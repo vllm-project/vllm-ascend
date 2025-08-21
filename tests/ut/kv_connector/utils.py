@@ -200,12 +200,26 @@ def create_model_runner_output(
     kv_connector_output = KVConnectorOutput(finished_sending=finished_sending,
                                             finished_recving=finished_recving)
     extra_args = {"kv_connector_output": kv_connector_output}
-    return ModelRunnerOutput(
-        req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
-        sampled_token_ids=sampled_token_ids,
-        logprobs=None,
-        prompt_logprobs_dict={},
-        pooler_output=[],
-        **extra_args,
-    )
+    if vllm_version_is("0.10.1.1"):
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=sampled_token_ids,
+            spec_token_ids=None,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            **extra_args,
+        )
+    else:
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=sampled_token_ids,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            **extra_args,
+        )
+
+    return model_runner_output

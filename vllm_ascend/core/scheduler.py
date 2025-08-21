@@ -31,6 +31,13 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.10.1.1"):
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+else:
+    KVCacheBlocks = None
+
 
 class AscendScheduler(Scheduler):
     """This Scheduler extends vllm's original v1 scheduler
@@ -59,7 +66,10 @@ class AscendScheduler(Scheduler):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
-        req_to_new_block_ids: dict[str, list[int]] = {}
+        if vllm_version_is("0.10.1.1"):
+            req_to_new_block_ids: dict[str, list[int]] = {}
+        else:
+            req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Spec decode-related.
@@ -217,8 +227,11 @@ class AscendScheduler(Scheduler):
 
             if self.lora_config and request.lora_request:
                 scheduled_loras.add(request.lora_request.lora_int_id)
-            req_to_new_block_ids[request.request_id] = (
-                self.kv_cache_manager.get_block_ids(request.request_id))
+            if vllm_version_is("0.10.1.1"):
+                req_to_new_block_ids[request.request_id] = (
+                    self.kv_cache_manager.get_block_ids(request.request_id))
+            else:
+                req_to_new_blocks[request.request_id] = new_blocks
             # Update request info.
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
@@ -307,8 +320,11 @@ class AscendScheduler(Scheduler):
                 # Schedule the request.
                 scheduled_running_reqs.append(request)
                 self.scheduled_req_ids.add(request.request_id)
-                req_to_new_block_ids[request.request_id] = (
-                    new_blocks.get_block_ids())
+                if vllm_version_is("0.10.1.1"):
+                    req_to_new_block_ids[request.request_id] = (
+                        new_blocks.get_block_ids())
+                else:
+                    req_to_new_blocks[request.request_id] = new_blocks
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 req_index += 1
@@ -346,16 +362,27 @@ class AscendScheduler(Scheduler):
                     any_request, len(self.running)))
 
         # Construct the scheduler output.
-        new_reqs_data = [
-            NewRequestData.from_request(req,
-                                        req_to_new_block_ids[req.request_id])
-            for req in scheduled_new_reqs
-        ]
+        if vllm_version_is("0.10.1.1"):
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req, req_to_new_block_ids[req.request_id])
+                for req in scheduled_new_reqs
+            ]
+            cached_reqs_data = self._make_cached_request_data(
+                scheduled_running_reqs, scheduled_resumed_reqs,
+                num_scheduled_tokens, scheduled_spec_decode_tokens,
+                req_to_new_block_ids)
+        else:
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req, req_to_new_blocks[req.request_id].get_block_ids())
+                for req in scheduled_new_reqs
+            ]
 
-        cached_reqs_data = self._make_cached_request_data(
-            scheduled_running_reqs, scheduled_resumed_reqs,
-            num_scheduled_tokens, scheduled_spec_decode_tokens,
-            req_to_new_block_ids)
+            cached_reqs_data = self._make_cached_request_data(
+                scheduled_running_reqs, scheduled_resumed_reqs,
+                num_scheduled_tokens, scheduled_spec_decode_tokens,
+                req_to_new_blocks)
         scheduled_cached_reqs = cached_reqs_data
 
         scheduler_output = SchedulerOutput(

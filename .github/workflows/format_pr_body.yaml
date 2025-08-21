@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
