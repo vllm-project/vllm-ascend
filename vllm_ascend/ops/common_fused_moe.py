@@ -18,12 +18,16 @@
 from typing import Callable, Optional
 
 import torch
+import torch.distributed as dist
+from torch import nn
 from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.layer import \
-    UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE, UnquantizedFusedMoEMethod)
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.moe_comm_method import MC2CommImpl
 from vllm_ascend.ops.fused_moe import fused_experts_moge, unified_fused_experts
 from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.utils import is_310p
@@ -107,6 +111,124 @@ def forward_oot(
         expert_map=expert_map,
         moe_comm_method=moe_comm_method,
     )
+
+
+class AscendFusedMoE(FusedMoE):
+
+    def __init__(
+        self,
+        num_experts,
+        top_k,
+        hidden_size,
+        intermediate_size,
+        params_dtype=None,
+        reduce_results=False,
+        renormalize=True,
+        use_grouped_topk=False,
+        num_expert_group=None,
+        topk_group=None,
+        quant_config=None,
+        tp_size=None,
+        ep_size=None,
+        dp_size=None,
+        prefix="",
+        custom_routing_function=None,
+        scoring_func="softmax",
+        e_score_correction_bias=None,
+        apply_router_weight_on_input=False,
+        activation="silu",
+        enable_eplb=False,
+        num_redundant_experts=0,
+        has_bias=False,
+    ):
+        super().__init__(
+            num_experts,
+            top_k,
+            hidden_size,
+            intermediate_size,
+            params_dtype,
+            reduce_results,
+            renormalize,
+            use_grouped_topk,
+            num_expert_group,
+            topk_group,
+            quant_config,
+            tp_size,
+            ep_size,
+            dp_size,
+            prefix,
+            custom_routing_function,
+            scoring_func,
+            e_score_correction_bias,
+            apply_router_weight_on_input,
+            activation,
+            enable_eplb,
+            num_redundant_experts,
+            has_bias,
+        )
+
+        self.tp_group = get_tp_group().device_group
+
+    def forward_impl(self, hidden_states: torch.Tensor,
+                     router_logits: torch.Tensor):
+        assert self.quant_method is not None
+
+        num_tokens, _ = hidden_states.shape
+        forward_context = get_forward_context()
+
+        moe_comm_method = forward_context.moe_comm_method
+        if type(moe_comm_method) is MC2CommImpl:
+            # NOTE: Pad tensors to make sure they can be evenly split.
+            if num_tokens % self.ep_size != 0:
+                pad_size = self.ep_size - (num_tokens % self.ep_size)
+                hidden_states = nn.functional.pad(hidden_states,
+                                                  (0, 0, 0, pad_size))
+                router_logits = nn.functional.pad(router_logits,
+                                                  (0, 0, 0, pad_size))
+
+            split_hidden_states = torch.tensor_split(hidden_states,
+                                                     self.ep_size,
+                                                     dim=0)
+            split_router_logits = torch.tensor_split(router_logits,
+                                                     self.ep_size,
+                                                     dim=0)
+            hidden_states = split_hidden_states[self.ep_rank]
+            router_logits = split_router_logits[self.ep_rank]
+
+        # Matrix multiply.
+        final_hidden_states = self.quant_method.apply(
+            layer=self,
+            x=hidden_states,
+            router_logits=router_logits,
+            top_k=self.top_k,
+            renormalize=self.renormalize,
+            use_grouped_topk=self.use_grouped_topk,
+            global_num_experts=self.global_num_experts,
+            expert_map=self.expert_map,
+            topk_group=self.topk_group,
+            num_expert_group=self.num_expert_group,
+            custom_routing_function=self.custom_routing_function,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.e_score_correction_bias,
+            activation=self.activation,
+            apply_router_weight_on_input=self.apply_router_weight_on_input,
+            enable_eplb=self.enable_eplb,
+            expert_load_view=self.expert_load_view,
+            logical_to_physical_map=self.logical_to_physical_map,
+            logical_replica_count=self.logical_replica_count,
+        )
+
+        if type(moe_comm_method) is MC2CommImpl:
+            dist.all_gather(list(split_hidden_states), final_hidden_states,
+                            self.tp_group)
+            final_hidden_states = torch.cat(split_hidden_states, dim=0)
+            if num_tokens % self.ep_size != 0:
+                final_hidden_states = final_hidden_states[:num_tokens]
+        elif self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+            final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
+                final_hidden_states)
+
+        return final_hidden_states
 
 
 UnquantizedFusedMoEMethod.__init__ = unquantized_fused_moe_init_func

@@ -3,7 +3,9 @@ from abc import ABC, abstractmethod
 import torch
 import torch_npu
 from transformers.configuration_utils import PretrainedConfig
-from vllm.distributed.parallel_state import get_ep_group, get_tp_group
+from vllm.distributed.parallel_state import (
+    get_ep_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size, get_tp_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import direct_register_custom_op
 
@@ -304,6 +306,11 @@ class MC2CommImpl(MoECommMethod):
         self.topk_ids = topk_ids
         self.topk_weights = topk_weights.to(torch.float32)
         self.mc2_mask = get_forward_context().mc2_mask
+
+        tp_size = get_tensor_model_parallel_world_size()
+        split_mc2_mask = torch.tensor_split(self.mc2_mask, tp_size, dim=0)
+        tp_rank = get_tensor_model_parallel_rank()
+        self.mc2_mask = split_mc2_mask[tp_rank]
 
         dispatch_kwargs = {
             "x": hidden_states,
