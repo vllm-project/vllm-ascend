@@ -132,17 +132,13 @@ def test_models_distributed_DeepSeek_dbo():
 def test_models_distributed_DeepSeek_w8a8_ep_dbo():
     example_prompts = ["The president of the United States is"] * 100
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
-    with VllmRunner(
-            snapshot_download("vllm-ascend/DeepSeek-V2-Lite-W8A8"),
-            dtype="auto",
-            quantization="ascend",
-            tensor_parallel_size=4,
-            enforce_eager=True,
-            enable_expert_parallel=True,
-            distributed_executor_backend="mp",
-            additional_config={"ascend_scheduler_config": {
-                "enabled": True,
-            }}) as vllm_model:
+    with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V2-Lite-W8A8"),
+                    dtype="auto",
+                    quantization="ascend",
+                    tensor_parallel_size=4,
+                    enforce_eager=True,
+                    enable_expert_parallel=True,
+                    distributed_executor_backend="mp") as vllm_model:
         model_arch = 'DeepseekV2ForCausalLM'
         registed_models = ModelRegistry.models
         assert registed_models[

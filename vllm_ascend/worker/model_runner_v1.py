@@ -77,8 +77,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import \
-    AscendCommonAttentionMetadata as CommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.distributed.utils import is_lmhead_tp
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
@@ -195,7 +194,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 "Non-Attention backend is not supported by V1 NPUModelRunner.")
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
-            weakref.proxy(self))
+            vllm_config=self.vllm_config,
+            device=self.device,
+            runner=weakref.proxy(self))
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
@@ -220,9 +221,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.spec_token_num = 0
         self.decode_token_per_req = 1
         if self.speculative_config:
-            if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
-                raise NotImplementedError(
-                    "DBO and mtp can't work at the same currently")
             self.use_spec_decode = True
             self.spec_token_num = self.speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
@@ -979,7 +977,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
             if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
-                # SpecDecoding now supports seq_len=1 and seq_len=2
+                # support deepseek mtp spec decode in disaggregated-prefill scenario
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
@@ -1015,19 +1013,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens[num_reqs:].fill_(0)
         self.query_start_loc[num_reqs + 1:].fill_(-1)
 
-        query_start_loc = self.query_start_loc[:num_reqs + 1]
         # Use host tensor, other wise error: tensor.hostData is null
-        common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=query_start_loc,
-            seq_lens=self.seq_lens_cpu[:num_reqs])
-        self.common_attn_metadata = common_attn_metadata
         self.seq_lens_list = self.seq_lens_np.tolist()[:num_input_tokens]
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
 
         is_only_prefill = bool(np.all(num_valid_tokens != 1))
-        extra_builder_kwargs['is_only_prefill'] = is_only_prefill
 
         enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
                                               attn_state,
@@ -1041,7 +1033,29 @@ class NPUModelRunner(LoRAModelRunnerMixin):
          enable_dbo) = self._get_forward_metadata_across_dp(
              maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill,
              enable_dbo)
-        extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
+
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[:num_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+            seq_lens=self.seq_lens[:num_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            actual_seq_lengths_q=self.actual_seq_lengths_q,
+            block_table_tensor=self.input_batch.block_table[0].
+            get_device_tensor(),
+            slot_mapping_cpu=self.
+            slot_mapping_cpu[:total_num_scheduled_tokens],
+            positions=self.positions[:num_input_tokens],
+            attn_mask=self.attn_mask,
+            spec_attn_mask=self.spec_attn_mask,
+            attn_state=self.attn_state,  # type: ignore
+            decode_token_per_req=self.decode_token_per_req,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            enable_dbo_across_dp=enable_dbo,
+            is_only_prefill=is_only_prefill,
+        )
 
         # TODO(zzzzwwjj): this code need to refactor afterwards.
         self.with_prefill = with_prefill
@@ -1060,25 +1074,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.extra_builder_kwargs = extra_builder_kwargs
         self.num_tokens_across_dp = num_tokens_across_dp
 
-        if self.vllm_config.model_config.use_mla:
-            attn_metadata = self.attn_metadata_builder.build(  # type: ignore
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                common_attn_metadata=common_attn_metadata,
-                common_prefix_len=None,
-                **extra_builder_kwargs,
-            )
-        else:
-            attn_metadata = self.attn_metadata_builder.build(  # type: ignore
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                common_attn_metadata=common_attn_metadata,
-                common_prefix_len=None,
-                **extra_builder_kwargs,
-            )
-        attn_metadata.num_input_tokens = num_input_tokens
+        attn_metadata = self.attn_metadata_builder.build(  # type: ignore
+            common_attn_metadata=common_attn_metadata,
+            **extra_builder_kwargs,
+        )
+        attn_metadata.num_input_tokens = padded_num_tokens_across_dp
 
         # Prepare input_ids
         token_indices = (positions_np +
@@ -1144,8 +1144,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
-                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla and with_prefill:
-                    model_kwargs["graph_enable"] = False  # type: ignore
+                if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                    if with_prefill:
+                        model_kwargs["graph_enable"] = False  # type: ignore
+                    else:
+                        model_kwargs["graph_enable"] = True  # type: ignore
                 if self.torchair_graph_enabled and not with_prefill:
                     compiled_model = self._get_torchair_lazy_compiled_model(
                         padded_num_tokens_across_dp)
@@ -1283,42 +1286,52 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         logits: torch.Tensor,
     ) -> torch.Tensor:
+        grammar_bitmask = scheduler_output.grammar_bitmask
+
+        # We receive the structured output bitmask from the scheduler,
+        # compacted to contain bitmasks only for structured output requests.
+        # The order of the requests in the bitmask is not guaranteed to be the
+        # same as the order of the requests in the gpu runner's batch. We need
+        # to sort the bitmask to match the order of the requests used here.
+
+        # Get the batch indices of the structured output requests.
+        # Keep track of the number of speculative tokens scheduled for every
+        # request in the batch, as the logit indices are offset by this amount.
+        struct_out_req_batch_indices: dict[str, int] = {}
+        cumulative_offset = 0
+        seq = sorted(self.input_batch.req_id_to_index.items(),
+                     key=lambda x: x[1])
+        for req_id, batch_index in seq:
+            logit_index = batch_index + cumulative_offset
+            cumulative_offset += len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+            if req_id in scheduler_output.structured_output_request_ids:
+                struct_out_req_batch_indices[req_id] = logit_index
+
+        out_indices = []
+
+        # Reorder the bitmask to match the order of the requests in the batch.
+        sorted_bitmask = np.zeros_like(grammar_bitmask,
+                                       shape=(logits.shape[0],
+                                              grammar_bitmask.shape[1]))
+        cumulative_index = 0
+        seq = sorted(scheduler_output.structured_output_request_ids.items(),
+                     key=lambda x: x[1])
+        for req_id, _ in seq:
+            logit_index = struct_out_req_batch_indices[req_id]
+            num_spec_tokens = len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+            for i in range(1 + num_spec_tokens):
+                sorted_bitmask[logit_index + i] = \
+                    grammar_bitmask[cumulative_index + i]
+                out_indices.append(logit_index + i)
+            cumulative_index += 1 + num_spec_tokens
+        grammar_bitmask = sorted_bitmask
+
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
-        grammar_bitmask = scheduler_output.grammar_bitmask
-        if grammar_bitmask is None:
-            return
-
-        # We receive the structured output bitmask from the scheduler, but the
-        # indices of the requests in the batch may not match the indices of
-        # the bitmask since the scheduler doesn't know how the gpu runner is
-        # ordering the requests in the batch. We need to sort the bitmask to
-        # match the order of the requests used here.
-        struct_out_req_batch_indices: dict[str, int] = {}
-        indices_match = True
-        for req_id in self.input_batch.req_ids:
-            mask_index = scheduler_output.structured_output_request_ids.get(
-                req_id)
-            if mask_index is None:
-                # not a structured output request
-                continue
-            batch_index = self.input_batch.req_id_to_index[req_id]
-            if batch_index != mask_index:
-                indices_match = False
-            struct_out_req_batch_indices[req_id] = batch_index
-
-        if not indices_match:
-            # Sort the bitmask to match the order of the requests
-            sorted_bitmask = np.zeros_like(grammar_bitmask)
-            for req_id, batch_index in struct_out_req_batch_indices.items():
-                orig_index = scheduler_output.structured_output_request_ids[
-                    req_id]
-                sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
-            grammar_bitmask = sorted_bitmask
-
         grammar_bitmask = torch.from_numpy(grammar_bitmask)
 
-        # TODO: compatibility with spec decode.
         # NOTE:
         # 1. XGrammar bitmask applying only supports CPU and GPU.
         # 2. The logits and bitmask should be on the same device.
@@ -1328,7 +1341,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         xgr.apply_token_bitmask_inplace(
             logits,
             grammar_bitmask,
-            indices=list(struct_out_req_batch_indices.values()),
+            indices=out_indices,
         )
         return logits.to(self.device).to(logits_dtype)
 
@@ -1763,7 +1776,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         num_tokens)
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
-                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla:
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
                         model_kwargs["graph_enable"] = True  # type: ignore
                     hidden_states = compiled_model(
                         input_ids=input_ids,
@@ -1773,7 +1786,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         **model_kwargs,
                     )
                 else:
-                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla:
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
                         model_kwargs["graph_enable"] = False  # type: ignore
                     hidden_states = model(
                         input_ids=input_ids,
@@ -2262,7 +2275,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                 attn_metadata.query_start_loc,
                 num_rejected_tokens,
-                force_one_token=False,
                 is_torchair_graph=self.torchair_graph_enabled)
             if self.torchair_graph_enabled:
                 # the seq len of each bath is padded to 2, thus input is same as the main model
