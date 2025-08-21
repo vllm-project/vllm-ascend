@@ -210,7 +210,6 @@ class AscendMLAMetadataBuilder:
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -479,6 +478,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_mla_prefetch = ascend_config.enable_mla_prefetch
+        self.exable_kv_nz = ascend_config.enable_kv_nz
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -977,6 +977,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 o_proj_input[num_decode_tokens:] = output_prefill
         # O proj
         current_ms_metadata = get_multistream_comm_context()
+        MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
         if current_ms_metadata is None:
             npu_prefetch(self.o_proj.weight,
                          o_proj_input,

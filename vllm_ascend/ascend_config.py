@@ -51,6 +51,7 @@ class AscendConfig:
         self.enable_mla_prefetch = additional_config.get(
             "enable_mla_prefetch", True
         )
+        self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
 
 
 class TorchairGraphConfig:
@@ -72,7 +73,6 @@ class TorchairGraphConfig:
             "enable_multistream_moe", False)
         self.enable_view_optimize = torchair_graph_config.get(
             "enable_view_optimize", True)
-        self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
 
         if not isinstance(self.graph_batch_sizes, list):
             raise TypeError("graph_batch_sizes must be list[int]")
@@ -100,10 +100,6 @@ class TorchairGraphConfig:
             if self.enable_multistream_moe:
                 raise RuntimeError(
                     "enable_multistream_moe is valid only when Torchair graph mode is enabled"
-                )
-            if self.enable_kv_nz:
-                raise RuntimeError(
-                    "enable_kv_nz is valid only when Torchair graph mode is enabled"
                 )
 
 
