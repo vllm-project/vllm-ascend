@@ -38,7 +38,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput, DraftTokenIds
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.ascend_config import init_ascend_config
@@ -149,6 +149,9 @@ class NPUWorker(WorkerBase):
         device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = NPUModelRunner(self.vllm_config, device)
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
 
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of

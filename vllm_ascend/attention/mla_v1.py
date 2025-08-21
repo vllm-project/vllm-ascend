@@ -184,6 +184,12 @@ class AscendMLAMetadataBuilder:
         self.max_blocks = (vllm_config.model_config.max_model_len +
                            self.block_size - 1) // self.block_size
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
+
+        if vllm_config.speculative_config is not None:
+            self.decode_threshold = vllm_config.speculative_config.num_speculative_tokens + 1
+        else:
+            self.decode_threshold = 1
+
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
                 # Max sure there is enough for 8 full length request or at least
@@ -224,7 +230,7 @@ class AscendMLAMetadataBuilder:
 
         for i, req_id in enumerate(input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if num_tokens == 1:
+            if num_tokens <= self.decode_threshold:
                 decodes.append(i)
             else:
                 prefills.append(i)
@@ -270,9 +276,8 @@ class AscendMLAMetadataBuilder:
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         # TODO(xyx): remove the if condition after mla supports torch mode speculative decoding
-        decode_threshold = 1
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata, decode_threshold=decode_threshold)
+            split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_actual_tokens
 
