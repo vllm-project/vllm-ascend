@@ -591,19 +591,19 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_c_normed = torch.empty(toks,
                                       num_heads,
                                       latent_kv_dim,
-                                      dtype=query.dtype,
-                                      device=query.device)
+                                      dtype=q_nope.dtype,
+                                      device=q_nope.device)
             k_pe = torch.empty(toks,
                                num_heads,
                                rope_dim,
-                               dtype=query.dtype,
-                               device=query.device)
+                               dtype=q_nope.dtype,
+                               device=q_nope.device)
 
             torch_npu.atb.npu_paged_cache_load(
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
-                seq_len2.to(query.device),
+                seq_len2.to(q_nope.device),
                 seq_starts=prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,
@@ -616,7 +616,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
             mask = torch.triu(
-                torch.ones(512, 512, device=query.device, dtype=query.dtype),
+                torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype),
                 1)
             torch_npu.atb.npu_ring_mla(
                 q_nope=q_nope,
