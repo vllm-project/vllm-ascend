@@ -87,6 +87,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
                                                      DummyCommImpl,
+                                                     MC2CommImpl,
                                                      MoECommMethod)
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
@@ -368,13 +369,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
+        self.mc2_tokens_capacity = 512 * self.parallel_config.tensor_parallel_size
         self.reserved_mc2_mask = torch.zeros(
-            512,
+            self.mc2_tokens_capacity,
             dtype=torch.bool,
             device=self.device,
         )
 
-        self.moe_comm_method = AllGatherCommImpl
+        self.moe_comm_method = MC2CommImpl
 
     def _use_aclgraph(self) -> bool:
         return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.level == CompilationLevel.PIECEWISE and not self.model_config.enforce_eager
@@ -1622,6 +1624,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              intermediate_tensors) = (self._prepare_inputs(
                  scheduler_output, intermediate_tensors))
 
+        moe_comm_method = (self.moe_comm_method if num_input_tokens
+                           <= self.mc2_tokens_capacity else AllGatherCommImpl)
+
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
             with set_ascend_forward_context(
@@ -1631,7 +1636,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens_across_dp=num_tokens_across_dp,
                     with_prefill=self.with_prefill,
                     reserved_mc2_mask=self.reserved_mc2_mask,
-                    moe_comm_method=self.moe_comm_method(
+                    moe_comm_method=moe_comm_method(
                         self.device, self.dtype, self.model_config.hf_config),
                     num_actual_tokens=scheduler_output.
                     total_num_scheduled_tokens):
