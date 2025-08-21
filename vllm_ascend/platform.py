@@ -235,12 +235,18 @@ class NPUPlatform(Platform):
             raise ValueError("vLLM Ascend does not support V0 engine.")
 
         use_torchair = get_ascend_config().torchair_graph_config.enabled
-        if use_mla:
-            return "vllm_ascend.attention.mla_v1.AscendMLABackend"
-        elif use_torchair:
-            return "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend"
-        else:
-            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+        # choose attention backend based on use_mla and use_torchair
+        backend_map = {
+            (True, True):
+            "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend",
+            (True, False):
+            "vllm_ascend.attention.mla_v1.AscendMLABackend",
+            (False, True):
+            "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend",
+            (False, False):
+            "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+        }
+        return backend_map[(use_mla, use_torchair)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
