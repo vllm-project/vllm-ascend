@@ -4,7 +4,6 @@ from typing import Union
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import RequestStatus
 
-
 def finish_requests(
     self,
     request_ids: Union[str, Iterable[str]],
