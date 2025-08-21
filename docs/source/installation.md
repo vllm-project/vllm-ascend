@@ -171,7 +171,7 @@ vllm-ascend will build custom ops by default. If you don't want to build it, set
 
 ```{note}
 If you are building from v0.7.3-dev and intend to use sleep mode feature, you should set `COMPILE_CUSTOM_KERNELS=1` manually.
-To build custom ops, gcc/g++ higher than 8 and c++ 17 or higher is required. If you're using `pip install -e .` and encourage a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
+To build custom ops, gcc/g++ higher than 8 and c++ 17 or higher is required. If you're using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
 If you encounter other problems during compiling, it is probably because unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in env to specify your g++ and gcc locations before compiling.
 ```
 
