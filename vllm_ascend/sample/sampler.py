@@ -7,13 +7,15 @@ from vllm_ascend.utils import is_310p, vllm_version_is
 
 if not vllm_version_is("0.10.1.1"):
     from vllm.config import LogprobsMode
+    DEFAULT_LOGPROBS_MODE = LogprobsMode.RAW_LOGPROBS
 else:
     LogprobsMode = None
+    DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
 
 class AscendSampler(Sampler):
 
-    def __init__(self, logprobs_mode="raw_logprobs"):
+    def __init__(self, logprobs_mode=DEFAULT_LOGPROBS_MODE):
         # TODO: support logprobs_mode in vllm-ascend
         super().__init__(logprobs_mode=logprobs_mode)
         self.topk_topp_sampler = AscendTopKTopPSampler()
