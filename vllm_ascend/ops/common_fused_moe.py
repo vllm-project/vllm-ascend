@@ -15,24 +15,80 @@
 # limitations under the License.
 #
 
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import torch
-import torch.distributed as dist
-from torch import nn
 from vllm.config import CompilationLevel, get_current_vllm_config
-from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod)
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.moe_comm_method import MC2CommImpl
-from vllm_ascend.ops.fused_moe import fused_experts_moge, unified_fused_experts
+from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
+                                                     DummyCommImpl,
+                                                     MC2CommImpl,
+                                                     MoECommMethod)
+from vllm_ascend.ops.fused_moe import apply_mlp, fused_experts_moge
 from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.utils import is_310p
 
 original_unquantized_fused_moe_init_func = UnquantizedFusedMoEMethod.__init__
+
+
+def fused_experts(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: str = "silu",
+    apply_router_weight_on_input: bool = False,
+    use_int8_w8a8: bool = False,
+    use_int4_w4a8: bool = False,
+    global_num_experts: Optional[int] = None,
+    expert_map: Optional[torch.Tensor] = None,
+    w1_scale: Optional[torch.Tensor] = None,
+    w2_scale: Optional[torch.Tensor] = None,
+    w1_scale_bias: torch.Tensor = None,
+    w2_scale_bias: torch.Tensor = None,
+    moe_comm_method: Optional[MoECommMethod] = None,
+    # For TorchAir graph
+    is_torchair: bool = False,
+    # For Cube/Vector parallel
+    shared_experts: Optional[Any] = None,
+    quantized_x_for_share: Optional[Any] = None,
+    dynamic_scale_for_share: Optional[Any] = None,
+    # For load balance
+    log2phy: torch.Tensor = None,
+    global_redundant_expert_num: int = 0,
+) -> torch.Tensor:
+    # Check constraints
+    assert hidden_states.shape[1] == w1.shape[2], (
+        f"Hidden size mismatch {hidden_states.shape[1]} != {w1.shape[2]}")
+
+    assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
+    assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
+    assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
+    assert w2.stride(-1) == 1, "Stride of last dimension must be 1"
+    assert hidden_states.dtype in [
+        torch.float32, torch.float16, torch.bfloat16
+    ]
+    assert moe_comm_method is not None, "Missing communication context"
+
+    num_experts = w1.shape[0]
+
+    permuted_hidden_states, expert_tokens, group_list_type = moe_comm_method.permute(
+        hidden_states, topk_ids, topk_weights, expert_map, num_experts)
+    mlp_output = apply_mlp(
+        permuted_hidden_states,
+        w1,
+        w2,
+        expert_tokens,
+        group_list_type=group_list_type,
+    )
+    moe_comm_method.unpermute(mlp_output, hidden_states)
+
+    return hidden_states
 
 
 def unquantized_fused_moe_init_func(self, *args, **kwargs):
@@ -101,7 +157,7 @@ def forward_oot(
 
     moe_comm_method = get_forward_context().moe_comm_method
 
-    return unified_fused_experts(
+    return fused_experts(
         hidden_states=x,
         w1=layer.w13_weight,
         w2=layer.w2_weight,
@@ -167,33 +223,23 @@ class AscendFusedMoE(FusedMoE):
             has_bias,
         )
 
-        self.tp_group = get_tp_group().device_group
+        for method in {AllGatherCommImpl, DummyCommImpl, MC2CommImpl}:
+            setattr(
+                self, method.__name__.lower(),
+                method(moe_config=self.moe_config))  # type: ignore[abstract]
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
 
-        num_tokens, _ = hidden_states.shape
         forward_context = get_forward_context()
+        forward_context.moe_comm_method = getattr(
+            self, forward_context.moe_comm_method_name)
 
         moe_comm_method = forward_context.moe_comm_method
-        if type(moe_comm_method) is MC2CommImpl:
-            # NOTE: Pad tensors to make sure they can be evenly split.
-            if num_tokens % self.ep_size != 0:
-                pad_size = self.ep_size - (num_tokens % self.ep_size)
-                hidden_states = nn.functional.pad(hidden_states,
-                                                  (0, 0, 0, pad_size))
-                router_logits = nn.functional.pad(router_logits,
-                                                  (0, 0, 0, pad_size))
 
-            split_hidden_states = torch.tensor_split(hidden_states,
-                                                     self.ep_size,
-                                                     dim=0)
-            split_router_logits = torch.tensor_split(router_logits,
-                                                     self.ep_size,
-                                                     dim=0)
-            hidden_states = split_hidden_states[self.ep_rank]
-            router_logits = split_router_logits[self.ep_rank]
+        hidden_states, router_logits = moe_comm_method.prepare(
+            hidden_states=hidden_states, router_logits=router_logits)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -218,15 +264,9 @@ class AscendFusedMoE(FusedMoE):
             logical_replica_count=self.logical_replica_count,
         )
 
-        if type(moe_comm_method) is MC2CommImpl:
-            dist.all_gather(list(split_hidden_states), final_hidden_states,
-                            self.tp_group)
-            final_hidden_states = torch.cat(split_hidden_states, dim=0)
-            if num_tokens % self.ep_size != 0:
-                final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
-            final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states)
+        final_hidden_states = moe_comm_method.finalize(
+            hidden_states=final_hidden_states,
+            reduce_results=self.reduce_results)
 
         return final_hidden_states
 
