@@ -37,7 +37,6 @@ from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group
@@ -73,7 +72,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import dispose_tensor, npu_prefetch
+from vllm_ascend.utils import dispose_tensor
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):

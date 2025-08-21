@@ -412,8 +412,8 @@ class TestAscendMLAImpl(TestBase):
         meta = MagicMock()
         meta.prefill = prefill_meta
 
-        out, lse = self.impl._compute_prefill_context(q_nope, q_pe, kv_cache, 32,
-                                                      meta, prefix_out,
+        out, lse = self.impl._compute_prefill_context(q_nope, q_pe, kv_cache,
+                                                     32, meta, prefix_out,
                                                       prefix_lse)
 
         mock_load.assert_called_once()
