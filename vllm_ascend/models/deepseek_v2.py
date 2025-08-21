@@ -565,7 +565,8 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             v_head_dim=self.v_head_dim,
             rotary_emb=self.rotary_emb,
             q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
-            q_a_layernorm=self.q_a_layernorm if self.q_lora_rank is not None else None,
+            q_a_layernorm=self.q_a_layernorm
+            if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
             kv_a_layernorm=self.kv_a_layernorm,
@@ -598,11 +599,9 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
-        output = self.mla_attn.impl.forward(hidden_states,
-                                            kv_cache,
+        output = self.mla_attn.impl.forward(hidden_states, kv_cache,
                                             forward_context.attn_metadata,
-                                            need_gather_q_kv,
-                                            output)
+                                            need_gather_q_kv, output)
         output = output.view(-1, output_shape[-1])
         return output
 
@@ -735,8 +734,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states, residual)
 
         if isinstance(self.mlp, CustomDeepseekV2MoE):
-            hidden_states = self.mlp(hidden_states,
-                                     attn_metadata)
+            hidden_states = self.mlp(hidden_states, attn_metadata)
         else:
             hidden_states = self.mlp(hidden_states)
 
