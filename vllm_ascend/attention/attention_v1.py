@@ -398,12 +398,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         attn_weights = torch.matmul(q, k.transpose(1, 2)) * self.scale
                         mask_seq = mask_seqs[:, :seq_len, :seq_len]
                         attn_weights = attn_weights + mask_seq
-
-                        sinks = self.sinks.reshape(-1, 1, 1).expand(-1, q.shape[-2], -1)
-                        combined_logits = torch.cat([attn_weights, sinks], dim=-1)
-                        combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
+                        combined_logits = attn_weights
+                        # sinks = self.sinks.reshape(-1, 1, 1).expand(-1, q.shape[-2], -1)
+                        # combined_logits = torch.cat([attn_weights, sinks], dim=-1)
+                        # combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
                         probs = F.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
-                        scores = probs[..., :-1]
+                        # scores = probs[..., :-1]
+                        scores = probs
                         attn_weights = F.dropout(scores, p=0.0, training=False)
                         attn_output = torch.matmul(attn_weights, v).transpose(0, 1).contiguous()
                         output[start:end].copy_(attn_output)
@@ -571,7 +572,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         if self.sliding_window is not None and seq_len > self.sliding_window:
                             begin = max(self.sliding_window, seq_len - query_len)
                             for i in range(begin, seq_len):
-                                mask_seq[0][start + i][0:i - self.sliding_window + 1] = mn
+                                mask_seq[0][i - (seq_len - query_len) + start][0:i - self.sliding_window + 1] = mn
 
                         # Slice mask to match the attn_weights shape
                         mask_seq = mask_seq[:, start:end, :seq_len]
