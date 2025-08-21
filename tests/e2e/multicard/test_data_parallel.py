@@ -27,10 +27,10 @@ from unittest.mock import patch
 
 import pytest
 
-DENSE_MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 MODELS = ["Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-30B-A3B"]
 
 
+@pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
 def test_data_parallel_inference(model, max_tokens):
