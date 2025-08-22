@@ -20,6 +20,7 @@
 from typing import Optional, Union
 
 import torch
+import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
@@ -178,12 +179,14 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                 self.mlp = Qwen3MoeSparseMoeBlock(config=config,
                                                   quant_config=quant_config,
                                                   prefix=f"{prefix}.mlp")
+            self.is_moe = True
         else:
             self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,
                                    intermediate_size=config.intermediate_size,
                                    hidden_act=config.hidden_act,
                                    quant_config=quant_config,
                                    prefix=f"{prefix}.mlp")
+            self.is_moe = False
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -192,6 +195,9 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         self.enable_sequence_parallelism = (
             vllm_config.compilation_config.pass_config.
             enable_sequence_parallelism if vllm_config is not None else False)
+        
+        self.stream_cmo_global = torch.npu.Stream()
+        self.event_prefetch_moe = torch.npu.Event()
 
     def forward(
         self,
@@ -231,9 +237,20 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
             hidden_states = _metadata_for_padding.padding_aligned_reduce_scatter(
                 hidden_states)
 
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        if not self.is_moe: # dense layer, no prefetch
+            # Fully Connected
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual)
+        else: # moe layer: prefetch expert weights
+            self.event_prefetch_moe.record(stream = torch_npu.npu.default_stream())
+            with torch.npu.stream(torch_npu.npu.default_stream()): # default stream
+                self.event_prefetch_moe.wait(stream = torch_npu.npu.default_stream())
+                # Fully Connected
+                hidden_states, residual = self.post_attention_layernorm(
+                    hidden_states, residual)
+            with torch.npu.stream(self.stream_cmo_global): # stream for prefetch
+                self.event_prefetch_moe.wait(stream = self.stream_cmo_global)
+                torch_npu.npu_prefetch(self.mlp.experts.w13_weight, None, 25 * 1024 * 1024 * 1, 0)
 
         if not self.use_aclgraph:
             hidden_states = self.mlp(
