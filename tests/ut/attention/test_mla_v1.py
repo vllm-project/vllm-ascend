@@ -411,7 +411,7 @@ class TestAscendMLAImpl(TestBase):
         meta = MagicMock()
         meta.prefill = prefill_meta
         self.impl.prefill_mask = torch.triu(
-            torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype),1)
+            torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype), 1)
 
         out, lse = self.impl._compute_prefill_context(q_nope, q_pe, kv_cache,
                                                       32, meta, prefix_out,
