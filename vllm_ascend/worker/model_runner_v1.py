@@ -2189,6 +2189,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         elapsed_time = end_time - start_time
         npu_graph_size = start_free_npu_memory - end_free_npu_memory
         # This usually takes 5~20 seconds.
+        if end_free_npu_memory / (1 << 30) < 3:
+            logger.warning(f"Post graph compilation, the available memory on each NPU is reduced to merely {(end_free_npu_memory / (1 << 30)):.2f} GB. "
+                           "During inference operations, subsequent memory allocations may potentially trigger Out-of-Memory(OOM) conditions. "
+                           "Should you encounter this warning followed by service termination, "
+                           "consider decreasing gpu-memory-utiliazation configuration parameter.")
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, npu_graph_size / (1 << 30))
 
