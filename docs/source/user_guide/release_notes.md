@@ -8,6 +8,7 @@ This is the 3rd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 
 - MTP supports V1 scheduler [#2371](https://github.com/vllm-project/vllm-ascend/pull/2371)
 - Add LMhead TP communication groups [#1956](https://github.com/vllm-project/vllm-ascend/pull/1956)
+- Fix the bug that qwen3 moe doesn't work with aclgraph [#2478](https://github.com/vllm-project/vllm-ascend/pull/2478)
 - Fix `grammar_bitmask` IndexError caused by outdated `apply_grammar_bitmask` method [#2314](https://github.com/vllm-project/vllm-ascend/pull/2314)
 - Remove `chunked_prefill_for_mla` [#2177](https://github.com/vllm-project/vllm-ascend/pull/2177)
 - Fix bugs and refactor cached mask generation logic [#2326](https://github.com/vllm-project/vllm-ascend/pull/2326)
