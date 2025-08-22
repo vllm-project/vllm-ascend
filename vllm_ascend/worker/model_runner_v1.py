@@ -95,7 +95,6 @@ from vllm_ascend.torchair.torchair_attention import AscendTorchairMetadata
 from vllm_ascend.torchair.torchair_mla import AscendMLATorchairMetadata
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                ProfileExecuteDuration, is_310p,
-                               maybe_converting_weight_acl_format,
                                vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
@@ -1265,7 +1264,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                              intermediate_tensors,
                                              inputs_embeds):
         assert self.model is not None
-        maybe_converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -1880,7 +1878,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                           is_torchair_compile, input_ids,
                                           positions, attn_metadata, num_tokens,
                                           intermediate_tensors, inputs_embeds):
-        maybe_converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
         hidden_states = self.model(input_ids=input_ids,
                                    positions=positions,
                                    intermediate_tensors=intermediate_tensors,
