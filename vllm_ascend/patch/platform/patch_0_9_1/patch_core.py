@@ -9,6 +9,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.config import \
     maybe_register_config_serialize_by_value
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
 
 import vllm_ascend.envs as vllm_ascend_envs
@@ -117,6 +118,8 @@ def run_engine_core_dplb(*args,
 
         engine_core.scheduler.finish_requests = types.MethodType(
             finish_requests, engine_core.scheduler)
+        engine_core.scheduler._update_from_kv_xfer_finished = types.MethodType(
+            _update_from_kv_xfer_finished, engine_core.scheduler)
         engine_core.run_busy_loop()
 
     except SystemExit:
@@ -164,6 +167,29 @@ def finish_requests(
         self._free_request(request)
 
 
+def _update_from_kv_xfer_finished(self,
+                                    model_runner_output: ModelRunnerOutput):
+    """
+    KV Connector: update the scheduler state based on the output.
+
+    The Worker side connectors add finished_recving and
+    finished_sending reqs to the output.
+    * if finished_sending: free the blocks
+    # if finished_recving: add to state so we can
+        scheduler the request during the next step.
+    """
+    # KV Connector:: update recv and send status from last step.
+    for req_id in (model_runner_output.finished_recving or ()):
+        logger.debug("Finished recving KV transfer for request %s", req_id)
+        self.finished_recving_kv_req_ids.add(req_id)
+    for req_id in (model_runner_output.finished_sending or ()):
+        logger.debug("Finished sending KV transfer for request %s", req_id)
+        if req_id in self.requests:
+            self._free_blocks(self.requests[req_id])
+        else:
+            logger.debug("cannot find the req_id it may have been aborted.%s", req_id)
+
+
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
 
@@ -198,6 +224,8 @@ def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
 
         engine_core.scheduler.finish_requests = types.MethodType(
             finish_requests, engine_core.scheduler)
+        engine_core.scheduler._update_from_kv_xfer_finished = types.MethodType(
+            _update_from_kv_xfer_finished, engine_core.scheduler)
         engine_core.run_busy_loop()
 
     except SystemExit:
