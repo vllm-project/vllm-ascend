@@ -25,11 +25,12 @@ from unittest.mock import patch
 
 import pytest
 import vllm  # noqa: F401
-import vllm_ascend  # noqa: F401
-from tests.e2e.conftest import VllmRunner
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
+
+import vllm_ascend  # noqa: F401
+from tests.e2e.conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",

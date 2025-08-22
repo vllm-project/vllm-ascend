@@ -1,4 +1,5 @@
 from vllm import ModelRegistry
+
 import vllm_ascend.envs as envs_ascend
 
 
@@ -7,7 +8,6 @@ def register_model():
     from .deepseek_mtp import CustomDeepSeekMTP  # noqa: F401
     from .deepseek_v2 import CustomDeepseekV2ForCausalLM  # noqa: F401
     from .deepseek_v3 import CustomDeepseekV3ForCausalLM  # noqa: F401
-    from .gemma3 import AscendGemma3ForCausalLM  # noqa: F401
     from .qwen2_5_vl import \
         AscendQwen2_5_VLForConditionalGeneration  # noqa: F401
     from .qwen2_vl import AscendQwen2VLForConditionalGeneration  # noqa: F401
