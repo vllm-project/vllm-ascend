@@ -183,4 +183,39 @@ This has been solved in `ray>=2.47.1`, thus we could solve this as following:
 
 ```
 python3 -m pip install modelscope 'ray>=2.47.1' 'protobuf>3.20.0'
-``` 
+```
+
+### 21. Failed with inferencing Qwen3 MoE due to `Alloc sq cq fail` issue?
+
+When running Qwen3 MoE with tp/dp/ep, etc., you may encounter an error just as the following:
+
+```bash
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]   File "/home/xxx/miniconda3/envs/atb/lib/python3.10/site-packages/torch_npu/npu/graphs.py", line 210, in capture_begin
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]     super().capture_begin(pool=pool, capture_error_mode=capture_error_mode)
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632] RuntimeError: capture_begin:build/CMakeFiles/torch_npu.dir/compiler_depend.ts:156 NPU function error: c10_npu::acl::AclmdlRICaptureBegin(capture_stream_, capture_mode), error code is 207005
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632] [ERROR] 2025-08-05-11:23:25 (PID:519998, Device:0, RankID:-1) ERR00100 PTA call acl api failed
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632] [Error]: Failed to apply for memory.
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         Check the remaining storage space in the hardware environment.
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632] EL0006: [PID: 519998] 2025-08-05-11:23:25.691.093 The resources are insufficient.
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         Solution: Close applications not in use.
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         TraceBack (most recent call last):
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         [SqCqManage]Alloc sq cq fail, stream_id=1984, retCode=0x7020023.[FUNC:AllocStreamSqCq][FILE:stream_sqcq_manage.cc][LINE:78]
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         [SqCqManage]Alloc sq cq fail, stream_id=1984, retCode=0x7020023.[FUNC:Setup][FILE:stream.cc][LINE:655]
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         rtStreamBeginCapture execute failed, reason=[driver error:resource alloc fail][FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:53]
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         begin capture stream failed, runtime result = 207005[FUNC:ReportCallError][FILE:log_inner.cpp][LINE:161]
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         [SqCqManage]Alloc sq cq fail, stream_id=1985, retCode=0x7020023.[FUNC:AllocStreamSqCq][FILE:stream_sqcq_manage.cc][LINE:78]
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         [SqCqManage]Alloc sq cq fail, stream_id=1985, retCode=0x7020023.[FUNC:Setup][FILE:stream.cc][LINE:655]
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         stream setup failed, retCode=0x7020023.[FUNC:SyncGetDevMsg][FILE:api_impl.cc][LINE:6109]
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         Sync get device msg failed, retCode=0x7020023.[FUNC:GetDevErrMsg][FILE:api_impl.cc][LINE:6159]
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]         rtGetDevMsg execute failed, reason=[driver error:resource alloc fail][FUNC:FuncErrorReason][FILE:error_message_manage.cc][LINE:53]
+(EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]
+```
+
+Try to adjust the arg `cuda-capture-sizes` to address this. This is more probably to happen when you're using A3. Please refer to the empirical formula to estimate the number of gears that can be supported:
+
+```bash
+# pg_num: the number of process groups for communication
+# num_hidden_layer: number of hidden layers of the model
+num_capture_sizes = (1920 - pg_num * 40) / (num_hidden_layer + 1) / (1 + pg_num * 2) # for A3
+num_capture_sizes = (1920) / (num_hidden_layer + 1) / (1 + pg_num * 1) # for A2
+```
