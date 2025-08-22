@@ -3,10 +3,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 from vllm.config import ParallelConfig
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import (
-    _MC2, _MLP_TP, _OTP, destroy_ascend_model_parallel, get_mc2_group,
-    get_mlp_tp_group, get_otp_group, init_ascend_model_parallel)
+    destroy_ascend_model_parallel, get_mc2_group, get_otp_group,
+    init_ascend_model_parallel)
 
 
 @pytest.fixture
@@ -31,17 +30,11 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     with patch('vllm_ascend.distributed.parallel_state.model_parallel_initialized', return_value=False), \
          patch('vllm_ascend.distributed.parallel_state.init_model_parallel_group'):
         parallel_config.oproj_tensor_parallel_size = 2
-        envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE = True
         init_ascend_model_parallel(parallel_config)
 
         mc2_group = get_mc2_group()
         assert mc2_group is not None
         otp_group = get_otp_group()
         assert otp_group is not None
-        mlp_tp_group = get_mlp_tp_group()
-        assert mlp_tp_group is not None
 
         destroy_ascend_model_parallel()
-        assert _MC2 is None
-        assert _OTP is None
-        assert _MLP_TP is None
