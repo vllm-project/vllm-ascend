@@ -168,7 +168,7 @@ def finish_requests(
 
 
 def _update_from_kv_xfer_finished(self,
-                                    model_runner_output: ModelRunnerOutput):
+                                  model_runner_output: ModelRunnerOutput):
     """
     KV Connector: update the scheduler state based on the output.
 
@@ -187,7 +187,8 @@ def _update_from_kv_xfer_finished(self,
         if req_id in self.requests:
             self._free_blocks(self.requests[req_id])
         else:
-            logger.debug("cannot find the req_id it may have been aborted.%s", req_id)
+            logger.debug("cannot find the req_id it may have been aborted.%s", 
+                         req_id)
 
 
 def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
