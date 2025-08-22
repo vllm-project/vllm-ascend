@@ -71,7 +71,7 @@ class TorchairGraphConfig:
             "enable_multistream_moe", False)
         self.enable_view_optimize = torchair_graph_config.get(
             "enable_view_optimize", True)
-        self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
+        self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
 
         if not isinstance(self.graph_batch_sizes, list):
             raise TypeError("graph_batch_sizes must be list[int]")
