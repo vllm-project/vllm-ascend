@@ -47,7 +47,7 @@ This is the 1st release candidate of v0.10.0 for vLLM Ascend. Please follow the 
 - Torchair graph mode works with tp > 4 now. [#1508](https://github.com/vllm-project/vllm-ascend/issues/1508)
 - MTP support torchair graph mode now [#2145](https://github.com/vllm-project/vllm-ascend/pull/2145)
 
-## Other
+### Other
 
 - Bug fixes:
     * Fix functional problem of multi-modality models like Qwen2-audio with Aclgraph. [#1803](https://github.com/vllm-project/vllm-ascend/pull/1803)
@@ -206,7 +206,7 @@ This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please follow the [
 - Fix the accuracy problem with deploy models with parallel parameters. [#1678](https://github.com/vllm-project/vllm-ascend/pull/1678)
 - The pre-built wheel package now requires lower version of glibc. Users can use it by `pip install vllm-ascend` directly. [#1582](https://github.com/vllm-project/vllm-ascend/pull/1582)
 
-## Other
+### Other
 - Official doc has been updated for better read experience. For example, more deployment tutorials are added, user/developer docs are updated. More guide will coming soon.
 - Fix accuracy problem for deepseek V3/R1 models with torchair graph in long sequence predictions. [#1331](https://github.com/vllm-project/vllm-ascend/pull/1331)
 - A new env variable `VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP` has been added. It enables the fused allgather-experts kernel for Deepseek V3/R1 models. The default value is `0`. [#1335](https://github.com/vllm-project/vllm-ascend/pull/1335)
@@ -217,11 +217,11 @@ This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please follow the [
 - DeepSeek now works with prefix cache now. [#1498](https://github.com/vllm-project/vllm-ascend/pull/1498)
 - Support prompt logprobs to recover ceval accuracy in V1 [#1483](https://github.com/vllm-project/vllm-ascend/pull/1483)
 
-## Knowissue
+### Known Issues
 
 - Pipeline parallel does not work with ray and graph mode: https://github.com/vllm-project/vllm-ascend/issues/1751 https://github.com/vllm-project/vllm-ascend/issues/1754
 
-## New Contributors
+### New Contributors
 - @xleoken made their first contribution in https://github.com/vllm-project/vllm-ascend/pull/1357
 - @lyj-jjj made their first contribution in https://github.com/vllm-project/vllm-ascend/pull/1335
 - @sharonyunyun made their first contribution in https://github.com/vllm-project/vllm-ascend/pull/1194
@@ -275,7 +275,7 @@ After careful consideration, above features **will NOT be included in v0.9.1-dev
 ### Full Changelog
 https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1
 
-## New Contributors
+### New Contributors
 - @farawayboat made their first contribution in https://github.com/vllm-project/vllm-ascend/pull/1333
 - @yzim made their first contribution in https://github.com/vllm-project/vllm-ascend/pull/1159
 - @chenwaner made their first contribution in https://github.com/vllm-project/vllm-ascend/pull/1098
