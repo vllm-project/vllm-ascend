@@ -51,7 +51,7 @@ class TestTorchairUtils(TestBase):
         mock_model_registry.return_value = mock_registry
         utils.register_torchair_model()
 
-        self.assertEqual(mock_model_registry.register_model.call_count, 3)
+        self.assertEqual(mock_model_registry.register_model.call_count, 5)
         call_args_list = mock_model_registry.register_model.call_args_list
 
         expected_registrations = [
@@ -63,7 +63,11 @@ class TestTorchairUtils(TestBase):
              ),
             ("DeepseekV3ForCausalLM",
              "vllm_ascend.torchair.models.torchair_deepseek_v3:TorchairDeepseekV3ForCausalLM"
-             )
+             ),
+            ("Qwen2ForCausalLM",
+             "vllm_ascend.torchair.models.qwen2:CustomQwen2ForCausalLM"),
+            ("Qwen3ForCausalLM",
+             "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
         ]
 
         for i, (expected_name,

@@ -29,7 +29,7 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD, is_310p,
-                               register_ascend_customop, update_aclgraph_sizes)
+                               update_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -139,33 +139,53 @@ class NPUPlatform(Platform):
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
         check_ascend_config(vllm_config, enforce_eager)
+        from vllm.config.compilation import CUDAGraphMode
 
+        # TODO(cmq): update the post init in vllmconfig
+        # if cudagraph_mode is not explicitly set by users, set default value
+        if envs_vllm.VLLM_USE_V1 and compilation_config.level \
+            == CompilationLevel.PIECEWISE:
+            compilation_config.cudagraph_mode = \
+                CUDAGraphMode.PIECEWISE
+        else:
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        vllm_config._set_cudagraph_sizes()
+
+        # TODO(cmq): update the compilation level config to be determined by CUDAGraphMode
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         elif compilation_config.level != CompilationLevel.PIECEWISE:
             logger.warning(
                 "NPU does not support %s compilation level. Setting level to NO_COMPILATION",
                 compilation_config.level)
             compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         elif ascend_config.torchair_graph_config.enabled:
             logger.info(
                 "Torchair compilation enabled on NPU. Setting level to NO_COMPILATION"
             )
             compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         elif parallel_config.distributed_executor_backend == "ray":
             logger.warning(
                 "Ray distributed executor backend is not compatible with ACL Graph mode "
                 "right now. Setting level to NO_COMPILATION")
             compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         else:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
+            if envs_vllm.VLLM_USE_V1 and \
+                compilation_config.level == CompilationLevel.PIECEWISE:
+                compilation_config.set_splitting_ops_for_v1()
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
                 ["vllm.unified_ascend_attention_with_output"])
             update_aclgraph_sizes(vllm_config)
+            compilation_config.cudagraph_num_of_warmups = 1
 
         if parallel_config and parallel_config.worker_cls == "auto":
             if ascend_config.torchair_graph_config.enabled:
@@ -201,9 +221,6 @@ class NPUPlatform(Platform):
                     "For better performance in Qwen3 MoE, SP only works exclusively with MC2, AllToAll, and AllToAllV."
                 )
 
-        # register Ascend CustomOp
-        register_ascend_customop()
-
     @classmethod
     def get_attn_backend_cls(cls,
                              selected_backend,
@@ -218,12 +235,18 @@ class NPUPlatform(Platform):
             raise ValueError("vLLM Ascend does not support V0 engine.")
 
         use_torchair = get_ascend_config().torchair_graph_config.enabled
-        if use_mla:
-            return "vllm_ascend.attention.mla_v1.AscendMLABackend"
-        elif use_torchair:
-            return "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
-        else:
-            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+        # choose attention backend based on use_mla and use_torchair
+        backend_map = {
+            (True, True):
+            "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend",
+            (True, False):
+            "vllm_ascend.attention.mla_v1.AscendMLABackend",
+            (False, True):
+            "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend",
+            (False, False):
+            "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+        }
+        return backend_map[(use_mla, use_torchair)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -252,11 +275,11 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
-    def get_piecewise_backend_cls(cls) -> str:
+    def get_static_graph_wrapper_cls(cls) -> str:
         """
         Get piecewise backend class for piecewise graph.
         """
-        return "vllm_ascend.compilation.piecewise_backend.NPUPiecewiseBackend"  # noqa
+        return "vllm_ascend.compilation.acl_graph.ACLGraphWrapper"  # noqa
 
     @classmethod
     def stateless_init_device_torch_dist_pg(
