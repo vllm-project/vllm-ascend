@@ -8,7 +8,7 @@ def register_model():
     from .deepseek_mtp import CustomDeepSeekMTP  # noqa: F401
     from .deepseek_v2 import CustomDeepseekV2ForCausalLM  # noqa: F401
     from .deepseek_v3 import CustomDeepseekV3ForCausalLM  # noqa: F401
-    from .gpt_oss import GPTOSSForCausalLM  # noqa: F401
+    from .gpt_oss import CustomGptOssForCausalLM  # noqa: F401
     from .qwen2_5_vl import \
         AscendQwen2_5_VLForConditionalGeneration  # noqa: F401
     from .qwen2_vl import AscendQwen2VLForConditionalGeneration  # noqa: F401
@@ -17,11 +17,6 @@ def register_model():
     ModelRegistry.register_model(
         "DeepSeekMTPModel",
         "vllm_ascend.models.deepseek_mtp:CustomDeepSeekMTP")
-
-    # Register GPT-OSS model
-    ModelRegistry.register_model(
-        "GPTOSSForCausalLM",
-        "vllm_ascend.models.gpt_oss:GPTOSSForCausalLM")
 
     ModelRegistry.register_model(
         "Qwen2VLForConditionalGeneration",
@@ -65,3 +60,7 @@ def register_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "vllm_ascend.models.pangu_moe:PanguProMoEForCausalLM")
+
+    ModelRegistry.register_model(
+        "GptOssForCausalLM",
+        "vllm_ascend.models.gpt_oss:CustomGptOssForCausalLM")
