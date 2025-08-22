@@ -325,9 +325,9 @@ class CustomDeepseekDBOMLAAttention(DeepseekV2MLAAttention):
             self.o_proj = OprojCustomRowParallelLinear(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
-                otp_comm_group,
                 bias=False,
                 quant_config=quant_config,
+                custom_comm_group=otp_comm_group,
                 prefix=f"{prefix}.o_proj")
         else:
             self.o_proj = CustomDeepseekV2RowParallelLinear(

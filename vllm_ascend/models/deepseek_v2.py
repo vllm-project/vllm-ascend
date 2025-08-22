@@ -514,18 +514,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
-        if (config.n_routed_experts is not None
-                and self.debug_layer_idx >= config.first_k_dense_replace
-                and self.debug_layer_idx % config.moe_layer_freq == 0
-                and (ascend_config.torchair_graph_config.enable_multistream_moe
-                     or self.enable_shared_expert_dp)):
-            self.o_proj = CustomDeepseekV2RowParallelLinearReplaceAllreduce(
-                self.num_heads * self.v_head_dim,
-                self.hidden_size,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.o_proj")
-        elif oproj_tp_enable():
+        if oproj_tp_enable():
             otp_comm_group = get_otp_group()
             self.o_proj = OprojCustomRowParallelLinear(
                 self.num_heads * self.v_head_dim,
@@ -533,6 +522,17 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 bias=False,
                 quant_config=quant_config,
                 custom_comm_group=otp_comm_group,
+                prefix=f"{prefix}.o_proj")
+        elif (config.n_routed_experts is not None
+              and self.debug_layer_idx >= config.first_k_dense_replace
+              and self.debug_layer_idx % config.moe_layer_freq == 0
+              and (ascend_config.torchair_graph_config.enable_multistream_moe
+                   or self.enable_shared_expert_dp)):
+            self.o_proj = CustomDeepseekV2RowParallelLinearReplaceAllreduce(
+                self.num_heads * self.v_head_dim,
+                self.hidden_size,
+                bias=False,
+                quant_config=quant_config,
                 prefix=f"{prefix}.o_proj")
         else:
             self.o_proj = CustomDeepseekV2RowParallelLinear(

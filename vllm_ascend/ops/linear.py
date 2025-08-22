@@ -361,8 +361,8 @@ class CustomRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
     ):
         self.comm_group = custom_comm_group or get_tp_group()
-        self.tp_rank = custom_comm_group.rank_in_group
-        self.tp_size = custom_comm_group.world_size
+        self.tp_rank = self.comm_group.rank_in_group
+        self.tp_size = self.comm_group.world_size
         # Divide the weight matrix along the first dimension.
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
@@ -408,7 +408,7 @@ class CustomRowParallelLinear(RowParallelLinear):
 
 class OprojCustomRowParallelLinear(CustomRowParallelLinear):
     # support o_proj TP in pure DP scenario and graph mode
-    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_: torch.Tensor, is_prefill=True) -> torch.Tensor:
         if self.input_is_parallel:
             input_parallel = input_
         else:
