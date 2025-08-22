@@ -211,9 +211,9 @@ When running Qwen3 MoE with tp/dp/ep, etc., you may encounter an error just as t
 (EngineCore_0 pid=519998) ERROR 08-05 11:23:25 [core.py:632]
 ```
 
-Try to adjust the arg `cuda-capture-sizes` to address this. This is more probably to happen when you're using A3. Please refer to the empirical formula to estimate the number of gears that can be supported:
+Try to adjust the arg `cuda-capture-sizes` to address this. This is more likely to happen when you're using A3. Please refer to the empirical formula below to estimate a suitable value for this argument:
 
-```bash
+```python
 # pg_num: the number of process groups for communication
 # num_hidden_layer: number of hidden layers of the model
 num_capture_sizes = (1920 - pg_num * 40) / (num_hidden_layer + 1) / (1 + pg_num * 2) # for A3
