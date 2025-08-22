@@ -439,9 +439,6 @@ class TestAscendMLAImpl(TestBase):
                              self.impl.qk_nope_head_dim)
         k_pe = torch.randn(num_tokens, self.impl.num_heads,
                            self.impl.qk_rope_head_dim)
-        kv_c_and_k_pe_cache = torch.randn(num_blocks, block_size,
-                                          self.impl.num_heads,
-                                          self.impl.kv_lora_rank)
         metadata = MagicMock()
         metadata.decode = MagicMock()
         metadata.decode.block_table = MagicMock()
