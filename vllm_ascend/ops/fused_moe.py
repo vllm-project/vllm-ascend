@@ -836,6 +836,224 @@ def fused_experts(
     return final_hidden_states
 
 
+def quant_apply_mlp(hidden_states: torch.Tensor,
+                    w1: torch.Tensor,
+                    w1_scale: torch.Tensor,
+                    w2: torch.Tensor,
+                    w2_scale: torch.Tensor,
+                    group_list: torch.Tensor,
+                    is_mc2: bool,
+                    dynamic_scale: torch.Tensor = None,
+                    group_list_type: int = 1,
+                    w1_scale_bias: torch.Tensor = None,
+                    w2_scale_bias: torch.Tensor = None) -> torch.Tensor:
+    if dynamic_scale is None:
+        unquantized_hidden_states = hidden_states
+        hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
+            hidden_states)
+        # Dispose the original unquantized hidden states
+        # to save npu memory because they're no longer used.
+        dispose_tensor(unquantized_hidden_states)
+    else:
+        pertoken_scale = dynamic_scale
+
+    bias1, bias2 = None, None
+    _output_dtype = w2_scale.dtype
+
+    if w1_scale_bias is None and is_mc2:
+        w1_scale = w1_scale.to(torch.float32)
+
+        # gmm1: gate_up_proj
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[w1],
+            split_item=3,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=torch.int32)[0]
+
+        # act_fn: swiglu
+        hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
+            x=hidden_states,
+            weight_scale=w1_scale,
+            activation_scale=pertoken_scale,
+            bias=None,
+            quant_scale=None,
+            quant_offset=None,
+            group_index=group_list,
+            activate_left=True,
+            quant_mode=1,
+        )
+
+        # gmm2: down_proj
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[w2],
+            scale=[w2_scale],
+            per_token_scale=[swiglu_out_scale],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=w2_scale.dtype)[0]
+    else:
+        if w1_scale_bias is not None:
+            if group_list_type == 0:
+                group_list = torch.cat(
+                    [group_list[:1],
+                     torch.diff(group_list, dim=0)])
+                group_list_type = 1
+            bias1 = [w1_scale_bias]
+            bias2 = [w2_scale_bias]
+            # TODO w4a8 scene: dynamic acquisition of dtype in the future
+            _output_dtype = torch.bfloat16
+
+        # gmm1: gate_up_proj
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[w1],
+            scale=[w1_scale],
+            bias=bias1,
+            per_token_scale=[pertoken_scale],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=_output_dtype)[0]
+
+        # act_fn: swiglu
+        hidden_states = torch_npu.npu_swiglu(hidden_states)
+        hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
+            hidden_states)
+
+        # gmm2: down_proj
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[w2],
+            scale=[w2_scale],
+            bias=bias2,
+            per_token_scale=[swiglu_out_scale],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=_output_dtype)[0]
+    return hidden_states
+
+
+def unquant_apply_mlp(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        group_list: torch.Tensor,
+        group_list_type: int = 1,
+        topk_scales: Optional[torch.Tensor] = None) -> torch.Tensor:
+    w1 = w1.transpose(1, 2)
+    gate_up_out = torch_npu.npu_grouped_matmul(
+        x=[hidden_states],
+        weight=[w1],
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=group_list,
+    )[0]
+    if is_310p():
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
+            torch.float16)
+    else:
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+
+    if topk_scales is not None:
+        gate_up_out *= topk_scales
+
+    w2 = w2.transpose(1, 2)
+    hidden_states = torch_npu.npu_grouped_matmul(
+        x=[gate_up_out],
+        weight=[w2],
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=group_list,
+    )[0]
+    return hidden_states
+
+
+def unified_apply_mlp(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w1_scale: torch.Tensor,
+        w2: torch.Tensor,
+        w2_scale: torch.Tensor,
+        group_list: torch.Tensor,
+        is_mc2: bool,
+        dynamic_scale: torch.Tensor = None,
+        group_list_type: int = 1,
+        with_quant: bool = False,
+        w1_scale_bias: torch.Tensor = None,
+        w2_scale_bias: torch.Tensor = None,
+        topk_scales: Optional[torch.Tensor] = None) -> torch.Tensor:
+    if with_quant:
+        return quant_apply_mlp(hidden_states, w1, w1_scale, w2, w2_scale,
+                               group_list, is_mc2, dynamic_scale,
+                               group_list_type, w1_scale_bias, w2_scale_bias)
+    else:
+        return unquant_apply_mlp(hidden_states, w1, w2, group_list,
+                                 group_list_type, topk_scales)
+
+
+def unified_fused_experts_test(hidden_states: torch.Tensor,
+                               w1: torch.Tensor,
+                               w2: torch.Tensor,
+                               topk_weights: torch.Tensor,
+                               topk_ids: torch.Tensor,
+                               expert_map: torch.Tensor = None,
+                               log2phy: torch.Tensor = None,
+                               global_redundant_expert_num: int = 0,
+                               w1_scale: torch.Tensor = None,
+                               w1_scale_bias: torch.Tensor = None,
+                               w2_scale: torch.Tensor = None,
+                               w2_scale_bias: torch.Tensor = None,
+                               shared_experts: Optional[torch.Tensor] = None,
+                               shared_gate_up: Optional[Any] = None,
+                               shared_dequant_scale: Optional[Any] = None,
+                               mc2_mask: Optional[torch.Tensor] = None,
+                               apply_router_weight_on_input: bool = False):
+    token_dispatcher = get_forward_context().token_dispatcher
+    with_quant = get_forward_context().with_quant
+    is_mc2 = token_dispatcher.__class__.__name__ == "TokenDispatcherWithMC2"
+
+    results = token_dispatcher.token_dispatch(
+        hidden_states=hidden_states,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        expert_map=expert_map,
+        log2phy=log2phy,
+        global_redundant_expert_num=global_redundant_expert_num,
+        shared_experts=shared_experts,
+        shared_gate_up=shared_gate_up,
+        shared_dequant_scale=shared_dequant_scale,
+        mc2_mask=mc2_mask,
+        apply_router_weight_on_input=apply_router_weight_on_input)
+
+    expert_output = unified_apply_mlp(
+        hidden_states=results["hidden_states"],
+        w1=w1,
+        w1_scale=w1_scale,
+        w2=w2,
+        w2_scale=w2_scale,
+        group_list=results["group_list"],
+        is_mc2=is_mc2,
+        dynamic_scale=results.get("dynamic_scale"),
+        group_list_type=results.get("group_list_type"),
+        with_quant=with_quant,
+        w1_scale_bias=w1_scale_bias,
+        w2_scale_bias=w2_scale_bias,
+        topk_scales=results.get("topk_scales"))
+    final_hidden_states = token_dispatcher.token_combine(expert_output)
+    return final_hidden_states
+
+
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None):
@@ -916,7 +1134,18 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         fused_moe_state = get_forward_context().fused_moe_state
 
+        return unified_fused_experts_test(hidden_states=x,
+                                          w1=layer.w13_weight,
+                                          w2=layer.w2_weight,
+                                          topk_weights=topk_weights,
+                                          topk_ids=topk_ids,
+                                          expert_map=expert_map,
+                                          shared_experts=shared_experts,
+                                          mc2_mask=kwargs.get(
+                                              "mc2_mask", None))
+
         if fused_moe_state == FusedMoEState.MC2:
+            print("========using mc2=========", flush=True)
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -1095,7 +1324,7 @@ class AscendFusedMoE(FusedMoE):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
-        moe = FusedMoEConfig.make(
+        self.moe = FusedMoEConfig.make(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
@@ -1105,10 +1334,8 @@ class AscendFusedMoE(FusedMoE):
             in_dtype=params_dtype,
             quant_config=quant_config)
 
-        self.moe_config = moe
-
         if quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod(moe)
+            self.quant_method = AscendUnquantizedFusedMoEMethod(self.moe)
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
 
@@ -1153,6 +1380,19 @@ class AscendFusedMoE(FusedMoE):
                 self.token_dispatchers = [
                     self.token_dispatcher, token_dispatcher1
                 ]
+
+        ep_size = (get_ep_group().world_size if
+                   vllm_config.parallel_config.enable_expert_parallel else 1)
+        with_quant = quant_config is not None
+        from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
+            setup_token_dispatchers
+        setup_token_dispatchers(
+            ep_size,
+            top_k=self.top_k,
+            num_experts=self.global_num_experts,
+            num_global_redundant_experts=self.global_redundant_expert_num,
+            num_local_experts=self.local_num_experts,
+            with_quant=with_quant)
 
     def naive_multicast(self, x: torch.Tensor,
                         cu_tokens_across_dp_cpu: torch.Tensor):
