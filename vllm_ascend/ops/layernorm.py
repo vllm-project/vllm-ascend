@@ -18,6 +18,8 @@
 from typing import Optional, Tuple, Union
 
 import torch
+import torch_npu
+
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 
@@ -45,8 +47,6 @@ class AddRMSNormW8A8Quant(RMSNorm):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        import torch_npu
-
         if residual is not None:
             x, _, residual = torch_npu.npu_add_rms_norm_quant(
                 x,
@@ -63,12 +63,12 @@ class AddRMSNormW8A8Quant(RMSNorm):
 
 
 class AscendRMSNorm(RMSNorm):
+
     def forward_oot(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        import torch_npu
         from vllm_ascend.utils import is_310p
         if residual is not None:
             if is_310p():
