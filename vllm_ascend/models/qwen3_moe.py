@@ -48,77 +48,6 @@ from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
                                                init_metadata_for_sp)
 
 
-class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
-        nn.Module.__init__(self)
-        self.tp_size = get_tensor_model_parallel_world_size()
-        if self.tp_size > config.num_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.num_experts}.")
-
-        self.gate = ReplicatedLinear(
-            config.hidden_size,
-            config.num_experts,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.gate",
-        )
-
-        self.experts = AscendFusedMoE(
-            num_experts=config.num_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-        )
-
-        self.top_k = config.num_experts_per_tok
-
-        self.dp_size = get_dp_group().world_size
-
-        self.tp_group = get_tp_group().device_group
-        self.tp_rank = get_tp_group().rank_in_group
-        self.ep_group = get_ep_group()
-
-        self.params_dtype = torch.get_default_dtype()
-
-    def forward(
-        self,
-        hidden_states,
-        attn_metadata=None,
-    ):
-        if attn_metadata is None:
-            attn_metadata = get_forward_context().attn_metadata
-        # when profile runs, force experts to load balanced tokens
-        # to avoid high memory consumption on a single rank.
-        enable_force_load_balance = get_forward_context().in_profile_run
-        is_prefill = get_forward_context().with_prefill
-
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
-
-        hidden_states = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            is_prefill=is_prefill,
-            top_k=self.top_k,
-            enable_force_load_balance=enable_force_load_balance,
-            shared_experts=None,
-        )
-
-        return hidden_states
-
-
 class AscendQwen3MoeDecoderLayer(nn.Module):
 
     def __init__(
@@ -162,8 +91,7 @@ class AscendQwen3MoeDecoderLayer(nn.Module):
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
             if not use_aclgraph:
-                # FIXME: custom sparse moe block doesn't work with aclgraph.
-                self.mlp = CustomSparseMoeBlock(config=config,
+                self.mlp = AscendSparseMoeBlock(config=config,
                                                 quant_config=quant_config,
                                                 prefix=f"{prefix}.mlp")
             else:
