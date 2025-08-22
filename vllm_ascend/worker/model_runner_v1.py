@@ -2189,6 +2189,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         elapsed_time = end_time - start_time
         npu_graph_size = start_free_npu_memory - end_free_npu_memory
         # This usually takes 5~20 seconds.
+        # TODO: remove when aclgraph is ready for deepseek and uses more reasonable memory handling.
         LOW_MEMORY_THRESHOLD_GB = 3
         end_free_npu_memory_GB = end_free_npu_memory / (1 << 30)
         if end_free_npu_memory_GB < LOW_MEMORY_THRESHOLD_GB:
