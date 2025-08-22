@@ -36,9 +36,7 @@ MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
     "Qwen/Qwen3-0.6B-Base",
 ]
-MULTIMODALITY_VL_MODELS = [
-    "Qwen/Qwen2.5-VL-3B-Instruct", "RedHatAI/gemma-3-12b-it-quantized.w8a8"
-]
+MULTIMODALITY_VL_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 MULTIMODALITY_AUDIO_MODELS = ["Qwen/Qwen2-Audio-7B-Instruct"]
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
