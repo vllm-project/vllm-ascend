@@ -190,11 +190,6 @@ class MtpProposer:
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
 
-        if attn_metadata.prefill is not None:
-            attn_metadata.prefill.query_lens = query_lens.cpu()
-            attn_metadata.prefill.input_positions = target_positions
-            attn_metadata.prefill.seq_lens = seq_lens
-
         if not self.torchair_graph_enabled:
             # torch mode need to update num_tokens_across_dp
             # TODO: adapt enable_dbo later
@@ -213,6 +208,7 @@ class MtpProposer:
                 num_tokens=num_input_tokens,
                 with_prefill=with_prefill,
                 num_tokens_across_dp=num_tokens_across_dp,
+                reserved_mc2_mask=self.runner.reserved_mc2_mask,
                 in_profile_run=self.runner.in_profile_run,
                 num_actual_tokens=num_tokens):
             with ProfileExecuteDuration().capture_async('mtp_forward'):
@@ -315,6 +311,7 @@ class MtpProposer:
                 num_tokens=num_tokens,
                 with_prefill=with_prefill,
                 num_tokens_across_dp=num_tokens_across_dp,
+                reserved_mc2_mask=self.runner.reserved_mc2_mask,
                 in_profile_run=self.runner.in_profile_run,
                 num_actual_tokens=0):
             if is_running_torchair:
