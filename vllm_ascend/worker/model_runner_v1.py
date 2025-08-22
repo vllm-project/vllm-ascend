@@ -30,7 +30,6 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torch._dynamo.cache_size
-import torch.distributed as dist
 import torch.nn as nn
 from tqdm import tqdm  # type: ignore
 from vllm.attention import AttentionType, get_attn_backend
@@ -587,19 +586,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self, num_tokens: int, with_prefill: bool,
             enable_dbo: bool) -> tuple[torch.Tensor, bool, bool]:
 
-        local_forward_metadata = torch.tensor([[num_tokens, with_prefill, enable_dbo]],
-                                                device="npu",
-                                                dtype=torch.int32)
+        local_forward_metadata = torch.tensor(
+            [[num_tokens, with_prefill, enable_dbo]],
+            device="npu",
+            dtype=torch.int32)
         global_forward_metadata = get_dp_group().all_gather(
             local_forward_metadata, dim=0)
-        maybe_padded_num_tokens = global_forward_metadata[:, 0].cpu().max()
+        maybe_padded_num_tokens = global_forward_metadata[:, 0].max().item()
         num_tokens_across_dp = torch.tensor([maybe_padded_num_tokens] *
                                             self.dp_size,
                                             device="cpu",
                                             dtype=torch.int32)
         with_prefill = bool(global_forward_metadata[:, 1].any())
         enable_dbo = bool(global_forward_metadata[:, 2].any())
-        
+
         return num_tokens_across_dp, with_prefill, enable_dbo
 
     def _get_forward_metadata_across_dp_and_pad(
