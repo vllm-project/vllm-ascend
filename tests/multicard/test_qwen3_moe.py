@@ -21,7 +21,7 @@
 Run `pytest tests/test_offline_inference.py`.
 """
 
-from tests.e2e.conftest import VllmRunner
+from tests.conftest import VllmRunner
 
 
 def test_models_distributed_Qwen3_MOE_TP2():
