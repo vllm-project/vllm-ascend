@@ -19,7 +19,6 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch_npu
-
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 
