@@ -16,7 +16,7 @@
 import os
 
 from transformers import PretrainedConfig
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import KVTransferConfig, ModelConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (_check_torchair_supported,
@@ -304,3 +304,15 @@ class TestAscendConfig(TestBase):
                 "refresh": True
             }
             init_ascend_config(test_vllm_config)
+
+    def test_init_ascend_config_with_oproj_tensor_parallel(self):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "torchair_graph_config": {
+                "enabled": True,
+            },
+            "oproj_tensor_parallel_size": 2,
+        }
+        test_vllm_config.kv_transfer_config = KVTransferConfig()
+        test_vllm_config.kv_transfer_config.kv_role = "kv_consumer"
+        init_ascend_config(test_vllm_config)
