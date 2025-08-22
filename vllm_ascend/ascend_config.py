@@ -51,6 +51,10 @@ class AscendConfig:
             "enable_shared_expert_dp", True
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
 
+        self.enable_mla_sp = additional_config.get("enable_mla_sp", False)
+        self.o_shard_parallel_size = int(additional_config.get("o_shard_parallel_size", -1))
+        self.enable_o_shard = self.o_shard_parallel_size > 0
+        self.o_shard_full_layers = int(additional_config.get("o_shard_full_layers", 0))
 
 class TorchairGraphConfig:
     """
