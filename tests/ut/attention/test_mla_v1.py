@@ -411,8 +411,7 @@ class TestAscendMLAImpl(TestBase):
         meta = MagicMock()
         meta.prefill = prefill_meta
         self.impl.prefill_mask = torch.triu(
-            torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype),
-            1)
+            torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype),1)
 
         out, lse = self.impl._compute_prefill_context(q_nope, q_pe, kv_cache,
                                                       32, meta, prefix_out,
@@ -426,7 +425,8 @@ class TestAscendMLAImpl(TestBase):
 
     @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._v_up_proj")
     @patch("torch_npu.npu_fused_infer_attention_score")
-    def test_forward_decode_without_graph(self, mock_npu_fused_infer_attention_score,
+    def test_forward_decode_without_graph(self,
+                                          mock_npu_fused_infer_attention_score,
                                           mock_up_proj):
         num_tokens = 100
         num_blocks = 256
@@ -446,8 +446,10 @@ class TestAscendMLAImpl(TestBase):
         metadata.decode = MagicMock()
         metadata.decode.block_table = MagicMock()
         metadata.decode.seq_lens = 10
-        mock_npu_fused_infer_attention_score.return_value = [torch.randn(
-            num_tokens, self.impl.num_heads, self.impl.kv_lora_rank), None]
+        mock_npu_fused_infer_attention_score.return_value = [
+            torch.randn(num_tokens, self.impl.num_heads,
+                        self.impl.kv_lora_rank), None
+        ]
         mock_up_proj.return_value = torch.randn(num_tokens,
                                                 self.impl.num_heads,
                                                 self.impl.v_head_dim)
