@@ -213,7 +213,6 @@ class MtpProposer:
                 num_tokens_across_dp=num_tokens_across_dp,
                 reserved_mc2_mask=self.runner.reserved_mc2_mask,
                 in_profile_run=self.runner.in_profile_run,
-                reserved_mc2_mask=self.reserved_mc2_mask,
                 num_actual_tokens=num_tokens):
             with ProfileExecuteDuration().capture_async('mtp_forward'):
                 model_kwargs = {}
@@ -317,7 +316,6 @@ class MtpProposer:
                 num_tokens_across_dp=num_tokens_across_dp,
                 reserved_mc2_mask=self.runner.reserved_mc2_mask,
                 in_profile_run=self.runner.in_profile_run,
-                reserved_mc2_mask=self.reserved_mc2_mask,
                 num_actual_tokens=0):
             if is_running_torchair:
                 assert attn_metadata is not None
