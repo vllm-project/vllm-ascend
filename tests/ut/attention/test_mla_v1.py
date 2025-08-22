@@ -429,7 +429,6 @@ class TestAscendMLAImpl(TestBase):
                                           mock_npu_fused_infer_attention_score,
                                           mock_up_proj):
         num_tokens = 100
-        num_blocks = 256
         block_size = 4
         q_nope = torch.randn(num_tokens, self.impl.num_heads,
                              self.impl.qk_nope_head_dim)
