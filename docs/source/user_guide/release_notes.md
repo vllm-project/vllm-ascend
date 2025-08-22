@@ -38,7 +38,7 @@ This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 * Dynamic EPLB support in [#1943](https://github.com/vllm-project/vllm-ascend/pull/1943)
 * Disaggregated Prefilling support for V1 Engine and improvement, continued development and stabilization of the disaggregated prefill feature, including performance enhancements and bug fixes for single-machine setups:[#1953](https://github.com/vllm-project/vllm-ascend/pull/1953) [#1612](https://github.com/vllm-project/vllm-ascend/pull/1612) [#1361](https://github.com/vllm-project/vllm-ascend/pull/1361) [#1746](https://github.com/vllm-project/vllm-ascend/pull/1746) [#1552](https://github.com/vllm-project/vllm-ascend/pull/1552) [#1801](https://github.com/vllm-project/vllm-ascend/pull/1801) [#2083](https://github.com/vllm-project/vllm-ascend/pull/2083) [#1989](https://github.com/vllm-project/vllm-ascend/pull/1989)
 
-### Models improvement:
+### Models improvement
 * DeepSeek DeepSeek DBO support and improvement: [#1285](https://github.com/vllm-project/vllm-ascend/pull/1285) [#1291](https://github.com/vllm-project/vllm-ascend/pull/1291) [#1328](https://github.com/vllm-project/vllm-ascend/pull/1328) [#1420](https://github.com/vllm-project/vllm-ascend/pull/1420) [#1445](https://github.com/vllm-project/vllm-ascend/pull/1445) [#1589](https://github.com/vllm-project/vllm-ascend/pull/1589) [#1759](https://github.com/vllm-project/vllm-ascend/pull/1759) [#1827](https://github.com/vllm-project/vllm-ascend/pull/1827) [#2093](https://github.com/vllm-project/vllm-ascend/pull/2093)
 * DeepSeek MTP improvement and bugfix: [#1214](https://github.com/vllm-project/vllm-ascend/pull/1214) [#943](https://github.com/vllm-project/vllm-ascend/pull/943) [#1584](https://github.com/vllm-project/vllm-ascend/pull/1584) [#1473](https://github.com/vllm-project/vllm-ascend/pull/1473) [#1294](https://github.com/vllm-project/vllm-ascend/pull/1294) [#1632](https://github.com/vllm-project/vllm-ascend/pull/1632) [#1694](https://github.com/vllm-project/vllm-ascend/pull/1694) [#1840](https://github.com/vllm-project/vllm-ascend/pull/1840) [#2076](https://github.com/vllm-project/vllm-ascend/pull/2076) [#1990](https://github.com/vllm-project/vllm-ascend/pull/1990) [#2019](https://github.com/vllm-project/vllm-ascend/pull/2019)
 * Qwen3 MoE support improvement and bugfix around graph mode and DP:  [#1940](https://github.com/vllm-project/vllm-ascend/pull/1940) [#2006](https://github.com/vllm-project/vllm-ascend/pull/2006) [#1832](https://github.com/vllm-project/vllm-ascend/pull/1832)
@@ -47,7 +47,7 @@ This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 * Qwen2.5 VL improvement via mrope/padding mechanism improvement: [#1261](https://github.com/vllm-project/vllm-ascend/pull/1261) [#1705](https://github.com/vllm-project/vllm-ascend/pull/1705) [#1929](https://github.com/vllm-project/vllm-ascend/pull/1929) [#2007](https://github.com/vllm-project/vllm-ascend/pull/2007)
 * Ray: Fix the device error when using ray and add initialize_cache and improve warning info: [#1234](https://github.com/vllm-project/vllm-ascend/pull/1234) [#1501](https://github.com/vllm-project/vllm-ascend/pull/1501)
 
-### Graph mode improvement:
+### Graph mode improvement
 * Fix DeepSeek with deepseek with mc2 in [#1269](https://github.com/vllm-project/vllm-ascend/pull/1269)
 * Fix accuracy problem for deepseek V3/R1 models with torchair graph in long sequence predictions in [#1332](https://github.com/vllm-project/vllm-ascend/pull/1332)
 * Fix torchair_graph_batch_sizes bug in [#1570](https://github.com/vllm-project/vllm-ascend/pull/1570)
@@ -73,13 +73,13 @@ This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 * Fix DeepSeek OOM issue in extreme `--gpu-memory-utilization` scenario in [#1829](https://github.com/vllm-project/vllm-ascend/pull/1829)
 * Turn off aclgraph when enabling TorchAir in [#2154](https://github.com/vllm-project/vllm-ascend/pull/2154)
 
-### Ops improvement:
+### Ops improvement
 * add custom ascendc kernel vocabparallelembedding [#796](https://github.com/vllm-project/vllm-ascend/pull/796)
 * fix rope sin/cos cache bug in [#1267](https://github.com/vllm-project/vllm-ascend/pull/1267)
 * Refactoring AscendFusedMoE (#1229) in [#1264](https://github.com/vllm-project/vllm-ascend/pull/1264)
 * Use fused ops npu_top_k_top_p in sampler [#1920](https://github.com/vllm-project/vllm-ascend/pull/1920)
 
-### Core:
+### Core
 * Upgrade CANN to 8.2.rc1 in [#2036](https://github.com/vllm-project/vllm-ascend/pull/2036)
 * Upgrade torch-npu to 2.5.1.post1 in [#2135](https://github.com/vllm-project/vllm-ascend/pull/2135)
 * Upgrade python to 3.11 in [#2136](https://github.com/vllm-project/vllm-ascend/pull/2136)
@@ -121,7 +121,7 @@ This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 * Add with_prefill cpu allreduce to handle D-node recomputatio in [#2129](https://github.com/vllm-project/vllm-ascend/pull/2129)
 * Add D2H & initRoutingQuantV2 to improve prefill perf in [#2038](https://github.com/vllm-project/vllm-ascend/pull/2038)
 
-### Docs:
+### Docs
 * Provide an e2e guide for execute duration profiling [#1113](https://github.com/vllm-project/vllm-ascend/pull/1113)
 * Add Referer header for CANN package download url. [#1192](https://github.com/vllm-project/vllm-ascend/pull/1192)
 * Add reinstall instructions doc [#1370](https://github.com/vllm-project/vllm-ascend/pull/1370)
@@ -150,7 +150,7 @@ This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please follow the [
 - Fix the accuracy problem with deploy models with parallel parameters. [#1678](https://github.com/vllm-project/vllm-ascend/pull/1678)
 - The pre-built wheel package now requires lower version of glibc. Users can use it by `pip install vllm-ascend` directly. [#1582](https://github.com/vllm-project/vllm-ascend/pull/1582)
 
-## Other
+### Other
 - Official doc has been updated for better read experience. For example, more deployment tutorials are added, user/developer docs are updated. More guide will coming soon.
 - Fix accuracy problem for deepseek V3/R1 models with torchair graph in long sequence predictions. [#1331](https://github.com/vllm-project/vllm-ascend/pull/1331)
 - A new env variable `VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP` has been added. It enables the fused allgather-experts kernel for Deepseek V3/R1 models. The default value is `0`. [#1335](https://github.com/vllm-project/vllm-ascend/pull/1335)
