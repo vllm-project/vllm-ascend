@@ -2192,10 +2192,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         LOW_MEMORY_THRESHOLD_GB = 3
         end_free_npu_memory_GB = end_free_npu_memory / (1 << 30)
         if end_free_npu_memory_GB < LOW_MEMORY_THRESHOLD_GB:
-            logger.warning(f"Post graph compilation, the available memory on each NPU is reduced to merely {end_free_npu_memory_GB:.2f} GB. "
-                           "During inference operations, subsequent memory allocations may potentially trigger Out-of-Memory(OOM) conditions. "
-                           "Should you encounter this warning followed by service termination, "
-                           "consider decreasing gpu-memory-utilization configuration parameter.")
+            logger.warning(
+                f"Post graph compilation, the available memory on each NPU is reduced to merely {end_free_npu_memory_GB:.2f} GB. "
+                "During inference operations, subsequent memory allocations may potentially trigger Out-of-Memory(OOM) conditions. "
+                "Should you encounter this warning followed by service termination, "
+                "consider decreasing gpu-memory-utilization configuration parameter."
+            )
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, npu_graph_size / (1 << 30))
 
