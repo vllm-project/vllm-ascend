@@ -29,6 +29,12 @@ from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata,
 from vllm_ascend.utils import npu_prefetch
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
+import torch.distributed as dist
+from vllm.distributed.parallel_state import (get_dp_group, get_tp_group)
+from vllm_ascend.distributed.parallel_state import get_mla_sp_world_group
+from vllm_ascend.mla_sp_context import get_sp_context
+from vllm_ascend.ops.shard import RowShardLinear
+
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -648,6 +654,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                      x,
                      max_size=MAX_O_PROJ_PREFETCH_SIZE,
                      enabled=enable_multistream_mla)
+        if isinstance(self.o_proj, RowShardLinear):
+            x = get_tp_group().all_gather(x, dim=-1)
         return self.o_proj(x, is_prefill=False)[0]
 
     # Return `ql_nope`, `q_pe`
@@ -1094,6 +1102,61 @@ class AscendMLAImpl(MLAAttentionImpl):
                 current_ms_metadata.before_comm_event.wait()
                 return self._v_up_proj_and_o_proj(attn_output)
 
+    def _forward_prefill_sp(self, attn_output: torch.Tensor) -> torch.Tensor:
+        sp_context = get_sp_context()
+        assert sp_context is not None
+        sp_world_group = get_mla_sp_world_group()
+        tp_size = get_tp_group().world_size
+        my_rank = sp_context.my_rank
+        my_rank_start_token = sp_context.rank_sp_start_token[my_rank]
+        my_rank_end_token = sp_context.rank_sp_end_token[my_rank]
+        num_sp_tokens = max(my_rank_end_token - my_rank_start_token, 0)
+        sp_send = attn_output
+        if get_dp_group().world_size == 1:
+            padded_len = sp_context.num_tokens_per_rank * sp_world_group.world_size
+            if sp_context.num_global_tokens < padded_len:
+                sp_send = nn.functional.pad(sp_send, (0, 0, 0, padded_len - sp_context.num_global_tokens))
+            sp_output = torch.empty(
+                [sp_context.num_tokens_per_rank * tp_size, self.num_heads * self.v_head_dim],
+                dtype=sp_send.dtype,
+                device=sp_send.device
+            )
+            dist.all_to_all_single(
+                output=sp_output,
+                input=sp_send,
+                group=sp_world_group.device_group,
+            )
+            sp_output = sp_output.reshape(sp_context.num_tokens_per_rank, tp_size * self.num_heads * self.v_head_dim)
+            sp_output = sp_output[:num_sp_tokens]
+        else:
+            sp_output = torch.empty(
+                [num_sp_tokens * tp_size, self.num_heads * self.v_head_dim],
+                dtype=sp_send.dtype,
+                device=sp_send.device
+            )
+            dist.all_to_all_single(
+                output=sp_output,
+                input=sp_send,
+                output_split_sizes=sp_context.output_split_sizes,
+                input_split_sizes=sp_context.input_split_sizes,
+                group=sp_world_group.device_group,
+            )
+            sp_output = sp_output.reshape(num_sp_tokens, tp_size * self.num_heads * self.v_head_dim)
+        from vllm_ascend.utils import dispose_tensor
+        dispose_tensor(sp_send)
+        sp_tokens = sp_output.shape[0]
+        if sp_tokens == 0:
+            sp_output = nn.functional.pad(sp_output, (0, 0, 0, 1))
+            sp_tokens = 1
+        o_output = self.o_proj(sp_output)[0]
+        dispose_tensor(sp_output)
+        if sp_tokens < sp_context.num_tokens_per_rank:
+            o_output = nn.functional.pad(o_output, (0, 0, 0, sp_context.num_tokens_per_rank - sp_tokens))
+        dp_output = get_tp_group().all_gather(o_output, 0)
+        del o_output
+        dp_output = dp_output[:sp_context.num_my_dp_sp_tokens]
+        return dp_output
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -1109,6 +1172,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
+            if get_sp_context() is not None:
+                attn_output = torch.empty(
+                    [hidden_states_or_q_c.shape[0], self.num_heads * self.v_head_dim],
+                    dtype=output.dtype,
+                    device=output.device
+                )
+                output[...] = self._forward_prefill_sp(attn_output)
             return output
         self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
@@ -1131,7 +1201,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if not self.running_in_graph:
             # Inputs and outputs may be padded for CUDA graphs
             output_padded = output
-            output = output[:num_actual_toks, ...]
+            if get_sp_context() is None:
+                output = output[:num_actual_toks, ...]
             if not self.torchair_graph_enabled:
                 kv_c_normed = kv_c_normed[:num_actual_toks, ...]
                 prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
@@ -1264,6 +1335,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                    prefill_k_c_normed,
                                                    prefill_k_pe, kv_cache,
                                                    attn_metadata)
+
+            if get_sp_context() is not None:
+                output[...] = self._forward_prefill_sp(output_prefill)
+                return output
+
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 current_ms_metadata.before_comm_event.record()
@@ -1291,6 +1367,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                     o_proj_input[:num_decode_tokens] = output_decode
             else:
                 o_proj_input[:num_decode_tokens] = output_decode
+
+        if isinstance(self.o_proj, RowShardLinear):
+            o_proj_input = get_tp_group().all_gather(o_proj_input, dim=-1)
 
         current_ms_metadata = get_multistream_comm_context()
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024  # 16MB
