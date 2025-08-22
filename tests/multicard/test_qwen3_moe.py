@@ -33,7 +33,7 @@ def test_models_distributed_Qwen3_MOE_TP2():
     with VllmRunner(
             "Qwen/Qwen3-30B-A3B",
             dtype=dtype,
-            tensor_parallel_size=2,
+            tensor_parallel_size=4,
             distributed_executor_backend="mp",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -48,7 +48,7 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_EP():
     with VllmRunner(
             "Qwen/Qwen3-30B-A3B",
             dtype=dtype,
-            tensor_parallel_size=2,
+            tensor_parallel_size=4,
             enable_expert_parallel=True,
             distributed_executor_backend="mp",
     ) as vllm_model:
