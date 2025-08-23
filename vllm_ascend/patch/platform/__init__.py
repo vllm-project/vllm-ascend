@@ -14,12 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm_ascend.utils import vllm_version_is
-
 # Import specific patches for different versions
-if vllm_version_is("0.9.1"):
-    from vllm_ascend.patch.platform import patch_0_9_1  # noqa: F401
-    from vllm_ascend.patch.platform import patch_common  # noqa: F401
-else:
-    from vllm_ascend.patch.platform import patch_common  # noqa: F401
-    from vllm_ascend.patch.platform import patch_main  # noqa: F401
+from vllm_ascend.patch.platform import patch_0_9_1  # noqa: F401
+from vllm_ascend.patch.platform import patch_common  # noqa: F401
