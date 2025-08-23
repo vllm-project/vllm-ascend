@@ -46,7 +46,7 @@ jobs:
       # Each version should be tested
       fail-fast: false
       matrix:
-        vllm_verison: [v0.9.1-dev, v0.9.1-dev-openeuler, main, main-openeuler]
+        vllm_verison: [main, main-openeuler]
     name: vLLM Ascend test
     runs-on: linux-aarch64-a2-1
     container:
@@ -78,6 +78,7 @@ jobs:
           # Overwrite e2e and examples
           cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
           cp -r examples /vllm-workspace/vllm-ascend/
+          cp -f docs/source/conf.py /vllm-workspace/vllm-ascend/docs/source/
 
           # Simulate container to enter directory
           cd /workspace
