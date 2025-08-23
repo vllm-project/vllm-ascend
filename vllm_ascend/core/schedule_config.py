@@ -55,6 +55,16 @@ class AscendSchedulerConfig(SchedulerConfig):
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
         self.chunked_prefill_enabled = self.enable_chunked_prefill
+        if (self.max_num_batched_tokens < self.max_model_len
+                and not self.chunked_prefill_enabled):
+            raise ValueError(
+                "Ascend scheduler is enabled without chunked prefill feature. "
+                f"Argument max_num_batched_tokens ({self.max_num_batched_tokens}) is "
+                f"smaller than max_model_len ({self.max_model_len}). "
+                "This effectively limits the maximum sequence length to "
+                "max_num_batched_tokens and makes vLLM reject longer "
+                "sequences. Please increase max_num_batched_tokens or "
+                "decrease max_model_len.")
         if self.policy != "fcfs":
             raise NotImplementedError(
                 f"currently AscendScheduler only supports fcfs policy, got {self.policy}"
