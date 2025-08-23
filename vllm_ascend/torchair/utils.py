@@ -170,3 +170,15 @@ def register_torchair_model():
     ModelRegistry.register_model(
         "Qwen3ForCausalLM",
         "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+
+
+def torchair_quant_method_register():
+    from vllm_ascend.quantization.quantizer import \
+        SUPPORT_ASCEND_QUANTIZER_TYPE
+    from vllm_ascend.torchair.quantization.torchair_quantizer import (
+        TorchairW4A8DYNAMICQuantizer, TorchairW8A8DYNAMICQuantizer)
+
+    SUPPORT_ASCEND_QUANTIZER_TYPE[
+        "W8A8_DYNAMIC"] = TorchairW8A8DYNAMICQuantizer
+    SUPPORT_ASCEND_QUANTIZER_TYPE[
+        "W4A8_DYNAMIC"] = TorchairW4A8DYNAMICQuantizer
