@@ -10,6 +10,8 @@ import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
+                                         init_none_hash)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
@@ -39,7 +41,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # KVCache Manager.
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                req_to_blocks) == 0
-    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                num_cached_block) == 0
     num_free_blocks = (
@@ -54,7 +55,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
 
 
 def create_vllm_config(
-    model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 1024,
     block_size: int = 128,
@@ -65,14 +65,11 @@ def create_vllm_config(
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_num_batched_tokens,
     )
+    fake_weight_path = os.path.join(os.path.dirname(__file__), "..",
+                                    "fake_weight")
     model_config = ModelConfig(
-        model=model,
-        task="auto",
-        tokenizer=model,
-        tokenizer_mode="auto",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
+        model=fake_weight_path,
+        skip_tokenizer_init=True,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -118,6 +115,9 @@ def create_scheduler(
     )
 
 
+_none_hash_initialized = False
+
+
 def create_request(
     request_id: int,
     num_tokens: int = 10,
@@ -126,8 +126,15 @@ def create_request(
     do_remote_prefill: bool = False,
     use_all_1s_for_prompt_tokens: bool = False,
     num_remote_blocks: int = 3,
+    block_size: int = 16,
 ) -> Request:
     """Make dummy request for testing."""
+    global _none_hash_initialized
+    if not _none_hash_initialized:
+        init_none_hash(hash)
+        _none_hash_initialized = True
+
+    block_hasher = get_request_block_hasher(block_size, hash)
 
     kv_transfer_params: Optional[dict[str, Any]] = None
 
@@ -164,6 +171,7 @@ def create_request(
             "pooling_params": []
         } if not vllm_version_is("0.9.1") else {}),
         eos_token_id=EOS_TOKEN_ID,
+        block_hasher=block_hasher,
     )
     req.kv_transfer_params = kv_transfer_params
     return req
@@ -192,13 +200,26 @@ def create_model_runner_output(
     kv_connector_output = KVConnectorOutput(finished_sending=finished_sending,
                                             finished_recving=finished_recving)
     extra_args = {"kv_connector_output": kv_connector_output}
-    return ModelRunnerOutput(
-        req_ids=req_ids,
-        req_id_to_index=req_id_to_index,
-        sampled_token_ids=sampled_token_ids,
-        spec_token_ids=None,
-        logprobs=None,
-        prompt_logprobs_dict={},
-        pooler_output=[],
-        **extra_args,
-    )
+    if vllm_version_is("0.10.1.1"):
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=sampled_token_ids,
+            spec_token_ids=None,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            **extra_args,
+        )
+    else:
+        model_runner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=sampled_token_ids,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            **extra_args,
+        )
+
+    return model_runner_output

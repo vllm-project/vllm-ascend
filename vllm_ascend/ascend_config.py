@@ -17,7 +17,7 @@ from typing import Optional
 
 from vllm.logger import logger
 
-TORCHAIR_MODEL_LIST = ["deepseek", "pangu", "kimi_k2"]
+TORCHAIR_MODEL_LIST = ["deepseek", "pangu", "kimi_k2", "qwen"]
 
 
 def _check_torchair_supported(model_type: str):
@@ -48,7 +48,7 @@ class AscendConfig:
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
         self.enable_shared_expert_dp = additional_config.get(
-            "enable_shared_expert_dp", True
+            "enable_shared_expert_dp", False
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
 
 
@@ -162,7 +162,7 @@ def check_ascend_config(vllm_config, enforce_eager):
     else:
         # torchair_graph case
         if ascend_config.torchair_graph_config.enabled:
-            # torchair_graph is supported for deepseek/pangu model only.
+            # torchair_graph is supported for deepseek/pangu/qwen model only.
             if vllm_config.model_config:
                 model_type = vllm_config.model_config.hf_config.model_type
                 if not _check_torchair_supported(model_type):

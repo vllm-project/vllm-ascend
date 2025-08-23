@@ -20,19 +20,25 @@ from typing import List, Optional, Tuple, Type
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch_npu
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
-from vllm.attention.backends.utils import PAD_SLOT_ID, CommonAttentionState
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
+                                              AttentionType)
+from vllm.attention.backends.utils import PAD_SLOT_ID
+from vllm.config import VllmConfig
+from vllm.utils import cdiv
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
+                                                AscendAttentionMetadataBuilder,
+                                                AscendAttentionState,
+                                                AscendMetadata)
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d)
-from vllm_ascend.worker.npu_input_batch import InputBatch
 
 
-class AscendAttentionTorchairBackend(AttentionBackend):
+class AscendAttentionTorchairBackend(AscendAttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
@@ -46,10 +52,6 @@ class AscendAttentionTorchairBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["AscendTorchairMetadata"]:
         return AscendTorchairMetadata
-
-    @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
-        return CommonAttentionState
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionTorchairMetadataBuilder"]:
@@ -73,36 +75,6 @@ class AscendAttentionTorchairBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         return (2, num_blocks, block_size, num_kv_heads * head_size)
 
-    @staticmethod
-    def swap_blocks(
-        src_kv_cache: List[torch.Tensor],
-        dst_kv_cache: List[torch.Tensor],
-        src_to_dst: torch.Tensor,
-    ) -> None:
-        src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]
-        dst_key_cache, dst_value_cache = dst_kv_cache[0], dst_kv_cache[1]
-        src_indices = src_to_dst[:, 0]
-        dst_indices = src_to_dst[:, 1]
-
-        dst_key_cache[dst_indices] = src_key_cache[src_indices].to(
-            dst_key_cache.device)
-        dst_value_cache[dst_indices] = src_value_cache[src_indices].to(
-            dst_key_cache.device)
-
-    @staticmethod
-    def copy_blocks(
-        kv_caches: List[torch.Tensor],
-        src_to_dists: torch.Tensor,
-    ) -> None:
-        src_indices = src_to_dists[:, 0]
-        dst_indices = src_to_dists[:, 1]
-
-        for kv_cache in kv_caches:
-            key_caches = kv_cache[0]
-            value_caches = kv_cache[1]
-            key_caches[dst_indices] = key_caches[src_indices]
-            value_caches[dst_indices] = value_caches[src_indices]
-
 
 @dataclass
 class AscendDecodeMetadata:
@@ -117,54 +89,33 @@ class AscendDecodeMetadata:
 
 
 @dataclass
-class AscendTorchairMetadata:
-    num_actual_tokens: int  # Number of tokens excluding padding.
-    # (batch_size, max_blocks_per_seq).
-    # Block addresses per sequence. (Seq id -> list of physical block)
-    block_tables: torch.Tensor
-    # (batch_size,). The sequence length per sequence. Sequence length means
-    # the computed tokens + new tokens None if it is a decoding.
-    query_start_loc: torch.Tensor
-    query_lens: torch.Tensor
-    seq_lens: torch.Tensor
-    # Maximum query length in the batch. None for decoding.
-    max_query_len: Optional[int] = None
-    # (num_tokens,). The indices of the token slots that input tokens will be
-    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
-    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
-    # in block 0, and 1st slot in block 1, respectively.
-    slot_mapping: torch.Tensor = None
-    # Current state of this attention run.
-    attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
-    attn_mask: Optional[torch.Tensor] = None
+class AscendTorchairMetadata(AscendMetadata):
 
     decode: Optional[AscendDecodeMetadata] = None
 
-    enable_dbo_across_dp: bool = False
 
+class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
 
-class AscendAttentionTorchairMetadataBuilder:
-
-    def __init__(self, runner):
-        self.runner = runner
-
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return False
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(vllm_config, device)
+        self.max_num_blocks_per_req = cdiv(
+            self.model_config.max_model_len,
+            self.vllm_config.cache_config.block_size)
+        self.max_blocks = (self.model_config.max_model_len +
+                           self.vllm_config.cache_config.block_size -
+                           1) // self.vllm_config.cache_config.block_size
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int, block_tables: torch.Tensor) -> torch.Tensor:
+        max_blocks = self.max_blocks
 
-        max_batch_size, max_blocks = self.runner.graph_block_tables.shape
-        assert max_batch_size >= num_seqs, f"max_batch_size: {max_batch_size} should be bigger than cur_num_seqs: {num_seqs}"
-
-        if isinstance(self.runner.graph_block_tables, np.ndarray):
-            graph_block_tables = torch.zeros((max_batch_size, max_blocks),
-                                             dtype=block_tables.dtype,
-                                             device=block_tables.device)
-        else:
-            graph_block_tables = self.runner.graph_block_tables.to(
-                device=block_tables.device, dtype=block_tables.dtype)
+        graph_block_tables = torch.zeros((num_seqs, max_blocks),
+                                         dtype=block_tables.dtype,
+                                         device=block_tables.device)
 
         num_blocks = block_tables.size(1)
         if num_blocks <= max_blocks:
@@ -176,14 +127,14 @@ class AscendAttentionTorchairMetadataBuilder:
                                max_blocks] = block_tables[:num_seqs, :
                                                           max_blocks]
 
-        return graph_block_tables[:num_seqs, :max_blocks]
+        return graph_block_tables[:, :max_blocks]
 
     def build_torchair_graph_dummy(
-            self, num_reqs: int,
-            num_actual_tokens: int) -> AscendTorchairMetadata:
-        device = self.runner.device
-        _, max_blocks = self.runner.graph_block_tables.shape
-        block_table = torch.zeros((num_reqs, max_blocks),
+        self, common_attn_metadata: TorchairCommonAttentionMetadata
+    ) -> AscendTorchairMetadata:
+        device = self.device
+        num_reqs = common_attn_metadata.num_reqs
+        block_table = torch.zeros((num_reqs, self.max_blocks),
                                   dtype=torch.int32,
                                   device=device)
         block_table = self._get_graph_runner_block_tables(
@@ -208,7 +159,7 @@ class AscendAttentionTorchairMetadataBuilder:
                                                max_seq_lens=1)
 
         attn_metadata = AscendTorchairMetadata(
-            num_actual_tokens=num_actual_tokens,
+            num_actual_tokens=common_attn_metadata.num_actual_tokens,
             block_tables=block_table,
             query_lens=0,
             query_start_loc=query_start_loc,
@@ -218,47 +169,50 @@ class AscendAttentionTorchairMetadataBuilder:
             decode=decode_metadata)
         return attn_metadata
 
-    def build(self,
-              num_reqs,
-              num_actual_tokens,
-              max_query_len,
-              graph_pad_size: int = -1,
-              enable_dbo_across_dp: bool = False,
-              *args,
-              **kwargs):
+    def build(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        model: nn.Module,
+    ):
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
 
-        device = self.runner.device
-
-        block_table = self.runner.input_batch.block_table[0].get_device_tensor(
-        )
-        block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
+        block_table = common_attn_metadata.block_table_tensor
+        block_table[:num_reqs, :self.max_num_blocks_per_req] = (
             block_table[:num_reqs])
 
-        query_lens = self.runner.query_lens
-        seq_lens = self.runner.seq_lens_cpu[:num_reqs]
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True)
-        attn_mask = self.runner.attn_mask
+        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        slot_mapping = common_attn_metadata.slot_mapping_cpu[:
+                                                             num_actual_tokens].to(
+                                                                 self.device,
+                                                                 non_blocking=
+                                                                 True)
+        attn_mask = common_attn_metadata.attn_mask
 
-        attn_state = self.runner.attn_state
+        attn_state = common_attn_metadata.attn_state
         if is_310p() and attn_state == AscendAttentionState.PrefillNoCache:
             mask_nz = nd_to_nz_2d(attn_mask)
             attn_mask = torch_npu.npu_format_cast(mask_nz.contiguous(), 29)
 
-        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
+                                                                       num_reqs
+                                                                       + 1]
+        query_start_loc = query_start_loc_cpu.to(self.device,
                                                  non_blocking=True)
-        input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
-            device, non_blocking=True).long()
+        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        input_positions = common_attn_metadata.positions[:
+                                                         num_actual_tokens].long(
+                                                         )
 
         decode_metadata = None
+        graph_pad_size = common_attn_metadata.graph_pad_size
         use_torchair_graph = graph_pad_size > -1
-        if self.runner.attn_state in [
+        if common_attn_metadata.attn_state in [
                 AscendAttentionState.DecodeOnly,
         ]:
             max_seq_lens = seq_lens.max().item()
             num_seqs = len(seq_lens)
-            if use_torchair_graph and self.runner.attn_state in [
+            if use_torchair_graph and common_attn_metadata.attn_state in [
                     AscendAttentionState.DecodeOnly,
             ]:
                 num_reqs_pad_size = 0
@@ -267,8 +221,8 @@ class AscendAttentionTorchairMetadataBuilder:
                     pad_value = 0
                     num_token_pad_size = graph_pad_size - num_actual_tokens
                     num_reqs_pad_size = (
-                        graph_pad_size // self.runner.decode_token_per_req -
-                        num_reqs)
+                        graph_pad_size //
+                        common_attn_metadata.decode_token_per_req - num_reqs)
                 pad_value = 1
                 padded_seq_lens = seq_lens.tolist() + [pad_value
                                                        ] * num_reqs_pad_size
@@ -308,11 +262,11 @@ class AscendAttentionTorchairMetadataBuilder:
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
-            max_query_len=max_query_len,
+            max_query_len=common_attn_metadata.max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
-            enable_dbo_across_dp=enable_dbo_across_dp)
+            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp)
         return attn_metadata
 
 
@@ -378,8 +332,9 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             shape = [batch_size * seq_len, num_heads, head_size]
         """
         num_tokens = query.shape[0]
-        use_kv_cache_quant = kv_cache is not None and kv_cache[0].numel(
-        ) > 0 and kv_cache[0].dtype == torch.int8
+        use_kv_cache_quant = (kv_cache is not None and len(kv_cache) > 0
+                              and kv_cache[0].numel() > 0
+                              and kv_cache[0].dtype == torch.int8)
         if output is None:
             output = torch.empty(num_tokens,
                                  self.num_heads,

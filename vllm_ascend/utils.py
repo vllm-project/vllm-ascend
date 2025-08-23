@@ -475,9 +475,20 @@ def register_ascend_customop():
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
+                                        AscendMlpMergedColumnParallelLinear,
+                                        AscendMlpRowParallelLinear)
     CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
     CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
                           name="SiluAndMul")
+    if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
+        CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
+                              name="ColumnParallelLinear")
+        CustomOp.register_oot(_decorated_op_cls=AscendMlpRowParallelLinear,
+                              name="RowParallelLinear")
+        CustomOp.register_oot(
+            _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
+            name="MergedColumnParallelLinear")
 
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
