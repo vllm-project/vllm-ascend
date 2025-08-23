@@ -47,8 +47,13 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (init_ascend_soc_version,
                                register_ascend_customop, sleep_mode_enabled,
-                               try_register_lib)
+                               try_register_lib, vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+if not vllm_version_is("0.10.1.1"):
+    from vllm.v1.outputs import DraftTokenIds
+else:
+    DraftTokenIds = None
 
 
 class NPUWorker(WorkerBase):
@@ -343,3 +348,6 @@ class NPUWorker(WorkerBase):
 
     def get_supported_tasks(self) -> "tuple[SupportedTask, ...]":
         return self.model_runner.get_supported_tasks()
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
