@@ -246,4 +246,4 @@ if vllm_ascend_envs.VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED:
     # Patch the EngineCoreClient to use the custom make_async_mp_client
     EngineCoreProc.run_engine_core = run_engine_core_dplb  # type: ignore[attr-defined]
 else:
-    EngineCoreProc.run_engine_core = run_engine_core
+    EngineCoreProc.run_engine_core = run_engine_core  # type: ignore[attr-defined]
