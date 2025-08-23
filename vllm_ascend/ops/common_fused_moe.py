@@ -19,6 +19,7 @@ from typing import Any, Callable, Optional
 
 import torch
 from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod)
@@ -28,6 +29,7 @@ from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
                                                      DummyCommImpl,
                                                      MC2CommImpl,
                                                      MoECommMethod)
+from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import apply_mlp, fused_experts_moge
 from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.utils import is_310p
@@ -223,6 +225,11 @@ class AscendFusedMoE(FusedMoE):
             has_bias,
         )
 
+        self.moe_config.tp_group = get_tp_group()
+        self.moe_config.dp_group = get_dp_group()
+        self.moe_config.ep_group = get_ep_group()
+        self.moe_config.mc2_group = get_mc2_group()
+
         for method in {AllGatherCommImpl, DummyCommImpl, MC2CommImpl}:
             setattr(
                 self, method.__name__.lower(),
@@ -233,12 +240,12 @@ class AscendFusedMoE(FusedMoE):
         assert self.quant_method is not None
 
         forward_context = get_forward_context()
-        forward_context.moe_comm_method = getattr(
-            self, forward_context.moe_comm_method_name)
+        moe_comm_method_name = forward_context.moe_comm_method_name
+        if not self.moe_config.use_ep and moe_comm_method_name != "dummycommimpl":
+            moe_comm_method_name = "allgathercommimpl"
+        forward_context.moe_comm_method = getattr(self, moe_comm_method_name)
 
-        moe_comm_method = forward_context.moe_comm_method
-
-        hidden_states, router_logits = moe_comm_method.prepare(
+        hidden_states, router_logits = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states, router_logits=router_logits)
 
         # Matrix multiply.
@@ -264,7 +271,7 @@ class AscendFusedMoE(FusedMoE):
             logical_replica_count=self.logical_replica_count,
         )
 
-        final_hidden_states = moe_comm_method.finalize(
+        final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
             reduce_results=self.reduce_results)
 
