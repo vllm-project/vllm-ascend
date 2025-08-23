@@ -229,6 +229,7 @@ async def lifespan(app: FastAPI):
     for d in proxy_state.decoders:
         await d.client.aclose()
 
+
 async def listen_for_disconnect(request: Request) -> None:
     """Return if a disconnect message is received"""
     while True:
