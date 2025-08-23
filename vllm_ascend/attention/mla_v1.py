@@ -482,7 +482,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_mla_prefetch = ascend_config.enable_mla_prefetch
-        self.exable_kv_nz = ascend_config.enable_kv_nz
+        self.exable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
