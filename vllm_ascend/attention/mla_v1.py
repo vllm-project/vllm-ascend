@@ -543,8 +543,9 @@ class AscendMLAMetadataBuilder:
                                                device=input_positions.device)
                 input_positions = torch.cat(
                     [input_positions, position_padding])
-                actual_seq_lengths_q = actual_seq_lengths_q + self.runner.actual_seq_lengths_q[
-                    num_reqs:num_reqs + num_reqs_pad_size]
+
+                actual_seq_lengths_q = self.pad_actual_seq_len_q(
+                    num_reqs_pad_size, num_reqs, actual_seq_lengths_q)
             else:
                 seq_lens_list = seq_lens.tolist()
             # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to batch_size(num_tokens)
@@ -587,6 +588,30 @@ class AscendMLAMetadataBuilder:
             seq_lens=seq_lens,
             enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
         )
+
+    def pad_actual_seq_len_q(self, num_reqs_pad_size, num_reqs,
+                             actual_seq_lengths_q):
+        need_padding = num_reqs_pad_size != 0 and \
+            len(self.runner.actual_seq_lengths_q) > num_reqs and \
+            self.runner.actual_seq_lengths_q[num_reqs] - actual_seq_lengths_q[-1] > 16
+        if need_padding:
+            padding_seq_len_q = self.runner.actual_seq_lengths_q[
+                num_reqs:num_reqs + num_reqs_pad_size]
+            start_val = actual_seq_lengths_q[-1]
+            end_val = padding_seq_len_q[-1]
+
+            num_step = len(padding_seq_len_q)
+            interpolated = np.round(
+                np.linspace(start_val, end_val,
+                            num_step + 1)[1:]).astype(int).tolist()
+            assert interpolated[-1] == end_val
+            assert len(interpolated) == len(padding_seq_len_q)
+            actual_seq_lengths_q = actual_seq_lengths_q + interpolated
+        else:
+            actual_seq_lengths_q = actual_seq_lengths_q + self.runner.actual_seq_lengths_q[
+                num_reqs:num_reqs + num_reqs_pad_size]
+
+        return actual_seq_lengths_q
 
 
 class AscendMLAImpl(MLAAttentionImpl):
