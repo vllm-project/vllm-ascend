@@ -15,12 +15,20 @@
 # limitations under the License.
 #
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import torch
-from vllm.distributed import tensor_model_parallel_all_reduce
-from vllm.model_executor.layers.vocab_parallel_embedding import \
-    VocabParallelEmbedding
+from vllm.distributed import divide, tensor_model_parallel_all_reduce
+from vllm.distributed.parallel_state import get_tp_group
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding, pad_vocab_size)
+
+from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
+from vllm_ascend.utils import lmhead_tp_enable
 
 
 def get_masked_input_and_mask(
@@ -72,3 +80,125 @@ def vocab_parallel_embedding_forward(self, input_):
 
 
 VocabParallelEmbedding.forward = vocab_parallel_embedding_forward
+
+
+class AscendVocabParallelEmbedding(VocabParallelEmbedding):
+    """
+    Register VocabParallelEmbedding as a custom op for Ascend.
+    AscendVocabParallelEmbedding support different communication parallel groups
+    Added the feature of lmheadTP in pure dp scenario
+    """
+
+    def __init__(self,
+                 num_embeddings: int,
+                 embedding_dim: int,
+                 params_dtype: Optional[torch.dtype] = None,
+                 org_num_embeddings: Optional[int] = None,
+                 padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
+        torch.nn.Module.__init__(self)
+
+        if lmhead_tp_enable():
+            self.comm_group = get_lmhead_tp_group()
+        else:
+            self.comm_group = get_tp_group()
+
+        self.tp_size = self.comm_group.world_size
+        self.tp_rank = self.comm_group.rank_in_group
+
+        self.num_embeddings = num_embeddings
+        self.padding_size = padding_size
+        self.org_vocab_size = org_num_embeddings or num_embeddings
+        num_added_embeddings = num_embeddings - self.org_vocab_size
+        self.org_vocab_size_padded = pad_vocab_size(self.org_vocab_size,
+                                                    self.padding_size)
+        self.num_embeddings_padded = pad_vocab_size(
+            self.org_vocab_size_padded + num_added_embeddings,
+            self.padding_size)
+        assert self.org_vocab_size_padded <= self.num_embeddings_padded
+
+        self.shard_indices = self._get_indices(self.num_embeddings_padded,
+                                               self.org_vocab_size_padded,
+                                               self.num_embeddings,
+                                               self.org_vocab_size,
+                                               self.tp_rank, self.tp_size)
+        self.embedding_dim = embedding_dim
+        quant_method = None
+        if quant_config is not None:
+            quant_method = quant_config.get_quant_method(self, prefix=prefix)
+        if quant_method is None:
+            quant_method = UnquantizedEmbeddingMethod()
+
+        # If we are making an embedding layer, then our quantization linear
+        # method must implement the embedding operation. If we are another
+        # layer type like ParallelLMHead, this is not important.
+        is_embedding_layer = type(self) is VocabParallelEmbedding
+        quant_method_implements_embedding = method_has_implemented_embedding(
+            type(quant_method))
+        if is_embedding_layer and not quant_method_implements_embedding:
+            raise NotImplementedError(
+                f"The class {type(quant_method).__name__} must implement "
+                "the 'embedding' method, see UnquantizedEmbeddingMethod.")
+
+        self.quant_method: QuantizeMethodBase = quant_method
+
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+        # Divide the weight matrix along the vocaburaly dimension.
+        self.num_added_embeddings = self.num_embeddings - self.org_vocab_size
+        self.num_embeddings_per_partition = divide(self.num_embeddings_padded,
+                                                   self.tp_size)
+        assert (self.shard_indices.num_elements_padded ==
+                self.num_embeddings_per_partition)
+        self.num_org_embeddings_per_partition = (
+            self.shard_indices.org_vocab_end_index -
+            self.shard_indices.org_vocab_start_index)
+        self.num_added_embeddings_per_partition = (
+            self.shard_indices.added_vocab_end_index -
+            self.shard_indices.added_vocab_start_index)
+
+        self.quant_method.create_weights(self,
+                                         self.embedding_dim,
+                                         [self.num_embeddings_per_partition],
+                                         self.embedding_dim,
+                                         self.num_embeddings_padded,
+                                         params_dtype=params_dtype,
+                                         weight_loader=self.weight_loader)
+
+
+class AscendLogitsProcessor(LogitsProcessor):
+    """
+    Register LogitsProcessor as a custom op for Ascend.
+    Added the feature of lmheadTP in pure dp scenario
+    """
+
+    def _get_logits(
+        self,
+        hidden_states: torch.Tensor,
+        lm_head: ParallelLMHead,
+        embedding_bias: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+
+        if lmhead_tp_enable():
+            # Gather hidden states from all devices in tensor parallel group
+            gathered_hidden_states = get_lmhead_tp_group().all_gather(
+                hidden_states, dim=0)
+        else:
+            gathered_hidden_states = hidden_states
+
+        local_logits = lm_head.quant_method.apply(lm_head,
+                                                  gathered_hidden_states,
+                                                  bias=embedding_bias)
+
+        if lmhead_tp_enable():
+            logits = get_lmhead_tp_group().all_to_all(local_logits)
+        else:
+            # Gather logits for tensor parallel
+            logits = self._gather_logits(local_logits)
+
+        # Remove paddings in vocab (if any)
+        if logits is not None:
+            logits = logits[..., :self.org_vocab_size]
+
+        return logits
