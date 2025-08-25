@@ -20,12 +20,13 @@ from typing import Optional, Type, Union
 
 from vllm.config import SchedulerConfig
 
+MAX_INT = 2147483647
 
 @dataclass
 class AscendSchedulerConfig(SchedulerConfig):
     enable_chunked_prefill: bool = False
-    max_long_partial_prefills: Optional[Union[int, float]] = None
-    long_prefill_token_threshold: Optional[Union[int, float]] = None
+    max_long_partial_prefills: int = MAX_INT
+    long_prefill_token_threshold: int = MAX_INT
     policy: str = "fcfs"
     scheduler_cls: Union[str, Type[object]] = (
         "vllm_ascend.core.scheduler.AscendScheduler")
@@ -73,20 +74,24 @@ class AscendSchedulerConfig(SchedulerConfig):
                 "decrease max_model_len.")
         # concurrent partial prefills. Default is inf
         if self.max_long_partial_prefills is None:
-            self.max_long_partial_prefills = float('inf')
-            self.long_prefill_token_threshold = float('inf')
-        else:
-            if self.long_prefill_token_threshold is None:
+            self.max_long_partial_prefills = MAX_INT
+            self.long_prefill_token_threshold = MAX_INT
+
+        if self.long_prefill_token_threshold is None or \
+            self.long_prefill_token_threshold <= 0:
+            if self.max_model_len is None:
+                self.long_prefill_token_threshold = MAX_INT
+            else:
                 self.long_prefill_token_threshold = \
                     max(1, int(self.max_model_len * 0.04))
 
-        if self.max_long_partial_prefills <= 0:
+        if self.max_long_partial_prefills < 0:
             raise ValueError(
-                f"max_long_partial_prefills must be positive, but got "
+                f"max_long_partial_prefills must be non-negative, but got "
                 f"{self.max_long_partial_prefills}")
-        if self.long_prefill_token_threshold <= 0:
+        if self.long_prefill_token_threshold < 0:
             raise ValueError(
-                f"long_prefill_token_threshold must be positive, but got "
+                f"long_prefill_token_threshold must be non-negative, but got "
                 f"{self.long_prefill_token_threshold}")
 
         if self.policy != "fcfs":

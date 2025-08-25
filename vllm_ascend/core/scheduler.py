@@ -104,8 +104,12 @@ class AscendScheduler(Scheduler):
                 self.phase = "decode"
         # Skip long prompt requests in prefill stage.
         # long_prefill_budget is float('inf') if not use.
-        long_prefill_budget = self.vllm_config.scheduler_config.max_long_partial_prefills
-        long_prefill_token_threshold = self.vllm_config.scheduler_config.long_prefill_token_threshold
+        if self.vllm_config.scheduler_config.long_prefill_token_threshold == 0:
+            long_prefill_budget = float('inf')
+            long_prefill_token_threshold = float('inf')
+        else:
+            long_prefill_budget = self.vllm_config.scheduler_config.max_long_partial_prefills
+            long_prefill_token_threshold = self.vllm_config.scheduler_config.long_prefill_token_threshold
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
