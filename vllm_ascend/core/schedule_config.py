@@ -16,11 +16,12 @@
 #
 
 from dataclasses import dataclass, fields
-from typing import Optional, Type, Union
+from typing import Type, Union
 
 from vllm.config import SchedulerConfig
 
 MAX_INT = 2147483647
+
 
 @dataclass
 class AscendSchedulerConfig(SchedulerConfig):
