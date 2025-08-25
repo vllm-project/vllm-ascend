@@ -272,7 +272,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                     w2: torch.Tensor,
                     w2_scale: torch.Tensor,
                     group_list: torch.Tensor,
-                    is_mc2: bool,
                     dynamic_scale: torch.Tensor = None,
                     group_list_type: int = 1,
                     w1_scale_bias: torch.Tensor = None,
@@ -290,6 +289,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     bias1, bias2 = None, None
     _output_dtype = w2_scale.dtype
 
+    is_mc2 = get_forward_context().fused_moe_state == FusedMoEState.MC2
     if w1_scale_bias is None and is_mc2:
         w1_scale = w1_scale.to(torch.float32)
 
@@ -416,16 +416,14 @@ def unified_apply_mlp(
         w2: torch.Tensor,
         w2_scale: torch.Tensor,
         group_list: torch.Tensor,
-        is_mc2: bool,
         dynamic_scale: torch.Tensor = None,
         group_list_type: int = 1,
-        with_quant: bool = False,
         w1_scale_bias: torch.Tensor = None,
         w2_scale_bias: torch.Tensor = None,
         topk_scales: Optional[torch.Tensor] = None) -> torch.Tensor:
-    if with_quant:
+    if get_forward_context().with_quant:
         return quant_apply_mlp(hidden_states, w1, w1_scale, w2, w2_scale,
-                               group_list, is_mc2, dynamic_scale,
+                               group_list, dynamic_scale,
                                group_list_type, w1_scale_bias, w2_scale_bias)
     else:
         return unquant_apply_mlp(hidden_states, w1, w2, group_list,
@@ -450,8 +448,6 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
                                mc2_mask: Optional[torch.Tensor] = None,
                                apply_router_weight_on_input: bool = False):
     token_dispatcher = get_forward_context().token_dispatcher
-    with_quant = get_forward_context().with_quant
-    is_mc2 = token_dispatcher.__class__.__name__ == "TokenDispatcherWithMC2"
 
     results = token_dispatcher.token_dispatch(
         hidden_states=hidden_states,
@@ -473,10 +469,8 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
         w2=w2,
         w2_scale=w2_scale,
         group_list=results["group_list"],
-        is_mc2=is_mc2,
         dynamic_scale=results.get("dynamic_scale"),
         group_list_type=results.get("group_list_type"),
-        with_quant=with_quant,
         w1_scale_bias=w1_scale_bias,
         w2_scale_bias=w2_scale_bias,
         topk_scales=results.get("topk_scales"))
