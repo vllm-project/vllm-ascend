@@ -393,10 +393,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.remove_request(req_id)
 
         # Free the cached encoder outputs.
-        for req_id, input_id in scheduler_output.free_encoder_mm_hashes:
+        for req_id, mm_hash in scheduler_output.free_encoder_mm_hashes:
             encoder_outputs = self.encoder_cache.get(req_id)
             if encoder_outputs is not None:
-                encoder_outputs.pop(input_id, None)
+                encoder_outputs.pop(mm_hash, None)
                 if not encoder_outputs:
                     self.encoder_cache.pop(req_id, None)
 
