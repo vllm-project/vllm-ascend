@@ -51,8 +51,7 @@ from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
     MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
-from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
-                               get_all_reduce_merge_state,
+from vllm_ascend.utils import (AscendSocVersion, get_all_reduce_merge_state,
                                get_ascend_soc_version,
                                get_rm_router_logits_state, is_310p)
 
@@ -1405,7 +1404,6 @@ class AscendFusedMoE(FusedMoE):
                 dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                                 self.tp_group)
                 final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
-                dispose_tensor(e_hidden_states)
             else:
                 final_hidden_states = e_hidden_states
             if num_tokens < padding_size:
@@ -1418,12 +1416,10 @@ class AscendFusedMoE(FusedMoE):
                 final_hidden_states = get_dp_group().all_reduce(
                     e_hidden_states)
                 final_hidden_states = final_hidden_states[start:end, :]
-                dispose_tensor(e_hidden_states)
             elif fused_moe_state == FusedMoEState.AllGather:
                 final_hidden_states = data_parallel_reduce_scatter(
                     e_hidden_states, dim=0)
                 final_hidden_states = final_hidden_states[:num_tokens]
-                dispose_tensor(e_hidden_states)
             else:
                 final_hidden_states = e_hidden_states
         else:

@@ -76,7 +76,6 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
-from vllm_ascend.utils import dispose_tensor
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
@@ -487,13 +486,8 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            previous_hidden_states, previous_residual = hidden_states, residual
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-            # Dispose hidden_states and residual from the previous layer
-            # to save npu memory because they're no longer used.
-            dispose_tensor(previous_hidden_states)
-            dispose_tensor(previous_residual)
 
         hidden_states = self.self_attn(
             positions=positions,
