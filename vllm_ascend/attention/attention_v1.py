@@ -292,7 +292,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.sliding_window is not None and \
             attn_metadata.attn_mask.shape[0] > self.sliding_window:
             batch_size = attn_metadata.seq_lens.shape[0]
-            block_size = self.key_cache.shape[1]
+            
             query = query.view(batch_size, int(num_tokens/batch_size), self.num_heads, self.head_size) # BSND
             key = key.view(batch_size, int(num_tokens/batch_size), self.num_kv_heads, self.head_size) # BSND
             value = value.view(batch_size, int(num_tokens/batch_size), self.num_kv_heads, self.head_size) # BSND
