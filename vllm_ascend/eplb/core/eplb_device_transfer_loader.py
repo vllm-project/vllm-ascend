@@ -18,6 +18,7 @@ from enum import Enum
 
 import torch.distributed as dist
 from vllm.logger import logger
+from vllm_ascend.ascend_config import get_ascend_config
 
 
 class ExpertWeightUpdateState(Enum):
@@ -38,6 +39,7 @@ class D2DExpertWeightLoader:
         self.state = ExpertWeightUpdateState.WAITING
         self.recv_expert_list = []
         self.mock_flag = True
+        self.enable_weight_nz_layout = get_ascend_config().enable_weight_nz_layout
 
     def generate_expert_d2d_transfer_task(self, expert_send_info,
                                           expert_recv_info, updated_expert_map,
@@ -61,10 +63,14 @@ class D2DExpertWeightLoader:
             dst_rank, global_expert_id_to_send = send_info
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[
                 layer_id][global_expert_id_to_send].item()
+            idx = 0
             for src_tensor in self.eplb_adaptor.expert_param_per_layer[
-                    layer_id][local_expert_id]:
+                layer_id][local_expert_id]:
+                if self.enable_weight_nz_layout and idx < 2:
+                    src_tensor = src_tensor.clone()
                 self.comm_op_list.append(
                     dist.P2POp(dist.isend, src_tensor, dst_rank))
+                idx += 1
 
         buffer_tensor_id = 0
         for recv_info in expert_recv_info:
