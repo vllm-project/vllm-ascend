@@ -1911,6 +1911,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # Padding for DP
+        num_pad, num_tokens_across_dp_native = self.get_dp_padding(num_tokens)
+        # num_tokens += num_pad  ## Uncomment this after TorchAir is removed
+
+        # Padding for DP (for TorchAir)
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self._get_forward_metadata_across_dp_and_pad(
              num_tokens, with_prefill, False)
