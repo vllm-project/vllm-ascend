@@ -48,6 +48,7 @@ def test_models_distributed_QwQ():
             dtype=dtype,
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
+            enforce_eager=True,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -73,7 +74,6 @@ def test_models_distributed_DeepSeek_multistream_moe():
                 },
                 "refresh": True,
             },
-            enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -132,12 +132,11 @@ def test_models_distributed_topk() -> None:
                                      top_k=50,
                                      top_p=0.9)
 
-    with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
-            tensor_parallel_size=2,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
+    with VllmRunner("deepseek-ai/DeepSeek-V2-Lite",
+                    dtype=dtype,
+                    tensor_parallel_size=2,
+                    distributed_executor_backend="mp",
+                    enforce_eager=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 
@@ -159,6 +158,7 @@ def test_models_distributed_alltoallv() -> None:
             dtype=dtype,
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
+            enforce_eager=True,
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
@@ -230,16 +230,15 @@ def test_sp_for_qwen3_moe() -> None:
                                      top_k=50,
                                      top_p=0.9)
 
-    with VllmRunner(
-            snapshot_download("Qwen/Qwen3-30B-A3B"),
-            dtype="auto",
-            tensor_parallel_size=2,
-            distributed_executor_backend="mp",
-            compilation_config={
-                "pass_config": {
-                    "enable_sequence_parallelism": True
-                }
-            },
-            enable_expert_parallel=True,
-    ) as vllm_model:
+    with VllmRunner(snapshot_download("Qwen/Qwen3-30B-A3B"),
+                    dtype="auto",
+                    tensor_parallel_size=2,
+                    distributed_executor_backend="mp",
+                    compilation_config={
+                        "pass_config": {
+                            "enable_sequence_parallelism": True
+                        }
+                    },
+                    enable_expert_parallel=True,
+                    enforce_eager=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)

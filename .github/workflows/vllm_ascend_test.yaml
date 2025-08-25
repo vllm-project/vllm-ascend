@@ -191,7 +191,6 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv tests/e2e/singlecard/test_offline_inference.py
           # pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
@@ -202,16 +201,14 @@ jobs:
           # TODO: revert me when test_v1_spec_decode.py::test_ngram_correctness is fixed
           pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
 
-          # All other tests, ignore: 310p test, accuracy test.
+          # All other tests.
           pytest -sv tests/e2e/singlecard/ \
-          --ignore=tests/e2e/singlecard/test_offline_inference.py \
           --ignore=tests/e2e/singlecard/test_ilama_lora.py \
           --ignore=tests/e2e/singlecard/test_guided_decoding.py \
           --ignore=tests/e2e/singlecard/test_camem.py \
           --ignore=tests/e2e/singlecard/test_embedding.py \
           --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py \
           --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py \
-          --ignore=tests/e2e/singlecard/test_offline_inference_310p.py
   e2e-2-cards:
     needs: [e2e]
     if: ${{ needs.e2e.result == 'success' }}
@@ -287,4 +284,3 @@ jobs:
           pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
             --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
             --ignore=tests/e2e/multicard/test_data_parallel.py \
-            --ignore=tests/e2e/multicard/test_offline_inference_310p.py
