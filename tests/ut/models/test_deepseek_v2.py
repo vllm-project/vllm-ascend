@@ -20,6 +20,7 @@ import torch
 from transformers import PretrainedConfig
 from vllm.config import CacheConfig
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
 from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2DecoderLayer, CustomDeepseekV2ForCausalLM,
@@ -27,7 +28,7 @@ from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2MLP, CustomDeepseekV2MoE,
     CustomDeepseekV2RowParallelLinear,
     CustomDeepseekV2RowParallelLinearReplaceAllreduce,
-    CustomDeepseekV2SiluAndMul, CustomLogitsProcessor, CustomParallelLMHead)
+    CustomDeepseekV2SiluAndMul, CustomParallelLMHead)
 
 
 @pytest.fixture
@@ -333,7 +334,7 @@ def test_custom_deepseek_v2_lmhead(mock_distributed, vllm_config):
         model.model.config = SimpleConfig()
     lmhead = CustomParallelLMHead(model.model.config.vocab_size,
                                   model.model.config.hidden_size)
-    logits_processor = CustomLogitsProcessor(model.model.config.vocab_size)
+    logits_processor = LogitsProcessor(model.model.config.vocab_size)
 
     input_ids = torch.randint(0, model.model.config.vocab_size, (2, 4))
     positions = torch.arange(4).repeat(2, 1)

@@ -18,18 +18,14 @@
 from typing import Optional, Tuple
 
 import torch
-from torch.nn import Module
-from torch.nn.parameter import Parameter
-from vllm.distributed import (divide, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+from vllm.distributed import divide, tensor_model_parallel_all_reduce
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, UnquantizedEmbeddingMethod,
     VocabParallelEmbedding, pad_vocab_size)
-from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.utils import lmhead_tp_enable
@@ -86,39 +82,30 @@ def vocab_parallel_embedding_forward(self, input_):
 VocabParallelEmbedding.forward = vocab_parallel_embedding_forward
 
 
-class CustomParallelLMHead(ParallelLMHead):
-    """Custom Parallelized LM head, added the feature of lmheadTP in pure dp scenario
-    
-    Output logits weight matrices used in the Sampler. The weight and bias
-    tensors are padded to make sure they are divisible by the number of
-    model parallel GPUs.
-
-    Args:
-        num_embeddings: vocabulary size.
-        embedding_dim: size of hidden state.
-        bias: whether to use bias.
-        params_dtype: type of the parameters.
-        org_num_embeddings: original vocabulary size (without LoRA).
-        padding_size: padding size for the vocabulary.
+class AscendVocabParallelEmbedding(VocabParallelEmbedding):
+    """
+    Register VocabParallelEmbedding as a custom op for Ascend.
+    AscendVocabParallelEmbedding support different communication parallel groups
+    Added the feature of lmheadTP in pure dp scenario
     """
 
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
-                 bias: bool = False,
                  params_dtype: Optional[torch.dtype] = None,
                  org_num_embeddings: Optional[int] = None,
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""):
-        Module.__init__(self)
+        torch.nn.Module.__init__(self)
 
         if lmhead_tp_enable():
-            tp_rank = get_lmhead_tp_group().rank_in_group
-            self.tp_size = get_lmhead_tp_group().world_size
+            self.comm_group = get_lmhead_tp_group()
         else:
-            tp_rank = get_tensor_model_parallel_rank()
-            self.tp_size = get_tensor_model_parallel_world_size()
+            self.comm_group = get_tp_group()
+
+        self.tp_size = self.comm_group.world_size
+        self.tp_rank = self.comm_group.rank_in_group
 
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
@@ -134,10 +121,9 @@ class CustomParallelLMHead(ParallelLMHead):
         self.shard_indices = self._get_indices(self.num_embeddings_padded,
                                                self.org_vocab_size_padded,
                                                self.num_embeddings,
-                                               self.org_vocab_size, tp_rank,
-                                               self.tp_size)
+                                               self.org_vocab_size,
+                                               self.tp_rank, self.tp_size)
         self.embedding_dim = embedding_dim
-
         quant_method = None
         if quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
@@ -180,28 +166,17 @@ class CustomParallelLMHead(ParallelLMHead):
                                          params_dtype=params_dtype,
                                          weight_loader=self.weight_loader)
 
-        self.quant_config = quant_config
-        if bias:
-            self.bias = Parameter(
-                torch.empty(self.num_embeddings_per_partition,
-                            dtype=params_dtype))
-            set_weight_attrs(self.bias, {
-                "output_dim": 0,
-                "weight_loader": self.weight_loader,
-            })
-        else:
-            self.register_parameter("bias", None)
 
-
-class CustomLogitsProcessor(LogitsProcessor):
-    """Custom logits processor extending base LogitsProcessor functionality.
+class AscendLogitsProcessor(LogitsProcessor):
+    """
+    Register LogitsProcessor as a custom op for Ascend.
     Added the feature of lmheadTP in pure dp scenario
     """
 
     def _get_logits(
         self,
         hidden_states: torch.Tensor,
-        lm_head: CustomParallelLMHead,
+        lm_head: ParallelLMHead,
         embedding_bias: Optional[torch.Tensor],
     ) -> Optional[torch.Tensor]:
 
