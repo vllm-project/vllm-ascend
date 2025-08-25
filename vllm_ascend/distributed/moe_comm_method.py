@@ -21,9 +21,7 @@ from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 class MoECommMethod(ABC):
     """Base class for MoE communication methods."""
 
-    moe_config: FusedMoEConfig = None
-
-    def __init__(self, moe_config: Optional[FusedMoEConfig]):
+    def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
 
     @abstractmethod
