@@ -385,23 +385,44 @@ class AscendScheduler(Scheduler):
                 req_to_new_blocks)
         scheduled_cached_reqs = cached_reqs_data
 
-        scheduler_output = SchedulerOutput(
-            scheduled_new_reqs=new_reqs_data,
-            scheduled_cached_reqs=scheduled_cached_reqs,
-            num_scheduled_tokens=num_scheduled_tokens,
-            total_num_scheduled_tokens=total_num_scheduled_tokens,
-            scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
-            scheduled_encoder_inputs={},
-            num_common_prefix_blocks=num_common_prefix_blocks,
-            # finished_req_ids is an existing state in the scheduler,
-            # instead of being newly scheduled in this step.
-            # It contains the request IDs that are finished in between
-            # the previous and the current steps.
-            finished_req_ids=self.finished_req_ids,  # type: ignore
-            free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            structured_output_request_ids={},
-            grammar_bitmask=None,
-        )
+        if vllm_version_is("0.10.1.1"):
+            scheduler_output = SchedulerOutput(
+                scheduled_new_reqs=new_reqs_data,
+                scheduled_cached_reqs=scheduled_cached_reqs,
+                num_scheduled_tokens=num_scheduled_tokens,
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
+                scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+                scheduled_encoder_inputs={},
+                num_common_prefix_blocks=num_common_prefix_blocks,
+                # finished_req_ids is an existing state in the scheduler,
+                # instead of being newly scheduled in this step.
+                # It contains the request IDs that are finished in between
+                # the previous and the current steps.
+                finished_req_ids=self.finished_req_ids,  # type: ignore
+                free_encoder_input_ids=self.encoder_cache_manager.
+                get_freed_ids(),
+                structured_output_request_ids={},
+                grammar_bitmask=None,
+            )
+        else:
+            scheduler_output = SchedulerOutput(
+                scheduled_new_reqs=new_reqs_data,
+                scheduled_cached_reqs=scheduled_cached_reqs,
+                num_scheduled_tokens=num_scheduled_tokens,
+                total_num_scheduled_tokens=total_num_scheduled_tokens,
+                scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+                scheduled_encoder_inputs={},
+                num_common_prefix_blocks=num_common_prefix_blocks,
+                # finished_req_ids is an existing state in the scheduler,
+                # instead of being newly scheduled in this step.
+                # It contains the request IDs that are finished in between
+                # the previous and the current steps.
+                finished_req_ids=self.finished_req_ids,  # type: ignore
+                free_encoder_mm_hashes=self.encoder_cache_manager.
+                get_freed_mm_hashes(),
+                structured_output_request_ids={},
+                grammar_bitmask=None,
+            )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
