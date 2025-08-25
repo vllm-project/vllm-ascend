@@ -309,8 +309,12 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     ])
 
     # Calculate maximum supported batch sizes considering model architecture
-    max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
-                                     (num_hidden_layers + 1) / parallel_factor)
+    resources_per_graph = num_hidden_layers + 1
+    if vllm_config.speculative_config is not None:
+        draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
+    max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE / resources_per_graph /
+                                     parallel_factor)
     logger.info("Calculated maximum supported batch sizes for ACL graph: %s",
                 max_num_batch_sizes)
 
