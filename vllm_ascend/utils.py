@@ -478,9 +478,16 @@ def register_ascend_customop():
     from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
                                         AscendMlpMergedColumnParallelLinear,
                                         AscendMlpRowParallelLinear)
+    from vllm_ascend.ops.rotary_embedding import (
+        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
     CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
                           name="SiluAndMul")
+    CustomOp.register_oot(_decorated_op_cls=AscendRotaryEmbedding,
+                          name="RotaryEmbedding")
+    CustomOp.register_oot(
+        _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
+        name="DeepseekScalingRotaryEmbedding")
     if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
         CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
                               name="ColumnParallelLinear")
