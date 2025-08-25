@@ -28,6 +28,7 @@ from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2RowParallelLinear,
     CustomDeepseekV2RowParallelLinearReplaceAllreduce,
     CustomDeepseekV2SiluAndMul)
+from vllm_ascend.ops.linear import OprojCustomRowParallelLinear
 
 
 @pytest.fixture
@@ -168,13 +169,14 @@ def test_custom_deepseek_v2_merged_replicated_linear(mock_distributed):
 
 @pytest.mark.parametrize("cls", [
     CustomDeepseekV2RowParallelLinearReplaceAllreduce,
-    CustomDeepseekV2RowParallelLinear
+    CustomDeepseekV2RowParallelLinear, OprojCustomRowParallelLinear
 ])
 def test_row_parallel_linear(cls, mock_distributed):
     linear = cls(input_size=128, output_size=64, bias=False, quant_config=None)
     linear.quant_method = Mock()
     linear.quant_method.apply.return_value = torch.randn(2, 4, 64)
-
+    if hasattr(linear, "comm_group"):
+        linear.comm_group.reduce_scatter.return_value = torch.randn(2, 4, 64)
     input_ = torch.randn(2, 4, 128)
     with patch("vllm_ascend.models.deepseek_v2.split_tensor_along_last_dim",
                return_value=[torch.randn(2, 4, 64)]):

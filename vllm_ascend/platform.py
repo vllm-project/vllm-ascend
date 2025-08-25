@@ -131,6 +131,8 @@ class NPUPlatform(Platform):
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
 
+        parallel_config.oproj_tensor_parallel_size = (
+            ascend_config.oproj_tensor_parallel_size)
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
