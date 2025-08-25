@@ -215,6 +215,7 @@ def _construct_cached_request_state(req_id_suffix: int):
         generator=None,
         num_computed_tokens=len(output_token_ids),
         output_token_ids=output_token_ids,
+        mm_hashes=None,
     )
 
 
