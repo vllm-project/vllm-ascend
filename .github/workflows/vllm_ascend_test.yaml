@@ -81,7 +81,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [main]
+        vllm_version: [v0.10.1.1, main]
     steps:
       - name: Install packages
         run: |
@@ -89,7 +89,7 @@ jobs:
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
@@ -102,7 +102,7 @@ jobs:
           python3 -m pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Install vllm-project/vllm-ascend
         run: |
@@ -137,7 +137,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-1]
-        vllm_version: [main]
+        vllm_version: [v0.10.1.1, main]
     name: singlecard e2e test
     runs-on: ${{ matrix.os }}
     container:
@@ -219,7 +219,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-2]
-        vllm_version: [main]
+        vllm_version: [v0.10.1.1, main]
     name: multicard e2e test
     runs-on: ${{ matrix.os }}
     container:
@@ -278,7 +278,6 @@ jobs:
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_dbo
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeekV3_dbo
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_alltoallv
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC

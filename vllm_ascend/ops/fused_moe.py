@@ -1185,7 +1185,7 @@ class AscendFusedMoE(FusedMoE):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
-        self.moe = FusedMoEConfig.make(
+        moe = FusedMoEConfig.make(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
@@ -1196,8 +1196,10 @@ class AscendFusedMoE(FusedMoE):
             quant_config=quant_config)
         self.quant_config = quant_config
 
+        self.moe_config = moe
+
         if quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod(self.moe)
+            self.quant_method = AscendUnquantizedFusedMoEMethod(moe)
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
 

@@ -13,13 +13,18 @@ from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.base import TestBase
 from vllm_ascend.core.scheduler import AscendScheduler
 from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.10.1.1"):
+    from vllm.v1.outputs import DraftTokenIds
+else:
+    DraftTokenIds = None
 
 EOS_TOKEN_ID = 50256
 MODEL = "Qwen3-0.6B"
@@ -66,16 +71,33 @@ def create_requests(
 
 
 def make_output(scheduler):
-    return ModelRunnerOutput(
-        req_ids=[req.request_id for req in scheduler.running],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(scheduler.running)
-        },
-        sampled_token_ids=[[1000]] * len(scheduler.running),
-        logprobs=None,
-        prompt_logprobs_dict={},
-        pooler_output=[])
+    req_ids = [req.request_id for req in scheduler.running]
+    req_id_to_index = {
+        req.request_id: i
+        for i, req in enumerate(scheduler.running)
+    }
+    sampled_token_ids = [[1000]] * len(scheduler.running)
+    logprobs = None
+    if vllm_version_is("0.10.1.1"):
+        modelrunner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=sampled_token_ids,
+            spec_token_ids=None,
+            logprobs=logprobs,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+    else:
+        modelrunner_output = ModelRunnerOutput(
+            req_ids=req_ids,
+            req_id_to_index=req_id_to_index,
+            sampled_token_ids=sampled_token_ids,
+            logprobs=logprobs,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+    return modelrunner_output
 
 
 class TestAscendScheduler(TestBase):
@@ -271,8 +293,7 @@ class TestAscendScheduler(TestBase):
             req.num_computed_tokens = req.num_tokens
             scheduler.requests[req.request_id] = req
             scheduler.running.append(req)
-            if not vllm_version_is("0.9.2"):
-                req.status = RequestStatus.RUNNING
+            req.status = RequestStatus.RUNNING
 
         scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                            scheduled_cached_reqs=[],
@@ -291,18 +312,33 @@ class TestAscendScheduler(TestBase):
                                            free_encoder_input_ids=[],
                                            structured_output_request_ids={},
                                            grammar_bitmask=None)
-
-        model_output = ModelRunnerOutput(
-            req_ids=[req.request_id for req in requests],
-            req_id_to_index={
-                req.request_id: i
-                for i, req in enumerate(requests)
-            },
-            sampled_token_ids=[[EOS_TOKEN_ID], [10, 11]
-                               ],  # First request hits EOS, second continues
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[])
+        if vllm_version_is("0.10.1.1"):
+            model_output = ModelRunnerOutput(
+                req_ids=[req.request_id for req in requests],
+                req_id_to_index={
+                    req.request_id: i
+                    for i, req in enumerate(requests)
+                },
+                sampled_token_ids=[[EOS_TOKEN_ID], [
+                    10, 11
+                ]],  # First request hits EOS, second continues
+                spec_token_ids=None,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[])
+        else:
+            model_output = ModelRunnerOutput(
+                req_ids=[req.request_id for req in requests],
+                req_id_to_index={
+                    req.request_id: i
+                    for i, req in enumerate(requests)
+                },
+                sampled_token_ids=[[EOS_TOKEN_ID], [
+                    10, 11
+                ]],  # First request hits EOS, second continues
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[])
 
         scheduler.update_from_output(scheduler_output, model_output)
 
@@ -325,8 +361,7 @@ class TestAscendScheduler(TestBase):
             req.num_computed_tokens = req.num_tokens
             scheduler.requests[req.request_id] = req
             scheduler.running.append(req)
-            if not vllm_version_is("0.9.2"):
-                req.status = RequestStatus.RUNNING
+            req.status = RequestStatus.RUNNING
 
         scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                            scheduled_cached_reqs=[],
@@ -346,18 +381,31 @@ class TestAscendScheduler(TestBase):
                                            free_encoder_input_ids=[],
                                            structured_output_request_ids={},
                                            grammar_bitmask=None)
-
-        model_output = ModelRunnerOutput(
-            req_ids=[req.request_id for req in requests],
-            req_id_to_index={
-                req.request_id: i
-                for i, req in enumerate(requests)
-            },
-            sampled_token_ids=[[10, 42, 12],
-                               [13, 14]],  # First request hits stop token
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[])
+        if vllm_version_is("0.10.1.1"):
+            model_output = ModelRunnerOutput(
+                req_ids=[req.request_id for req in requests],
+                req_id_to_index={
+                    req.request_id: i
+                    for i, req in enumerate(requests)
+                },
+                sampled_token_ids=[[10, 42, 12],
+                                   [13, 14]],  # First request hits stop token
+                spec_token_ids=None,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[])
+        else:
+            model_output = ModelRunnerOutput(
+                req_ids=[req.request_id for req in requests],
+                req_id_to_index={
+                    req.request_id: i
+                    for i, req in enumerate(requests)
+                },
+                sampled_token_ids=[[10, 42, 12],
+                                   [13, 14]],  # First request hits stop token
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[])
 
         scheduler.update_from_output(scheduler_output, model_output)
 
@@ -379,8 +427,7 @@ class TestAscendScheduler(TestBase):
             req.num_computed_tokens = req.num_tokens
             scheduler.requests[req.request_id] = req
             scheduler.running.append(req)
-            if not vllm_version_is("0.9.2"):
-                req.status = RequestStatus.RUNNING
+            req.status = RequestStatus.RUNNING
 
         scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                            scheduled_cached_reqs=[],
@@ -401,18 +448,31 @@ class TestAscendScheduler(TestBase):
                                            structured_output_request_ids={},
                                            grammar_bitmask=None)
 
-        model_output = ModelRunnerOutput(
-            req_ids=[req.request_id for req in requests],
-            req_id_to_index={
-                req.request_id: i
-                for i, req in enumerate(requests)
-            },
-            sampled_token_ids=[[10, 11, 12],
-                               [13]],  # First request exceeds max_tokens
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[])
-
+        if vllm_version_is("0.10.1.1"):
+            model_output = ModelRunnerOutput(
+                req_ids=[req.request_id for req in requests],
+                req_id_to_index={
+                    req.request_id: i
+                    for i, req in enumerate(requests)
+                },
+                sampled_token_ids=[[10, 11, 12],
+                                   [13]],  # First request exceeds max_tokens
+                spec_token_ids=None,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[])
+        else:
+            model_output = ModelRunnerOutput(
+                req_ids=[req.request_id for req in requests],
+                req_id_to_index={
+                    req.request_id: i
+                    for i, req in enumerate(requests)
+                },
+                sampled_token_ids=[[10, 11, 12],
+                                   [13]],  # First request exceeds max_tokens
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[])
         scheduler.update_from_output(scheduler_output, model_output)
 
         # Verify first request stopped due to length
@@ -448,13 +508,24 @@ class TestAscendScheduler(TestBase):
             structured_output_request_ids={},
             grammar_bitmask=None)
 
-        model_output = ModelRunnerOutput(
-            req_ids=[requests[0].request_id],
-            req_id_to_index={requests[0].request_id: 0},
-            sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[])
+        if vllm_version_is("0.10.1.1"):
+            model_output = ModelRunnerOutput(
+                req_ids=[requests[0].request_id],
+                req_id_to_index={requests[0].request_id: 0},
+                sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
+                spec_token_ids=None,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[])
+
+        else:
+            model_output = ModelRunnerOutput(
+                req_ids=[requests[0].request_id],
+                req_id_to_index={requests[0].request_id: 0},
+                sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[])
 
         scheduler.update_from_output(scheduler_output, model_output)
 
@@ -505,13 +576,23 @@ class TestAscendScheduler(TestBase):
                 512)
 
             # Model output of the first request.
-            model_runner_output = ModelRunnerOutput(
-                req_ids=[requests[0].request_id],
-                req_id_to_index={requests[0].request_id: 0},
-                sampled_token_ids=[[0]],
-                logprobs=None,
-                prompt_logprobs_dict={},
-                pooler_output=[])
+            if vllm_version_is("0.10.1.1"):
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=[requests[0].request_id],
+                    req_id_to_index={requests[0].request_id: 0},
+                    sampled_token_ids=[[0]],
+                    spec_token_ids=None,
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    pooler_output=[])
+            else:
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=[requests[0].request_id],
+                    req_id_to_index={requests[0].request_id: 0},
+                    sampled_token_ids=[[0]],
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    pooler_output=[])
 
             scheduler.update_from_output(scheduler_output0,
                                          model_runner_output)
@@ -521,13 +602,23 @@ class TestAscendScheduler(TestBase):
             # request is still running.
             scheduler.schedule()
             # Model output of the second request.
-            model_runner_output = ModelRunnerOutput(
-                req_ids=[requests[1].request_id],
-                req_id_to_index={requests[1].request_id: 0},
-                sampled_token_ids=[[0]],
-                logprobs=None,
-                prompt_logprobs_dict={},
-                pooler_output=[])
+            if vllm_version_is("0.10.1.1"):
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=[requests[1].request_id],
+                    req_id_to_index={requests[1].request_id: 0},
+                    sampled_token_ids=[[0]],
+                    spec_token_ids=None,
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    pooler_output=[])
+            else:
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=[requests[1].request_id],
+                    req_id_to_index={requests[1].request_id: 0},
+                    sampled_token_ids=[[0]],
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    pooler_output=[])
 
             scheduler.update_from_output(scheduler_output1,
                                          model_runner_output)
@@ -579,19 +670,29 @@ class TestAscendScheduler(TestBase):
                 req_id = requests[i].request_id
                 self.assertEqual(output.num_scheduled_tokens[req_id], 1)
                 self.assertNotIn(req_id, output.scheduled_spec_decode_tokens)
-
-            model_runner_output = ModelRunnerOutput(
-                req_ids=req_ids,
-                req_id_to_index=req_to_index,
-                sampled_token_ids=[[0] for _ in range(len(requests))],
-                logprobs=None,
-                prompt_logprobs_dict={},
-                pooler_output=[])
-            draft_token_ids = DraftTokenIds(req_ids, spec_tokens)
+            if vllm_version_is("0.10.1.1"):
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=req_ids,
+                    req_id_to_index=req_to_index,
+                    sampled_token_ids=[[0] for _ in range(len(requests))],
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    spec_token_ids=spec_tokens,
+                    pooler_output=[])
+            else:
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=req_ids,
+                    req_id_to_index=req_to_index,
+                    sampled_token_ids=[[0] for _ in range(len(requests))],
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    pooler_output=[])
+                draft_token_ids = DraftTokenIds(req_ids, spec_tokens)
 
             engine_core_outputs = scheduler.update_from_output(
                 output, model_runner_output)
-            scheduler.update_draft_token_ids(draft_token_ids)
+            if not vllm_version_is("0.10.1.1"):
+                scheduler.update_draft_token_ids(draft_token_ids)
 
             for i in range(len(requests)):
                 running_req = scheduler.running[i]
@@ -627,14 +728,23 @@ class TestAscendScheduler(TestBase):
                 else:
                     self.assertNotIn(req_id,
                                      output.scheduled_spec_decode_tokens)
-
-            model_runner_output = ModelRunnerOutput(
-                req_ids=req_ids,
-                req_id_to_index=req_to_index,
-                sampled_token_ids=output_tokens,
-                logprobs=None,
-                prompt_logprobs_dict={},
-                pooler_output=[])
+            if vllm_version_is("0.10.1.1"):
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=req_ids,
+                    req_id_to_index=req_to_index,
+                    sampled_token_ids=output_tokens,
+                    spec_token_ids=None,
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    pooler_output=[])
+            else:
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=req_ids,
+                    req_id_to_index=req_to_index,
+                    sampled_token_ids=output_tokens,
+                    logprobs=None,
+                    prompt_logprobs_dict={},
+                    pooler_output=[])
 
             engine_core_outputs = scheduler.update_from_output(
                 output, model_runner_output)

@@ -66,7 +66,7 @@ jobs:
           git --no-pager log -1 || true
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Run vllm-ascend/tests/e2e/run_doctests.sh
         run: |

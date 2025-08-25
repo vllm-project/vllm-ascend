@@ -52,7 +52,7 @@ Please use the following recommended versions to get started quickly:
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
 |v0.10.0rc1|Latest release candidate|[QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details|
-|v0.9.1rc2|Next stable release|[QuickStart](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/installation.html) for more details|
+|v0.9.1rc3|Next stable release|[QuickStart](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/installation.html) for more details|
 |v0.7.3.post1|Latest stable version|[QuickStart](https://vllm-ascend.readthedocs.io/en/stable/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/stable/installation.html) for more details|
 
 ## Contributing
@@ -77,6 +77,7 @@ Below is maintained branches:
 | v0.7.1-dev | Unmaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version, only bug fix is allowed and no new release tag any more. |
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version |
+| rfc/feature-name | Maintained | [Feature branches](https://vllm-ascend.readthedocs.io/en/latest/community/versioning_policy.html#feature-branches) for collaboration |
 
 Please refer to [Versioning policy](https://vllm-ascend.readthedocs.io/en/latest/community/versioning_policy.html) for more details.
 

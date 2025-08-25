@@ -24,7 +24,8 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 |-------------|--------------|------------------|-------------|--------------------|--------------|
 | v0.10.0rc1  | v0.10.0      | >= 3.9, < 3.12   | 8.2.RC1     | 2.7.1 / 2.7.1.dev20250724            |              |
 | v0.9.2rc1   | v0.9.2       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250619      |              |
-| v0.9.1rc2   | v0.9.1       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1.post1|              |
+| v0.9.1rc3   | v0.9.1       | >= 3.9, < 3.12   | 8.2.RC1     | 2.5.1 / 2.5.1.post1 |              |
+| v0.9.1rc2   | v0.9.1       | >= 3.9, < 3.12   | 8.2.RC1     | 2.5.1 / 2.5.1.post1|              |
 | v0.9.1rc1   | v0.9.1       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250528      |              |
 | v0.9.0rc2   | v0.9.0       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
 | v0.9.0rc1   | v0.9.0       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
@@ -39,6 +40,8 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2025.08.22 | Release candidates, v0.9.1rc3             |
+| 2025.08.07 | Release candidates, v0.10.0rc1            |
 | 2025.08.04 | Release candidates, v0.9.1rc2             |
 | 2025.07.11 | Release candidates, v0.9.2rc1             |
 | 2025.06.22 | Release candidates, v0.9.1rc1             |
@@ -83,6 +86,17 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vLLM Asce
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 | v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev               |
+
+### Feature branches
+
+| Branch     | Status       | RFC link                              | Merge plan | Mentor |
+|------------|--------------|---------------------------------------|------------|--------|
+|rfc/long_seq_optimization|Maintained|https://github.com/vllm-project/vllm/issues/22693|930|wangxiyuan|
+- Branch: The feature branch should be created with a prefix `rfc/` followed by the feature name, such as `rfc/feature-name`.
+- Status: The status of the feature branch is `Maintained` until it is merged into the main branch or deleted.
+- RFC link: The feature branch should be created with a corresponding RFC issue. The creation of a feature branch requires an RFC and approval from at least two maintainers.
+- Merge plan: The final goal of a feature branch is to merge it into the main branch. If it exceeds 3 months, the mentor maintainer should evaluate whether to delete the branch.
+- Mentor: The mentor should be a vLLM Ascend maintainer who is responsible for the feature branch.
 
 ### Backward compatibility
 
