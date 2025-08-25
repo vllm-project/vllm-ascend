@@ -296,7 +296,7 @@ class TestAscendScheduler(TestBase):
         # Test initial scheduling
         output = scheduler.schedule()
         self.assertEqual(len(output.scheduled_new_reqs),
-            scheduler.scheduler_config.max_long_partial_prefills)
+                         scheduler.scheduler_config.max_long_partial_prefills)
         self.assertEqual(output.scheduled_cached_reqs.num_reqs, 0)
         self.assertEqual(len(output.finished_req_ids), 0)
 
