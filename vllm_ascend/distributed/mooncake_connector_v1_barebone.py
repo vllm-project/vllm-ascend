@@ -416,8 +416,8 @@ class KVCacheRecvingThread(threading.Thread):
         num_blocks = len(block_ids)
         block_len = num_blocks * block_size
         block_table = block_ids_tensor.view(1, -1).npu()
-        block_len_tensor = torch.tensor([num_blocks * block_size], dtype=torch.int32).npu()
-        seq_start_locate = torch.tensor([0], dtype=torch.int32).npu()
+        block_len_tensor = torch.tensor([block_len], dtype=torch.int32).npu()
+        seq_start_tensor = torch.tensor([0], dtype=torch.int32).npu()
 
         k_buffer = torch.empty(block_len, num_kv_head, head_dim, dtype=dtype).npu()
         v_buffer = torch.empty(block_len, num_kv_head, head_dim, dtype=dtype).npu()
@@ -435,17 +435,13 @@ class KVCacheRecvingThread(threading.Thread):
                 v_cache_layer,
                 block_table,
                 block_len_tensor,
-                seq_starts=seq_start_locate,
+                seq_starts=seq_start_tensor,
                 key=k_buffer,
                 value=v_buffer,
             )
 
-            k_buffer = k_buffer.view(num_blocks, self.num_need_pulls, block_size, -1)
-            k_buffer.transpose_(1, 2)
-            k_buffer = k_buffer.contiguous().view(block_len, num_kv_head, -1)
-            v_buffer = v_buffer.view(num_blocks, self.num_need_pulls, block_size, -1)
-            v_buffer.transpose_(1, 2)
-            v_buffer = v_buffer.contiguous().view(block_len, num_kv_head, -1)
+            k_buffer = self._transpose_kv_cache_between_head(k_buffer, num_blocks, block_size, block_len, num_kv_head)
+            v_buffer = self._transpose_kv_cache_between_head(v_buffer, num_blocks, block_size, block_len, num_kv_head)
 
             torch_npu._npu_reshape_and_cache(
                 key=k_buffer,
@@ -456,6 +452,14 @@ class KVCacheRecvingThread(threading.Thread):
             )
         del k_buffer
         del v_buffer
+
+    def _transpose_kv_cache_between_head(self, buffer: torch.Tensor, num_blocks: int,
+                                         block_size: int, block_len: int, num_kv_head: int) -> torch.Tensor:
+        buffer = buffer.view(num_blocks, self.num_need_pulls, block_size, -1)
+        buffer.transpose_(1, 2)
+        buffer = buffer.contiguous().view(block_len, num_kv_head, -1)
+
+        return buffer
 
     def _get_remote_metadata(self, remote_host: str,
                              remote_handshake_port: int) -> None:
