@@ -807,44 +807,89 @@ def fused_experts(
         hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
 
     if expert_map is not None:
-        # Generate token indices and flatten
-        token_indices = (torch.arange(num_tokens,
-                                      device=device,
-                                      dtype=torch.int64).unsqueeze(1).expand(
-                                          -1, top_k).reshape(-1))
+        # # Generate token indices and flatten
+        # token_indices = (torch.arange(num_tokens,
+        #                               device=device,
+        #                               dtype=torch.int64).unsqueeze(1).expand(
+        #                                   -1, top_k).reshape(-1))
 
-        # Flatten token-to-expert mappings and map to local experts
-        weights_flat = topk_weights.view(-1)
-        experts_flat = topk_ids.view(-1)
-        local_experts_flat = expert_map[experts_flat]
+        # # Flatten token-to-expert mappings and map to local experts
+        # weights_flat = topk_weights.view(-1)
+        # experts_flat = topk_ids.view(-1)
+        # local_experts_flat = expert_map[experts_flat]
 
-        # Filter valid token-expert pairs
-        mask = local_experts_flat != -1
-        filtered_weights = torch.where(
-            mask, weights_flat, torch.zeros_like(weights_flat)).to(dtype)
-        filtered_experts = torch.where(
-            mask, local_experts_flat,
-            torch.full_like(local_experts_flat,
-                            num_experts)).to(topk_ids.dtype)
+        # # Filter valid token-expert pairs
+        # mask = local_experts_flat != -1
+        # filtered_weights = torch.where(
+        #     mask, weights_flat, torch.zeros_like(weights_flat)).to(dtype)
+        # filtered_experts = torch.where(
+        #     mask, local_experts_flat,
+        #     torch.full_like(local_experts_flat,
+        #                     num_experts)).to(topk_ids.dtype)
 
-        # Sort by local expert IDs
-        sort_indices = torch.argsort(filtered_experts.view(torch.float32))
-        sorted_token_indices = token_indices[sort_indices]
-        sorted_weights = filtered_weights[sort_indices]
+        # # Sort by local expert IDs
+        # sort_indices = torch.argsort(filtered_experts.view(torch.float32))
+        # sorted_token_indices = token_indices[sort_indices]
+        # sorted_weights = filtered_weights[sort_indices]
 
-        # Compute token counts with minlength of num_experts
-        # This is equivalent to but faster than:
-        # >>> token_counts = torch.bincount(filtered_experts, minlength=num_experts)[:-1]
-        token_counts = torch.zeros(num_experts + 1,
-                                   device=device,
-                                   dtype=torch.int64)
-        ones = torch.ones_like(filtered_experts, dtype=torch.int64)
-        token_counts.scatter_add_(0, filtered_experts.to(torch.int64), ones)
-        token_counts = token_counts[:num_experts]
-        expert_tokens = torch.cumsum(token_counts, dim=0, dtype=torch.int64)
+        # # Compute token counts with minlength of num_experts
+        # # This is equivalent to but faster than:
+        # # >>> token_counts = torch.bincount(filtered_experts, minlength=num_experts)[:-1]
+        # token_counts = torch.zeros(num_experts + 1,
+        #                            device=device,
+        #                            dtype=torch.int64)
+        # ones = torch.ones_like(filtered_experts, dtype=torch.int64)
+        # token_counts.scatter_add_(0, filtered_experts.to(torch.int64), ones)
+        # token_counts = token_counts[:num_experts]
+        # expert_tokens = torch.cumsum(token_counts, dim=0, dtype=torch.int64)
 
-        # Rearrange hidden_states
-        sorted_hidden_states = hidden_states[sorted_token_indices]
+        # # Rearrange hidden_states
+        # sorted_hidden_states = hidden_states[sorted_token_indices]
+        
+        global_num_experts = len(expert_map)
+        mask = expert_map[topk_ids] != -1
+        # NOTE: This is equivalent to self.topk_weights[~mask] = 0.0,
+        # but ~mask will dispatch to aclnnNonzeroV2, which is not supported in ACL Graph
+        topk_weights = torch.where(mask, topk_weights, 0.0)
+
+        first_expert_idx = get_ep_group().rank_in_group * num_experts
+        last_expert_idx = first_expert_idx + num_experts
+
+        permuted_hidden_states, expanded_row_idx, expert_tokens, _ = (
+            torch_npu.npu_moe_init_routing_v2(
+                hidden_states,
+                topk_ids,
+                active_num=num_tokens * top_k,
+                expert_num=global_num_experts,
+                expert_tokens_num_type=1,  # Only support `count` mode now
+                expert_tokens_num_flag=True,  # Output `expert_tokens`
+                active_expert_range=[first_expert_idx, last_expert_idx],
+                quant_mode=-1,
+            ))
+        expert_tokens = expert_tokens.to(torch.int64)
+        group_list_type = 1  # `count` mode
+        w1 = w1.transpose(1, 2)
+        # print(f"================w1.shape={w1.shape}, expert_tokens.shape={expert_tokens.shape}")
+        gate_up_out_list = torch_npu.npu_grouped_matmul(
+            x=[permuted_hidden_states],
+            weight=[w1],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=expert_tokens,
+        )[0]
+
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out_list)
+
+        w2 = w2.transpose(1, 2)
+        down_out_list = torch_npu.npu_grouped_matmul(
+            x=[gate_up_out],
+            weight=[w2],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=expert_tokens,
+        )[0]
     else:
         row_idx_len = num_tokens * top_k
         row_idx = (torch.arange(0,
@@ -863,46 +908,50 @@ def fused_experts(
             expanded_expert_idx, num_experts)
         expert_tokens = expert_tokens.to(torch.int64)
 
-    w1 = w1.transpose(1, 2)
-    gate_up_out_list = torch_npu.npu_grouped_matmul(
-        x=[sorted_hidden_states],
-        weight=[w1],
-        split_item=2,
-        group_list_type=0,
-        group_type=0,
-        group_list=expert_tokens,
-    )[0]
+        w1 = w1.transpose(1, 2)
+        gate_up_out_list = torch_npu.npu_grouped_matmul(
+            x=[sorted_hidden_states],
+            weight=[w1],
+            split_item=2,
+            group_list_type=0,
+            group_type=0,
+            group_list=expert_tokens,
+        )[0]
 
-    gate_up_out = torch_npu.npu_swiglu(gate_up_out_list)
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out_list)
 
-    w2 = w2.transpose(1, 2)
-    down_out_list = torch_npu.npu_grouped_matmul(
-        x=[gate_up_out],
-        weight=[w2],
-        split_item=2,
-        group_list_type=0,
-        group_type=0,
-        group_list=expert_tokens,
-    )[0]
+        w2 = w2.transpose(1, 2)
+        down_out_list = torch_npu.npu_grouped_matmul(
+            x=[gate_up_out],
+            weight=[w2],
+            split_item=2,
+            group_list_type=0,
+            group_type=0,
+            group_list=expert_tokens,
+        )[0]
 
     if expert_map is not None:
-        weighted_down_out = down_out_list * sorted_weights.unsqueeze(1)
+        # weighted_down_out = down_out_list * sorted_weights.unsqueeze(1)
 
-        final_hidden_states = torch.zeros(*original_shape,
-                                          device=hidden_states.device,
-                                          dtype=dtype)
+        # final_hidden_states = torch.zeros(*original_shape,
+        #                                   device=hidden_states.device,
+        #                                   dtype=dtype)
 
-        # TODO: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
-        # This created multiple NaN and index_add_ will mix them up which harms accuracy
-        # remove this mask and filter after it being fixed
-        num_valid_tokens = mask.sum()
-        valid_token_mask = torch.arange(
-            0, sorted_token_indices.shape[0],
-            device=device).unsqueeze(1) < num_valid_tokens
-        valid_output = torch.where(
-            valid_token_mask, weighted_down_out,
-            torch.zeros_like(weighted_down_out)).to(dtype)
-        final_hidden_states.index_add_(0, sorted_token_indices, valid_output)
+        # # TODO: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
+        # # This created multiple NaN and index_add_ will mix them up which harms accuracy
+        # # remove this mask and filter after it being fixed
+        # num_valid_tokens = mask.sum()
+        # valid_token_mask = torch.arange(
+        #     0, sorted_token_indices.shape[0],
+        #     device=device).unsqueeze(1) < num_valid_tokens
+        # valid_output = torch.where(
+        #     valid_token_mask, weighted_down_out,
+        #     torch.zeros_like(weighted_down_out)).to(dtype)
+        # final_hidden_states.index_add_(0, sorted_token_indices, valid_output)
+        final_hidden_states = torch_npu.npu_moe_token_unpermute(
+            permuted_tokens=down_out_list,
+            sorted_indices=expanded_row_idx,
+            probs=topk_weights)
     else:
         scales = torch.ones_like(
             topk_weights) if apply_router_weight_on_input else topk_weights
