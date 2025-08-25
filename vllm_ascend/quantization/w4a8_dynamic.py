@@ -28,8 +28,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.layers.experts_selector import select_experts
-from vllm_ascend.quantization.w8a8_dynamic import (fused_experts_with_all2all,
-                                                   fused_experts_with_mc2)
+from vllm_ascend.quantization.dynamic_fused_moe import (
+    fused_experts_with_all2all, fused_experts_with_mc2)
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 
 
