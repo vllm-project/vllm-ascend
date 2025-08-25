@@ -13,25 +13,26 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/lora/test_layers.py
 
+import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding, get_masked_input_and_mask)
 
-from tests.ut.base import TestBase
+from vllm_ascend.ops.vocab_parallel_embedding import \
+    AscendVocabParallelEmbedding
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
 
 
-class TestGetMaskedInputAndMask(TestBase):
+class TestGetMaskedInputAndMask(unittest.TestCase):
 
     def setUp(self):
         self.input_ = torch.arange(12)
 
     def test_get_masked_input_and_mask(self):
         # tp 1 no padding
-        input_modified, _ = get_masked_input_and_mask(
+        input_modified, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
             self.input_,
             org_vocab_start_index=0,
             org_vocab_end_index=8,
@@ -41,19 +42,23 @@ class TestGetMaskedInputAndMask(TestBase):
         assert torch.equal(self.input_, input_modified)
 
         # tp 2 no padding
-        input_rank_0, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=0,
-                                                    org_vocab_end_index=4,
-                                                    added_vocab_start_index=8,
-                                                    added_vocab_end_index=10,
-                                                    num_org_vocab_padding=0)
+        input_rank_0, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=0,
+            org_vocab_end_index=4,
+            added_vocab_start_index=8,
+            added_vocab_end_index=10,
+            num_org_vocab_padding=0)
 
-        input_rank_1, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=4,
-                                                    org_vocab_end_index=8,
-                                                    added_vocab_start_index=10,
-                                                    added_vocab_end_index=12,
-                                                    num_org_vocab_padding=0)
+        input_rank_1, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=4,
+            org_vocab_end_index=8,
+            added_vocab_start_index=10,
+            added_vocab_end_index=12,
+            num_org_vocab_padding=0)
 
         assert torch.equal(input_rank_0,
                            torch.tensor([0, 1, 2, 3, 0, 0, 0, 0, 4, 5, 0, 0]))
@@ -61,33 +66,41 @@ class TestGetMaskedInputAndMask(TestBase):
                            torch.tensor([0, 0, 0, 0, 0, 1, 2, 3, 0, 0, 4, 5]))
 
         # tp 4 no padding
-        input_rank_0, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=0,
-                                                    org_vocab_end_index=2,
-                                                    added_vocab_start_index=8,
-                                                    added_vocab_end_index=9,
-                                                    num_org_vocab_padding=0)
+        input_rank_0, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=0,
+            org_vocab_end_index=2,
+            added_vocab_start_index=8,
+            added_vocab_end_index=9,
+            num_org_vocab_padding=0)
 
-        input_rank_1, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=2,
-                                                    org_vocab_end_index=4,
-                                                    added_vocab_start_index=9,
-                                                    added_vocab_end_index=10,
-                                                    num_org_vocab_padding=0)
+        input_rank_1, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=2,
+            org_vocab_end_index=4,
+            added_vocab_start_index=9,
+            added_vocab_end_index=10,
+            num_org_vocab_padding=0)
 
-        input_rank_2, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=4,
-                                                    org_vocab_end_index=6,
-                                                    added_vocab_start_index=10,
-                                                    added_vocab_end_index=11,
-                                                    num_org_vocab_padding=0)
+        input_rank_2, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=4,
+            org_vocab_end_index=6,
+            added_vocab_start_index=10,
+            added_vocab_end_index=11,
+            num_org_vocab_padding=0)
 
-        input_rank_3, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=6,
-                                                    org_vocab_end_index=8,
-                                                    added_vocab_start_index=11,
-                                                    added_vocab_end_index=12,
-                                                    num_org_vocab_padding=0)
+        input_rank_3, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=6,
+            org_vocab_end_index=8,
+            added_vocab_start_index=11,
+            added_vocab_end_index=12,
+            num_org_vocab_padding=0)
         assert torch.equal(input_rank_0,
                            torch.tensor([0, 1, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0]))
         assert torch.equal(input_rank_1,
@@ -98,7 +111,8 @@ class TestGetMaskedInputAndMask(TestBase):
                            torch.tensor([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 2]))
 
         # tp 1 with padding
-        input_modified, _ = get_masked_input_and_mask(
+        input_modified, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
             self.input_,
             org_vocab_start_index=0,
             org_vocab_end_index=8,
@@ -110,52 +124,64 @@ class TestGetMaskedInputAndMask(TestBase):
             torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13]))
 
         # tp 2 with padding
-        input_rank_0, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=0,
-                                                    org_vocab_end_index=4,
-                                                    added_vocab_start_index=8,
-                                                    added_vocab_end_index=10,
-                                                    num_org_vocab_padding=2)
+        input_rank_0, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=0,
+            org_vocab_end_index=4,
+            added_vocab_start_index=8,
+            added_vocab_end_index=10,
+            num_org_vocab_padding=2)
 
-        input_rank_1, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=4,
-                                                    org_vocab_end_index=8,
-                                                    added_vocab_start_index=10,
-                                                    added_vocab_end_index=12,
-                                                    num_org_vocab_padding=2)
+        input_rank_1, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=4,
+            org_vocab_end_index=8,
+            added_vocab_start_index=10,
+            added_vocab_end_index=12,
+            num_org_vocab_padding=2)
         assert torch.equal(input_rank_0,
                            torch.tensor([0, 1, 2, 3, 0, 0, 0, 0, 6, 7, 0, 0]))
         assert torch.equal(input_rank_1,
                            torch.tensor([0, 0, 0, 0, 0, 1, 2, 3, 0, 0, 6, 7]))
 
         # tp 4 with padding
-        input_rank_0, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=0,
-                                                    org_vocab_end_index=2,
-                                                    added_vocab_start_index=8,
-                                                    added_vocab_end_index=9,
-                                                    num_org_vocab_padding=2)
+        input_rank_0, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=0,
+            org_vocab_end_index=2,
+            added_vocab_start_index=8,
+            added_vocab_end_index=9,
+            num_org_vocab_padding=2)
 
-        input_rank_1, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=2,
-                                                    org_vocab_end_index=4,
-                                                    added_vocab_start_index=9,
-                                                    added_vocab_end_index=10,
-                                                    num_org_vocab_padding=2)
+        input_rank_1, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=2,
+            org_vocab_end_index=4,
+            added_vocab_start_index=9,
+            added_vocab_end_index=10,
+            num_org_vocab_padding=2)
 
-        input_rank_2, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=4,
-                                                    org_vocab_end_index=6,
-                                                    added_vocab_start_index=10,
-                                                    added_vocab_end_index=11,
-                                                    num_org_vocab_padding=2)
+        input_rank_2, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=4,
+            org_vocab_end_index=6,
+            added_vocab_start_index=10,
+            added_vocab_end_index=11,
+            num_org_vocab_padding=2)
 
-        input_rank_3, _ = get_masked_input_and_mask(self.input_,
-                                                    org_vocab_start_index=6,
-                                                    org_vocab_end_index=8,
-                                                    added_vocab_start_index=11,
-                                                    added_vocab_end_index=12,
-                                                    num_org_vocab_padding=2)
+        input_rank_3, _ = AscendVocabParallelEmbedding._get_masked_input_and_mask(
+            None,
+            self.input_,
+            org_vocab_start_index=6,
+            org_vocab_end_index=8,
+            added_vocab_start_index=11,
+            added_vocab_end_index=12,
+            num_org_vocab_padding=2)
         assert torch.equal(input_rank_0,
                            torch.tensor([0, 1, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0]))
         assert torch.equal(input_rank_1,
@@ -166,11 +192,11 @@ class TestGetMaskedInputAndMask(TestBase):
                            torch.tensor([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4]))
 
 
-class TestCustomVocabParallelEmbedding(TestBase):
+class TestCustomVocabParallelEmbedding(unittest.TestCase):
 
     def setUp(self):
         # Create a mock VocabParallelEmbedding instance
-        self.mock_embedding = MagicMock(spec=VocabParallelEmbedding)
+        self.mock_embedding = MagicMock(spec=AscendVocabParallelEmbedding)
         self.mock_embedding.tp_size = 2  # Test with tensor parallelism
         self.mock_embedding.shard_indices = MagicMock()
         self.mock_embedding.shard_indices.org_vocab_start_index = 10
@@ -191,7 +217,7 @@ class TestCustomVocabParallelEmbedding(TestBase):
         """Test the mask and offset calculation helper function."""
         input_ = torch.tensor([5, 15, 25, 35, 45])  # includes all cases
 
-        masked_input, mask = get_masked_input_and_mask(
+        masked_input, mask = self.mock_embedding._get_masked_input_and_mask(
             input_,
             org_vocab_start_index=10,
             org_vocab_end_index=20,
@@ -215,7 +241,7 @@ class TestCustomVocabParallelEmbedding(TestBase):
     def test_forward_with_tp_size_1(self):
         """Test forward pass without tensor parallelism."""
         # Create a fresh mock embedding with tp_size=1
-        mock_embedding = MagicMock(spec=VocabParallelEmbedding)
+        mock_embedding = MagicMock(spec=AscendVocabParallelEmbedding)
         mock_embedding.tp_size = 1
         mock_embedding.quant_method = MagicMock()
         mock_embedding.quant_method.embedding = MagicMock(
