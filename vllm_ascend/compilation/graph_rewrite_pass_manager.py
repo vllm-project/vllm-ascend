@@ -17,10 +17,8 @@
 #
 
 from torch import fx as fx
-
-from vllm.config import VllmConfig
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
-from vllm.compilation.inductor_pass import get_pass_context
+from vllm.config import VllmConfig
 
 
 class GraphRewritePassManager:
@@ -41,15 +39,17 @@ class GraphRewritePassManager:
                 pass_(graph)
         graph.recompile()
         return graph
-    
+
     def add(self, pass_: VllmInductorPass):
         assert isinstance(pass_, VllmInductorPass)
         self.passes.append(pass_)
-  
+
     def configure(self, config: VllmConfig):
         # By default, we enable the graph rewriter and quantization fusion pass.
-        self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
-        if self.ascend_compilation_config.get("enable_quantization_fusion", True):
+        self.ascend_compilation_config: dict = config.additional_config.get(
+            "ascend_compilation_config", {})
+        if self.ascend_compilation_config.get("enable_quantization_fusion",
+                                              True):
             from .quant_fusion_pass import AscendQuantFusionPass
             self.passes.append(AscendQuantFusionPass(config))
         # Add more passes here as needed

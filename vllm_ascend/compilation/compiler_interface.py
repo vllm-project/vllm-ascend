@@ -16,24 +16,13 @@
 # limitations under the License.
 #
 
-import copy
-import hashlib
-import os
-from contextlib import ExitStack
 from typing import Any, Callable, Optional
-from unittest.mock import patch
+
 import torch
 import torch._inductor.compile_fx
 import torch.fx as fx
-from vllm.compilation.compiler_interface import CompilerInterface, AlwaysHitShapeEnv, get_inductor_factors, set_inductor_config
-from vllm.compilation.pass_manager import PostGradPassManager
-
-import vllm.envs as envs
+from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
-from vllm.utils import is_torch_equal_or_newer
-
-from vllm.compilation.inductor_pass import pass_context
 
 
 def get_dtype_from_args(args: list[Any]) -> list[torch.dtype]:
@@ -46,6 +35,7 @@ def get_dtype_from_args(args: list[Any]) -> list[torch.dtype]:
             dtype_list.append(value.dtype)
     return dtype_list
 
+
 def get_shapes_from_args(args: list[Any]) -> list[torch.Size]:
     """
     Extract the shapes from the kwargs dictionary.
@@ -55,6 +45,8 @@ def get_shapes_from_args(args: list[Any]) -> list[torch.Size]:
         if isinstance(value, torch.Tensor):
             shape_list.append(value.shape)
     return shape_list
+
+
 class AscendAdaptor(CompilerInterface):
     name = "ascend_adaptor"
 
@@ -73,7 +65,8 @@ class AscendAdaptor(CompilerInterface):
         kwargs = {
             "runtime_shape": runtime_shape,
             "arg_shapes": arg_shapes,
-            "arg_dtypes": arg_dtypes}
+            "arg_dtypes": arg_dtypes
+        }
         graph = graph_rewriter_manager(graph, **kwargs)
 
         compilation_counter.num_eager_compiles += 1

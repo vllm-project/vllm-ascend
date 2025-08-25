@@ -19,7 +19,6 @@
 from typing import List, Tuple
 
 import torch
-import torch_npu
 from torch.fx.subgraph_rewriter import replace_pattern
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 

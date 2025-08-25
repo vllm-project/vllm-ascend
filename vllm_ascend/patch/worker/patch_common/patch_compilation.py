@@ -16,11 +16,13 @@
 #
 
 import vllm
-from vllm.config import CompilationConfig
 import vllm.compilation.backends
 from vllm.compilation.compiler_interface import CompilerInterface
-from vllm_ascend.compilation.graph_rewrite_pass_manager import GraphRewritePassManager
+from vllm.config import CompilationConfig
+
 from vllm_ascend.compilation.compiler_interface import AscendAdaptor
+from vllm_ascend.compilation.graph_rewrite_pass_manager import \
+    GraphRewritePassManager
 
 
 def configure_post_pass(self):

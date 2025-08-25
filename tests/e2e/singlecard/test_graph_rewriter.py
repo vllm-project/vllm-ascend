@@ -17,17 +17,15 @@
 #
 
 import copy
-import random
 import re
-from unittest.mock import patch
+
 import pytest
 import torch
 import torch.nn as nn
 import torch_npu
-from vllm import LLM, SamplingParams
 from vllm.config import VllmConfig
+
 from tests.ut.base import PytestBase
-from tests.e2e.model_utils import check_outputs_equal
 from vllm_ascend.compilation.graph_rewrite_pass_manager import \
     GraphRewritePassManager
 from vllm_ascend.compilation.quant_fusion_pass import AscendQuantFusionPass
@@ -149,7 +147,7 @@ class TestGraphRewriter(PytestBase):
         compiled_model = torch.compile(model, backend=compilation_interface)
         for i in range(3):
             output = compiled_model(input_tensor)
-
+        (output)    #  make formatter happy
         # 3. Check if the output is as expected, we use the original model to get the reference output
         reference_output = new_model(input_tensor)
         compiled_output = compiled_model(input_tensor)
