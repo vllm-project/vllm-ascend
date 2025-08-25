@@ -63,12 +63,8 @@ def apply_mlp_decode(hidden_states: torch.Tensor,
     """
 
     if dynamic_scale is None:
-        unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
             hidden_states)
-        # Dispose the original unquantized hidden states
-        # to save npu memory because they're no longer used.
-        dispose_tensor(unquantized_hidden_states)
     else:
         pertoken_scale = dynamic_scale
 
@@ -288,7 +284,6 @@ def fused_experts_with_mc2(
                 (shared_gate_up, shared_dequant_scale))
             shared_act, swiglu_out_scale = shared_act_out[0], shared_act_out[1]
 
-    # `expand_x` will be disposed in the `apply_mlp` function
     if w1_scale_bias is None:
         down_out_list = apply_mlp_decode(expand_x,
                                          w1,
