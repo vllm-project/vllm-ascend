@@ -289,8 +289,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = mask.repeat(attn_metadata.seq_lens.size(0), 1, 1, 1)
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
+        if self.sliding_window is not None and \
+            attn_metadata.attn_mask.shape[0] > self.sliding_window:
+            batch_size = attn_metadata.seq_lens.shape[0]
+            block_size = self.key_cache.shape[1]
+            query = query.view(batch_size, int(num_tokens/batch_size), self.num_heads, self.head_size) # BSND
+            key = key.view(batch_size, int(num_tokens/batch_size), self.num_kv_heads, self.head_size) # BSND
+            value = value.view(batch_size, int(num_tokens/batch_size), self.num_kv_heads, self.head_size) # BSND
 
-        torch_npu._npu_flash_attention(query=query,
+            output, _ = torch_npu.npu_fused_infer_attention_score(
+                query,
+                key,
+                value,
+                num_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="BSND",
+                pre_tokens=self.sliding_window,
+                scale=self.scale,
+                actual_seq_lengths=attn_metadata.seq_lens,
+                actual_seq_lengths_kv=attn_metadata.seq_lens
+            )
+            output = output.view(num_tokens, self.num_heads, self.head_size)
+        else:
+            torch_npu._npu_flash_attention(query=query,
                                        key=key,
                                        value=value,
                                        mask=mask,
@@ -339,8 +360,31 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # seq_lens_tensor needs to be transferred to the device for 310P.
             attn_metadata.seq_lens = \
                 attn_metadata.seq_lens.to(device=query.device)
+        if self.sliding_window is not None:
+            batch_size = attn_metadata.seq_lens.shape[0]
+            block_size = self.key_cache.shape[1]
+            query = query.view(batch_size, 1, self.num_heads*self.head_size)
+            key = self.key_cache.flatten(2, 3).contiguous()
+            value = self.value_cache.flatten(2, 3).contiguous()
 
-        torch_npu._npu_paged_attention(query=query,
+            output, _ = torch_npu.npu_fused_infer_attention_score(
+                query,
+                key,
+                value,
+                num_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="BSH",
+                block_size=self.key_cache.shape[1],
+                pre_tokens=self.sliding_window,
+                scale=self.scale,
+                block_table=attn_metadata.block_tables,
+                actual_seq_lengths=[1]*len(attn_metadata.seq_lens),
+                actual_seq_lengths_kv=attn_metadata.seq_lens
+            )
+
+            output = output.view(num_tokens, self.num_heads, self.head_size)
+        else:
+            torch_npu._npu_paged_attention(query=query,
                                        key_cache=self.key_cache,
                                        value_cache=self.value_cache,
                                        num_kv_heads=self.num_kv_heads,
