@@ -393,8 +393,7 @@ class TestAscendScheduler(TestBase):
                 total_num_scheduled_tokens=5,
                 scheduled_encoder_inputs={},
                 scheduled_spec_decode_tokens={
-                    requests[0].request_id:
-                    [10, 42],
+                    requests[0].request_id: [10, 42],
                     requests[1].request_id: [13]
                 },
                 num_common_prefix_blocks=0,
@@ -425,8 +424,7 @@ class TestAscendScheduler(TestBase):
                 total_num_scheduled_tokens=5,
                 scheduled_encoder_inputs={},
                 scheduled_spec_decode_tokens={
-                    requests[0].request_id:
-                    [10, 42],
+                    requests[0].request_id: [10, 42],
                     requests[1].request_id: [13]
                 },
                 num_common_prefix_blocks=0,
@@ -479,8 +477,7 @@ class TestAscendScheduler(TestBase):
                 total_num_scheduled_tokens=4,
                 scheduled_encoder_inputs={},
                 scheduled_spec_decode_tokens={
-                    requests[0].request_id:
-                    [10, 11],
+                    requests[0].request_id: [10, 11],
                     requests[1].request_id: []
                 },
                 num_common_prefix_blocks=0,
@@ -511,8 +508,7 @@ class TestAscendScheduler(TestBase):
                 total_num_scheduled_tokens=4,
                 scheduled_encoder_inputs={},
                 scheduled_spec_decode_tokens={
-                    requests[0].request_id:
-                    [10, 11],
+                    requests[0].request_id: [10, 11],
                     requests[1].request_id: []
                 },
                 num_common_prefix_blocks=0,
