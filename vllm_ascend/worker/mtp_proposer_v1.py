@@ -19,7 +19,7 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.distributed.utils import is_lmhead_tp
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
-from vllm_ascend.utils import ProfileExecuteDuration
+from vllm_ascend.utils import TORCHAIR_CACHE_DIR, ProfileExecuteDuration
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
@@ -423,6 +423,7 @@ class MtpProposer:
                     self.model.__dict__[forward_proxy_name],
                     dynamic=True,
                     fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
                     ge_cache=False)
             return self.torchair_compiled_models[batch_size]
