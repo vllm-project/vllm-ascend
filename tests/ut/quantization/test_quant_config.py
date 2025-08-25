@@ -113,6 +113,7 @@ class TestAscendQuantConfig(TestBase):
     def test_get_quant_method_for_fused_moe(self):
         fused_moe_layer = MagicMock(spec=FusedMoE)
         fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
+        fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
 
         # Test skipped layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=True), \

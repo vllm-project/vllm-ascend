@@ -29,7 +29,7 @@ import argparse
 
 from vllm.assets.audio import AudioAsset
 try:
-    import librosa
+    import librosa # type: ignore
 except ImportError:
     raise Exception("Can't import librosa, please ensure it's installed")
 

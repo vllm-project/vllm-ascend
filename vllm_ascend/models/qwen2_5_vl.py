@@ -30,8 +30,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.model_executor.layers.activation import (_ACTIVATION_REGISTRY,
-                                                   get_act_and_mul_fn)
+from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -42,8 +41,6 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLMultiModalProcessor, Qwen2_5_VLProcessingInfo)
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
-
-from vllm_ascend.utils import vllm_version_is
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
@@ -202,8 +199,6 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         )
 
         act_fn = get_act_and_mul_fn(vision_config.hidden_act)
-        if vllm_version_is("0.10.0"):
-            act_fn = _ACTIVATION_REGISTRY[vision_config.hidden_act]
         self.blocks = nn.ModuleList([
             AscendQwen2_5_VisionBlock(
                 dim=self.hidden_size,
@@ -303,12 +298,9 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
+            ("mlp.gate_up_proj.", "mlp.gate_proj.", 0),
+            ("mlp.gate_up_proj.", "mlp.up_proj.", 1),
         ]
-        if not vllm_version_is("0.10.0"):
-            stacked_params_mapping.extend([
-                ("mlp.gate_up_proj.", "mlp.gate_proj.", 0),
-                ("mlp.gate_up_proj.", "mlp.up_proj.", 1),
-            ])
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:

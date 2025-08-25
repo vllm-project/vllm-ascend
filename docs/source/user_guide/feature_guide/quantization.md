@@ -12,10 +12,11 @@ Install modelslim:
 
 ```bash
 git clone https://gitee.com/ascend/msit
+cd msit/msmodelslim
+
 # Optional, this commit has been verified
 git checkout f8ab35a772a6c1ee7675368a2aa4bafba3bedd1a
 
-cd msit/msmodelslim
 bash install.sh
 pip install accelerate
 ```

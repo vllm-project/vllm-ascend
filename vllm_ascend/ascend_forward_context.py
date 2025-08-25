@@ -4,12 +4,13 @@ from enum import Enum
 from typing import Any, Optional
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size)
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import (BatchDescriptor, get_forward_context,
+                                  set_forward_context)
 
-import vllm_ascend.envs as envs
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.moe_comm_method import MoECommMethod
 
 
@@ -27,7 +28,7 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
                          is_deepseek_v3_r1: bool):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
-    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
             and is_deepseek_v3_r1):
         return FusedMoEState.AllGatherEP
     elif ep_size == 1:
@@ -35,7 +36,7 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
             return FusedMoEState.NaiveMulticast
         else:
             return FusedMoEState.AllGather
-    elif envs.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
+    elif envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
         # MC2 Dispatch/Combine performs better than alltoall_seq in decoding stage.
         return (FusedMoEState.All2AllSeq if
                 (ep_size < 16 or with_prefill) else FusedMoEState.MC2)
@@ -48,26 +49,31 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
 
 @contextmanager
 def set_ascend_forward_context(
-    attn_metadata: Any,
-    vllm_config: VllmConfig,
-    virtual_engine: int = 0,
-    num_tokens: Optional[int] = None,
-    num_tokens_across_dp: Optional[torch.Tensor] = None,
-    with_prefill: bool = True,
-    in_profile_run: bool = False,
-    reserved_mc2_mask: Optional[torch.Tensor] = None,
-    moe_comm_method: Optional[MoECommMethod] = None,
-    num_actual_tokens: Optional[int] = None,
-):
+        attn_metadata: Any,
+        vllm_config: VllmConfig,
+        virtual_engine: int = 0,
+        num_tokens: Optional[int] = None,
+        num_tokens_across_dp: Optional[torch.Tensor] = None,
+        with_prefill: bool = True,
+        in_profile_run: bool = False,
+        reserved_mc2_mask: Optional[torch.Tensor] = None,
+        moe_comm_method: Optional[MoECommMethod] = None,
+        num_actual_tokens: Optional[int] = None,
+        aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        batch_descriptor: Optional[BatchDescriptor] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
     """
-    with set_forward_context(attn_metadata,
-                             vllm_config,
-                             virtual_engine=virtual_engine,
-                             num_tokens=num_tokens,
-                             num_tokens_across_dp=num_tokens_across_dp):
+    with set_forward_context(
+            attn_metadata,
+            vllm_config,
+            virtual_engine=virtual_engine,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=aclgraph_runtime_mode,
+            batch_descriptor=batch_descriptor,
+    ):
         forward_context = get_forward_context()
         forward_context.moe_comm_method = moe_comm_method
         forward_context.with_prefill = with_prefill
