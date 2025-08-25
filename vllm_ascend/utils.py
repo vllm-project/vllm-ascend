@@ -485,10 +485,12 @@ def register_ascend_customop():
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
-                                        AscendMlpMergedColumnParallelLinear,
-                                        AscendMlpRowParallelLinear)
+                                        AscendMlpMergedColumnParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+    from vllm_ascend.ops.vocab_parallel_embedding import (
+        AscendLogitsProcessor, AscendParallelLMHead,
+        AscendVocabParallelEmbedding)
     CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
     CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
                           name="SiluAndMul")
@@ -497,11 +499,16 @@ def register_ascend_customop():
     CustomOp.register_oot(
         _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
         name="DeepseekScalingRotaryEmbedding")
+    CustomOp.register_oot(_decorated_op_cls=AscendVocabParallelEmbedding,
+                          name="VocabParallelEmbedding")
+    CustomOp.register_oot(_decorated_op_cls=AscendParallelLMHead,
+                          name="ParallelLMHead")
+    CustomOp.register_oot(_decorated_op_cls=AscendLogitsProcessor,
+                          name="LogitsProcessor")
     if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
         CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
                               name="ColumnParallelLinear")
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpRowParallelLinear,
-                              name="RowParallelLinear")
+
         CustomOp.register_oot(
             _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
             name="MergedColumnParallelLinear")

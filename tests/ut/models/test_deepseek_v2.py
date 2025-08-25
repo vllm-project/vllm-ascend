@@ -20,13 +20,14 @@ import torch
 from transformers import PretrainedConfig
 from vllm.config import CacheConfig
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
 from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2MergedReplicatedLinear, CustomDeepseekV2MLAAttention,
     CustomDeepseekV2MLP, CustomDeepseekV2MoE,
     CustomDeepseekV2RowParallelLinear,
     CustomDeepseekV2RowParallelLinearReplaceAllreduce,
-    CustomDeepseekV2SiluAndMul, CustomLogitsProcessor, CustomParallelLMHead)
+    CustomDeepseekV2SiluAndMul, CustomParallelLMHead)
 
 
 @pytest.fixture
