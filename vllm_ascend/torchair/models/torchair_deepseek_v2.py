@@ -70,9 +70,9 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
 from vllm_ascend.utils import dispose_tensor, npu_prefetch
 
 
@@ -335,7 +335,7 @@ class TorchairDeepseekV2MoE(nn.Module):
         else:
             self.gate.e_score_correction_bias = None
 
-        self.experts = AscendFusedMoE(
+        self.experts = TorchairAscendFusedMoE(
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -951,7 +951,7 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = AscendFusedMoE.make_expert_params_mapping(
+        expert_params_mapping = TorchairAscendFusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
