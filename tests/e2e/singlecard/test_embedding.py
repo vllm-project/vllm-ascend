@@ -19,7 +19,6 @@
 from collections.abc import Sequence
 from typing import Optional
 
-import pytest
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import HfRunner
@@ -50,8 +49,6 @@ def test_dummy():
     assert True
 
 
-@pytest.mark.skip(
-    reason="TODO: revert me when pooler is adapted with the latest vllm main")
 def test_embed_models_correctness(hf_runner, vllm_runner):
     queries = ['What is the capital of China?', 'Explain gravity']
 
