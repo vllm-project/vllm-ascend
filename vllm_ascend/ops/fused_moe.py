@@ -1002,7 +1002,7 @@ def unified_apply_mlp(
                                  group_list_type, topk_scales)
 
 
-def unified_fused_experts_test(hidden_states: torch.Tensor,
+def unified_fused_experts_eager(hidden_states: torch.Tensor,
                                w1: torch.Tensor,
                                w2: torch.Tensor,
                                topk_weights: torch.Tensor,
@@ -1134,7 +1134,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         fused_moe_state = get_forward_context().fused_moe_state
 
-        return unified_fused_experts_test(hidden_states=x,
+        return unified_fused_experts_eager(hidden_states=x,
                                           w1=layer.w13_weight,
                                           w2=layer.w2_weight,
                                           topk_weights=topk_weights,

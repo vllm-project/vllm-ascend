@@ -861,13 +861,14 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
     def token_combine(self,
                       hidden_states: torch.Tensor,
                       bias: torch.Tensor = None):
-        assert self.mask is not None
-        assert self.sorted_token_indices is not None
-        assert self.sorted_weights is not None
         assert self.original_shape is not None
         dtype = hidden_states.dtype
         device = hidden_states.device
         if self.expert_map is not None:
+            assert self.mask is not None
+            assert self.sorted_token_indices is not None
+            assert self.sorted_weights is not None
+
             weighted_down_out = hidden_states * \
                 self.sorted_weights.unsqueeze(1)
 

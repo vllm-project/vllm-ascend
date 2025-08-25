@@ -27,7 +27,7 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe import unified_fused_experts_test
+from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
 from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
@@ -920,7 +920,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         topk_weights = topk_weights.to(x.dtype)
 
-        return unified_fused_experts_test(
+        return unified_fused_experts_eager(
             hidden_states=x,
             w1=layer.w13_weight,
             w1_scale=layer.w13_weight_scale,
