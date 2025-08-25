@@ -20,6 +20,7 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
+import torch_npu
 import zmq
 from mooncake.engine import TransferEngine
 from vllm.config import VllmConfig
@@ -403,19 +404,58 @@ class KVCacheRecvingThread(threading.Thread):
         if self.num_need_pulls > 1 and offset == self.num_need_pulls -1:
             self._cat_kv_cache(local_block_ids)
 
-    def _cat_kv_cache(self, block_ids: list[int]):
-        # used to cat the kv cache in the block after kv cache transfer
-        for block_id in block_ids:
-            for cache_list in self.kv_caches.values():
-                for cache in cache_list:
-                    origin_tensor = cache[block_id[0]]
-                    block_size = self.vllm_config.cache_config.block_size
+    def _cat_kv_cache(self, block_ids: list[list[int]]):
+        # get necessary params from config
+        head_dim = self.model_config.hf_config.head_dim
+        block_size = self.vllm_config.cache_config.block_size
+        num_kv_head = self.model_config.hf_config.num_key_value_heads
 
-                    #TODO: use cat instead of transpose
-                    cache_temp = origin_tensor.view(self.num_need_pulls, block_size, -1)
-                    cache_temp.transpose_(0, 1)
-                    cache_temp = cache_temp.contiguous().view(block_size, -1)
-                    origin_tensor.view(-1).copy_(cache_temp.view(-1))
+        dtype = list(self.kv_caches.values())[0][0].dtype
+        block_ids = [item for sublist in block_ids for item in sublist]
+        block_ids_tensor = torch.tensor(block_ids, dtype=torch.int32)
+        num_blocks = len(block_ids)
+        block_len = num_blocks * block_size
+        block_table = block_ids_tensor.view(1, -1).npu()
+        block_len_tensor = torch.tensor([num_blocks * block_size], dtype=torch.int32).npu()
+        seq_start_locate = torch.tensor([0], dtype=torch.int32).npu()
+
+        k_buffer = torch.empty(block_len, num_kv_head, head_dim, dtype=dtype).npu()
+        v_buffer = torch.empty(block_len, num_kv_head, head_dim, dtype=dtype).npu()
+
+        block_offsets = torch.arange(0, block_size, dtype=torch.int32)
+        slot_mapping = block_offsets.reshape(
+            (1, block_size)) + block_ids_tensor.reshape(
+            (num_blocks, 1)) * block_size
+        slot_mapping = slot_mapping.flatten().npu()
+
+        for kv_cache_layer in self.kv_caches.values():
+            k_cache_layer, v_cache_layer = kv_cache_layer
+            torch_npu.atb.npu_paged_cache_load(
+                k_cache_layer,
+                v_cache_layer,
+                block_table,
+                block_len_tensor,
+                seq_starts=seq_start_locate,
+                key=k_buffer,
+                value=v_buffer,
+            )
+
+            k_buffer = k_buffer.view(num_blocks, self.num_need_pulls, block_size, -1)
+            k_buffer.transpose_(1, 2)
+            k_buffer = k_buffer.contiguous().view(block_len, num_kv_head, -1)
+            v_buffer = v_buffer.view(num_blocks, self.num_need_pulls, block_size, -1)
+            v_buffer.transpose_(1, 2)
+            v_buffer = v_buffer.contiguous().view(block_len, num_kv_head, -1)
+
+            torch_npu._npu_reshape_and_cache(
+                key=k_buffer,
+                value=v_buffer,
+                key_cache=k_cache_layer,
+                value_cache=v_cache_layer,
+                slot_indices=slot_mapping,
+            )
+        del k_buffer
+        del v_buffer
 
     def _get_remote_metadata(self, remote_host: str,
                              remote_handshake_port: int) -> None:
