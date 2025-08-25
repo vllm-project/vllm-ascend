@@ -452,6 +452,8 @@ def register_ascend_customop():
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.fused_moe import AscendFusedMoE
+    from vllm_ascend.ops.layernorm import AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
                                         AscendMlpMergedColumnParallelLinear,
                                         AscendMlpRowParallelLinear)
@@ -474,8 +476,8 @@ def register_ascend_customop():
             _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
             name="MergedColumnParallelLinear")
 
-    from vllm_ascend.ops.layernorm import AscendRMSNorm
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
+    CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True

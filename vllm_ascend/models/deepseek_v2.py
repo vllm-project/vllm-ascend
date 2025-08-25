@@ -43,6 +43,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
@@ -70,7 +71,6 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor, npu_prefetch
@@ -335,7 +335,7 @@ class CustomDeepseekV2MoE(nn.Module):
         else:
             self.gate.e_score_correction_bias = None
 
-        self.experts = AscendFusedMoE(
+        self.experts = FusedMoE(
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -952,7 +952,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = AscendFusedMoE.make_expert_params_mapping(
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
