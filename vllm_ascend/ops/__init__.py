@@ -21,10 +21,11 @@ import vllm_ascend.ops.fused_moe  # noqa
 import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.vocab_parallel_embedding  # noqa
 from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-from vllm_ascend.ops.rotary_embedding import (
-    AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod)
+from vllm_ascend.ops.rotary_embedding import (
+    AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+
 
 class dummyFusionOp:
     default = None
