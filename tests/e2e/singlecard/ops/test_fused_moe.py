@@ -92,8 +92,14 @@ def test_fused_experts(
     score = torch.softmax(score, dim=-1, dtype=dtype)
     topk_weights, topk_ids = torch.topk(score, topk)
     topk_ids = topk_ids.to(torch.int32)
+    row_idx = (torch.arange(
+        0,
+        m * topk,
+        device=device,
+        dtype=torch.int32,
+    ).view(topk, -1).permute(1, 0).contiguous())
 
-    output = fused_experts(a, w1, w2, topk_weights, topk_ids, topk, e_map)
+    output = fused_experts(a, w1, w2, topk_weights, topk_ids, row_idx, topk, e_map)
     torch_output = torch_moe(a, w1, w2, topk_weights, topk_ids, topk, e_map)
     # TODO: The native params are: atol=2e-2, rtol=0, maybe related to the nan problem
     torch.testing.assert_close(output, torch_output, atol=4e-2, rtol=1)

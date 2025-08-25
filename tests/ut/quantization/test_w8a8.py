@@ -824,7 +824,7 @@ class TestSelectExperts(TestBase):
                                               self.top_k,
                                               dtype=torch.long))
 
-        weights, _ = select_experts(
+        weights, ids, _ = select_experts(
             hidden_states=self.hidden_states,
             router_logits=self.router_logits,
             top_k=self.top_k,

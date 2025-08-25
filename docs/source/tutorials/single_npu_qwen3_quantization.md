@@ -32,12 +32,15 @@ see https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8
 :::
 
 ```bash
-# Optional, this commit has been verified
-git clone https://gitee.com/ascend/msit -b f8ab35a772a6c1ee7675368a2aa4bafba3bedd1a
-
+git clone https://gitee.com/ascend/msit
 cd msit/msmodelslim
+
+# Optional, this commit has been verified
+git checkout f8ab35a772a6c1ee7675368a2aa4bafba3bedd1a
+
 # Install by run this script
 bash install.sh
+pip install accelerate
 
 cd example/Qwen
 # Original weight path, Replace with your local model path

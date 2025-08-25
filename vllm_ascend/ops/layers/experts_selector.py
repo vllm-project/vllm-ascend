@@ -21,7 +21,7 @@ import torch_npu
 
 
 def return_row_idx(hidden_states, top_k):
-    num_tokens, _ = hidden_states.shape
+    num_tokens = hidden_states.shape[0]
     row_idx_len = num_tokens * top_k
     row_idx = (torch.arange(0,
                             row_idx_len,
@@ -95,6 +95,8 @@ def select_experts(hidden_states: torch.Tensor,
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
         )
+    if row_idx is None:
+        row_idx = return_row_idx(hidden_states, top_k)
     return topk_weights, topk_ids, row_idx
 
 
