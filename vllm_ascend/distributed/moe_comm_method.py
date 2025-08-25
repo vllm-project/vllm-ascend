@@ -8,13 +8,12 @@ import torch_npu
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
-from vllm.utils import direct_register_custom_op
 
 from vllm_ascend.distributed.communication_op import \
     data_parallel_reduce_scatter
-from vllm_ascend.distributed.parallel_state import get_mc2_comm_name
+from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
 
@@ -116,9 +115,15 @@ class DummyCommImpl(MoECommMethod):
         expert_map: torch.Tensor,
         num_experts: int,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        """Dummy implementation, see moe_comm_pre_process_fake for details."""
-        return moe_comm_pre_process_fake(hidden_states, topk_ids, topk_weights,
-                                         expert_map, num_experts)
+        """Dummy implementation, make sure the output shapes are correct."""
+        top_k_num = topk_ids.shape[1]
+        permuted_hidden_states = hidden_states.repeat_interleave(top_k_num,
+                                                                 dim=0)
+        expert_tokens = torch.zeros((num_experts, ),
+                                    dtype=torch.int64,
+                                    device=hidden_states.device)
+        group_list_type = 0
+        return permuted_hidden_states, expert_tokens, group_list_type
 
     def unpermute(self, mlp_output: torch.Tensor,
                   hidden_states: torch.Tensor) -> None:
@@ -331,7 +336,8 @@ class MC2CommImpl(MoECommMethod):
         # because ep_group and mc2_group basically have the same init params.
         # We only init another group because of the restriction of MC2:
         # "No other groups can be used in the same process as the MC2 group."
-        self.mc2_comm_name = get_mc2_comm_name(self.moe_config.ep_rank)
+        self.mc2_comm_name = get_mc2_group().device_group._get_backend(
+            torch.device("npu")).get_hccl_comm_name(self.moe_config.ep_rank)
 
         # Feature flags
         self.enable_dispatch_v2 = hasattr(torch_npu,
@@ -488,68 +494,3 @@ class MC2CommImpl(MoECommMethod):
         combine = torch_npu.npu_moe_distribute_combine_v2 if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine
 
         hidden_states[:] = combine(**combine_kwargs)
-
-
-def moe_comm_pre_process(
-    hidden_states: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    expert_map: torch.Tensor,
-    num_experts: int,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """This function is a wrapper for the pre_process method of the
-    MoECommMethod instance stored in the ForwardContext. So it can be
-    used as a custom op in the vllm framework.
-    """
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.moe_comm_method
-    return self._pre_process(hidden_states, topk_ids, topk_weights, expert_map,
-                             num_experts)
-
-
-def moe_comm_pre_process_fake(
-    hidden_states: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    expert_map: torch.Tensor,
-    num_experts: int,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
-    """This is a fake implementation of the pre_process method.
-    torch.compile will use this implementation to generate FX graph.
-    """
-    top_k_num = topk_ids.shape[1]
-    permuted_hidden_states = hidden_states.repeat_interleave(top_k_num, dim=0)
-    expert_tokens = torch.zeros((num_experts, ),
-                                dtype=torch.int64,
-                                device=hidden_states.device)
-    group_list_type = 0
-    return permuted_hidden_states, expert_tokens, group_list_type
-
-
-def moe_comm_post_process(mlp_output: torch.Tensor,
-                          hidden_states: torch.Tensor) -> None:
-    """This function is a wrapper for the post_process method of the
-    MoECommMethod instance stored in the ForwardContext. So it can be
-    used as a custom op in the vllm framework.
-    """
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.moe_comm_method
-    self._post_process(mlp_output, hidden_states)
-    return
-
-
-direct_register_custom_op(
-    op_name="moe_comm_pre_process",
-    op_func=moe_comm_pre_process,
-    mutates_args=[],
-    fake_impl=moe_comm_pre_process_fake,
-    dispatch_key="PrivateUse1",
-)
-
-direct_register_custom_op(
-    op_name="moe_comm_post_process",
-    op_func=moe_comm_post_process,
-    mutates_args=["hidden_states"],
-    fake_impl=lambda x, y: None,  # No-op for fake implementation
-    dispatch_key="PrivateUse1",
-)
