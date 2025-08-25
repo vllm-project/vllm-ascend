@@ -423,30 +423,30 @@ def unified_apply_mlp(
         topk_scales: Optional[torch.Tensor] = None) -> torch.Tensor:
     if get_forward_context().with_quant:
         return quant_apply_mlp(hidden_states, w1, w1_scale, w2, w2_scale,
-                               group_list, dynamic_scale,
-                               group_list_type, w1_scale_bias, w2_scale_bias)
+                               group_list, dynamic_scale, group_list_type,
+                               w1_scale_bias, w2_scale_bias)
     else:
         return unquant_apply_mlp(hidden_states, w1, w2, group_list,
                                  group_list_type, topk_scales)
 
 
 def unified_fused_experts_eager(hidden_states: torch.Tensor,
-                               w1: torch.Tensor,
-                               w2: torch.Tensor,
-                               topk_weights: torch.Tensor,
-                               topk_ids: torch.Tensor,
-                               expert_map: torch.Tensor = None,
-                               log2phy: torch.Tensor = None,
-                               global_redundant_expert_num: int = 0,
-                               w1_scale: torch.Tensor = None,
-                               w1_scale_bias: torch.Tensor = None,
-                               w2_scale: torch.Tensor = None,
-                               w2_scale_bias: torch.Tensor = None,
-                               shared_experts: Optional[torch.Tensor] = None,
-                               shared_gate_up: Optional[Any] = None,
-                               shared_dequant_scale: Optional[Any] = None,
-                               mc2_mask: Optional[torch.Tensor] = None,
-                               apply_router_weight_on_input: bool = False):
+                                w1: torch.Tensor,
+                                w2: torch.Tensor,
+                                topk_weights: torch.Tensor,
+                                topk_ids: torch.Tensor,
+                                expert_map: torch.Tensor = None,
+                                log2phy: torch.Tensor = None,
+                                global_redundant_expert_num: int = 0,
+                                w1_scale: torch.Tensor = None,
+                                w1_scale_bias: torch.Tensor = None,
+                                w2_scale: torch.Tensor = None,
+                                w2_scale_bias: torch.Tensor = None,
+                                shared_experts: Optional[torch.Tensor] = None,
+                                shared_gate_up: Optional[Any] = None,
+                                shared_dequant_scale: Optional[Any] = None,
+                                mc2_mask: Optional[torch.Tensor] = None,
+                                apply_router_weight_on_input: bool = False):
     token_dispatcher = get_forward_context().token_dispatcher
 
     results = token_dispatcher.token_dispatch(
@@ -557,14 +557,14 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         return unified_fused_experts_eager(hidden_states=x,
-                                          w1=layer.w13_weight,
-                                          w2=layer.w2_weight,
-                                          topk_weights=topk_weights,
-                                          topk_ids=topk_ids,
-                                          expert_map=expert_map,
-                                          shared_experts=shared_experts,
-                                          mc2_mask=kwargs.get(
-                                              "mc2_mask", None))
+                                           w1=layer.w13_weight,
+                                           w2=layer.w2_weight,
+                                           topk_weights=topk_weights,
+                                           topk_ids=topk_ids,
+                                           expert_map=expert_map,
+                                           shared_experts=shared_experts,
+                                           mc2_mask=kwargs.get(
+                                               "mc2_mask", None))
 
 
 class AscendFusedMoE(FusedMoE):
