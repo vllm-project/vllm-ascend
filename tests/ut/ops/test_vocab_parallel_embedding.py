@@ -16,12 +16,10 @@
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.model_executor.layers.vocab_parallel_embedding import \
-    VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding, get_masked_input_and_mask)
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.vocab_parallel_embedding import (
-    get_masked_input_and_mask, vocab_parallel_embedding_forward)
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
 
@@ -168,7 +166,7 @@ class TestGetMaskedInputAndMask(TestBase):
                            torch.tensor([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4]))
 
 
-class TestVocabParallelEmbedding(TestBase):
+class TestCustomVocabParallelEmbedding(TestBase):
 
     def setUp(self):
         # Create a mock VocabParallelEmbedding instance
@@ -228,7 +226,7 @@ class TestVocabParallelEmbedding(TestBase):
         with patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.tensor_model_parallel_all_reduce",
                 side_effect=lambda x: x) as mock_reduce_tp1:
-            output = vocab_parallel_embedding_forward(mock_embedding, input_)
+            output = mock_embedding.forward(input_)
 
         # Should just pass through without masking
         mock_embedding.quant_method.embedding.assert_called_once_with(
@@ -244,8 +242,7 @@ class TestVocabParallelEmbedding(TestBase):
         with patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.tensor_model_parallel_all_reduce",
                 side_effect=lambda x: x) as mock_reduce_tp:
-            output = vocab_parallel_embedding_forward(self.mock_embedding,
-                                                      input_)
+            output = self.mock_embedding.forward(input_)
 
         # Check that masking was applied correctly
         self.mock_embedding.quant_method.embedding.assert_called_once()
@@ -270,8 +267,7 @@ class TestVocabParallelEmbedding(TestBase):
         with patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.tensor_model_parallel_all_reduce",
                 side_effect=lambda x: x):
-            output = vocab_parallel_embedding_forward(self.mock_embedding,
-                                                      input_)
+            output = self.mock_embedding.forward(input_)
 
         # Check that invalid positions (0, 2, 4) were zeroed out
         self.assertTrue(torch.all(output[0] == 0))
@@ -294,6 +290,5 @@ class TestVocabParallelEmbedding(TestBase):
                 with patch(
                         "vllm_ascend.ops.vocab_parallel_embedding.tensor_model_parallel_all_reduce",
                         side_effect=lambda x: x):
-                    output = vocab_parallel_embedding_forward(
-                        self.mock_embedding, input_)
+                    output = self.mock_embedding.forward(input_)
                 self.assertEqual(output.shape, expected_shape)

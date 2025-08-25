@@ -500,6 +500,11 @@ def register_ascend_customop():
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
 
+    from vllm_ascend.ops.vocab_parallel_embedding import \
+        AscendVocabParallelEmbedding
+    CustomOp.register_oot(_decorated_op_cls=AscendVocabParallelEmbedding,
+                          name="VocabParallelEmbedding")
+
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
