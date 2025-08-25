@@ -296,23 +296,24 @@ class TestAscendScheduler(TestBase):
             req.status = RequestStatus.RUNNING
 
         if vllm_version_is("0.10.1.1"):
-            scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                            scheduled_cached_reqs=[],
-                                            num_scheduled_tokens={
-                                                requests[0].request_id: 1,
-                                                requests[1].request_id: 2
-                                            },
-                                            total_num_scheduled_tokens=3,
-                                            scheduled_encoder_inputs={},
-                                            scheduled_spec_decode_tokens={
-                                                requests[0].request_id: [],
-                                                requests[1].request_id: [10]
-                                            },
-                                            num_common_prefix_blocks=0,
-                                            finished_req_ids=set(),
-                                            free_encoder_input_ids=[],
-                                            structured_output_request_ids={},
-                                            grammar_bitmask=None)
+            scheduler_output = SchedulerOutput(
+                scheduled_new_reqs=[],
+                scheduled_cached_reqs=[],
+                num_scheduled_tokens={
+                    requests[0].request_id: 1,
+                    requests[1].request_id: 2
+                },
+                total_num_scheduled_tokens=3,
+                scheduled_encoder_inputs={},
+                scheduled_spec_decode_tokens={
+                    requests[0].request_id: [],
+                    requests[1].request_id: [10]
+                },
+                num_common_prefix_blocks=0,
+                finished_req_ids=set(),
+                free_encoder_input_ids=[],
+                structured_output_request_ids={},
+                grammar_bitmask=None)
             model_output = ModelRunnerOutput(
                 req_ids=[req.request_id for req in requests],
                 req_id_to_index={
@@ -327,23 +328,24 @@ class TestAscendScheduler(TestBase):
                 prompt_logprobs_dict={},
                 pooler_output=[])
         else:
-            scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                            scheduled_cached_reqs=[],
-                                            num_scheduled_tokens={
-                                                requests[0].request_id: 1,
-                                                requests[1].request_id: 2
-                                            },
-                                            total_num_scheduled_tokens=3,
-                                            scheduled_encoder_inputs={},
-                                            scheduled_spec_decode_tokens={
-                                                requests[0].request_id: [],
-                                                requests[1].request_id: [10]
-                                            },
-                                            num_common_prefix_blocks=0,
-                                            finished_req_ids=set(),
-                                            free_encoder_mm_hashes=[],
-                                            structured_output_request_ids={},
-                                            grammar_bitmask=None)
+            scheduler_output = SchedulerOutput(
+                scheduled_new_reqs=[],
+                scheduled_cached_reqs=[],
+                num_scheduled_tokens={
+                    requests[0].request_id: 1,
+                    requests[1].request_id: 2
+                },
+                total_num_scheduled_tokens=3,
+                scheduled_encoder_inputs={},
+                scheduled_spec_decode_tokens={
+                    requests[0].request_id: [],
+                    requests[1].request_id: [10]
+                },
+                num_common_prefix_blocks=0,
+                finished_req_ids=set(),
+                free_encoder_mm_hashes=[],
+                structured_output_request_ids={},
+                grammar_bitmask=None)
             model_output = ModelRunnerOutput(
                 req_ids=[req.request_id for req in requests],
                 req_id_to_index={
@@ -381,24 +383,25 @@ class TestAscendScheduler(TestBase):
             req.status = RequestStatus.RUNNING
 
         if vllm_version_is("0.10.1.1"):
-            scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                            scheduled_cached_reqs=[],
-                                            num_scheduled_tokens={
-                                                requests[0].request_id: 3,
-                                                requests[1].request_id: 2
-                                            },
-                                            total_num_scheduled_tokens=5,
-                                            scheduled_encoder_inputs={},
-                                            scheduled_spec_decode_tokens={
-                                                requests[0].request_id:
-                                                [10, 42],
-                                                requests[1].request_id: [13]
-                                            },
-                                            num_common_prefix_blocks=0,
-                                            finished_req_ids=set(),
-                                            free_encoder_input_ids=[],
-                                            structured_output_request_ids={},
-                                            grammar_bitmask=None)
+            scheduler_output = SchedulerOutput(
+                scheduled_new_reqs=[],
+                scheduled_cached_reqs=[],
+                num_scheduled_tokens={
+                    requests[0].request_id: 3,
+                    requests[1].request_id: 2
+                },
+                total_num_scheduled_tokens=5,
+                scheduled_encoder_inputs={},
+                scheduled_spec_decode_tokens={
+                    requests[0].request_id:
+                    [10, 42],
+                    requests[1].request_id: [13]
+                },
+                num_common_prefix_blocks=0,
+                finished_req_ids=set(),
+                free_encoder_input_ids=[],
+                structured_output_request_ids={},
+                grammar_bitmask=None)
             model_output = ModelRunnerOutput(
                 req_ids=[req.request_id for req in requests],
                 req_id_to_index={
@@ -412,24 +415,25 @@ class TestAscendScheduler(TestBase):
                 prompt_logprobs_dict={},
                 pooler_output=[])
         else:
-            scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                            scheduled_cached_reqs=[],
-                                            num_scheduled_tokens={
-                                                requests[0].request_id: 3,
-                                                requests[1].request_id: 2
-                                            },
-                                            total_num_scheduled_tokens=5,
-                                            scheduled_encoder_inputs={},
-                                            scheduled_spec_decode_tokens={
-                                                requests[0].request_id:
-                                                [10, 42],
-                                                requests[1].request_id: [13]
-                                            },
-                                            num_common_prefix_blocks=0,
-                                            finished_req_ids=set(),
-                                            free_encoder_mm_hashes=[],
-                                            structured_output_request_ids={},
-                                            grammar_bitmask=None)
+            scheduler_output = SchedulerOutput(
+                scheduled_new_reqs=[],
+                scheduled_cached_reqs=[],
+                num_scheduled_tokens={
+                    requests[0].request_id: 3,
+                    requests[1].request_id: 2
+                },
+                total_num_scheduled_tokens=5,
+                scheduled_encoder_inputs={},
+                scheduled_spec_decode_tokens={
+                    requests[0].request_id:
+                    [10, 42],
+                    requests[1].request_id: [13]
+                },
+                num_common_prefix_blocks=0,
+                finished_req_ids=set(),
+                free_encoder_mm_hashes=[],
+                structured_output_request_ids={},
+                grammar_bitmask=None)
             model_output = ModelRunnerOutput(
                 req_ids=[req.request_id for req in requests],
                 req_id_to_index={
@@ -465,24 +469,25 @@ class TestAscendScheduler(TestBase):
             req.status = RequestStatus.RUNNING
 
         if vllm_version_is("0.10.1.1"):
-            scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                            scheduled_cached_reqs=[],
-                                            num_scheduled_tokens={
-                                                requests[0].request_id: 3,
-                                                requests[1].request_id: 1
-                                            },
-                                            total_num_scheduled_tokens=4,
-                                            scheduled_encoder_inputs={},
-                                            scheduled_spec_decode_tokens={
-                                                requests[0].request_id:
-                                                [10, 11],
-                                                requests[1].request_id: []
-                                            },
-                                            num_common_prefix_blocks=0,
-                                            finished_req_ids=set(),
-                                            free_encoder_input_ids=[],
-                                            structured_output_request_ids={},
-                                            grammar_bitmask=None)
+            scheduler_output = SchedulerOutput(
+                scheduled_new_reqs=[],
+                scheduled_cached_reqs=[],
+                num_scheduled_tokens={
+                    requests[0].request_id: 3,
+                    requests[1].request_id: 1
+                },
+                total_num_scheduled_tokens=4,
+                scheduled_encoder_inputs={},
+                scheduled_spec_decode_tokens={
+                    requests[0].request_id:
+                    [10, 11],
+                    requests[1].request_id: []
+                },
+                num_common_prefix_blocks=0,
+                finished_req_ids=set(),
+                free_encoder_input_ids=[],
+                structured_output_request_ids={},
+                grammar_bitmask=None)
             model_output = ModelRunnerOutput(
                 req_ids=[req.request_id for req in requests],
                 req_id_to_index={
@@ -496,24 +501,25 @@ class TestAscendScheduler(TestBase):
                 prompt_logprobs_dict={},
                 pooler_output=[])
         else:
-            scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
-                                            scheduled_cached_reqs=[],
-                                            num_scheduled_tokens={
-                                                requests[0].request_id: 3,
-                                                requests[1].request_id: 1
-                                            },
-                                            total_num_scheduled_tokens=4,
-                                            scheduled_encoder_inputs={},
-                                            scheduled_spec_decode_tokens={
-                                                requests[0].request_id:
-                                                [10, 11],
-                                                requests[1].request_id: []
-                                            },
-                                            num_common_prefix_blocks=0,
-                                            finished_req_ids=set(),
-                                            free_encoder_mm_hashes=[],
-                                            structured_output_request_ids={},
-                                            grammar_bitmask=None)
+            scheduler_output = SchedulerOutput(
+                scheduled_new_reqs=[],
+                scheduled_cached_reqs=[],
+                num_scheduled_tokens={
+                    requests[0].request_id: 3,
+                    requests[1].request_id: 1
+                },
+                total_num_scheduled_tokens=4,
+                scheduled_encoder_inputs={},
+                scheduled_spec_decode_tokens={
+                    requests[0].request_id:
+                    [10, 11],
+                    requests[1].request_id: []
+                },
+                num_common_prefix_blocks=0,
+                finished_req_ids=set(),
+                free_encoder_mm_hashes=[],
+                structured_output_request_ids={},
+                grammar_bitmask=None)
             model_output = ModelRunnerOutput(
                 req_ids=[req.request_id for req in requests],
                 req_id_to_index={
