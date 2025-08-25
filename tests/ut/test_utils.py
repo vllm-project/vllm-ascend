@@ -356,13 +356,13 @@ class TestUtils(TestBase):
         # ascend custom op is not registered
         utils.register_ascend_customop()
         # should call register_oot three
-        self.assertEqual(mock_customop.register_oot.call_count, 6)
+        self.assertEqual(mock_customop.register_oot.call_count, 8)
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
         # should not register_oot again, thus only called three in this ut
-        self.assertEqual(mock_customop.register_oot.call_count, 6)
+        self.assertEqual(mock_customop.register_oot.call_count, 8)
 
 
 class TestProfileExecuteDuration(TestBase):
