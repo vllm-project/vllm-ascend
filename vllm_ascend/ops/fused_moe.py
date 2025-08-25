@@ -1212,7 +1212,11 @@ class AscendFusedMoE(FusedMoE):
                 expert_load_balancer.get_rank_placement_map(
                     self.moe_instance_id, self.ep_rank))
             self.log2phy = expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id, self.ep_rank).npu()
+                self.moe_instance_id, get_ep_group().rank_in_group).npu()
+            log2phy_map, num_experts = self.log2phy
+            log2phy_map = log2phy_map.npu()
+            num_experts = num_experts.npu()
+            self.log2phy = log2phy_map, num_experts
             self.global_redundant_expert_num = (
                 expert_load_balancer.get_global_redundant_expert_num())
         else:
@@ -1447,8 +1451,16 @@ class AscendFusedMoE(FusedMoE):
                 e_hidden_states, expert_token_num, group_list_type = e_hidden_states
 
         if self.dynamic_eplb:
-            self.moe_load += expert_token_num if group_list_type else \
-                torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
+            if is_prefill:
+                token_nums = expert_token_num if group_list_type else \
+                    torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
+                self.moe_load.add_(token_nums)
+            else:
+                with npu_stream_switch("moe_load_async", 0):
+                    npu_wait_tensor(hidden_states, expert_token_num)
+                    token_nums = expert_token_num if group_list_type else \
+                        torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
+                    self.moe_load.add_(token_nums)
 
         if not self.enable_prefill_optimizations and fused_moe_state != FusedMoEState.AllGather and not enable_sp:
             if tp_size > 1:
@@ -1486,7 +1498,7 @@ class AscendFusedMoE(FusedMoE):
         return self.expert_map
 
     def get_log2phy_map(self):
-        return self.log2phy
+        return self.log2phy[0]
 
     def clear_moe_load(self):
         if self.moe_load is not None:
