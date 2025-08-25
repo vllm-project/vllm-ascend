@@ -398,7 +398,7 @@ class AscendScheduler(Scheduler):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,  # type: ignore
-            free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+            free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             structured_output_request_ids={},
             grammar_bitmask=None,
         )

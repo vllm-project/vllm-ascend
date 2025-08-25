@@ -309,7 +309,7 @@ class TestAscendScheduler(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_input_ids=[],
+                                           free_encoder_mm_hashes=[],
                                            structured_output_request_ids={},
                                            grammar_bitmask=None)
         if vllm_version_is("0.10.1.1"):
@@ -378,7 +378,7 @@ class TestAscendScheduler(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_input_ids=[],
+                                           free_encoder_mm_hashes=[],
                                            structured_output_request_ids={},
                                            grammar_bitmask=None)
         if vllm_version_is("0.10.1.1"):
@@ -444,7 +444,7 @@ class TestAscendScheduler(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_input_ids=[],
+                                           free_encoder_mm_hashes=[],
                                            structured_output_request_ids={},
                                            grammar_bitmask=None)
 
@@ -504,7 +504,7 @@ class TestAscendScheduler(TestBase):
             },
             num_common_prefix_blocks=0,
             finished_req_ids=set(),
-            free_encoder_input_ids=[],
+            free_encoder_mm_hashes=[],
             structured_output_request_ids={},
             grammar_bitmask=None)
 
