@@ -1,6 +1,9 @@
 import os
 from concurrent.futures import ThreadPoolExecutor
+from unittest import mock
 from unittest.mock import MagicMock, patch
+
+import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.torchair import utils
@@ -75,3 +78,45 @@ class TestTorchairUtils(TestBase):
             args, kwargs = call_args_list[i]
             self.assertEqual(args[0], expected_name)
             self.assertEqual(args[1], expected_path)
+
+    @mock.patch('torch_npu.get_npu_format')
+    @mock.patch('torch_npu.npu_format_cast')
+    @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
+                new=mock.MagicMock)
+    def test_converting_weight_acl_format(self, mock_npu_cast,
+                                          mock_get_format):
+        ACL_FORMAT_FRACTAL_NZ = 29
+        mock_get_format.return_value = 1
+        mock_npu_cast.return_value = 1
+
+        fused_moe = mock.MagicMock()
+        fused_moe.w13_weight = mock.MagicMock()
+        fused_moe.w2_weight = mock.MagicMock()
+        fused_moe.w13_weight.data = torch.randn(128, 256)
+        fused_moe.w2_weight.data = torch.randn(256, 128)
+        model = mock.MagicMock()
+        model.modules.return_value = [fused_moe]
+
+        utils.converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
+        self.assertEqual(fused_moe.w13_weight.data, 1)
+
+    @mock.patch('torch_npu.get_npu_format')
+    @mock.patch('torch_npu.npu_format_cast')
+    @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
+                new=mock.MagicMock)
+    def test_converting_weight_acl_format_format_true(self, mock_npu_cast,
+                                                      mock_get_format):
+        ACL_FORMAT_FRACTAL_NZ = 29
+        mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
+        mock_npu_cast.return_value = 1
+
+        fused_moe = mock.MagicMock()
+        fused_moe.w13_weight = mock.MagicMock()
+        fused_moe.w2_weight = mock.MagicMock()
+        fused_moe.w13_weight.data = torch.randn(128, 256)
+        fused_moe.w2_weight.data = torch.randn(256, 128)
+        model = mock.MagicMock()
+        model.modules.return_value = [fused_moe]
+
+        utils.converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
+        mock_npu_cast.assert_not_called()
