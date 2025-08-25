@@ -382,7 +382,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_lengths_kv=attn_metadata.seq_lens
             )
 
-            output = output.view(num_tokens, self.num_heads, self.head_size)
+            output = output.view(batch_size, self.num_heads, self.head_size)
         else:
             torch_npu._npu_paged_attention(query=query,
                                        key_cache=self.key_cache,
