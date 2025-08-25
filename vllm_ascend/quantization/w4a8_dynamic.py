@@ -297,7 +297,7 @@ class AscendW4A8DynamicFusedMoEMethod:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         topk_weights = topk_weights.to(x.dtype)
-        
+
         return unified_fused_experts_eager(
             hidden_states=x,
             w1=layer.w13_weight,
