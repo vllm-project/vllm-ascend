@@ -590,6 +590,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             [[num_tokens, with_prefill, enable_dbo]],
             device="npu",
             dtype=torch.int32)
+        # use device all_gather
         global_forward_metadata = get_dp_group().all_gather(
             local_forward_metadata, dim=0)
         maybe_padded_num_tokens = global_forward_metadata[:, 0].max().item()
