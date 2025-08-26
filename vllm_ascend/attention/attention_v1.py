@@ -306,7 +306,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if self.sliding_window is not None and \
             attn_metadata.attn_mask.shape[0] > self.sliding_window:
-            
+
             key = self._repeat_kv(key, self.num_heads // self.num_kv_heads)
             value = self._repeat_kv(value, self.num_heads // self.num_kv_heads)
 
