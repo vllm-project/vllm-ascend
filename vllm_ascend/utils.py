@@ -481,6 +481,49 @@ def register_ascend_customop():
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
+def register_ascend_torchair_customop():
+    """Register Ascend CustomOP
+
+    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`, 
+    and ensure this will execute after model config is initilazed.
+    """
+    global _ASCEND_CUSTOMOP_IS_REIGISTERED
+    if _ASCEND_CUSTOMOP_IS_REIGISTERED:
+        return
+    from vllm.model_executor.custom_op import CustomOp
+
+    from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
+                                        AscendMlpMergedColumnParallelLinear,
+                                        AscendMlpRowParallelLinear)
+    from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
+        TorchairAscendDeepseekScalingRotaryEmbedding,
+        TorchairAscendRotaryEmbedding)
+
+    CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
+    CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
+                          name="SiluAndMul")
+    CustomOp.register_oot(_decorated_op_cls=TorchairAscendRotaryEmbedding,
+                          name="RotaryEmbedding")
+    CustomOp.register_oot(
+        _decorated_op_cls=TorchairAscendDeepseekScalingRotaryEmbedding,
+        name="DeepseekScalingRotaryEmbedding")
+    if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
+        CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
+                              name="ColumnParallelLinear")
+        CustomOp.register_oot(_decorated_op_cls=AscendMlpRowParallelLinear,
+                              name="RowParallelLinear")
+        CustomOp.register_oot(
+            _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
+            name="MergedColumnParallelLinear")
+
+    from vllm_ascend.ops.layernorm import AscendRMSNorm
+    CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
+
+    # NOTE: Keep this at last to ensure all custom actions are registered
+    _ASCEND_CUSTOMOP_IS_REIGISTERED = True
+
+
 # TODO(zzzzwwjj): Currently there is no clear SOC_VERSION policy for A2 and A3 in CANN.
 # So we get the version dynamically. In the future, we should get the version info from _build_info like 310p does.
 class AscendSocVersion(Enum):

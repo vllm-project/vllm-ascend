@@ -41,13 +41,15 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (init_ascend_soc_version,
-                               register_ascend_customop, sleep_mode_enabled,
-                               try_register_lib, vllm_version_is)
+                               register_ascend_customop,
+                               register_ascend_torchair_customop,
+                               sleep_mode_enabled, try_register_lib,
+                               vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if not vllm_version_is("0.10.1.1"):
@@ -75,10 +77,14 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
         _register_atb_extensions()
-        register_ascend_customop()
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         init_ascend_soc_version()
+
+        if get_ascend_config().torchair_graph_config.enabled:
+            register_ascend_torchair_customop()
+        else:
+            register_ascend_customop()
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
