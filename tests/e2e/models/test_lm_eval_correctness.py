@@ -65,6 +65,10 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
     template = env.get_template("report_template.md")
     model_args = build_model_args(eval_config, tp_size)
 
+    parallel_mode = f"TP{model_args.get('tensor_parallel_size', 1)}"
+    if model_args.get('enable_expert_parallel', False):
+        parallel_mode += " + EP"
+
     report_content = template.render(
         vllm_version=env_config.vllm_version,
         vllm_commit=env_config.vllm_commit,
@@ -79,10 +83,11 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         datasets=",".join([task["name"] for task in eval_config["tasks"]]),
         apply_chat_template=eval_config.get("apply_chat_template", True),
         fewshot_as_multiturn=eval_config.get("fewshot_as_multiturn", True),
-        limit=eval_config.get("limit", None),
+        limit=eval_config.get("limit", "N/A"),
         batch_size="auto",
         num_fewshot=eval_config.get("num_fewshot", "N/A"),
-        rows=report_data["rows"])
+        rows=report_data["rows"],
+        parallel_mode=parallel_mode)
 
     report_output = os.path.join(
         report_dir, f"{os.path.basename(eval_config['model_name'])}.md")
@@ -123,7 +128,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir,
         for metric in task["metrics"]:
             metric_name = metric["name"]
             ground_truth = metric["value"]
-            measured_value = task_result[metric_name]
+            measured_value = round(task_result[metric_name], 4)
             task_success = bool(
                 np.isclose(ground_truth, measured_value, rtol=RTOL))
             success = success and task_success

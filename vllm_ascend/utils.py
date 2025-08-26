@@ -32,7 +32,6 @@ from torch_npu.npu.streams import Event
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -46,7 +45,7 @@ else:
 # Maximum number of graphs that can be captured by ACL Graph
 MAX_CAPTURE_SIZE = 1920
 
-ASCEND_QUATIZATION_METHOD = "ascend"
+ASCEND_QUANTIZATION_METHOD = "ascend"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 
 ACL_FORMAT_FRACTAL_ND = 2
@@ -168,28 +167,6 @@ def aligned_16(tensor: torch.Tensor):
     new_tensor[:n] = tensor
 
     return new_tensor
-
-
-def maybe_converting_weight_acl_format(model, format=ACL_FORMAT_FRACTAL_NZ):
-    # currently, there are some operations which do not support ACL_FORMAT_FRACTAL_NZ
-    # in eager mode but support it in torchair graph mode. since ACL_FORMAT_FRACTAL_NZ
-    # is much more preferred than ACL_FORMAT_FRACTAL_ND on 300I Duo, we add this
-    # conversion when using torchair graph mode on 300I Duo platform.
-    # TODO: we will remove this conversion if npu_quant_grouped_matmul_dequant
-    # accepts weight format of ACL_FORMAT_FRACTAL_NZ in eager mode.
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-
-    use_torchair = get_ascend_config().torchair_graph_config.enabled
-    if not is_310p() or not use_torchair:
-        return
-    for module in model.modules():
-        if isinstance(module, FusedMoE):
-            if torch_npu.get_npu_format(module.w13_weight.data) == format:
-                return
-            module.w13_weight.data = torch_npu.npu_format_cast(
-                module.w13_weight.data, format)
-            module.w2_weight.data = torch_npu.npu_format_cast(
-                module.w2_weight.data, format)
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
@@ -478,9 +455,16 @@ def register_ascend_customop():
     from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
                                         AscendMlpMergedColumnParallelLinear,
                                         AscendMlpRowParallelLinear)
+    from vllm_ascend.ops.rotary_embedding import (
+        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
     CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
                           name="SiluAndMul")
+    CustomOp.register_oot(_decorated_op_cls=AscendRotaryEmbedding,
+                          name="RotaryEmbedding")
+    CustomOp.register_oot(
+        _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
+        name="DeepseekScalingRotaryEmbedding")
     if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
         CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
                               name="ColumnParallelLinear")
