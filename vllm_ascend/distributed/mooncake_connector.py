@@ -19,6 +19,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import zmq
+import vllm_ascend.envs as envs_ascend
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -758,13 +759,14 @@ class MooncakeConnectorWorker:
         # get tp device id
         # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940
         # introducing some changes
-        device_ids_str = os.getenv("ASCEND_RT_VISIBLE_DEVICES", None)
+        device_ids_str = envs_ascend.PHYSICAL_DEVICES
         if device_ids_str is None:
             device_ids = list(
                 range(self.dp_rank * self.tp_size,
                       (self.dp_rank + 1) * self.tp_size))
         else:
             device_ids = list(map(int, device_ids_str.split(',')))
+            device_ids = device_ids[self.dp_rank * self.tp_size : (self.dp_rank + 1) * self.tp_size]
         assert len(device_ids) > self.tp_rank  # type: ignore
         self.device_id = device_ids[self.tp_rank]  # type: ignore
 
