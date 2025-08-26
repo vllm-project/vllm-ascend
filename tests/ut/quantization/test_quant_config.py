@@ -10,8 +10,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.quant_config import (AscendKVCacheMethod,
                                                    AscendQuantConfig)
-
-ASCEND_QUATIZATION_METHOD = "ascend"
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
 class TestAscendQuantConfig(TestBase):
@@ -42,7 +41,7 @@ class TestAscendQuantConfig(TestBase):
 
     def test_get_name(self):
         self.assertEqual(AscendQuantConfig.get_name(),
-                         ASCEND_QUATIZATION_METHOD)
+                         ASCEND_QUANTIZATION_METHOD)
 
     def test_get_supported_act_dtypes(self):
         supported_dtypes = AscendQuantConfig.get_supported_act_dtypes()
@@ -66,7 +65,7 @@ class TestAscendQuantConfig(TestBase):
         # Test when NPU is available
         mock_is_available.return_value = True
         result = AscendQuantConfig.override_quantization_method(None, None)
-        self.assertEqual(result, ASCEND_QUATIZATION_METHOD)
+        self.assertEqual(result, ASCEND_QUANTIZATION_METHOD)
 
         # Test when NPU is not available
         mock_is_available.return_value = False

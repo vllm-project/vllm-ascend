@@ -45,7 +45,7 @@ else:
 # Maximum number of graphs that can be captured by ACL Graph
 MAX_CAPTURE_SIZE = 1920
 
-ASCEND_QUATIZATION_METHOD = "ascend"
+ASCEND_QUANTIZATION_METHOD = "ascend"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 
 ACL_FORMAT_FRACTAL_ND = 2
