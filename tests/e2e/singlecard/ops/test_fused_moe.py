@@ -26,6 +26,7 @@ import pytest
 import torch
 import torch_npu
 from vllm.model_executor.layers.activation import SiluAndMul
+
 from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
     TokenDispatcherWithAllGather
