@@ -143,13 +143,12 @@ class NPUPlatform(Platform):
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.level = CompilationLevel.NO_COMPILATION
-        elif envs_vllm.VLLM_USE_V1:
-            compilation_config.cudagraph_num_of_warmups = 1
+
+        compilation_config.cudagraph_num_of_warmups = 1
 
         if compilation_config.cudagraph_mode is None:
             # if cudagraph_mode is not explicitly set by users, set default value
-            if envs_vllm.VLLM_USE_V1 and compilation_config.level \
-                == CompilationLevel.PIECEWISE:
+            if compilation_config.level == CompilationLevel.PIECEWISE:
                 compilation_config.cudagraph_mode = \
                     CUDAGraphMode.PIECEWISE
             elif compilation_config.level not in [
@@ -161,7 +160,7 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             else:
                 logger.warning(
-                    "compilation_config.level = CompilationLevel.NO_COMPILATION or VLLM_USE_V1 = 0 is set, Setting CUDAGraphMode to NONE"
+                    "compilation_config.level = CompilationLevel.NO_COMPILATION is set, Setting CUDAGraphMode to NONE"
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
