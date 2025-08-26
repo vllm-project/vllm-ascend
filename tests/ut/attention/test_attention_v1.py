@@ -431,6 +431,7 @@ class TestAscendAttentionBackendImpl(TestBase):
 
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu._npu_paged_attention')
+    @patch('torch_npu.npu_fused_infer_attention_score')
     def test_forward_decode_only_swa(self, mock_paged_attention,
                                      mock_npu_reshape_and_cache):
         """Test forward pass in DecodeOnly state"""
