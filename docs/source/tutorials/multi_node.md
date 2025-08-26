@@ -147,6 +147,7 @@ vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 nic_name="xxx"
 local_ip="xxx"
 
+export VLLM_USE_MODELSCOPE=True
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
