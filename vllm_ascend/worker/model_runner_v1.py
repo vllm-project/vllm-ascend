@@ -1290,16 +1290,104 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
 
-        self.attn_mask = self._make_attention_mask(
-            seq_lens=seq_lens,
-            query_lens=num_scheduled_tokens,
-            position=positions,
-            attn_state=attn_state)
-        self.attn_state = attn_state  # type: ignore
+        if self.cp_size > 1 or self.sp_size > 1:
+            self.attn_mask = None
+        else:
+            self.attn_mask = self._make_attention_mask(
+                seq_lens=seq_lens,
+                query_lens=num_scheduled_tokens,
+                position=positions,
+                attn_state=attn_state)
+        self.attn_state = attn_state
 
         extra_builder_kwargs = {}
-        extra_builder_kwargs['cp_kv_recover_idx'] = np.array(self.cp_kv_recover_idx).flatten().tolist()
-        extra_builder_kwargs['num_actual_tokens_cp_full'] = total_num_scheduled_tokens * (self.cp_size if self.attn_metadata_builder._num_prefills > 0 else 1)
+        num_actual_tokens_cp_full = total_num_scheduled_tokens * (self.cp_size if self.attn_metadata_builder._num_prefills > 0 else 1)
+        if self.cp_size > 1 and self.attn_metadata_builder._num_prefills > 0:
+            cp_kv_recover_idx = torch.zeros(num_actual_tokens_cp_full,
+                                            dtype=torch.int32,
+                                            device=self.device)
+            cp_kv_recover_idx.copy_(torch.tensor(np.array(self.cp_kv_recover_idx).flatten().tolist()), non_blocking=True)
+            extra_builder_kwargs['cp_kv_recover_idx'] = cp_kv_recover_idx.to(torch.float32).argsort().to(torch.int32)
+            
+            q_head_idx, q_tail_idx = [], []
+            kv_with_q_head_nomask_idx, kv_with_q_head_mask_idx = [], []
+            kv_with_q_tail_nomask_idx, kv_with_q_tail_mask_idx = [], []
+            chunk_seqlens = []
+            kv_with_q_head_nomask_seqlens, kv_with_q_tail_nomask_seqlens = [], []
+            q_req_offset = 0    # 请求在输入 Q 中的偏移，Q 是CP切分的
+            kv_req_offset = 0   # 请求在输入 KV 中的偏移，KV 是全量的
+            # cp_rank0: q_head_chunk_id=0, q_tail_chunk_id=3
+            # cp_rank1: q_head_chunk_id=1, q_tail_chunk_id=2
+            q_head_chunk_id = self.cp_rank
+            q_tail_chunk_id = self.cp_size * 2 - 1 - self.cp_rank
+            for seq_len in seq_lens:
+                chunk_len = seq_len // 2    # 序列切 cp_size*2 份，每一份的长度, 按request
+                chunk_seqlens.append(chunk_len)
+                # 负载均衡前半段计算所需的Q和KV
+                q_head_idx.extend(list(range(q_req_offset, q_req_offset + chunk_len)))
+                kv_with_q_head_nomask_idx.extend(
+                    list(range(kv_req_offset, kv_req_offset + chunk_len * q_head_chunk_id)))
+                kv_with_q_head_mask_idx.extend(
+                    list(range(kv_req_offset + chunk_len * q_head_chunk_id,
+                            kv_req_offset + chunk_len * (q_head_chunk_id + 1))))
+                kv_with_q_head_nomask_seqlens.append(chunk_len * q_head_chunk_id)
+
+                # 负载均衡后半段计算所需的Q和KV
+                q_tail_idx.extend(list(range(q_req_offset + chunk_len,
+                                            q_req_offset + chunk_len * 2)))
+                kv_with_q_tail_nomask_idx.extend(
+                    list(range(kv_req_offset, kv_req_offset + chunk_len * q_tail_chunk_id)))
+                kv_with_q_tail_mask_idx.extend(
+                    list(range(kv_req_offset + chunk_len * q_tail_chunk_id,
+                            kv_req_offset + chunk_len * (q_tail_chunk_id + 1))))
+                kv_with_q_tail_nomask_seqlens.append(chunk_len * q_tail_chunk_id)
+
+                q_req_offset += seq_len
+                kv_req_offset += seq_len * self.cp_size # KV是全量的
+
+            # Convert lists to tensors and move to device
+            def _list_to_tensor(lst, device, dtype=torch.int32):
+                tensor_npu = torch.zeros(len(lst), dtype=dtype, device=device)
+                tensor_npu.copy_(torch.tensor(lst, dtype=dtype), non_blocking=True)
+                return tensor_npu
+
+            # 处理q_head和q_tail相关索引
+            q_head_idx_tensor = _list_to_tensor(q_head_idx, self.device)
+            q_tail_idx_tensor = _list_to_tensor(q_tail_idx, self.device)
+            extra_builder_kwargs['q_head_idx_tensor'] = q_head_idx_tensor
+            extra_builder_kwargs['q_tail_idx_tensor'] = q_tail_idx_tensor
+
+            # 处理q_full_idx（拼接后排序）
+            q_full_idx = torch.cat([q_head_idx_tensor, q_tail_idx_tensor])
+            q_full_idx = q_full_idx.to(torch.float32).argsort().to(torch.int32)
+            extra_builder_kwargs['q_full_idx'] = q_full_idx
+
+            # 处理kv相关的各类索引（批量添加到kwargs）
+            kv_idx_names = {
+                'kv_with_q_head_nomask_idx': kv_with_q_head_nomask_idx,
+                'kv_with_q_head_mask_idx': kv_with_q_head_mask_idx,
+                'kv_with_q_tail_nomask_idx': kv_with_q_tail_nomask_idx,
+                'kv_with_q_tail_mask_idx': kv_with_q_tail_mask_idx
+            }
+            for key, value in kv_idx_names.items():
+                # 动态获取变量（假设变量名与key名一致）
+                tensor_npu = _list_to_tensor(value, self.device)
+                extra_builder_kwargs[f'{key}_tensor'] = tensor_npu
+
+            # 处理序列长度相关张量
+            attn_mask_seqlens = torch.tensor([chunk_seqlens, chunk_seqlens], dtype=torch.int32)
+            head_attn_nomask_seqlens = torch.tensor([chunk_seqlens, kv_with_q_head_nomask_seqlens], dtype=torch.int32)
+            tail_attn_nomask_seqlens = torch.tensor([chunk_seqlens, kv_with_q_tail_nomask_seqlens], dtype=torch.int32)
+            cp_prefill_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=torch.bfloat16), 1)
+
+            extra_builder_kwargs.update({
+                'attn_mask_seqlens': attn_mask_seqlens,
+                'head_attn_nomask_seqlens': head_attn_nomask_seqlens,
+                'tail_attn_nomask_seqlens': tail_attn_nomask_seqlens,
+                'cp_prefill_mask': cp_prefill_mask
+            })
+
+        extra_builder_kwargs['num_actual_tokens_cp_full'] = num_actual_tokens_cp_full
         extra_builder_kwargs['num_computed_tokens_of_cp_sp'] = self.input_batch.num_computed_tokens_of_cp_sp[:self.input_batch.num_reqs]
 
         self.query_start_loc_np[0] = 0

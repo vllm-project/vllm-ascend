@@ -1045,9 +1045,7 @@ class CustomDeepseekV2Model(nn.Module):
             chunk_hidden_states = [torch.empty_like(hidden_states) for _ in range(self.cp_size)]
             dist.all_gather(list(chunk_hidden_states), hidden_states, self.cp_group)
             hidden_states = torch.cat(chunk_hidden_states, dim=0)
-            cp_kv_recover_idx = torch.tensor(attn_metadata.prefill.cp_kv_recover_idx).to(hidden_states.device)
-            cp_kv_recover_idx = cp_kv_recover_idx.sort().indices
-            hidden_states = torch.index_select(hidden_states, 0, cp_kv_recover_idx)
+            hidden_states = torch.index_select(hidden_states, 0, attn_metadata.prefill.cp_kv_recover_idx)
         return hidden_states
 
 
