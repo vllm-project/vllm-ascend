@@ -303,6 +303,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = mask.repeat(attn_metadata.seq_lens.size(0), 1, 1, 1)
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
+
         if self.sliding_window is not None and \
             attn_metadata.attn_mask.shape[0] > self.sliding_window:
             
