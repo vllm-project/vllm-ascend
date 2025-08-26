@@ -1203,18 +1203,24 @@ class AscendFusedMoE(FusedMoE):
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
+        self.static_eplb = ascend_config.static_eplb
         self.dynamic_eplb = ascend_config.dynamic_eplb
         if expert_map_path and os.path.exists(expert_map_path):
-            # moe expert load balance
-            expert_load_balancer = ExpertLoadBalancer(expert_map_path,
-                                                      self.global_num_experts)
-            self.local_num_experts, self.expert_map = (
-                expert_load_balancer.get_rank_placement_map(
-                    self.moe_instance_id, self.ep_rank))
-            self.log2phy = expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id, self.ep_rank).npu()
-            self.global_redundant_expert_num = (
-                expert_load_balancer.get_global_redundant_expert_num())
+            if self.static_eplb or self.dynamic_eplb:
+                # moe expert load balance
+                expert_load_balancer = ExpertLoadBalancer(expert_map_path,
+                                                        self.global_num_experts)
+                self.local_num_experts, self.expert_map = (
+                    expert_load_balancer.get_rank_placement_map(
+                        self.moe_instance_id, self.ep_rank))
+                self.log2phy = expert_load_balancer.get_rank_log2phy_map(
+                    self.moe_instance_id, self.ep_rank).npu()
+                self.global_redundant_expert_num = (
+                    expert_load_balancer.get_global_redundant_expert_num())
+            else:
+                # Create a tensor of size num_experts filled with -1
+                self.local_num_experts, self.expert_map = determine_expert_map(
+                self.ep_size, self.ep_rank, self.global_num_experts)
         else:
             # Create a tensor of size num_experts filled with -1
             self.local_num_experts, self.expert_map = determine_expert_map(
