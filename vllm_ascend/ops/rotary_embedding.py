@@ -30,8 +30,7 @@ from vllm_ascend.utils import enable_custom_op, is_310p
 
 
 def custom_rotary_embedding_enabled(query, neox_style, head_size):
-    return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and enable_custom_op(
-    )
+    return False
 
 
 def rope_forward_oot(
