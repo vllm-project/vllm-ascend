@@ -262,10 +262,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.key_cache = torch.zeros(1,1,1,1)
-        self.value_cache = torch.zeros(1,1,1,1)
+        self.key_cache = torch.zeros(1, 1, 1, 1)
+        self.value_cache = torch.zeros(1, 1, 1, 1)
 
-    def _repeat_kv(self, hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    def _repeat_kv(self, hidden_states: torch.Tensor,
+                   n_rep: int) -> torch.Tensor:
         """
         This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
         num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
@@ -273,8 +274,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         num_key_value_heads, slen, head_dim = hidden_states.shape
         if n_rep == 1:
             return hidden_states
-        hidden_states = hidden_states[:, None, :, :].expand(num_key_value_heads, n_rep, slen, head_dim)
-        return hidden_states.reshape(num_key_value_heads * n_rep, slen, head_dim)
+        hidden_states = hidden_states[:, None, :, :].expand(
+            num_key_value_heads, n_rep, slen, head_dim)
+        return hidden_states.reshape(num_key_value_heads * n_rep, slen,
+                                     head_dim)
 
     def _forward_prefill_no_cache(
         self,
@@ -316,19 +319,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 pre_tokens=self.sliding_window,
                 scale=self.scale,
                 actual_seq_lengths=attn_metadata.seq_lens,
-                actual_seq_lengths_kv=attn_metadata.seq_lens
-            )
+                actual_seq_lengths_kv=attn_metadata.seq_lens)
             output = output.view(num_tokens, self.num_heads, self.head_size)
         else:
             torch_npu._npu_flash_attention(query=query,
-                                       key=key,
-                                       value=value,
-                                       mask=mask,
-                                       seq_len=attn_metadata.seq_lens,
-                                       scale_value=self.scale,
-                                       num_heads=self.num_heads,
-                                       num_kv_heads=self.num_kv_heads,
-                                       out=output)
+                                           key=key,
+                                           value=value,
+                                           mask=mask,
+                                           seq_len=attn_metadata.seq_lens,
+                                           scale_value=self.scale,
+                                           num_heads=self.num_heads,
+                                           num_kv_heads=self.num_kv_heads,
+                                           out=output)
         assert output is not None
         return output[:num_tokens, :, :]
 
@@ -372,7 +374,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.sliding_window is not None:
             batch_size = attn_metadata.seq_lens.shape[0]
 
-            query = query.view(batch_size, 1, self.num_heads*self.head_size)
+            query = query.view(batch_size, 1, self.num_heads * self.head_size)
             key = self.key_cache.flatten(2, 3).contiguous()
             value = self.value_cache.flatten(2, 3).contiguous()
 
@@ -387,21 +389,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 pre_tokens=self.sliding_window,
                 scale=self.scale,
                 block_table=attn_metadata.block_tables,
-                actual_seq_lengths=[1]*len(attn_metadata.seq_lens),
-                actual_seq_lengths_kv=attn_metadata.seq_lens
-            )
+                actual_seq_lengths=[1] * len(attn_metadata.seq_lens),
+                actual_seq_lengths_kv=attn_metadata.seq_lens)
 
             output = output.view(batch_size, self.num_heads, self.head_size)
         else:
-            torch_npu._npu_paged_attention(query=query,
-                                       key_cache=self.key_cache,
-                                       value_cache=self.value_cache,
-                                       num_kv_heads=self.num_kv_heads,
-                                       num_heads=self.num_heads,
-                                       scale_value=self.scale,
-                                       block_table=attn_metadata.block_tables,
-                                       context_lens=attn_metadata.seq_lens,
-                                       out=output)
+            torch_npu._npu_paged_attention(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                block_table=attn_metadata.block_tables,
+                context_lens=attn_metadata.seq_lens,
+                out=output)
         return output
 
     def _forward_v1_style(
