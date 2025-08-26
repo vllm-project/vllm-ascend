@@ -374,9 +374,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.seq_lens.to(device=query.device)
         if self.sliding_window is not None:
             batch_size = attn_metadata.seq_lens.shape[0]
-            block_size = self.key_cache.shape[1] if self.key_cache is not None else 128
+            block_size = 128
             query = query.view(batch_size, 1, self.num_heads * self.head_size)
+            key = self.key_cache
+            value = self.value_cache
             if self.key_cache is not None and self.value_cache is not None:
+                block_size = self.key_cache.shape[1]
                 key = self.key_cache.flatten(2, 3).contiguous()
                 value = self.value_cache.flatten(2, 3).contiguous()
 
