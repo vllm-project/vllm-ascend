@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from torch import nn
-from vllm.config import get_current_vllm_config
+from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -916,11 +916,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None):
 
         super().__init__(moe=moe)
+
         vllm_config = get_current_vllm_config()
+        self.max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
 
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
         get_ascend_config()
+
+        if ascend_config.torchair_graph_config.enabled:
+            self.use_aclgraph = False
+        else:
+            self.use_aclgraph = (vllm_config.compilation_config.level
+                                 == CompilationLevel.PIECEWISE and
+                                 not vllm_config.model_config.enforce_eager)
 
         try:
             device_group = get_mc2_group().device_group
@@ -1070,6 +1079,9 @@ class AscendFusedMoE(FusedMoE):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
+        enable_eplb: bool = False,
+        num_redundant_experts: int = 0,
+        has_bias: bool = False,
     ):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
@@ -1094,6 +1106,9 @@ class AscendFusedMoE(FusedMoE):
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            enable_eplb=enable_eplb,
+            num_redundant_experts=num_redundant_experts,
+            has_bias=has_bias,
         )
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
@@ -1240,7 +1255,7 @@ class AscendFusedMoE(FusedMoE):
     def forward(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
-                is_prefill: bool,
+                is_prefill: bool = False,
                 enable_force_load_balance: bool = False,
                 top_k: Optional[int] = None,
                 shared_experts: Optional[Any] = None,
