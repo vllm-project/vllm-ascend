@@ -28,7 +28,6 @@ import torch
 import torch_npu
 from vllm.distributed.parallel_state import get_ep_group
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.distributed.tensor_parallel import (
     all_gather_last_dim_from_tensor_parallel_region, all_to_all_hp2sp,
@@ -541,7 +540,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.ep_world_size = get_mc2_group().world_size
         self.enable_dispatch_v2 = hasattr(torch_npu,
                                           "npu_moe_distribute_dispatch_v2")
-        self.need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3)
+        self.need_extra_args = (
+            get_ascend_soc_version() == AscendSocVersion.A3)
 
         # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
         self.a3_need_extra_args = \
@@ -640,8 +640,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
 
         else:
             if shared_experts is not None:
-                shared_gate_up, _ = shared_experts.gate_up_proj(
-                    hidden_states)
+                shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)
                 self.shared_act = shared_experts.act_fn(shared_gate_up)
         group_list_type = 1
         return {
