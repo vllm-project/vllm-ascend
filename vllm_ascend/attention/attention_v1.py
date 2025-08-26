@@ -262,8 +262,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.key_cache = torch.zeros(1, 1, 1, 1)
-        self.value_cache = torch.zeros(1, 1, 1, 1)
+        self.key_cache = None
+        self.value_cache = None
 
     def _repeat_kv(self, hidden_states: torch.Tensor,
                    n_rep: int) -> torch.Tensor:
@@ -374,10 +374,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.seq_lens.to(device=query.device)
         if self.sliding_window is not None:
             batch_size = attn_metadata.seq_lens.shape[0]
-
+            block_size = self.key_cache.shape[1] if self.key_cache is not None else 128
             query = query.view(batch_size, 1, self.num_heads * self.head_size)
-            key = self.key_cache.flatten(2, 3).contiguous()
-            value = self.value_cache.flatten(2, 3).contiguous()
+            if self.key_cache is not None and self.value_cache is not None:
+                key = self.key_cache.flatten(2, 3).contiguous()
+                value = self.value_cache.flatten(2, 3).contiguous()
 
             output, _ = torch_npu.npu_fused_infer_attention_score(
                 query,
@@ -386,7 +387,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="BSH",
-                block_size=self.key_cache.shape[1],
+                block_size=block_size,
                 pre_tokens=self.sliding_window,
                 scale=self.scale,
                 block_table=attn_metadata.block_tables,
