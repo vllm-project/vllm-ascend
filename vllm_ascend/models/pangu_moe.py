@@ -497,6 +497,10 @@ class PanguProMoESparseMoeBlock(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         global _ROUTER_SCALE
         _ROUTER_SCALE = self.router_scale
+
+        # TODO(angazenn): Does not support MC2 currently
+        get_forward_context().moe_comm_method_name = "allgathercommimpl"
+
         if not use_h2p():
             final_hidden_states = self.experts.forward_impl(
                 hidden_states=hidden_states, router_logits=router_logits)
