@@ -39,36 +39,31 @@ from .utils import prompts
 from vllm import LLM, SamplingParams
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
+
+from transformers import AutoTokenizer
+
+
+MODEL_NAME = "facebook/opt-125m"
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+target_ids = [67, 128]
+for tid in target_ids:
+    token_str = tokenizer.decode([tid])
+    print(f"Token {tid} -> {token_str}")
+
+
 # Create a mixture of requests which do and don't utilize the dummy logitproc
 sampling_params_list = [
     SamplingParams(temperature=TEMP_GREEDY,
                    max_tokens=MAX_TOKENS,
                    extra_args={DUMMY_LOGITPROC_ARG: 128}),
-    SamplingParams(temperature=TEMP_GREEDY, max_tokens=MAX_TOKENS),
     SamplingParams(temperature=TEMP_GREEDY,
                    max_tokens=MAX_TOKENS,
                    extra_args={DUMMY_LOGITPROC_ARG: 67}),
-    SamplingParams(temperature=TEMP_GREEDY, max_tokens=MAX_TOKENS),
 ]
 
 
 def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
-    """Compare `LLM` instance initialized with specified `kwargs` against
-    reference `LLM` instance.
-
-    Two scenarios:
-    1. Server has loaded dummy logitproc; test that requests which specify
-       dummy logitproc arg value behave as if logitproc is operating (output
-       token value should repeat), while requests that don't specify dummy
-       logitproc arg value should match reference `LLM` output.
-    2. Server has *not* loaded dummy logitproc; test that all requests
-       behave as if logitproc is *not* operating (output matches reference
-       `LLM` output.)
-    
-    Args:
-      kwargs: `LLM` constructor kwargs
-      logitproc_loaded: server has loaded dummy logitproc if True
-    """
 
     # Create a vLLM instance and load custom logitproc
     llm_logitproc = VllmRunner(
