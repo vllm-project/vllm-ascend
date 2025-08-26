@@ -437,7 +437,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
         value = torch.randn(10, 8 * 64)
-        kv_cache = torch.empty(10, 128, 8, 64)
+        kv_cache = torch.empty(2, 5, 128, 8, 64)
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
         metadata.seq_lens = torch.tensor([10] * 10)
