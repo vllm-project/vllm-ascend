@@ -16,7 +16,7 @@
 # limitations under the License.
 #
 
-from typing import List, Tuple
+from typing import List, Tuple, Callable
 
 import torch
 from torch.fx.subgraph_rewriter import replace_pattern
@@ -28,7 +28,7 @@ class AddRMSNormQuantPattern:
     def __init__(self, vllm_config):
         self.vllm_config = vllm_config
 
-    def register(self, patterns: List[Tuple[callable]]):
+    def register(self, patterns: List[Tuple[Callable, Callable]]):
 
         def pattern(rms_norm_input, residual, rms_norm_weight, scale, offset):
             """
@@ -68,7 +68,7 @@ class AscendQuantFusionPass(VllmInductorPass):
 
     def __init__(self, vllm_config):
         super().__init__(vllm_config)
-        self.patterns = []
+        self.patterns: List[Tuple[Callable, Callable]] = []
         # Register the AddRMSNormQuant fusion pattern into the graph rewriter pattern list
         AddRMSNormQuantPattern(vllm_config).register(self.patterns)
 

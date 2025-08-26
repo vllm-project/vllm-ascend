@@ -64,8 +64,10 @@ class ACLGraphWrapper:
                  cudagraph_options: Optional[CUDAGraphOptions] = None):
         self.runnable = runnable
         self.vllm_config = vllm_config
-        self.ascend_compilation_config: dict = vllm_config.additional_config.get("ascend_compilation_config", {})
-        self.fx_graph_eager = self.ascend_compilation_config.get("fx_graph_eager", False)
+        self.ascend_compilation_config: dict = vllm_config.additional_config.get(
+            "ascend_compilation_config", {})
+        self.fx_graph_eager = self.ascend_compilation_config.get(
+            "fx_graph_eager", False)
         self.graph_pool = graph_pool
         self.runtime_mode = runtime_mode
         self.compilation_config = vllm_config.compilation_config
