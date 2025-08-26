@@ -1224,8 +1224,9 @@ class AscendFusedMoE(FusedMoE):
         else:
             if self.dynamic_eplb:
                 self.global_redundant_expert_num = ascend_config.init_redundancy_expert
-                from vllm_ascend.eplb.core.eplb_utils import \
-                    determine_default_expert_map, determine_default_log2phy_map
+                from vllm_ascend.eplb.core.eplb_utils import (
+                    determine_default_expert_map,
+                    determine_default_log2phy_map)
                 self.local_num_experts, self.expert_map = determine_default_expert_map(
                     self.global_num_experts, self.ep_size, self.ep_rank, self.global_redundant_expert_num)
                 self.log2phy = determine_default_log2phy_map(
