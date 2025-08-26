@@ -938,8 +938,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         topk_weights = topk_weights.to(x.dtype)
-        if fused_moe_state in (FusedMoEState.AllGatherEP,
-                               FusedMoEState.AllGatherEPNaiveMulticast):
+        if fused_moe_state == FusedMoEState.AllGatherEP:
             return fused_experts_with_allgather(
                 hidden_states=x,
                 w1=layer.w13_weight,

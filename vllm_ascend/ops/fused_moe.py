@@ -1307,8 +1307,7 @@ class AscendFusedMoE(FusedMoE):
 
         if (fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
-                FusedMoEState.NaiveMulticast,
-                FusedMoEState.AllGatherEPNaiveMulticast
+                FusedMoEState.NaiveMulticast
         ] and not replace_allreduce):
             if fused_moe_state in {FusedMoEState.MC2}:
                 padding_size = forward_context.padded_num_tokens
@@ -1336,8 +1335,9 @@ class AscendFusedMoE(FusedMoE):
                 mc2_mask = chunk_mc2_mask[tp_rank]
 
         if self.dp_size > 1:
-            if fused_moe_state in (FusedMoEState.AllGather,
-                                   FusedMoEState.AllGatherEP):
+            if (fused_moe_state == FusedMoEState.AllGather
+                    or (fused_moe_state == FusedMoEState.AllGatherEP
+                        and not is_prefill)):
                 # NOTE: When in torchair graph, it has been padded in model_runner_v1
                 if not self.torchair_graph_enabled:
                     max_tokens_across_dp = forward_context.max_tokens_across_dp
@@ -1356,7 +1356,7 @@ class AscendFusedMoE(FusedMoE):
                     router_logits = get_dp_group().all_gather(router_logits, 0)
 
             elif fused_moe_state in (FusedMoEState.NaiveMulticast,
-                                     FusedMoEState.AllGatherEPNaiveMulticast):
+                                     FusedMoEState.AllGatherEP):
                 cu_tokens_across_dp_cpu = get_forward_context(
                 ).dp_metadata.cu_tokens_across_dp_cpu
                 hidden_states = self.naive_multicast(hidden_states,
@@ -1400,8 +1400,7 @@ class AscendFusedMoE(FusedMoE):
 
         if (fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
-                FusedMoEState.NaiveMulticast,
-                FusedMoEState.AllGatherEPNaiveMulticast
+                FusedMoEState.NaiveMulticast
         ] and not replace_allreduce and not self.enable_shared_expert_dp):
             if tp_size > 1:
                 dist.all_gather(list(chunk_hidden_states), e_hidden_states,
@@ -1413,8 +1412,8 @@ class AscendFusedMoE(FusedMoE):
             if num_tokens < padding_size:
                 final_hidden_states = final_hidden_states[:num_tokens]
         elif self.dp_size > 1 and not self.enable_shared_expert_dp:
-            if fused_moe_state in (FusedMoEState.NaiveMulticast,
-                                   FusedMoEState.AllGatherEPNaiveMulticast):
+            if (fused_moe_state == FusedMoEState.NaiveMulticast or
+                (fused_moe_state == FusedMoEState.AllGatherEP and is_prefill)):
                 start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
                     self.dp_rank - 1]
                 end = cu_tokens_across_dp_cpu[self.dp_rank]
@@ -1435,7 +1434,7 @@ class AscendFusedMoE(FusedMoE):
 
         if tp_size > 1 and not self.all_reduce_merge and fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
-                FusedMoEState.NaiveMulticast, FusedMoEState.AllGatherEPNaiveMulticast
+                FusedMoEState.NaiveMulticast
         ]:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
