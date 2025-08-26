@@ -20,7 +20,6 @@ import torch
 import torch.distributed as dist
 from vllm.distributed.device_communicators.base_device_communicator import \
     DeviceCommunicatorBase
-from vllm.utils import logger
 
 
 class NPUCommunicator(DeviceCommunicatorBase):
@@ -34,12 +33,6 @@ class NPUCommunicator(DeviceCommunicatorBase):
         # TODO(hz): Refer to CudaCommunicator's implementation to integrate PyHcclCommunicator
         # init device according to rank
         self.device = torch.npu.current_device()
-
-        if self.use_all2all:
-            from vllm.distributed.device_communicators.all2all import \
-                NaiveAll2AllManager
-            self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-            logger.info("Using naive all2all manager.")
 
     def all_to_all(self,
                    input_: torch.Tensor,
@@ -80,17 +73,3 @@ class NPUCommunicator(DeviceCommunicatorBase):
         dist.all_to_all(output_list, input_list, group=self.device_group)
         output_tensor = torch.cat(output_list, dim=gather_dim).contiguous()
         return output_tensor
-
-    # TODO: Add ut for dispatch and combine
-    def dispatch(
-            self, hidden_states: torch.Tensor,
-            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self.all2all_manager is not None
-        hidden_states, router_logits = self.all2all_manager.dispatch(
-            hidden_states, router_logits)
-        return hidden_states, router_logits
-
-    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        assert self.all2all_manager is not None
-        hidden_states = self.all2all_manager.combine(hidden_states)
-        return hidden_states
