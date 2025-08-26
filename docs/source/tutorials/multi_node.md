@@ -107,6 +107,7 @@ Before launch the inference server, ensure the following environment variables a
 nic_name="xxxx"
 local_ip="xxxx"
 
+export VLLM_USE_MODELSCOPE=True
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
@@ -115,9 +116,9 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export HCCL_BUFFSIZE=1024
 
-# The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3-W8A8
+# The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.1-W8A8
 # If you want to the quantization manually, please refer to https://vllm-ascend.readthedocs.io/en/latest/user_guide/feature_guide/quantization.html
-vllm serve /root/.cache/ds_v3 \
+vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 --host 0.0.0.0 \
 --port 8004 \
 --data-parallel-size 4 \
@@ -155,7 +156,7 @@ export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 
-vllm serve /root/.cache/ds_v3 \
+vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 --host 0.0.0.0 \
 --port 8004 \
 --headless \
@@ -198,7 +199,7 @@ curl http://{ node0 ip:8004 }/v1/completions \
 For details please refer to [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks)
 
 ```shell
-vllm bench serve --model /root/.cache/ds_v3  --served-model-name deepseek_v3 \
+vllm bench serve --model vllm-ascend/DeepSeek-V3.1-W8A8  --served-model-name deepseek_v3 \
 --dataset-name random --random-input-len 128 --random-output-len 128 \
 --num-prompts 200  --trust-remote-code --base-url "http://{ node0 ip }:8004" --request-rate 1
 ```
