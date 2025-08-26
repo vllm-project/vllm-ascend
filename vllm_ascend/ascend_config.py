@@ -224,9 +224,9 @@ def check_ascend_config(vllm_config, enforce_eager):
                 # torchair_graph is supported for deepseek model only currently.
                 if vllm_config.model_config:
                     model_type = vllm_config.model_config.hf_config.model_type
-                    if "deepseek" not in model_type:
+                    if "deepseek" not in model_type and "kimi" not in model_type:
                         raise NotImplementedError(
-                            "Torchair graph mode only works with deepseek model."
+                            "Torchair graph mode only works with deepseek and kimi models."
                         )
             # aclgraph case
             else:

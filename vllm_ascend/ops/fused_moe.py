@@ -1026,8 +1026,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         **kwargs,
     ) -> torch.Tensor:
 
-        # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-        if global_num_experts == 256:
+        # NOTE: now npu_moe_gating_top_k can only support `group_count=256` or 'group_count=384' pattern
+        if global_num_experts == 256 or global_num_experts == 384:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
                 router_logits,
                 k=top_k,  # topk当前写8
@@ -1329,6 +1329,8 @@ class AscendFusedMoE(FusedMoE):
         fused_moe_state = get_forward_context().fused_moe_state
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
         hidden_states_for_share, dynamic_scale_for_share = None, None
+        from vllm_ascend.quantization.w4a8_dynamic import \
+            AscendW4A8DynamicFusedMoEMethod
         from vllm_ascend.quantization.w8a8_dynamic import \
             AscendW8A8DynamicFusedMoEMethod
 
@@ -1344,8 +1346,10 @@ class AscendFusedMoE(FusedMoE):
                     router_logits, _ = gate(hidden_states)
                 hidden_states_for_share = hidden_states
                 if hasattr(self.quant_method, "quant_method") and (
-                        isinstance(self.quant_method.quant_method,
-                                   AscendW8A8DynamicFusedMoEMethod)
+                    (isinstance(self.quant_method.quant_method,
+                                AscendW8A8DynamicFusedMoEMethod)
+                     or isinstance(self.quant_method.quant_method,
+                                   AscendW4A8DynamicFusedMoEMethod))
                         and fused_moe_state == FusedMoEState.MC2):
                     with npu_stream_switch("moe_secondary", 0):
                         hidden_states_for_share, dynamic_scale_for_share = (
