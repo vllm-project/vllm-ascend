@@ -100,14 +100,6 @@ class TestTokenDispatcherWithMC2(TestBase):
             return_value=AscendSocVersion.A3)
         self.ascend_soc_version_patch.start()
 
-        # Mock get_ascend_config()
-        self.ascend_config = MagicMock()
-        self.ascend_config.torchair_graph_config.enabled = False
-        self.ascend_config_patch = patch(
-            "vllm_ascend.ops.moe_dispatcher.token_dispatcher.get_ascend_config",
-            return_value=self.ascend_config)
-        self.ascend_config_patch.start()
-
         kwargs = {"with_quant": False, "top_k": 8, "num_experts": 128}
         self.dispatcher = TokenDispatcherWithMC2(**kwargs)
 
@@ -115,13 +107,10 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.mc2_group_patch.stop()
         self.forward_context_patch.stop()
         self.ascend_soc_version_patch.stop()
-        self.ascend_config_patch.stop()
 
     def test_init(self):
-        # self.assertEqual(self.dispatcher.moe_all_to_all_group_name, "hccl_123")
         self.assertEqual(self.dispatcher.ep_rank_id, 0)
         self.assertEqual(self.dispatcher.ep_world_size, 8)
-        self.assertFalse(self.dispatcher.torchair_graph_enabled)
         self.assertFalse(self.dispatcher.with_quant)
         self.assertTrue(self.dispatcher.enable_dispatch_v2)
         self.assertTrue(self.dispatcher.need_extra_args)
@@ -167,20 +156,12 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         with patch("torch_npu.npu_moe_distribute_dispatch_v2",
                    return_value=(torch.randn(10, 128), ) * 5):
-            with patch(
-                    "vllm_ascend.ops.moe_dispatcher.token_dispatcher.npu_stream_switch",
-                    autospec=True):
-                with patch(
-                        "vllm_ascend.ops.moe_dispatcher.token_dispatcher.npu_wait_tensor",
-                        autospec=True) as mock_wait:
-                    self.dispatcher.token_dispatch(
-                        self.hidden_states,
-                        self.topk_weights,
-                        torch.randint(0, 8, (10, 1)),
-                        torch.tensor([0, 1, 2, 3, 4, 5, 6, 7]),
-                        shared_experts=self.shared_experts)
-                    mock_wait.assert_any_call(self.hidden_states,
-                                              self.topk_weights)
+            self.dispatcher.token_dispatch(self.hidden_states,
+                                           self.topk_weights,
+                                           torch.randint(0, 8, (10, 1)),
+                                           torch.tensor(
+                                               [0, 1, 2, 3, 4, 5, 6, 7]),
+                                           shared_experts=self.shared_experts)
 
     def test_get_combine_mc_kwargs_with_quant(self):
         self.dispatcher.with_quant = True
@@ -214,13 +195,7 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         with patch("torch_npu.npu_moe_distribute_combine_v2",
                    return_value=torch.randn(10, 128)):
-            with patch(
-                    "vllm_ascend.ops.moe_dispatcher.token_dispatcher.npu_stream_switch",
-                    autospec=True):
-                with patch(
-                        "vllm_ascend.ops.moe_dispatcher.token_dispatcher.npu_wait_tensor",
-                        autospec=True):
-                    self.dispatcher.token_combine(self.hidden_states)
+            self.dispatcher.token_combine(self.hidden_states)
 
 
 class TestTokenDispatcherWithAllGather(TestBase):
