@@ -83,7 +83,7 @@ def torch_moe(a, w1, w2, topk_weights, topk_ids, topk, expert_map):
                 a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
     return (out.view(B, -1, w2.shape[1]) *
             topk_weights.view(B, -1, 1).to(out.dtype)).sum(dim=1)
-    
+
 
 @pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
@@ -115,9 +115,14 @@ def test_token_dispatcher_with_all_gather(
 
     if ep_size > 1:
         local_e = e // ep_size
-        e_ids = torch.arange(local_e * 0, local_e * (0 + 1), device=device, dtype=torch.int32)
+        e_ids = torch.arange(local_e * 0,
+                             local_e * (0 + 1),
+                             device=device,
+                             dtype=torch.int32)
         expert_map = torch.full((e, ), -1, device=device, dtype=torch.int32)
-        expert_map[e_ids] = torch.arange(local_e, device=device, dtype=torch.int32)
+        expert_map[e_ids] = torch.arange(local_e,
+                                         device=device,
+                                         dtype=torch.int32)
         w1_local = w1[e_ids]
         w2_local = w2[e_ids]
 
@@ -144,29 +149,28 @@ def test_token_dispatcher_with_all_gather(
         topk_weights=topk_weights,
         topk_ids=topk_ids,
         expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input
-    )
+        apply_router_weight_on_input=apply_router_weight_on_input)
 
     sorted_hidden_states = dispatch_output["hidden_states"]
     group_list = dispatch_output["group_list"]
     group_list_type = dispatch_output.get("group_list_type", 1)
 
-    expert_output = apply_mlp(
-        hidden_states=sorted_hidden_states,
-        w1=w1_local,
-        w2=w2_local,
-        group_list=group_list,
-        group_list_type=group_list_type
-    )
+    expert_output = apply_mlp(hidden_states=sorted_hidden_states,
+                              w1=w1_local,
+                              w2=w2_local,
+                              group_list=group_list,
+                              group_list_type=group_list_type)
 
-    combined_output = dispatcher.token_combine(
-        hidden_states=expert_output,
-        bias=None
-    )
+    combined_output = dispatcher.token_combine(hidden_states=expert_output,
+                                               bias=None)
 
-    torch_output = torch_moe(a, w1, w2, topk_weights, topk_ids, topk, expert_map)
+    torch_output = torch_moe(a, w1, w2, topk_weights, topk_ids, topk,
+                             expert_map)
 
-    torch.testing.assert_close(combined_output, torch_output, atol=4e-2, rtol=1)
+    torch.testing.assert_close(combined_output,
+                               torch_output,
+                               atol=4e-2,
+                               rtol=1)
     torch.npu.empty_cache()
 
 
