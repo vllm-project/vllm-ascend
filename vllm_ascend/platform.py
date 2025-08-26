@@ -187,6 +187,8 @@ class NPUPlatform(Platform):
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
+            assert compilation_config.level == CompilationLevel.PIECEWISE, \
+                "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
             compilation_config.set_splitting_ops_for_v1()
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
