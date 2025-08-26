@@ -166,10 +166,13 @@ class VllmEplbAdaptor(EplbAdaptor):
         expert_maps_local = self.global2local(expert_maps, num_local_experts)
 
         expert_maps_list = expert_maps_local.tolist()
-        record = {"moe_layer_count": len(expert_maps_list), "layer_list": []}
+        record: dict[str, Any] = {
+            "moe_layer_count": len(expert_maps_list),
+            "layer_list": []
+        }
 
         for layer_idx, layer_data in enumerate(expert_maps_list):
-            layer_record = {
+            layer_record: dict[str, Any] = {
                 "layer_id": layer_idx,
                 "device_count": len(layer_data),
                 "device_list": []
@@ -203,7 +206,7 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
 
     def global2local(self, placement: torch.Tensor,
-                     E_local: int) -> tuple[torch.Tensor, torch.Tensor]:
+                     E_local: int) -> torch.Tensor:
 
         L, G, _ = placement.shape
         device = placement.device
