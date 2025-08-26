@@ -16,14 +16,14 @@
 # Adapted from vllm/tests/kernels/test_moe.py
 
 import os
-from typing import Any, Callable, Optional, Tuple, Union
+from typing import Any, Callable, Optional
 
 import torch
 import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
+from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,

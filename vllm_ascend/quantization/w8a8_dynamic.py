@@ -18,9 +18,8 @@
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
-import torch.distributed as dist
 import torch_npu
-from vllm.distributed import GroupCoordinator, get_ep_group
+from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 import vllm_ascend.envs as envs_ascend
@@ -30,8 +29,7 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
 from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
-                               dispose_tensor, get_ascend_soc_version)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor
 
 
 def apply_mlp_decode(hidden_states: torch.Tensor,
