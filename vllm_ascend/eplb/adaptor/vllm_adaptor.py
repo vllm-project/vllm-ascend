@@ -21,6 +21,7 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 
 
@@ -38,6 +39,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         else:
             self.num_dense_layers = self.model.config.first_k_dense_replace
             self.global_expert_num = self.model.config.n_routed_experts
+        self.init_redundancy_expert = get_ascend_config().init_redundancy_expert
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
 
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 and qwen3-moe is supported here
@@ -198,6 +200,9 @@ class VllmEplbAdaptor(EplbAdaptor):
         return placement_global
 
     def determine_expert_map_all(self):
+        if self.world_size == 1:
+            local_ids = torch.arange(self.global_expert_num, dtype=torch.int32)
+            return local_ids.view(1, 1, -1).expand(self.num_moe_layers, 1, -1)
 
         local_num_experts = self.global_expert_num // self.world_size
 
@@ -215,6 +220,13 @@ class VllmEplbAdaptor(EplbAdaptor):
                 start = r * local_num_experts
                 end = self.global_expert_num
                 local_count = self.global_expert_num - r * local_num_experts
+
+            if r < self.init_redundancy_expert:
+                local_count += 1
+                if end < self.global_expert_num:
+                    end += 1
+                else:
+                    start -= 1
 
             local_ids = torch.arange(local_count, dtype=torch.int32)
             expert_map_all[:, r, start:end] = local_ids.unsqueeze(0).expand(
