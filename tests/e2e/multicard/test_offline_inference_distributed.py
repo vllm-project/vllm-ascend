@@ -31,6 +31,10 @@ from vllm.model_executor.models.registry import ModelRegistry
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
+DEEPSEEK_W4A8_MODELS = [
+    "vllm-ascend/DeepSeek-V3-W4A8-Pruing",
+    "vllm-ascend/DeepSeek-R1-w4a8-pruning"
+]
 
 
 def test_models_distributed_QwQ():
@@ -72,26 +76,6 @@ def test_models_distributed_DeepSeek_multistream_moe():
             enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
-def test_models_distributed_DeepSeek_dbo():
-    example_prompts = ["The president of the United States is"] * 41
-    dtype = "half"
-    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
-    with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
-            tensor_parallel_size=2,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        model_arch = 'DeepseekV2ForCausalLM'
-        registed_models = ModelRegistry.models
-        assert registed_models[
-            model_arch].module_name == "vllm_ascend.models.deepseek_dbo"
-        assert registed_models[
-            model_arch].class_name == "CustomDeepseekDBOForCausalLM"
-        vllm_model.generate(example_prompts, sampling_params)
 
 
 @pytest.mark.skip(
@@ -211,14 +195,15 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_MLA_PA": "1"})
-def test_models_distributed_DeepSeek_W4A8DYNAMIC():
+def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
     prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning"),
+            snapshot_download(model),
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",

@@ -17,7 +17,7 @@ from typing import Optional
 
 from vllm.logger import logger
 
-TORCHAIR_MODEL_LIST = ["deepseek", "pangu", "kimi_k2"]
+TORCHAIR_MODEL_LIST = ["deepseek", "pangu", "kimi_k2", "qwen"]
 
 
 def _check_torchair_supported(model_type: str):
@@ -50,7 +50,6 @@ class AscendConfig:
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp", True
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel and not vllm_config.parallel_config.enable_sequence_parallel
-        # TODO seems enable_shared_expert_dp conflicts with sp, need to check why
 
 
 class TorchairGraphConfig:
@@ -163,7 +162,7 @@ def check_ascend_config(vllm_config, enforce_eager):
     else:
         # torchair_graph case
         if ascend_config.torchair_graph_config.enabled:
-            # torchair_graph is supported for deepseek/pangu model only.
+            # torchair_graph is supported for deepseek/pangu/qwen model only.
             if vllm_config.model_config:
                 model_type = vllm_config.model_config.hf_config.model_type
                 if not _check_torchair_supported(model_type):

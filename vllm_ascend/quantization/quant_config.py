@@ -44,7 +44,7 @@ from .quantizer import AscendQuantizer
 @register_quantization_config(ASCEND_QUATIZATION_METHOD)
 class AscendQuantConfig(QuantizationConfig):
     """Config class for Ascend
-    
+
     This class is a general class that parse quantization configs
     that are supported on ascend hardware.
     """
@@ -295,6 +295,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
+        per_group_param = [
+            "weight_scale_second", "weight_offset_second", "scale_bias"
+        ]
         dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
             num_experts, intermediate_size_per_partition, hidden_size,
             params_dtype)
@@ -302,7 +305,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             param = torch.nn.Parameter(param_value, requires_grad=False)
             layer.register_parameter(param_key, param)
             set_weight_attrs(param, extra_weight_attrs)
-            if "weight_scale_second" in param_key or "weight_offset_second" in param_key:
+            if any(fields in param_key for fields in per_group_param):
                 setattr(param, "quant_method",
                         FusedMoeWeightScaleSupported.GROUP.value)
 

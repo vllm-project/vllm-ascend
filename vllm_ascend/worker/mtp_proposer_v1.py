@@ -16,7 +16,9 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
+from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
 from vllm_ascend.utils import ProfileExecuteDuration
 
 
@@ -46,6 +48,8 @@ class MtpProposer:
             device=self.runner.device)
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore
+        self.torchair_graph_enabled = get_ascend_config(
+        ).torchair_graph_config.enabled
 
     @staticmethod
     def prepare_inputs(
@@ -88,7 +92,7 @@ class MtpProposer:
 
             # FIXME(woosuk): Avoid synchronization.
             num_tokens = cu_num_tokens[-1].item()
-            token_indices = torch.empty(
+            token_indices = torch.zeros(
                 num_tokens,
                 dtype=torch.int32,
                 device=cu_num_tokens.device,
@@ -134,11 +138,8 @@ class MtpProposer:
         self.input_ids[:num_tokens - 1] = target_token_ids[1:]
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-        if token_indices is not None and self.runner.torchair_graph_enabled:
+        if token_indices is not None and self.torchair_graph_enabled:
             last_token_indices = token_indices
-        else:
-            seq_lens = target_positions[last_token_indices] + 1
-            seq_lens = seq_lens.cpu()
 
         self.input_ids[last_token_indices] = next_token_ids
 
@@ -155,23 +156,36 @@ class MtpProposer:
         #     input_batch=self.runner.input_batch,
         #     scheduler_output=self.runner.scheduler_output,
         # )
-        extra_builder_kwargs = {}
-
-        is_running_torchair = self.runner.torchair_graph_enabled and \
+        is_running_torchair = self.torchair_graph_enabled and \
             not self.runner.with_prefill
 
         if is_running_torchair:
-            extra_builder_kwargs['graph_pad_size'] = self.runner.graph_pad_size
             num_input_tokens = self.runner.graph_pad_size
         else:
             num_input_tokens = num_tokens
 
-        attn_metadata = self.runner.attn_metadata_builder.build(
+        seq_lens = target_positions[last_token_indices] + 1
+        seq_lens = seq_lens.int()
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=cu_num_tokens[:batch_size + 1],
+            query_start_loc_cpu=cu_num_tokens[:batch_size + 1].cpu(),
+            seq_lens_cpu=seq_lens.cpu(),
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            query_start_loc=cu_num_tokens,
-            **extra_builder_kwargs)
+            actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
+            block_table_tensor=self.runner.input_batch.block_table[0].
+            get_device_tensor(),
+            slot_mapping_cpu=target_slot_mapping,
+            positions=target_positions,
+            attn_mask=self.runner.attn_mask,
+            spec_attn_mask=self.runner.spec_attn_mask,
+            attn_state=self.runner.attn_state,
+            graph_pad_size=self.runner.graph_pad_size,
+            decode_token_per_req=self.runner.decode_token_per_req,
+        )
+        attn_metadata = self.runner.attn_metadata_builder.build(
+            common_attn_metadata, self.runner.get_model())
 
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
@@ -181,7 +195,7 @@ class MtpProposer:
             attn_metadata.prefill.input_positions = target_positions
             attn_metadata.prefill.seq_lens = seq_lens
 
-        if not self.runner.torchair_graph_enabled:
+        if not self.torchair_graph_enabled:
             # torch mode need to update num_tokens_across_dp
             # TODO: adapt enable_dbo later
             (num_input_tokens, num_tokens_across_dp, with_prefill,
@@ -204,7 +218,7 @@ class MtpProposer:
             with ProfileExecuteDuration().capture_async('mtp_forward'):
                 model_kwargs = {}
                 model_kwargs["attn_metadata"] = attn_metadata
-                if self.runner.torchair_graph_enabled:
+                if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.runner.kv_caches[-1:]
                 if is_running_torchair:
                     torchair_compiled_model = self._get_torchair_lazy_compiled_model(
@@ -268,12 +282,12 @@ class MtpProposer:
                   skip_attn: bool = False,
                   num_reqs: int = 0,
                   num_tokens_across_dp=None) -> None:
-        if not self.runner.torchair_graph_enabled:
+        if not self.torchair_graph_enabled:
             # TODO: adapt enable_dbo later
             (num_tokens, num_tokens_across_dp, with_prefill,
              _) = self.runner._get_forward_metadata_across_dp_and_pad(
                  num_tokens, with_prefill, False)
-        is_running_torchair = self.runner.torchair_graph_enabled and \
+        is_running_torchair = self.torchair_graph_enabled and \
             not with_prefill
 
         if is_running_torchair:
@@ -281,8 +295,16 @@ class MtpProposer:
         if skip_attn:
             attn_metadata = None
         else:
+            common_attn_metadata = TorchairCommonAttentionMetadata(
+                num_reqs=num_reqs,
+                num_actual_tokens=1,
+                actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
+                attn_mask=self.runner.attn_mask,
+                spec_attn_mask=self.runner.spec_attn_mask,
+                decode_token_per_req=self.runner.decode_token_per_req,
+            )
             attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
-                num_reqs=num_reqs, num_actual_tokens=1)
+                common_attn_metadata)
 
         input_ids = self.input_ids[:num_tokens]
         positions = self.positions[:num_tokens]
