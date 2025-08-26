@@ -344,7 +344,7 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu._npu_flash_attention')
     def test_forward_prefill_no_cache_swa(self, mock_flash_attention,
-                                      mock_reshape_cache):
+                                          mock_reshape_cache):
         """Test forward pass in PrefillNoCache state"""
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
@@ -360,12 +360,12 @@ class TestAscendAttentionBackendImpl(TestBase):
         # layer.quant_method.apply.return_value = metadata
         print(self.layer_no_quant._v_scale_float)
         output = self.impl_swa.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata,
-                                   trace_flag=False)
+                                       query,
+                                       key,
+                                       value,
+                                       kv_cache,
+                                       metadata,
+                                       trace_flag=False)
 
         mock_reshape_cache.assert_called_once()
         mock_flash_attention.assert_called_once()
@@ -432,7 +432,7 @@ class TestAscendAttentionBackendImpl(TestBase):
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu._npu_paged_attention')
     def test_forward_decode_only_swa(self, mock_paged_attention,
-                                 mock_npu_reshape_and_cache):
+                                     mock_npu_reshape_and_cache):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
@@ -447,12 +447,12 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
 
         output = self.impl_swa.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata,
-                                   trace_flag=False)
+                                       query,
+                                       key,
+                                       value,
+                                       kv_cache,
+                                       metadata,
+                                       trace_flag=False)
 
         mock_paged_attention.assert_called_once()
         assert output.shape == (10, 8 * 64)
