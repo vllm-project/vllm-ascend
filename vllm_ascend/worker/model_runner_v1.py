@@ -1251,8 +1251,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.attn_state = attn_state  # type: ignore
 
         num_actual_tokens_cp_full = total_num_scheduled_tokens * (
-            self.cp_size if self.attn_metadata_builder._num_prefills > 0 else 1)
-        if self.cp_size > 1 and self.attn_metadata_builder._num_prefills > 0:
+            self.cp_size if is_prefill > 0 else 1)
+        if self.cp_size > 1 and is_prefill > 0:
             cp_kv_recover_idx = torch.zeros(num_actual_tokens_cp_full,
                                             dtype=torch.int32,
                                             device=self.device)
@@ -1265,16 +1265,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_with_q_tail_nomask_idx, kv_with_q_tail_mask_idx = [], []
             chunk_seqlens = []
             kv_with_q_head_nomask_seqlens, kv_with_q_tail_nomask_seqlens = [], []
-            q_req_offset = 0  # 请求在输入 Q 中的偏移，Q 是CP切分的
-            kv_req_offset = 0  # 请求在输入 KV 中的偏移，KV 是全量的
-            # cp_rank0: q_head_chunk_id=0, q_tail_chunk_id=3
-            # cp_rank1: q_head_chunk_id=1, q_tail_chunk_id=2
+            q_req_offset = 0
+            kv_req_offset = 0
             q_head_chunk_id = self.cp_rank
             q_tail_chunk_id = self.cp_size * 2 - 1 - self.cp_rank
             for seq_len in seq_lens:
-                chunk_len = seq_len // 2  # 序列切 cp_size*2 份，每一份的长度, 按request
+                chunk_len = seq_len // 2
                 chunk_seqlens.append(chunk_len)
-                # 负载均衡前半段计算所需的Q和KV
                 q_head_idx.extend(list(range(q_req_offset, q_req_offset + chunk_len)))
                 kv_with_q_head_nomask_idx.extend(
                     list(range(kv_req_offset, kv_req_offset + chunk_len * q_head_chunk_id)))
@@ -1283,7 +1280,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                kv_req_offset + chunk_len * (q_head_chunk_id + 1))))
                 kv_with_q_head_nomask_seqlens.append(chunk_len * q_head_chunk_id)
 
-                # 负载均衡后半段计算所需的Q和KV
                 q_tail_idx.extend(list(range(q_req_offset + chunk_len,
                                              q_req_offset + chunk_len * 2)))
                 kv_with_q_tail_nomask_idx.extend(
@@ -1294,7 +1290,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 kv_with_q_tail_nomask_seqlens.append(chunk_len * q_tail_chunk_id)
 
                 q_req_offset += seq_len
-                kv_req_offset += seq_len * self.cp_size  # KV是全量的
+                kv_req_offset += seq_len * self.cp_size
 
             # Convert lists to tensors and move to device
             def _list_to_tensor(lst, device, dtype=torch.int32):
@@ -1408,9 +1404,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # token id pad
         if self.cp_size > 1:
             for i in range(num_reqs):
-                if num_scheduled_tokens[i] > 1:  # prefill
-                    num_padded_tokens = num_scheduled_tokens_for_slot[i] + self.input_batch.num_computed_tokens_cpu[i]
-                    self.input_batch.token_ids_cpu[i][num_padded_tokens - num_cp_pads[i]: num_padded_tokens] = 0
+                if num_scheduled_tokens[i] > 1:
+                    num_padded_tokens = num_scheduled_tokens_for_slot[i]+self.input_batch.num_computed_tokens_cpu[i]
+                    self.input_batch.token_ids_cpu[i][num_padded_tokens-num_cp_pads[i]: num_padded_tokens] = 0
 
         # Prepare input_ids
         token_indices = (positions_np +
@@ -1566,9 +1562,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return input_ids, positions
 
     def _get_cumsum_and_arange(
-            self,
-            num_tokens: np.ndarray,
-            cumsum_dtype: Optional[np.dtype] = None,
+        self,
+        num_tokens: np.ndarray,
+        cumsum_dtype: Optional[np.dtype] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Get the cumulative sum and batched arange of the given array.
         # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
@@ -1586,9 +1582,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return cu_num_tokens, arange
 
     def _calc_spec_decode_metadata(
-            self,
-            num_draft_tokens: np.ndarray,
-            cu_num_scheduled_tokens: np.ndarray,
+        self,
+        num_draft_tokens: np.ndarray,
+        cu_num_scheduled_tokens: np.ndarray,
     ) -> SpecDecodeMetadata:
         # Inputs:
         # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
@@ -1661,9 +1657,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return metadata
 
     def apply_grammar_bitmask(
-            self,
-            scheduler_output: "SchedulerOutput",
-            logits: torch.Tensor,
+        self,
+        scheduler_output: "SchedulerOutput",
+        logits: torch.Tensor,
     ) -> torch.Tensor:
         grammar_bitmask = scheduler_output.grammar_bitmask
 
@@ -1725,18 +1721,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return logits.to(self.device).to(logits_dtype)
 
     def propose_draft_token_ids(
-            self,
-            valid_sampled_token_ids: list[list[int]],
-            sampling_metadata: SamplingMetadata,
-            scheduler_output: "SchedulerOutput",
-            spec_decode_metadata: SpecDecodeMetadata,
-            positions: torch.Tensor,
-            num_scheduled_tokens: int,
-            hidden_states: torch.Tensor,
-            attn_metadata: Union[AscendMetadata, AscendMLAMetadata,
-            AscendTorchairMetadata,
-            AscendMLATorchairMetadata],
-            aux_hidden_states: torch.Tensor = None,
+        self,
+        valid_sampled_token_ids: list[list[int]],
+        sampling_metadata: SamplingMetadata,
+        scheduler_output: "SchedulerOutput",
+        spec_decode_metadata: SpecDecodeMetadata,
+        positions: torch.Tensor,
+        num_scheduled_tokens: int,
+        hidden_states: torch.Tensor,
+        attn_metadata: Union[AscendMetadata, AscendMLAMetadata,
+                             AscendTorchairMetadata,
+                             AscendMLATorchairMetadata],
+        aux_hidden_states: torch.Tensor = None,
     ) -> Optional[list[list[int]]]:
         if not self.use_spec_decode:
             # Speculative decoding is not enabled.
@@ -1759,18 +1755,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return draft_token_ids
 
     def _pool(
-            self,
-            hidden_states: torch.Tensor,
-            num_scheduled_tokens: int,
-            num_scheduled_tokens_np: np.ndarray,
-            finished_sending: Optional[set[str]] = None,
-            finished_recving: Optional[set[str]] = None,
-            kv_connector_output: Optional["KVConnectorOutput"] = None,
+        self,
+        hidden_states: torch.Tensor,
+        num_scheduled_tokens: int,
+        num_scheduled_tokens_np: np.ndarray,
+        finished_sending: Optional[set[str]] = None,
+        finished_recving: Optional[set[str]] = None,
+        kv_connector_output: Optional["KVConnectorOutput"] = None,
     ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs == \
-               len(self.input_batch.pooling_params), \
-            "Either all or none of the requests in" \
-            " a batch must be pooling request"
+        assert self.input_batch.num_reqs ==\
+            len(self.input_batch.pooling_params), \
+        "Either all or none of the requests in" \
+        " a batch must be pooling request"
 
         extracted_hidden_states = list(
             torch.split(hidden_states[:num_scheduled_tokens],
@@ -1817,9 +1813,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def execute_model(
-            self,
-            scheduler_output: "SchedulerOutput",
-            intermediate_tensors: Optional[IntermediateTensors] = None,
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
         with ProfileExecuteDuration().capture_async("prepare input"):
             self._update_states(scheduler_output)
@@ -1836,7 +1832,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              padded_num_tokens_across_dp, logits_indices, spec_decode_metadata,
              input_ids, inputs_embeds,
              intermediate_tensors) = (self._prepare_inputs(
-                scheduler_output, intermediate_tensors))
+                 scheduler_output, intermediate_tensors))
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
@@ -1850,7 +1846,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     moe_comm_method=self.moe_comm_method(
                         self.device, self.dtype, self.model_config.hf_config),
                     num_actual_tokens=scheduler_output.
-                            total_num_scheduled_tokens):
+                    total_num_scheduled_tokens):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
@@ -2117,7 +2113,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     @staticmethod
     def get_finished_kv_transfer(
-            scheduler_output: "SchedulerOutput",
+        scheduler_output: "SchedulerOutput",
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
@@ -2151,14 +2147,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def _dummy_run(
-            self,
-            num_tokens: int,
-            with_prefill: bool = False,
-            is_torchair_compile: bool = False,
-            moe_comm_method: Type[MoECommMethod] = DummyCommImpl,
-            aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-            force_attention: bool = False,
-            uniform_decode: bool = False,
+        self,
+        num_tokens: int,
+        with_prefill: bool = False,
+        is_torchair_compile: bool = False,
+        moe_comm_method: Type[MoECommMethod] = DummyCommImpl,
+        aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        force_attention: bool = False,
+        uniform_decode: bool = False,
     ) -> torch.Tensor:
         # only support eager mode and piecewise graph now
         assert aclgraph_runtime_mode in {
@@ -2172,7 +2168,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self._get_forward_metadata_across_dp_and_pad(
-            num_tokens, with_prefill, False)
+             num_tokens, with_prefill, False)
 
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using
@@ -2188,7 +2184,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
         # for GQA/MQA.
         max_query_len = self.uniform_decode_query_len if uniform_decode else \
-            num_tokens
+                        num_tokens
 
         max_num_reqs = self.scheduler_config.max_num_seqs
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
@@ -2332,9 +2328,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
 
     def _dummy_pooler_run_task(
-            self,
-            hidden_states: torch.Tensor,
-            task: PoolingTask,
+        self,
+        hidden_states: torch.Tensor,
+        task: PoolingTask,
     ) -> PoolerOutput:
         num_tokens = hidden_states.shape[0]
         max_num_reqs = self.scheduler_config.max_num_seqs
@@ -2383,8 +2379,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def _dummy_pooler_run(
-            self,
-            hidden_states: torch.Tensor,
+        self,
+        hidden_states: torch.Tensor,
     ) -> PoolerOutput:
         # Find the task that has the largest output for subsequent steps
         output_size = dict[PoolingTask, float]()
@@ -2712,8 +2708,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     elapsed_time, npu_graph_size / (1 << 30))
 
     def _generate_ngram_token_ids(
-            self,
-            sampled_token_ids: list[list[int]],
+        self,
+        sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
         draft_token_ids: list[list[int]] = []
