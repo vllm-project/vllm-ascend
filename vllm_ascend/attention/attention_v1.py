@@ -262,8 +262,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.key_cache = None
-        self.value_cache = None
+        self.key_cache = torch.zeros(1,1,1,1)
+        self.value_cache = torch.zeros(1,1,1,1)
 
     def _repeat_kv(self, hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
         """
@@ -302,7 +302,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                              ACL_FORMAT_FRACTAL_NZ)
         if self.sliding_window is not None and \
             attn_metadata.attn_mask.shape[0] > self.sliding_window:
-            batch_size = attn_metadata.seq_lens.shape[0]
+            
             key = self._repeat_kv(key, self.num_heads // self.num_kv_heads)
             value = self._repeat_kv(value, self.num_heads // self.num_kv_heads)
 
@@ -371,7 +371,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.seq_lens.to(device=query.device)
         if self.sliding_window is not None:
             batch_size = attn_metadata.seq_lens.shape[0]
-            block_size = self.key_cache.shape[1]
+
             query = query.view(batch_size, 1, self.num_heads*self.head_size)
             key = self.key_cache.flatten(2, 3).contiguous()
             value = self.value_cache.flatten(2, 3).contiguous()
