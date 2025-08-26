@@ -20,6 +20,7 @@
 import atexit
 import functools
 import math
+import os
 from contextlib import contextmanager
 from enum import Enum
 from threading import Lock
@@ -303,16 +304,47 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     parallel_config = vllm_config.parallel_config
 
     # TODO: Find out whether we need to take into account the pp_size
-    parallel_factor = 1 + sum(size > 1 for size in [
-        parallel_config.data_parallel_size_local,
+    num_comm_groups = sum(size > 1 for size in [
+        parallel_config.data_parallel_size,
         parallel_config.tensor_parallel_size,
     ])
 
-    # Calculate maximum supported batch sizes considering model architecture
-    max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
-                                     (num_hidden_layers + 1) / parallel_factor)
-    logger.info("Calculated maximum supported batch sizes for ACL graph: %s",
-                max_num_batch_sizes)
+    if os.getenv("HCCL_OP_EXPANSION_MODE") == 'AIV':
+        # TODO: Find out whether we need to take into account the pp_size
+        parallel_factor = 1 + num_comm_groups + int(
+            parallel_config.enable_expert_parallel)
+        # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device
+        # Assume the following case:
+        # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
+        # According to the formula, max_num_batch_sizes = math.floor(1920 / (48 + 1) / 2) = 19
+        max_num_batch_sizes = math.floor(
+            MAX_CAPTURE_SIZE / (num_hidden_layers + 1) / parallel_factor)
+        logger.info(
+            "Calculated maximum supported batch sizes for ACL graph: %s",
+            max_num_batch_sizes)
+    else:
+        # The above describes an empirical formula applicable to the A2 hardware.
+        # Under this configuration, HCCL employs the FFTS+ method for execution unfolding,
+        # which adds only 1 concurrent stream without consuming collective communication execution unfolding streams.
+        # On A3 hardware, HCCL defaults to the AICPU method.
+        # This approach may additionally allocate up to rank_size (max 16) - 1 streams per collective communication domain on the device (worst case).
+        # Using the default collective communication unfolding method on A3 will lead to a significant reduction in the maximum supported sizes.
+        # Therefore, the calculation formula has been modified as follows:
+        # Assume the following case:
+        # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
+        # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
+        max_num_batch_sizes = math.floor(
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40) /
+            (num_hidden_layers + 1) / (1 + num_comm_groups * 2))
+        logger.info(
+            "Calculated maximum supported batch sizes for ACL graph: %s",
+            max_num_batch_sizes)
+        logger.warning(
+            "Currently, communication is performed using FFTS+ method, which reduces "
+            "the number of available streams and, as a result, limits the range of runtime "
+            "shapes that can be handled. To both improve communication performance and "
+            "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
+        )
 
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
