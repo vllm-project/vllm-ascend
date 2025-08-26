@@ -1,4 +1,3 @@
 # LogitsProcessor Guide
 
 ## Overview
-

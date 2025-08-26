@@ -21,27 +21,25 @@ import sys
 from typing import Union
 
 import pytest
-
-from tests.e2e.utils import fork_new_process_for_each_test
-from tests.conftest import VllmRunner
-# yapf: disable
-from tests.e2e.singlecard.sample.utils import (DUMMY_LOGITPROC_ARG,
-                                              DUMMY_LOGITPROC_FQCN,
-                                              DUMMY_LOGITPROC_MODULE,
-                                              MAX_TOKENS, MODEL_NAME,
-                                              TEMP_GREEDY,
-                                              CustomLogitprocSource,
-                                              DummyLogitsProcessor,
-                                              dummy_module)
-from tests.e2e.singlecard.sample.utils import entry_points as fake_entry_points
-from .utils import prompts
+from transformers import AutoTokenizer
 # yapf: enable
 from vllm import LLM, SamplingParams
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
+from tests.conftest import VllmRunner
+# yapf: disable
+from tests.e2e.singlecard.sample.utils import (DUMMY_LOGITPROC_ARG,
+                                               DUMMY_LOGITPROC_FQCN,
+                                               DUMMY_LOGITPROC_MODULE,
+                                               MAX_TOKENS, MODEL_NAME,
+                                               TEMP_GREEDY,
+                                               CustomLogitprocSource,
+                                               DummyLogitsProcessor,
+                                               dummy_module)
+from tests.e2e.singlecard.sample.utils import entry_points as fake_entry_points
+from tests.e2e.utils import fork_new_process_for_each_test
 
-from transformers import AutoTokenizer
-
+from .utils import prompts
 
 MODEL_NAME = "facebook/opt-125m"
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -50,7 +48,6 @@ target_ids = [67, 128]
 for tid in target_ids:
     token_str = tokenizer.decode([tid])
     print(f"Token {tid} -> {token_str}")
-
 
 # Create a mixture of requests which do and don't utilize the dummy logitproc
 sampling_params_list = [
