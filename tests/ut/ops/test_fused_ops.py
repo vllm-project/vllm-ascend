@@ -19,9 +19,10 @@ import pytest
 import torch
 import torch.nn as nn
 import torch_npu
-import vllm_ascend.ops.moe_dispatcher.token_dispatcher as token_dispatcher_module
 from pytest_mock import MockerFixture
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
+
+import vllm_ascend.ops.moe_dispatcher.token_dispatcher as token_dispatcher_module
 from vllm_ascend.ascend_forward_context import (FusedMoEState,
                                                 _get_fused_moe_state)
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
@@ -54,9 +55,6 @@ def mock_dp_and_tp_group(mocker):
 @pytest.fixture
 def mock_dist_env(mocker: MockerFixture):
     mock_setup_token_dispatchers = MagicMock()
-    from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
-        setup_token_dispatchers
-
     mock_token_dispatcher_with_allgather = MagicMock()
     mock_token_dispatcher_with_all2allv = MagicMock()
     mock_token_dispatcher_with_mc2 = MagicMock()
@@ -108,13 +106,10 @@ def mock_dist_env(mocker: MockerFixture):
     mock_register_token_dispatcher_patcher = patch(
         'vllm_ascend.ops.moe_dispatcher.token_dispatcher._register_token_dispatcher',
         side_effect=capture_register)
-    mock_register_token_dispatcher = mock_register_token_dispatcher_patcher.start(
-    )
 
     mock_get_token_dispatcher_patcher = patch(
         'vllm_ascend.ops.moe_dispatcher.token_dispatcher.get_token_dispatcher',
         side_effect=lambda name: captured_dispatchers.get(name))
-    mock_get_token_dispatcher = mock_get_token_dispatcher_patcher.start()
 
     default_mock_token_dispatcher = mock_token_dispatcher_with_allgather
 

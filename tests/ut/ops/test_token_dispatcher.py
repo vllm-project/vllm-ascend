@@ -341,11 +341,6 @@ class TestTokenDispatcherWithAllGather(TestBase):
                                                  topk_ids, None)
         self.assertEqual(results["hidden_states"].shape, (6, 128))
 
-    def test_token_dispatch_invalid_topk_when_router_weight(self):
-        self.dispatcher.apply_router_weight_on_input = True
-        hidden_states = torch.randn(3, 128)
-        topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
-
 
 class TestTokenDispatcherWithAll2AllV(TestBase):
 
