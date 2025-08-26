@@ -1208,8 +1208,8 @@ class AscendFusedMoE(FusedMoE):
         if expert_map_path and os.path.exists(expert_map_path):
             if self.static_eplb or self.dynamic_eplb:
                 # moe expert load balance
-                expert_load_balancer = ExpertLoadBalancer(expert_map_path,
-                                                        self.global_num_experts)
+                expert_load_balancer = ExpertLoadBalancer(
+                    expert_map_path, self.global_num_experts)
                 self.local_num_experts, self.expert_map = (
                     expert_load_balancer.get_rank_placement_map(
                         self.moe_instance_id, self.ep_rank))
@@ -1220,7 +1220,7 @@ class AscendFusedMoE(FusedMoE):
             else:
                 # Create a tensor of size num_experts filled with -1
                 self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size, self.ep_rank, self.global_num_experts)
+                    self.ep_size, self.ep_rank, self.global_num_experts)
         else:
             if self.dynamic_eplb:
                 self.global_redundant_expert_num = ascend_config.init_redundancy_expert
@@ -1228,13 +1228,15 @@ class AscendFusedMoE(FusedMoE):
                     determine_default_expert_map,
                     determine_default_log2phy_map)
                 self.local_num_experts, self.expert_map = determine_default_expert_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank, self.global_redundant_expert_num)
+                    self.global_num_experts, self.ep_size, self.ep_rank,
+                    self.global_redundant_expert_num)
                 self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank, self.global_redundant_expert_num)
+                    self.global_num_experts, self.ep_size, self.ep_rank,
+                    self.global_redundant_expert_num)
             else:
                 # Create a tensor of size num_experts filled with -1
                 self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size, self.ep_rank, self.global_num_experts)
+                    self.ep_size, self.ep_rank, self.global_num_experts)
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = (

@@ -39,7 +39,8 @@ class VllmEplbAdaptor(EplbAdaptor):
         else:
             self.num_dense_layers = self.model.config.first_k_dense_replace
             self.global_expert_num = self.model.config.n_routed_experts
-        self.init_redundancy_expert = get_ascend_config().init_redundancy_expert
+        self.init_redundancy_expert = get_ascend_config(
+        ).init_redundancy_expert
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
 
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 and qwen3-moe is supported here
@@ -163,12 +164,9 @@ class VllmEplbAdaptor(EplbAdaptor):
     def _export_tensor_to_file(self, expert_maps, expert_map_record_path: str):
         num_local_experts = expert_maps.max() + 1
         expert_maps_local = self.global2local(expert_maps, num_local_experts)
- 
+
         expert_maps_list = expert_maps_local.tolist()
-        record = {
-            "moe_layer_count": len(expert_maps_list),
-            "layer_list": []
-        }
+        record = {"moe_layer_count": len(expert_maps_list), "layer_list": []}
 
         for layer_idx, layer_data in enumerate(expert_maps_list):
             layer_record = {
@@ -205,15 +203,15 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
 
     def global2local(self, placement: torch.Tensor,
-                    E_local: int) -> tuple[torch.Tensor, torch.Tensor]:
+                     E_local: int) -> tuple[torch.Tensor, torch.Tensor]:
 
         L, G, _ = placement.shape
         device = placement.device
 
         pt_local = torch.full((L, G, E_local),
-                                fill_value=-1,
-                                dtype=torch.long,
-                                device=device)
+                              fill_value=-1,
+                              dtype=torch.long,
+                              device=device)
 
         valid = placement >= 0
         l_idx, g_idx, k_idx = valid.nonzero(as_tuple=True)

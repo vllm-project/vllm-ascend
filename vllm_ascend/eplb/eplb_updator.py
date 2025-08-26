@@ -97,8 +97,10 @@ class EplbUpdator:
         if self.cur_iterations == (self.num_iterations_eplb_update + \
                                    self.num_wait_worker_iterations + self.num_moe_layers):
             if self.expert_map_record_path is not None:
-                self.adaptor._export_tensor_to_file(self.shared_dict["expert_maps"], self.expert_map_record_path)
-            
+                self.adaptor._export_tensor_to_file(
+                    self.shared_dict["expert_maps"],
+                    self.expert_map_record_path)
+
             self.adaptor.model.clear_all_moe_loads()
             if not self.gate_eplb:
                 self.cur_iterations = 0

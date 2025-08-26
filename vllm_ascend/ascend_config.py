@@ -43,14 +43,14 @@ class AscendConfig:
             "expert_map_path", None
         )  # When using expert load balancing for the MOE model, an expert map path needs to be passed in
         self.expert_map_record_path = additional_config.get(
-            "expert_map_record_path", None
-        )  # Whether to enable expert map recording
+            "expert_map_record_path",
+            None)  # Whether to enable expert map recording
         self.init_redundancy_expert = additional_config.get(
-            "init_redundancy_expert", 0
-        )  # The number of redundancy experts for the MOE model
+            "init_redundancy_expert",
+            0)  # The number of redundancy experts for the MOE model
         self.static_eplb = additional_config.get(
-            "static_eplb", False
-        )  # Whether to enable static expert load balancing
+            "static_eplb",
+            False)  # Whether to enable static expert load balancing
         self.dynamic_eplb = additional_config.get(
             "dynamic_eplb",
             False)  # Whether to enable dynamic expert load balancing

@@ -20,7 +20,8 @@ import random
 import torch
 
 
-def determine_default_expert_map(global_expert_num, world_size, rank_id, global_redundant_expert_num):
+def determine_default_expert_map(global_expert_num, world_size, rank_id,
+                                 global_redundant_expert_num):
     if world_size == 1:
         local_ids = torch.arange(global_expert_num, dtype=torch.int32)
         expert_map = local_ids.unsqueeze(0).expand(world_size, -1)
@@ -50,6 +51,7 @@ def determine_default_expert_map(global_expert_num, world_size, rank_id, global_
     expert_map[start:end] = local_ids
 
     return (local_count, expert_map)
+
 
 def generate_log2phy_map(expert_map):
     num_local_experts = expert_map.max() + 1
@@ -81,13 +83,14 @@ def generate_log2phy_map(expert_map):
     return log2phy_map
 
 
-def determine_default_log2phy_map(global_expert_num, world_size, rank_id, global_redundant_expert_num):
+def determine_default_log2phy_map(global_expert_num, world_size, rank_id,
+                                  global_redundant_expert_num):
     if world_size == 1:
         local_ids = torch.arange(global_expert_num, dtype=torch.int32)
         expert_map_all = local_ids.unsqueeze(0).expand(world_size, -1)
         log2phy_map_all = generate_log2phy_map(expert_map_all)
         return log2phy_map_all[rank_id]
-    
+
     local_num_experts = global_expert_num // world_size
 
     expert_map_all = torch.full((world_size, global_expert_num),
@@ -103,7 +106,7 @@ def determine_default_log2phy_map(global_expert_num, world_size, rank_id, global
             start = r * local_num_experts
             end = global_expert_num
             local_count = global_expert_num - r * local_num_experts
-            
+
         if r < global_redundant_expert_num:
             local_count += 1
             if end < global_expert_num:
