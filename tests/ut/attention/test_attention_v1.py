@@ -434,9 +434,9 @@ class TestAscendAttentionBackendImpl(TestBase):
     def test_forward_decode_only_swa(self, mock_paged_attention,
                                      mock_npu_reshape_and_cache):
         """Test forward pass in DecodeOnly state"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
+        query = torch.randn(1, 8 * 64)
+        key = torch.randn(1, 8 * 64)
+        value = torch.randn(1, 8 * 64)
         kv_cache = torch.empty(2, 5, 128, 8, 64)
         metadata = self.attn_metadata
         metadata.attn_state = AscendAttentionState.DecodeOnly
@@ -455,7 +455,7 @@ class TestAscendAttentionBackendImpl(TestBase):
                                        trace_flag=False)
 
         mock_paged_attention.assert_called_once()
-        assert output.shape == (10, 8 * 64)
+        assert output.shape == (1, 8 * 64)
 
     @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
     @patch('torch_npu._npu_reshape_and_cache')
