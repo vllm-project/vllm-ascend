@@ -35,7 +35,6 @@ from vllm_ascend.distributed.tensor_parallel import (
     all_to_all_sp2hp, gather_from_sequence_parallel_region,
     reduce_scatter_last_dim_to_tensor_parallel_region)
 from vllm_ascend.ops.comm_utils import async_all_to_all
-from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
 
@@ -540,12 +539,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_dispatch_v2 = hasattr(torch_npu,
                                           "npu_moe_distribute_dispatch_v2")
-        self.need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
-                                or self.torchair_graph_enabled)
+        self.need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3)
 
         # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
         self.a3_need_extra_args = \
@@ -637,21 +633,16 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
 
         if self.with_quant:
             if shared_experts is not None:
-                with npu_stream_switch("moe_secondary", 0):
-                    npu_wait_tensor(shared_gate_up, expand_x)
-                    shared_act_out = shared_experts.act_fn(
-                        (shared_gate_up, shared_dequant_scale))
-                    self.shared_act, self.swiglu_out_scale = \
-                        shared_act_out[0], shared_act_out[1]
+                shared_act_out = shared_experts.act_fn(
+                    (shared_gate_up, shared_dequant_scale))
+                self.shared_act, self.swiglu_out_scale = \
+                    shared_act_out[0], shared_act_out[1]
 
         else:
             if shared_experts is not None:
-                with npu_stream_switch("moe_secondary", 0):
-                    npu_wait_tensor(hidden_states, topk_weights)
-                    shared_gate_up, _ = shared_experts.gate_up_proj(
-                        hidden_states)
-                    npu_wait_tensor(shared_gate_up, expand_x)
-                    self.shared_act = shared_experts.act_fn(shared_gate_up)
+                shared_gate_up, _ = shared_experts.gate_up_proj(
+                    hidden_states)
+                self.shared_act = shared_experts.act_fn(shared_gate_up)
         group_list_type = 1
         return {
             "group_list_type": group_list_type,
@@ -723,15 +714,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             return hidden_states
         else:
             if self.with_quant:
-                with npu_stream_switch("moe_secondary", 0):
-                    npu_wait_tensor(self.shared_act, hidden_states)
-                    shared_hidden_states, _ = self.shared_experts.down_proj(
-                        (self.shared_act, self.swiglu_out_scale))
+                shared_hidden_states, _ = self.shared_experts.down_proj(
+                    (self.shared_act, self.swiglu_out_scale))
             else:
-                with npu_stream_switch("moe_secondary", 0):
-                    npu_wait_tensor(self.shared_act, hidden_states)
-                    shared_hidden_states, _ = self.shared_experts.down_proj(
-                        self.shared_act)
+                shared_hidden_states, _ = self.shared_experts.down_proj(
+                    self.shared_act)
             return hidden_states, shared_hidden_states
 
 
