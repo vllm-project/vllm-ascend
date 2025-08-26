@@ -116,7 +116,7 @@ def mock_distributed():
             patch.dict("vllm.distributed.parallel_state.__dict__", _TP=tp_group, _EP=ep_group, _DP=dp_group,
                        _PP=pp_group), \
             patch.dict("vllm_ascend.distributed.parallel_state.__dict__", _MC2=ep_group), \
-            patch.dict("torch.npu.current_device", return_value=0):
+            patch("torch.npu.current_device", return_value=0):
         yield
 
 
