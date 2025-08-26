@@ -455,7 +455,7 @@ class TestAscendAttentionBackendImpl(TestBase):
                                        trace_flag=False)
         print(output.shape)
         mock_fused_infer_attention_score.assert_called_once()
-        assert output.shape == (10, 8, 64)
+        assert output.shape == (10, 8 * 64)
 
     @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
     @patch('torch_npu._npu_reshape_and_cache')
