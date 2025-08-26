@@ -22,7 +22,6 @@ from vllm.config import CacheConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 
 from vllm_ascend.models.deepseek_v2 import (
-    CustomDeepseekV2DecoderLayer, CustomDeepseekV2ForCausalLM,
     CustomDeepseekV2MergedReplicatedLinear, CustomDeepseekV2MLAAttention,
     CustomDeepseekV2MLP, CustomDeepseekV2MoE,
     CustomDeepseekV2RowParallelLinear,
