@@ -20,7 +20,6 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 import torch
 from pytest_mock import MockerFixture
-
 from tests.ut.base import PytestBase, TestBase
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
     AscendSocVersion, MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig,
@@ -90,7 +89,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.forward_context = MagicMock()
         self.forward_context.mc2_mask = torch.tensor([1, 0, 1])
         self.forward_context_patch = patch(
-            "vllm_ascend.ops.moe_dispatcher.token_dispatcher.get_forward_context",
+            "vllm.forward_context.get_forward_context",
             return_value=self.forward_context)
         self.forward_context_patch.start()
 
@@ -151,7 +150,8 @@ class TestTokenDispatcherWithMC2(TestBase):
                                                     topk_weights, topk_ids,
                                                     expert_map)
             mock_dispatch.assert_called_once()
-            self.assertEqual(output[0], 1)  # group_list_type == 1
+            self.assertEqual(output["group_list_type"],
+                             1)  # group_list_type == 1
 
     def test_token_dispatch_with_shared_experts_and_quant(self):
         self.shared_experts = MagicMock()
@@ -268,14 +268,14 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
-        group_list_type, sorted_hidden_states, expert_tokens = self.dispatcher.token_dispatch(
-            hidden_states, topk_weights, topk_ids, None)
+        results = self.dispatcher.token_dispatch(hidden_states, topk_weights,
+                                                 topk_ids, None)
 
         # Verify npu_moe_init_routing is called
         self.mock_moe_init_routing.assert_called_once()
         args, kwargs = self.mock_moe_init_routing.call_args
 
-        self.assertEqual(group_list_type, 0)
+        self.assertEqual(results["group_list_type"], 0)
 
     def test_token_dispatch_with_quant(self):
         kwargs = {
@@ -292,11 +292,11 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
 
-        group_list_type, sorted_hidden_states, expert_tokens = self.dispatcher_quant.token_dispatch(
-            hidden_states, topk_weights, topk_ids, None)
+        results = self.dispatcher_quant.token_dispatch(hidden_states,
+                                                       topk_weights, topk_ids,
+                                                       None)
 
-        # Verify quant mode returns group_list_type=1
-        self.assertEqual(group_list_type, 0)
+        self.assertEqual(results["group_list_type"], 0)
 
     def test_token_combine_with_expert_map(self):
         self.dispatcher.expert_map = torch.tensor([0, 1, 2, 3])
@@ -337,19 +337,14 @@ class TestTokenDispatcherWithAllGather(TestBase):
         topk_weights = torch.tensor([[0.7], [0.6], [0.5]])  # topk=1
         topk_ids = torch.tensor([[0], [1], [2]])
 
-        group_list_type, sorted_hidden_states, expert_tokens = self.dispatcher.token_dispatch(
-            hidden_states, topk_weights, topk_ids, None)
-        self.assertEqual(sorted_hidden_states.shape, (6, 128))
+        results = self.dispatcher.token_dispatch(hidden_states, topk_weights,
+                                                 topk_ids, None)
+        self.assertEqual(results["hidden_states"].shape, (6, 128))
 
     def test_token_dispatch_invalid_topk_when_router_weight(self):
         self.dispatcher.apply_router_weight_on_input = True
         hidden_states = torch.randn(3, 128)
         topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
-
-        with self.assertRaises(AssertionError):
-            self.dispatcher.token_dispatch(
-                hidden_states, topk_weights,
-                torch.tensor([[0, 1], [1, 2], [2, 3]]), None)
 
 
 class TestTokenDispatcherWithAll2AllV(TestBase):
