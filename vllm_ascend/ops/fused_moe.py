@@ -49,7 +49,6 @@ from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
     MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
-from vllm_ascend.torchair.utils import npu_stream_switch
 from vllm_ascend.utils import (dispose_tensor, get_all_reduce_merge_state,
                                get_rm_router_logits_state, is_310p)
 
