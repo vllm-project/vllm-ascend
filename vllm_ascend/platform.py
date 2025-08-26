@@ -28,7 +28,7 @@ from vllm.platforms import Platform, PlatformEnum
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
-from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD, is_310p,
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, is_310p,
                                update_aclgraph_sizes)
 
 if TYPE_CHECKING:
@@ -50,7 +50,7 @@ class NPUPlatform(Platform):
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
 
-    supported_quantization: list[str] = [ASCEND_QUATIZATION_METHOD]
+    supported_quantization: list[str] = [ASCEND_QUANTIZATION_METHOD]
 
     def is_sleep_mode_available(self) -> bool:
         return True
@@ -70,8 +70,8 @@ class NPUPlatform(Platform):
             quant_action = parser._option_string_actions.get('--quantization')
             if quant_action and hasattr(quant_action,
                                         'choices') and quant_action.choices:
-                if ASCEND_QUATIZATION_METHOD not in quant_action.choices:
-                    quant_action.choices.append(ASCEND_QUATIZATION_METHOD)
+                if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
+                    quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401

@@ -12,7 +12,7 @@ from vllm.platforms import PlatformEnum
 
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
 class TestNPUPlatform(TestBase):
@@ -43,7 +43,7 @@ class TestNPUPlatform(TestBase):
                          "ASCEND_RT_VISIBLE_DEVICES")
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization,
-                         [ASCEND_QUATIZATION_METHOD])
+                         [ASCEND_QUANTIZATION_METHOD])
 
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())
@@ -61,7 +61,7 @@ class TestNPUPlatform(TestBase):
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
 
-        self.assertTrue(ASCEND_QUATIZATION_METHOD in mock_action.choices)
+        self.assertTrue(ASCEND_QUANTIZATION_METHOD in mock_action.choices)
         self.assertEqual(len(mock_action.choices), 3)  # original 2 + ascend
 
     @patch("vllm_ascend.utils.adapt_patch")
@@ -89,7 +89,7 @@ class TestNPUPlatform(TestBase):
             self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_action = MagicMock()
-        mock_action.choices = ["awq", ASCEND_QUATIZATION_METHOD]
+        mock_action.choices = ["awq", ASCEND_QUANTIZATION_METHOD]
         mock_parser._option_string_actions = {"--quantization": mock_action}
 
         self.platform.pre_register_and_update(mock_parser)
