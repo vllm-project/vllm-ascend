@@ -184,15 +184,31 @@ def parse_args():
                         type=str,
                         nargs="+",
                         default=["localhost"])
+    parser.add_argument("--prefiller-hosts-num",
+                        type=int,
+                        nargs="+",
+                        default=None)
     parser.add_argument("--prefiller-ports",
                         type=int,
                         nargs="+",
                         default=[8001])
+    parser.add_argument("--prefiller-ports-inc",
+                        type=int,
+                        nargs="+",
+                        default=None)
     parser.add_argument("--decoder-hosts",
                         type=str,
                         nargs="+",
                         default=["localhost"])
+    parser.add_argument("--decoder-hosts-num",
+                        type=int,
+                        nargs="+",
+                        default=None)
     parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8002])
+    parser.add_argument("--decoder-ports-inc",
+                        type=int,
+                        nargs="+",
+                        default=None)
     parser.add_argument("--max-retries",
                         type=int,
                         default=3,
@@ -209,6 +225,49 @@ def parse_args():
     if len(args.decoder_hosts) != len(args.decoder_ports):
         raise ValueError(
             "Number of decoder hosts must match number of decoder ports")
+    if args.prefiller_hosts_num is not None and (len(args.prefiller_hosts_num)
+                                                 != len(args.prefiller_hosts)):
+        raise ValueError(
+            "Number of prefiller hosts num must match number of prefiller hosts"
+        )
+    if args.prefiller_ports_inc is not None and (len(args.prefiller_ports_inc)
+                                                 != len(args.prefiller_ports)):
+        raise ValueError(
+            "Number of prefiller ports inc must match number of prefiller ports"
+        )
+    if args.decoder_hosts_num is not None and (len(args.decoder_hosts_num) !=
+                                               len(args.decoder_hosts)):
+        raise ValueError(
+            "Number of decoder hosts num must match number of decoder hosts")
+    if args.decoder_ports_inc is not None and (len(args.decoder_ports_inc) !=
+                                               len(args.decoder_ports)):
+        raise ValueError(
+            "Number of decoder ports inc must match number of decoder ports")
+
+    if args.prefiller_hosts_num is not None:
+        args.prefiller_hosts = [
+            host for host, num in zip(args.prefiller_hosts,
+                                      args.prefiller_hosts_num)
+            for _ in range(num)
+        ]
+    if args.prefiller_ports_inc is not None:
+        args.prefiller_ports = [(int(port) + i) for port, inc in zip(
+            args.prefiller_ports, args.prefiller_ports_inc)
+                                for i in range(inc)]
+
+    if args.decoder_hosts_num is not None:
+        args.decoder_hosts = [
+            host
+            for host, num in zip(args.decoder_hosts, args.decoder_hosts_num)
+            for _ in range(num)
+        ]
+    if args.decoder_ports_inc is not None:
+        args.decoder_ports = [
+            (int(port) + i)
+            for port, inc in zip(args.decoder_ports, args.decoder_ports_inc)
+            for i in range(inc)
+        ]
+
     args.prefiller_instances = list(
         zip(args.prefiller_hosts, args.prefiller_ports))
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
