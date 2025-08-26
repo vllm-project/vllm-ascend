@@ -192,7 +192,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/e2e/singlecard/test_offline_inference.py
-          # pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_embedding.py
@@ -205,7 +205,6 @@ jobs:
           # All other tests, ignore: 310p test, accuracy test.
           pytest -sv tests/e2e/singlecard/ \
           --ignore=tests/e2e/singlecard/test_offline_inference.py \
-          --ignore=tests/e2e/singlecard/test_ilama_lora.py \
           --ignore=tests/e2e/singlecard/test_guided_decoding.py \
           --ignore=tests/e2e/singlecard/test_camem.py \
           --ignore=tests/e2e/singlecard/test_embedding.py \
@@ -273,7 +272,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          # pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
@@ -284,7 +283,6 @@ jobs:
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_sp_for_qwen3_moe
           pytest -sv tests/e2e/multicard/test_data_parallel.py
-          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
-            --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
+          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
             --ignore=tests/e2e/multicard/test_data_parallel.py \
             --ignore=tests/e2e/multicard/test_offline_inference_310p.py
