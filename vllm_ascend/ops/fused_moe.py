@@ -53,7 +53,7 @@ from vllm_ascend.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
                                get_ascend_soc_version,
-                               get_rm_router_logits_state, is_310p)
+                               get_rm_router_logits_state, is_310p,npu_prefetch)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
@@ -987,6 +987,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         fused_moe_state = get_forward_context().fused_moe_state
 
         if fused_moe_state == FusedMoEState.MC2:
+            ascend_config = get_ascend_config()
+            npu_prefetch(layer.w2_weight, x,
+                         enabled=ascend_config.torchair_graph_config.enabled)
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
