@@ -288,25 +288,12 @@ class AscendMLAMetadataBuilder:
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
         model: nn.Module,
-        cp_kv_recover_idx: list[int] = None,
-        num_actual_tokens_cp_full: int = None,
-        num_computed_tokens_of_cp_sp: list[list[list[int]]] = None,
-        q_head_idx_tensor = None,
-        q_tail_idx_tensor = None,
-        kv_with_q_head_nomask_idx_tensor = None,
-        kv_with_q_head_mask_idx_tensor = None,
-        kv_with_q_tail_nomask_idx_tensor = None,
-        kv_with_q_tail_mask_idx_tensor = None,
-        attn_mask_seqlens = None,
-        head_attn_nomask_seqlens = None,
-        tail_attn_nomask_seqlens = None,
-        q_full_idx = None,
-        cp_prefill_mask = None,
     ) -> AscendMLAMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+
         cp_kv_recover_idx = common_attn_metadata.cp_kv_recover_idx
         num_actual_tokens_cp_full = common_attn_metadata.num_actual_tokens_cp_full
         num_computed_tokens_of_cp_sp = common_attn_metadata.num_computed_tokens_of_cp_sp
@@ -321,6 +308,7 @@ class AscendMLAMetadataBuilder:
         tail_attn_nomask_seqlens = common_attn_metadata.tail_attn_nomask_seqlens
         q_full_idx = common_attn_metadata.q_full_idx
         cp_prefill_mask = common_attn_metadata.cp_prefill_mask
+
         # TODO(xyx): remove the if condition after mla supports torch mode speculative decoding
         decode_threshold = 1
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
@@ -1236,13 +1224,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 decode_ql_nope, decode_q_pe = \
                     self._q_proj_and_k_up_proj(decode_hs_or_q_c)
-                # decode_hs_or_q_c: [seq, q_lora_rank/hidden_size(2048)],
-                # decode_ql_nope: [seq, num_heads(16/tp), kv_lora_rank(512)], decode_q_pe: [seq, num_heads(16/tp), qk_rope_head_dim(64)]
             if self.sp_size > 1:
                 decode_q_wo_k_up = decode_q_wo_k_up.contiguous()
                 decode_q_wo_k_up = get_tp_group().all_gather(decode_q_wo_k_up, 1)
-            # decode_ql_nope, decode_q_pe = \
-            #     self._q_proj_and_k_up_proj(decode_hs_or_q_c)
             if self.cp_size * self.sp_size > 1:
                 decode_q_wo_k_up_pe = decode_q_wo_k_up[..., self.qk_nope_head_dim:] # [seq, num_heads_full(16), qk_rope_head_dim(64)]
                 # decode_q_wo_k_up_nope = decode_q_wo_k_up[..., :self.qk_nope_head_dim] # [seq, num_heads_full(16), qk_nope_head_dim(128)]
@@ -1257,11 +1241,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                     decode_q_pe.contiguous(),
                     decode_k_pe,
                     max_seq_len=attn_metadata.decode.max_seq_lens)
-            # decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
-            #     attn_metadata.decode.input_positions,
-            #     decode_q_pe.contiguous(),
-            #     decode_k_pe,
-            #     max_seq_len=attn_metadata.decode.max_seq_lens)
         if has_prefill:
             assert attn_metadata.prefill is not None
             prefill_q = self.q_proj(prefill_hs_or_q_c)[0]\
@@ -1284,7 +1263,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe], dim=-1)
             prefill_kv_c_k_pe = get_cp_group().all_gather(prefill_kv_c_k_pe, 0)
             prefill_kv_c_k_pe = torch.index_select(prefill_kv_c_k_pe, 0, attn_metadata.prefill.cp_kv_recover_idx)
-            prefill_k_c_normed, prefill_k_pe = prefill_kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            prefill_k_c_normed, prefill_k_pe = prefill_kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim],
+                                                                       dim=-1)
+
             kv_c_normed, k_pe = prefill_k_c_normed, prefill_k_pe
             prefill_k_c_normed = prefill_k_c_normed.squeeze()
 
@@ -1331,7 +1312,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 output_decode = self._forward_decode(decode_ql_nope,
                                                      decode_q_pe,
                                                      decode_k_nope,
-                                                     decode_k_pe, kv_cache,
+                                                     decode_k_pe,
+						     kv_cache,
                                                      attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
@@ -1344,7 +1326,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if current_ms_metadata is None:
             output[...] = self.o_proj(
                 o_proj_input,
-                is_prefill=True,
+                is_prefill=has_prefill,
                 is_force_scatter=self.enable_shared_expert_dp)[0]
         else:
             with torch.npu.stream(current_ms_metadata.comm_stream):

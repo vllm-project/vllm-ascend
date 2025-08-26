@@ -44,8 +44,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (get_dp_group,
-                                             get_pp_group,
                                              get_tp_group,
+                                             get_pp_group,
                                              get_context_model_parallel_world_size,
                                              get_context_model_parallel_rank,
                                              is_global_first_rank)
@@ -251,7 +251,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.spec_attn_mask = None
         self.use_eagle = False
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
-                                     MtpProposer]] = None
+        MtpProposer]] = None
         self.actual_seq_lengths_q = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -340,10 +340,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                          pin_memory=True)
         self.positions_np = self.positions_cpu.numpy()
 
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens * self.cp_size * self.sp_size + self.cp_size * self.sp_size * self.max_num_reqs,
-                                            dtype=torch.int32,
-                                            device="cpu",
-                                            pin_memory=True)
+        self.slot_mapping_cpu = torch.zeros(
+            self.max_num_tokens * self.cp_size * self.sp_size + self.cp_size * self.sp_size * self.max_num_reqs,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=True)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                                dtype=torch.int32,
@@ -366,7 +367,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.aclgraph_dispatcher = CudagraphDispatcher(self.vllm_config)
         # Cached outputs.
         self._draft_token_ids: Optional[Union[list[list[int]],
-                                              torch.Tensor]] = None
+        torch.Tensor]] = None
 
         # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
         self.in_profile_run = False
@@ -434,7 +435,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             pooling_params = new_req_data.pooling_params
 
             if sampling_params and \
-                sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+                    sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
@@ -555,7 +556,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 req_ids_to_add.append(req_id)
                 continue
 
-            #cp param
+            # cp param
             self.input_batch.kv_rank[req_index] = req_state.kv_rank
             self.input_batch.num_computed_tokens_of_cp_sp[req_index] = req_state.num_computed_tokens_of_cp_sp
 
@@ -573,8 +574,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 start_token_index = num_computed_tokens
                 end_token_index = num_computed_tokens + len(new_token_ids)
                 self.input_batch.token_ids_cpu[
-                    req_index,
-                    start_token_index:end_token_index] = new_token_ids
+                req_index,
+                start_token_index:end_token_index] = new_token_ids
                 self.input_batch.num_tokens_no_spec[
                     req_index] = end_token_index
                 self.input_batch.num_tokens[req_index] = end_token_index
@@ -587,7 +588,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 start_index = self.input_batch.num_tokens_no_spec[req_index]
                 end_token_index = start_index + num_spec_tokens
                 self.input_batch.token_ids_cpu[
-                    req_index, start_index:end_token_index] = spec_token_ids
+                req_index, start_index:end_token_index] = spec_token_ids
                 # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] += num_spec_tokens
 
@@ -635,8 +636,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             num_tokens: int) -> bool:
         # do the checks for dp + dbo
         if attn_state in [
-                AscendAttentionState.DecodeOnly,
-                AscendAttentionState.SpecDecoding
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.SpecDecoding
         ]:
             return False
         # considering the case that one dp rank may enable dbo while others may not
@@ -652,10 +653,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return True
 
     def get_eagle_atten_dict(
-        self,
-        scheduler_output: "SchedulerOutput",
+            self,
+            scheduler_output: "SchedulerOutput",
     ) -> dict[str, Union[AscendMetadata, AscendMLAMetadata,
-                         AscendTorchairMetadata, AscendMLATorchairMetadata]]:
+    AscendTorchairMetadata, AscendMLATorchairMetadata]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -724,8 +725,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # here because M (max_model_len) is not necessarily divisible by
             # block_size.
             block_table_indices = (
-                req_indices * block_table.max_num_blocks_per_req +
-                positions_np // block_size)
+                    req_indices * block_table.max_num_blocks_per_req +
+                    positions_np // block_size)
             block_table_cpu = block_table.get_cpu_tensor()
             block_numbers = block_table_cpu.flatten(
             )[block_table_indices].numpy()
@@ -740,8 +741,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
 
         self.seq_lens_np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-            num_scheduled_tokens)
+                self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+                num_scheduled_tokens)
 
         # Copy the tensors to the NPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
@@ -767,8 +768,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.query_start_loc[num_reqs + 1:].fill_(-1)
 
         attn_metadata: dict[str, Union[AscendMetadata, AscendMLAMetadata,
-                                       AscendTorchairMetadata,
-                                       AscendMLATorchairMetadata]] = {}
+        AscendTorchairMetadata,
+        AscendMLATorchairMetadata]] = {}
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -878,7 +879,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 src_end = num_computed_tokens + prompt_part_len
 
                 self.mrope_positions_cpu[:, dst_start:dst_end] = \
-                    req.mrope_positions[:,src_start:src_end]
+                    req.mrope_positions[:, src_start:src_end]
 
                 mrope_pos_ptr += prompt_part_len
 
@@ -957,8 +958,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             )
 
     def _gather_mm_embeddings(
-        self,
-        scheduler_output: "SchedulerOutput",
+            self,
+            scheduler_output: "SchedulerOutput",
     ) -> list[torch.Tensor]:
         mm_embeds: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
@@ -1029,36 +1030,42 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
 
     def _num_scheduled_tokens_prefill_cp(
-        self,
-        num_tokens,
-        num_comnputed_tokens,
+            self,
+            num_tokens,
+            num_comnputed_tokens,
     ):
         num_scheduled_tokens = num_tokens - num_comnputed_tokens
-        num_cp_padded_scheduled_tokens = cdiv(num_scheduled_tokens, 2 * self.cp_size) * (2 * self.cp_size) # pad to 2*cp_size
-        cp_pad = num_cp_padded_scheduled_tokens - num_scheduled_tokens   # 给sample用
-        full_indices = list(range(self.max_num_tokens * self.cp_size * self.sp_size + self.cp_size * self.sp_size * self.max_num_reqs))
+        num_cp_padded_scheduled_tokens = cdiv(num_scheduled_tokens, 2 * self.cp_size) * (
+                    2 * self.cp_size)  # pad to 2*cp_size
+        cp_pad = num_cp_padded_scheduled_tokens - num_scheduled_tokens  # 给sample用
+        full_indices = list(
+            range(self.max_num_tokens * self.cp_size * self.sp_size + self.cp_size * self.sp_size * self.max_num_reqs))
         chunk_size = num_cp_padded_scheduled_tokens // (2 * self.cp_size)
 
         # split position_ids (and use splited postion_ids to split input_ids afterwards)
         req_position_cp = []
         req_position_cp.extend(full_indices[self.cp_rank * chunk_size: (self.cp_rank + 1) * chunk_size])
-        req_position_cp.extend(full_indices[num_cp_padded_scheduled_tokens - (self.cp_rank + 1) * chunk_size: num_cp_padded_scheduled_tokens - self.cp_rank * chunk_size])
+        req_position_cp.extend(full_indices[num_cp_padded_scheduled_tokens - (
+                    self.cp_rank + 1) * chunk_size: num_cp_padded_scheduled_tokens - self.cp_rank * chunk_size])
 
         # used to recover kv order in cp prefill (after all-gather kv and before storing kv_cache)
         num_added_recover_tokens = len(self.cp_kv_recover_idx[0]) * self.cp_size
         for rank in range(self.cp_size):
-            self.cp_kv_recover_idx[rank].extend(full_indices[rank * chunk_size + num_added_recover_tokens: (rank + 1) * chunk_size + num_added_recover_tokens])
-            self.cp_kv_recover_idx[rank].extend(full_indices[num_cp_padded_scheduled_tokens - (rank + 1) * chunk_size + num_added_recover_tokens:
-             num_cp_padded_scheduled_tokens - rank * chunk_size + num_added_recover_tokens])
+            self.cp_kv_recover_idx[rank].extend(full_indices[rank * chunk_size + num_added_recover_tokens: (
+                                                                                                                       rank + 1) * chunk_size + num_added_recover_tokens])
+            self.cp_kv_recover_idx[rank].extend(
+                full_indices[num_cp_padded_scheduled_tokens - (rank + 1) * chunk_size + num_added_recover_tokens:
+                             num_cp_padded_scheduled_tokens - rank * chunk_size + num_added_recover_tokens])
 
         return req_position_cp, num_cp_padded_scheduled_tokens, cp_pad
 
     def _slot_mapping_prefill_cp(
-        self,
-        num_scheduled_tokens_for_slot,
+            self,
+            num_scheduled_tokens_for_slot,
     ):
         block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
-        num_computed_and_new_tokens_batch = np.array(self.input_batch.num_computed_tokens_of_cp_sp[:self.input_batch.num_reqs])
+        num_computed_and_new_tokens_batch = np.array(
+            self.input_batch.num_computed_tokens_of_cp_sp[:self.input_batch.num_reqs])
         start_index = 0
         for i in range(self.input_batch.num_reqs):
             block_table_req = block_table_cpu[i]
@@ -1070,15 +1077,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             slot_mapping = (block_table_indices * self.block_size)[:num_save_tokens_rank] + block_offsets
 
             num_cp_padded_scheduled_tokens = num_scheduled_tokens_for_slot[i]
-            kv_save_start = np.sum(num_computed_and_new_tokens_batch[i][:self.cp_rank]) + np.sum(num_computed_and_new_tokens_batch[i][self.cp_rank][:self.sp_rank])
+            kv_save_start = np.sum(num_computed_and_new_tokens_batch[i][:self.cp_rank]) + np.sum(
+                num_computed_and_new_tokens_batch[i][self.cp_rank][:self.sp_rank])
 
-            self.slot_mapping_np[start_index+kv_save_start:start_index+kv_save_start+num_save_tokens_rank] = slot_mapping
+            self.slot_mapping_np[
+            start_index + kv_save_start:start_index + kv_save_start + num_save_tokens_rank] = slot_mapping
 
             start_index += num_cp_padded_scheduled_tokens
 
     def _slot_mapping_decode_cp(
-        self,
-        num_scheduled_tokens,
+            self,
+            num_scheduled_tokens,
     ):
         block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
         num_computed_and_new_tokens_batch = self.input_batch.num_computed_tokens_of_cp_sp
@@ -1094,18 +1103,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 block_offsets = positions_for_slot % self.block_size
                 slot_mapping = (block_table_indices * self.block_size)[:num_save_tokens_rank] + block_offsets
 
-                self.slot_mapping_np[start_index:start_index+num_scheduled_tokens_req] = slot_mapping[-num_scheduled_tokens_req:]
+                self.slot_mapping_np[start_index:start_index + num_scheduled_tokens_req] = slot_mapping[
+                                                                                           -num_scheduled_tokens_req:]
             start_index += num_scheduled_tokens_req
 
     def _prepare_inputs(
-        self,
-        scheduler_output: "SchedulerOutput",
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+            self,
+            scheduler_output: "SchedulerOutput",
+            intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> tuple[Union[AscendMetadata, AscendMLAMetadata, AscendTorchairMetadata,
-                     AscendMLATorchairMetadata], torch.Tensor, np.ndarray, int,
-               torch.Tensor, int, torch.Tensor, SpecDecodeMetadata,
-               Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    AscendMLATorchairMetadata], torch.Tensor, np.ndarray, int,
+    torch.Tensor, int, torch.Tensor, SpecDecodeMetadata,
+    Optional[torch.Tensor], Optional[torch.Tensor],
+    Optional[torch.Tensor]]:
         # Check input valid
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -1119,6 +1129,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             # Eager mode.
             num_input_tokens = total_num_scheduled_tokens
+        # TODO support chunked prefill (both has prefill and has decode)
+        is_prefill = list(scheduler_output.num_scheduled_tokens.values())[0] > 1
 
         # Padding for DP
         num_pad, num_tokens_across_dp_native = self.get_dp_padding(
@@ -1141,27 +1153,28 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens_for_slot = np.empty(num_reqs, dtype=np.int32)
         self.cp_kv_recover_idx = [[]] * self.cp_size
         for rank in range(self.cp_size):
-            self.cp_kv_recover_idx[rank] = [] #保证各个rank的list独立
+            self.cp_kv_recover_idx[rank] = []  # 保证各个rank的list独立
         for i, req_id in enumerate(self.input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             if self.cp_size > 1 and num_tokens > 1:
                 # when cp > 1 & prefill, need to pad & split sequence here
-                req_position_cp, num_cp_padded_scheduled_tokens, num_cp_pads[i] = self._num_scheduled_tokens_prefill_cp(num_tokens, self.input_batch.num_computed_tokens_cpu[i])
+                req_position_cp, num_cp_padded_scheduled_tokens, num_cp_pads[i] = self._num_scheduled_tokens_prefill_cp(
+                    num_tokens, self.input_batch.num_computed_tokens_cpu[i])
                 num_tokens = len(req_position_cp)
-                self.position_cp[start_index:start_index+num_tokens] = req_position_cp
+                self.position_cp[start_index:start_index + num_tokens] = req_position_cp
                 start_index += num_tokens
                 num_scheduled_tokens_for_slot[i] = num_cp_padded_scheduled_tokens
             else:
                 num_scheduled_tokens_for_slot[i] = num_tokens
             num_scheduled_tokens[i] = num_tokens
             num_valid_tokens[i] = num_tokens - \
-                len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+                                  len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
 
         # update total_num_scheduled_tokens
         total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
-        num_input_tokens = total_num_scheduled_tokens   #未考虑图模式pad
+        num_input_tokens = total_num_scheduled_tokens  # 未考虑图模式pad
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1176,14 +1189,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
 
         positions_np = self.positions_np[:total_num_scheduled_tokens]
-        if self.cp_size > 1 and self.attn_metadata_builder._num_prefills > 0:
+        if self.cp_size > 1 and is_prefill:
             np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
-                self.position_cp[:total_num_scheduled_tokens],
-                out=positions_np)
+                   self.position_cp[:total_num_scheduled_tokens],
+                   out=positions_np)
         else:
             np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
-                arange,
-                out=positions_np)
+                   arange,
+                   out=positions_np)
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1202,28 +1215,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         self.seq_lens_np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-            num_scheduled_tokens)
+                self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+                num_scheduled_tokens)
         seq_lens = self.seq_lens_cpu[:num_reqs]
 
         if self.cp_size * self.sp_size > 1:
-            if self.attn_metadata_builder._num_prefills > 0:
+            if is_prefill:
                 self.slot_mapping_np.fill(-1)
-
                 self._slot_mapping_prefill_cp(num_scheduled_tokens_for_slot)
-            elif self.attn_metadata_builder._num_decodes > 0:
+            else:
                 self.slot_mapping_np.fill(-1)
                 self._slot_mapping_decode_cp(num_scheduled_tokens)
         else:
             block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                    positions_np // self.block_size)
 
-        block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
-        block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
-        block_offsets = positions_np % self.block_size
-        np.add(block_numbers * self.block_size,
-               block_offsets,
-               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+            block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
+            block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
+            block_offsets = positions_np % self.block_size
+            np.add(block_numbers * self.block_size,
+                   block_offsets,
+                   out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
         attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens,
                                             num_valid_tokens)
@@ -1238,28 +1250,29 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_state=attn_state)
         self.attn_state = attn_state  # type: ignore
 
-        extra_builder_kwargs = {}
-        num_actual_tokens_cp_full = total_num_scheduled_tokens * (self.cp_size if self.attn_metadata_builder._num_prefills > 0 else 1)
+        num_actual_tokens_cp_full = total_num_scheduled_tokens * (
+            self.cp_size if self.attn_metadata_builder._num_prefills > 0 else 1)
         if self.cp_size > 1 and self.attn_metadata_builder._num_prefills > 0:
             cp_kv_recover_idx = torch.zeros(num_actual_tokens_cp_full,
                                             dtype=torch.int32,
                                             device=self.device)
-            cp_kv_recover_idx.copy_(torch.tensor(np.array(self.cp_kv_recover_idx).flatten().tolist()), non_blocking=True)
-            extra_builder_kwargs['cp_kv_recover_idx'] = cp_kv_recover_idx.to(torch.float32).argsort().to(torch.int32)
+            cp_kv_recover_idx.copy_(torch.tensor(np.array(self.cp_kv_recover_idx).flatten().tolist()),
+                                    non_blocking=True)
+            self.cp_kv_recover_idx = cp_kv_recover_idx.to(torch.float32).argsort().to(torch.int32)
 
             q_head_idx, q_tail_idx = [], []
             kv_with_q_head_nomask_idx, kv_with_q_head_mask_idx = [], []
             kv_with_q_tail_nomask_idx, kv_with_q_tail_mask_idx = [], []
             chunk_seqlens = []
             kv_with_q_head_nomask_seqlens, kv_with_q_tail_nomask_seqlens = [], []
-            q_req_offset = 0    # 请求在输入 Q 中的偏移，Q 是CP切分的
-            kv_req_offset = 0   # 请求在输入 KV 中的偏移，KV 是全量的
+            q_req_offset = 0  # 请求在输入 Q 中的偏移，Q 是CP切分的
+            kv_req_offset = 0  # 请求在输入 KV 中的偏移，KV 是全量的
             # cp_rank0: q_head_chunk_id=0, q_tail_chunk_id=3
             # cp_rank1: q_head_chunk_id=1, q_tail_chunk_id=2
             q_head_chunk_id = self.cp_rank
             q_tail_chunk_id = self.cp_size * 2 - 1 - self.cp_rank
             for seq_len in seq_lens:
-                chunk_len = seq_len // 2    # 序列切 cp_size*2 份，每一份的长度, 按request
+                chunk_len = seq_len // 2  # 序列切 cp_size*2 份，每一份的长度, 按request
                 chunk_seqlens.append(chunk_len)
                 # 负载均衡前半段计算所需的Q和KV
                 q_head_idx.extend(list(range(q_req_offset, q_req_offset + chunk_len)))
@@ -1281,7 +1294,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 kv_with_q_tail_nomask_seqlens.append(chunk_len * q_tail_chunk_id)
 
                 q_req_offset += seq_len
-                kv_req_offset += seq_len * self.cp_size # KV是全量的
+                kv_req_offset += seq_len * self.cp_size  # KV是全量的
 
             # Convert lists to tensors and move to device
             def _list_to_tensor(lst, device, dtype=torch.int32):
@@ -1292,25 +1305,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # 处理q_head和q_tail相关索引
             q_head_idx_tensor = _list_to_tensor(q_head_idx, self.device)
             q_tail_idx_tensor = _list_to_tensor(q_tail_idx, self.device)
-            extra_builder_kwargs['q_head_idx_tensor'] = q_head_idx_tensor
-            extra_builder_kwargs['q_tail_idx_tensor'] = q_tail_idx_tensor
+            self.q_head_idx_tensor = q_head_idx_tensor
+            self.q_tail_idx_tensor = q_tail_idx_tensor
 
             # 处理q_full_idx（拼接后排序）
             q_full_idx = torch.cat([q_head_idx_tensor, q_tail_idx_tensor])
             q_full_idx = q_full_idx.to(torch.float32).argsort().to(torch.int32)
-            extra_builder_kwargs['q_full_idx'] = q_full_idx
+            self.q_full_idx = q_full_idx
 
             # 处理kv相关的各类索引（批量添加到kwargs）
-            kv_idx_names = {
-                'kv_with_q_head_nomask_idx': kv_with_q_head_nomask_idx,
-                'kv_with_q_head_mask_idx': kv_with_q_head_mask_idx,
-                'kv_with_q_tail_nomask_idx': kv_with_q_tail_nomask_idx,
-                'kv_with_q_tail_mask_idx': kv_with_q_tail_mask_idx
+            self.kv_idx_names = {
+                'kv_with_q_head_nomask_idx_tensor': kv_with_q_head_nomask_idx,
+                'kv_with_q_head_mask_idx_tensor': kv_with_q_head_mask_idx,
+                'kv_with_q_tail_nomask_idx_tensor': kv_with_q_tail_nomask_idx,
+                'kv_with_q_tail_mask_idx_tensor': kv_with_q_tail_mask_idx
             }
-            for key, value in kv_idx_names.items():
+            for key, value in self.kv_idx_names.items():
                 # 动态获取变量（假设变量名与key名一致）
                 tensor_npu = _list_to_tensor(value, self.device)
-                extra_builder_kwargs[f'{key}_tensor'] = tensor_npu
+                self.kv_idx_names[key] = tensor_npu
 
             # 处理序列长度相关张量
             attn_mask_seqlens = torch.tensor([chunk_seqlens, chunk_seqlens], dtype=torch.int32)
@@ -1318,16 +1331,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             tail_attn_nomask_seqlens = torch.tensor([chunk_seqlens, kv_with_q_tail_nomask_seqlens], dtype=torch.int32)
             cp_prefill_mask = torch.triu(torch.ones(512, 512, device=self.device, dtype=torch.bfloat16), 1)
 
-            extra_builder_kwargs.update({
+            self.extra_long_seq_kwargs = {
                 'attn_mask_seqlens': attn_mask_seqlens,
                 'head_attn_nomask_seqlens': head_attn_nomask_seqlens,
                 'tail_attn_nomask_seqlens': tail_attn_nomask_seqlens,
                 'cp_prefill_mask': cp_prefill_mask
-            })
+            }
 
-        extra_builder_kwargs['num_actual_tokens_cp_full'] = num_actual_tokens_cp_full
-        extra_builder_kwargs['num_computed_tokens_of_cp_sp'] = self.input_batch.num_computed_tokens_of_cp_sp[:self.input_batch.num_reqs]
-
+        self.num_actual_tokens_cp_full = num_actual_tokens_cp_full
+        self.num_computed_tokens_of_cp_sp = self.input_batch.num_computed_tokens_of_cp_sp[:self.input_batch.num_reqs]
 
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
@@ -1350,10 +1362,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._get_forward_metadata_across_dp_and_pad(
-             total_num_scheduled_tokens, with_prefill, enable_dbo)
+            total_num_scheduled_tokens, with_prefill, enable_dbo)
         self.with_prefill = with_prefill
         self.num_tokens_across_dp = num_tokens_across_dp
         self._update_graph_pad_size(with_prefill, padded_num_tokens_across_dp)
+
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc[:num_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
@@ -1373,18 +1386,31 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_num_scheduled_tokens,
             graph_pad_size=self.graph_pad_size,
             decode_token_per_req=self.decode_token_per_req,
+            cp_kv_recover_idx=self.cp_kv_recover_idx,
+            num_actual_tokens_cp_full=self.num_actual_tokens_cp_full,
+            num_computed_tokens_of_cp_sp=self.num_computed_tokens_of_cp_sp,
+            q_head_idx_tensor=self.q_head_idx_tensor,
+            q_tail_idx_tensor=self.q_tail_idx_tensor,
+            q_full_idx=self.q_full_idx,
+            kv_with_q_head_nomask_idx_tensor=self.kv_idx_names['kv_with_q_head_nomask_idx_tensor'],
+            kv_with_q_head_mask_idx_tensor=self.kv_idx_names['kv_with_q_head_mask_idx_tensor'],
+            kv_with_q_tail_nomask_idx_tensor=self.kv_idx_names['kv_with_q_tail_nomask_idx_tensor'],
+            kv_with_q_tail_mask_idx_tensor=self.kv_idx_names['kv_with_q_tail_mask_idx_tensor'],
+            attn_mask_seqlens=self.extra_long_seq_kwargs['attn_mask_seqlens'],
+            head_attn_nomask_seqlens=self.extra_long_seq_kwargs['head_attn_nomask_seqlens'],
+            tail_attn_nomask_seqlens=self.extra_long_seq_kwargs['tail_attn_nomask_seqlens'],
+            cp_prefill_mask=self.extra_long_seq_kwargs['cp_prefill_mask']
         )
         attn_metadata = self.attn_metadata_builder.build(
             common_attn_metadata, self.model)
         if self.vllm_config.model_config.use_mla:
             attn_metadata.num_input_tokens = num_input_tokens
-
         # token id pad
         if self.cp_size > 1:
             for i in range(num_reqs):
-                if num_scheduled_tokens[i] > 1: # prefill
-                    num_padded_tokens = num_scheduled_tokens_for_slot[i]+self.input_batch.num_computed_tokens_cpu[i]
-                    self.input_batch.token_ids_cpu[i][num_padded_tokens-num_cp_pads[i]: num_padded_tokens] = 0
+                if num_scheduled_tokens[i] > 1:  # prefill
+                    num_padded_tokens = num_scheduled_tokens_for_slot[i] + self.input_batch.num_computed_tokens_cpu[i]
+                    self.input_batch.token_ids_cpu[i][num_padded_tokens - num_cp_pads[i]: num_padded_tokens] = 0
 
         # Prepare input_ids
         token_indices = (positions_np +
@@ -1460,9 +1486,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             spec_decode_metadata = None
-            logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
+            if self.cp_size > 1 and is_prefill:
+                # logits_indices = cu_num_tokens - num_cp_pads[:num_reqs] - 1 # if without all-gather and onlly sample on cp0
+                logits_indices = cu_num_tokens * self.cp_size - num_cp_pads[:num_reqs] - 1
+            else:
+                logits_indices = cu_num_tokens - 1
+            logits_indices = torch.from_numpy(logits_indices).to(
                 self.device, non_blocking=True)
         else:
+            # cp sp not supported now
+            assert self.cp_size == 1 and self.sp_size == 1
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
@@ -1533,9 +1566,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return input_ids, positions
 
     def _get_cumsum_and_arange(
-        self,
-        num_tokens: np.ndarray,
-        cumsum_dtype: Optional[np.dtype] = None,
+            self,
+            num_tokens: np.ndarray,
+            cumsum_dtype: Optional[np.dtype] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """Get the cumulative sum and batched arange of the given array.
         # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
@@ -1553,9 +1586,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return cu_num_tokens, arange
 
     def _calc_spec_decode_metadata(
-        self,
-        num_draft_tokens: np.ndarray,
-        cu_num_scheduled_tokens: np.ndarray,
+            self,
+            num_draft_tokens: np.ndarray,
+            cu_num_scheduled_tokens: np.ndarray,
     ) -> SpecDecodeMetadata:
         # Inputs:
         # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
@@ -1628,9 +1661,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return metadata
 
     def apply_grammar_bitmask(
-        self,
-        scheduler_output: "SchedulerOutput",
-        logits: torch.Tensor,
+            self,
+            scheduler_output: "SchedulerOutput",
+            logits: torch.Tensor,
     ) -> torch.Tensor:
         grammar_bitmask = scheduler_output.grammar_bitmask
 
@@ -1692,18 +1725,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return logits.to(self.device).to(logits_dtype)
 
     def propose_draft_token_ids(
-        self,
-        valid_sampled_token_ids: list[list[int]],
-        sampling_metadata: SamplingMetadata,
-        scheduler_output: "SchedulerOutput",
-        spec_decode_metadata: SpecDecodeMetadata,
-        positions: torch.Tensor,
-        num_scheduled_tokens: int,
-        hidden_states: torch.Tensor,
-        attn_metadata: Union[AscendMetadata, AscendMLAMetadata,
-                             AscendTorchairMetadata,
-                             AscendMLATorchairMetadata],
-        aux_hidden_states: torch.Tensor = None,
+            self,
+            valid_sampled_token_ids: list[list[int]],
+            sampling_metadata: SamplingMetadata,
+            scheduler_output: "SchedulerOutput",
+            spec_decode_metadata: SpecDecodeMetadata,
+            positions: torch.Tensor,
+            num_scheduled_tokens: int,
+            hidden_states: torch.Tensor,
+            attn_metadata: Union[AscendMetadata, AscendMLAMetadata,
+            AscendTorchairMetadata,
+            AscendMLATorchairMetadata],
+            aux_hidden_states: torch.Tensor = None,
     ) -> Optional[list[list[int]]]:
         if not self.use_spec_decode:
             # Speculative decoding is not enabled.
@@ -1726,18 +1759,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return draft_token_ids
 
     def _pool(
-        self,
-        hidden_states: torch.Tensor,
-        num_scheduled_tokens: int,
-        num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]] = None,
-        finished_recving: Optional[set[str]] = None,
-        kv_connector_output: Optional["KVConnectorOutput"] = None,
+            self,
+            hidden_states: torch.Tensor,
+            num_scheduled_tokens: int,
+            num_scheduled_tokens_np: np.ndarray,
+            finished_sending: Optional[set[str]] = None,
+            finished_recving: Optional[set[str]] = None,
+            kv_connector_output: Optional["KVConnectorOutput"] = None,
     ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs ==\
-            len(self.input_batch.pooling_params), \
-        "Either all or none of the requests in" \
-        " a batch must be pooling request"
+        assert self.input_batch.num_reqs == \
+               len(self.input_batch.pooling_params), \
+            "Either all or none of the requests in" \
+            " a batch must be pooling request"
 
         extracted_hidden_states = list(
             torch.split(hidden_states[:num_scheduled_tokens],
@@ -1784,9 +1817,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-        intermediate_tensors: Optional[IntermediateTensors] = None,
+            self,
+            scheduler_output: "SchedulerOutput",
+            intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
         with ProfileExecuteDuration().capture_async("prepare input"):
             self._update_states(scheduler_output)
@@ -1803,7 +1836,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              padded_num_tokens_across_dp, logits_indices, spec_decode_metadata,
              input_ids, inputs_embeds,
              intermediate_tensors) = (self._prepare_inputs(
-                 scheduler_output, intermediate_tensors))
+                scheduler_output, intermediate_tensors))
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
@@ -1817,7 +1850,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     moe_comm_method=self.moe_comm_method(
                         self.device, self.dtype, self.model_config.hf_config),
                     num_actual_tokens=scheduler_output.
-                    total_num_scheduled_tokens):
+                            total_num_scheduled_tokens):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
@@ -1977,7 +2010,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     f"{self.model_config.max_model_len}")
 
                 self.input_batch.token_ids_cpu[req_idx,
-                                               start_idx:end_idx] = sampled_ids
+                start_idx:end_idx] = sampled_ids
                 self.input_batch.num_tokens_no_spec[req_idx] = end_idx
                 self.input_batch.num_tokens[req_idx] = end_idx
                 req_id = self.input_batch.req_ids[req_idx]
@@ -2084,7 +2117,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     @staticmethod
     def get_finished_kv_transfer(
-        scheduler_output: "SchedulerOutput",
+            scheduler_output: "SchedulerOutput",
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
@@ -2118,14 +2151,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def _dummy_run(
-        self,
-        num_tokens: int,
-        with_prefill: bool = False,
-        is_torchair_compile: bool = False,
-        moe_comm_method: Type[MoECommMethod] = DummyCommImpl,
-        aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        force_attention: bool = False,
-        uniform_decode: bool = False,
+            self,
+            num_tokens: int,
+            with_prefill: bool = False,
+            is_torchair_compile: bool = False,
+            moe_comm_method: Type[MoECommMethod] = DummyCommImpl,
+            aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+            force_attention: bool = False,
+            uniform_decode: bool = False,
     ) -> torch.Tensor:
         # only support eager mode and piecewise graph now
         assert aclgraph_runtime_mode in {
@@ -2139,7 +2172,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self._get_forward_metadata_across_dp_and_pad(
-             num_tokens, with_prefill, False)
+            num_tokens, with_prefill, False)
 
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using
@@ -2155,7 +2188,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
         # for GQA/MQA.
         max_query_len = self.uniform_decode_query_len if uniform_decode else \
-                                                                num_tokens
+            num_tokens
 
         max_num_reqs = self.scheduler_config.max_num_seqs
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
@@ -2299,9 +2332,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
 
     def _dummy_pooler_run_task(
-        self,
-        hidden_states: torch.Tensor,
-        task: PoolingTask,
+            self,
+            hidden_states: torch.Tensor,
+            task: PoolingTask,
     ) -> PoolerOutput:
         num_tokens = hidden_states.shape[0]
         max_num_reqs = self.scheduler_config.max_num_seqs
@@ -2350,8 +2383,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def _dummy_pooler_run(
-        self,
-        hidden_states: torch.Tensor,
+            self,
+            hidden_states: torch.Tensor,
     ) -> PoolerOutput:
         # Find the task that has the largest output for subsequent steps
         output_size = dict[PoolingTask, float]()
@@ -2396,7 +2429,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                   self.lora_config,
                                                   self.device)
         logger.info("Loading model weights took %.4f GB",
-                    m.consumed_memory / float(2**30))
+                    m.consumed_memory / float(2 ** 30))
 
     def _convert_torch_format(self, tensor):
         tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT)
@@ -2512,11 +2545,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             nope_cache = align_memory(
                                 nope_cache,
                                 alignment)[:nope_allocate_shape].view(
-                                    nope_cache_shape)
+                                nope_cache_shape)
                             rope_cache = align_memory(
                                 rope_cache,
                                 alignment)[:rope_allocate_shape].view(
-                                    rope_cache_shape)
+                                rope_cache_shape)
                         kv_caches[layer_name] = (nope_cache, rope_cache)
                     else:
                         num_caches = kv_cache_shape[0]
@@ -2601,7 +2634,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                            aclgraph_runtime_mode: CUDAGraphMode,
                            uniform_decode: bool):
         assert aclgraph_runtime_mode != CUDAGraphMode.NONE and \
-            aclgraph_runtime_mode in [CUDAGraphMode.PIECEWISE]
+               aclgraph_runtime_mode in [CUDAGraphMode.PIECEWISE]
 
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
@@ -2679,8 +2712,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     elapsed_time, npu_graph_size / (1 << 30))
 
     def _generate_ngram_token_ids(
-        self,
-        sampled_token_ids: list[list[int]],
+            self,
+            sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
         # TODO(woosuk): Optimize.
         draft_token_ids: list[list[int]] = []
@@ -2791,17 +2824,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return spec_token_ids
 
     def _generate_mtp_token_ids(
-        self,
-        valid_sampled_token_ids: list[list[int]],
-        sampling_metadata: SamplingMetadata,
-        scheduler_output: "SchedulerOutput",
-        spec_decode_metadata: SpecDecodeMetadata,
-        positions: torch.Tensor,
-        num_scheduled_tokens: int,
-        hidden_states: torch.Tensor,
-        attn_metadata: Union[AscendMetadata, AscendMLAMetadata,
-                             AscendTorchairMetadata,
-                             AscendMLATorchairMetadata],
+            self,
+            valid_sampled_token_ids: list[list[int]],
+            sampling_metadata: SamplingMetadata,
+            scheduler_output: "SchedulerOutput",
+            spec_decode_metadata: SpecDecodeMetadata,
+            positions: torch.Tensor,
+            num_scheduled_tokens: int,
+            hidden_states: torch.Tensor,
+            attn_metadata: Union[AscendMetadata, AscendMLAMetadata,
+            AscendTorchairMetadata,
+            AscendMLATorchairMetadata],
     ):
         assert isinstance(self.drafter, MtpProposer)
         next_token_ids: list[int] = []
@@ -2866,9 +2899,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return spec_token_ids
 
     def _get_prompt_logprobs_dict(
-        self,
-        hidden_states: torch.Tensor,
-        scheduler_output: "SchedulerOutput",
+            self,
+            hidden_states: torch.Tensor,
+            scheduler_output: "SchedulerOutput",
     ) -> dict[str, Optional[LogprobsTensors]]:
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:

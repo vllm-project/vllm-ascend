@@ -52,6 +52,34 @@ class AscendCommonAttentionMetadata:
 
     graph_pad_size: int = -1
 
+    cp_kv_recover_idx: torch.Tensor = None
+
+    num_actual_tokens_cp_full: int = None
+
+    num_computed_tokens_of_cp_sp: list[list[list[int]]] = None
+
+    q_head_idx_tensor: torch.Tensor = None
+
+    q_tail_idx_tensor: torch.Tensor = None
+
+    kv_with_q_head_nomask_idx_tensor: torch.Tensor = None
+
+    kv_with_q_head_mask_idx_tensor: torch.Tensor = None
+
+    kv_with_q_tail_nomask_idx_tensor: torch.Tensor = None
+
+    kv_with_q_tail_mask_idx_tensor: torch.Tensor = None
+
+    attn_mask_seqlens: torch.Tensor = None
+
+    head_attn_nomask_seqlens: torch.Tensor = None
+
+    tail_attn_nomask_seqlens: torch.Tensor = None
+
+    q_full_idx: torch.Tensor = None
+
+    cp_prefill_mask: torch.Tensor = None
+
 
 def split_decodes_and_prefills(
     common_attn_metadata: AscendCommonAttentionMetadata,
