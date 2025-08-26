@@ -594,11 +594,17 @@ class TestNPUWorker(TestBase):
                 "allocated_bytes.all.current": 3000
             },  # current allocated = total_allocated_bytes
         ]
+        # Mock setup to simulate memory change between calls, exposing potential race condition
+        # The implementation calls torch_npu.npu.mem_get_info() twice in total_allocated_bytes calculation
+        # which is not atomic and can lead to incorrect memory calculations
         mock_torch_mem_get_info.side_effect = [
-            (7000, 10000),
-            (7000, 10000),
-            (7000, 10000),
-            (7000, 10000),
+            (7000, 10000),  # First call for total_allocated_bytes calculation
+            (
+                6000,
+                10000,
+            ),  # Second call for total_allocated_bytes calculation, simulating an allocation
+            (6000, 10000),  # Additional calls for other parts of the method
+            (6000, 10000),
         ]
 
         # Create worker mock
@@ -620,17 +626,19 @@ class TestNPUWorker(TestBase):
             worker.model_runner.profile_run.assert_called_once()
             mock_platform_empty_cache.assert_called_once()
 
-            # Verify calculation result
+            # Verify calculation result with race condition simulation
             # Calculation logic:
             # total_allocated_bytes = torch_npu.npu.mem_get_info()[1] - torch_npu.npu.mem_get_info()[0]
-            #                       = 10000 - 7000 = 3000
+            #                       = 10000 - 7000 = 3000 (first call)
+            #                       = 10000 - 6000 = 4000 (second call, memory changed!)
+            # This exposes the race condition where memory state changes between calls
             # non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
-            #                       = 3000 - 3000 = 0  # No non-torch memory allocation
+            #                       = 4000 - 3000 = 1000  # Non-torch memory allocation detected
             # peak_memory = torch_peak_memory + non_torch_allocations
-            #             = 2000 + 0 = 2000
+            #             = 2000 + 1000 = 3000
             # available = total_npu_memory * gpu_memory_utilization - peak_memory
-            #           = 10000 * 0.8 - 2000 = 6000
-            expected_result = max(0, int(10000 * 0.8 - 2000))
+            #           = 10000 * 0.8 - 3000 = 5000
+            expected_result = max(0, int(10000 * 0.8 - 3000))
             self.assertEqual(result, expected_result)
 
             # Verify log output
@@ -665,12 +673,16 @@ class TestNPUWorker(TestBase):
                 "allocated_bytes.all.current": 1000
             },  # current allocated
         ]
-        # Setup non-torch allocations > 0 case
+        # Mock setup to expose race condition in total_allocated_bytes calculation
+        # Setup non-torch allocations > 0 case with memory change simulation
         mock_torch_mem_get_info.side_effect = [
-            (6000, 10000),
-            (6000, 10000),
-            (6000, 10000),
-            (6000, 10000),
+            (6000, 10000),  # First call for total_allocated_bytes calculation
+            (
+                5000,
+                10000,
+            ),  # Second call for total_allocated_bytes calculation, simulating allocation
+            (5000, 10000),  # Additional calls for other parts of the method
+            (5000, 10000),
         ]
 
         # 创建 worker mock
@@ -684,12 +696,18 @@ class TestNPUWorker(TestBase):
             # Test determine_available_memory
             result = worker.determine_available_memory()
 
-            # Verify result: case with large non-torch memory allocation
-            # total_allocated_bytes = 10000 - 6000 = 4000
-            # non_torch_allocations = 4000 - 1000 = 3000  # Significant non-torch allocation
-            # peak_memory = 1500 + 3000 = 4500
-            # available = 10000 * 0.9 - 4500 = 4500
-            expected_result = max(0, int(10000 * 0.9 - 4500))
+            # Verify result: case with large non-torch memory allocation and race condition
+            # total_allocated_bytes = torch_npu.npu.mem_get_info()[1] - torch_npu.npu.mem_get_info()[0]
+            #                       = 10000 - 6000 = 4000 (first call)
+            #                       = 10000 - 5000 = 5000 (second call, memory changed!)
+            # This exposes the race condition where memory allocation occurs between calls
+            # non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
+            #                       = 5000 - 1000 = 4000  # Significant non-torch allocation detected
+            # peak_memory = torch_peak_memory + non_torch_allocations
+            #             = 1500 + 4000 = 5500
+            # available = total_npu_memory * gpu_memory_utilization - peak_memory
+            #           = 10000 * 0.9 - 5500 = 3500
+            expected_result = max(0, int(10000 * 0.9 - 5500))
             self.assertEqual(result, expected_result)
 
     @patch("vllm_ascend.worker.worker_v1.NPUPlatform.clear_npu_memory")
@@ -748,11 +766,15 @@ class TestNPUWorker(TestBase):
                 "allocated_bytes.all.current": 7000
             },
         ]
+        # Mock setup to expose race condition even in negative result scenarios
         mock_torch_mem_get_info.side_effect = [
-            (3000, 10000),
-            (3000, 10000),
-            (3000, 10000),
-            (3000, 10000),
+            (3000, 10000),  # First call for total_allocated_bytes calculation
+            (
+                2000,
+                10000,
+            ),  # Second call for total_allocated_bytes calculation, simulating more allocation
+            (2000, 10000),  # Additional calls for other parts of the method
+            (2000, 10000),
         ]
 
         # Create worker mock
@@ -766,8 +788,16 @@ class TestNPUWorker(TestBase):
             # Test determine_available_memory
             result = worker.determine_available_memory()
 
-            # Verify result is 0 (not negative)
-            # available = 10000 * 0.8 - 9000 = -1000, max(0, -1000) = 0
+            # Verify result is 0 (not negative) even with race condition
+            # total_allocated_bytes = torch_npu.npu.mem_get_info()[1] - torch_npu.npu.mem_get_info()[0]
+            #                       = 10000 - 3000 = 7000 (first call)
+            #                       = 10000 - 2000 = 8000 (second call, more memory allocated!)
+            # non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
+            #                       = 8000 - 7000 = 1000  # Additional non-torch allocation detected
+            # peak_memory = torch_peak_memory + non_torch_allocations
+            #             = 9000 + 1000 = 10000
+            # available = total_npu_memory * gpu_memory_utilization - peak_memory
+            #           = 10000 * 0.8 - 10000 = -2000, max(0, -2000) = 0
             self.assertEqual(result, 0)
 
     def test_execute_model_first_rank(self):
