@@ -5,6 +5,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 
 import torch
+import torch_npu
 
 try:
     # Recent release of torchair has moved these ops to `.scope`.
@@ -125,6 +126,25 @@ def npu_wait_tensor(self: torch.Tensor,
     return _npu_wait_tensor(self, dependency) if enabled else self
 
 
+def converting_weight_acl_format(model, format):
+    # currently, there are some operations which do not support ACL_FORMAT_FRACTAL_NZ
+    # in eager mode but support it in torchair graph mode. since ACL_FORMAT_FRACTAL_NZ
+    # is much more preferred than ACL_FORMAT_FRACTAL_ND on 300I Duo, we add this
+    # conversion when using torchair graph mode on 300I Duo platform.
+    # TODO: we will remove this conversion if npu_quant_grouped_matmul_dequant
+    # accepts weight format of ACL_FORMAT_FRACTAL_NZ in eager mode.
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    for module in model.modules():
+        if isinstance(module, FusedMoE):
+            if torch_npu.get_npu_format(module.w13_weight.data) == format:
+                return
+            module.w13_weight.data = torch_npu.npu_format_cast(
+                module.w13_weight.data, format)
+            module.w2_weight.data = torch_npu.npu_format_cast(
+                module.w2_weight.data, format)
+
+
 def register_torchair_model():
     from vllm import ModelRegistry
 
@@ -150,3 +170,15 @@ def register_torchair_model():
     ModelRegistry.register_model(
         "Qwen3ForCausalLM",
         "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+
+
+def torchair_quant_method_register():
+    from vllm_ascend.quantization.quantizer import \
+        SUPPORT_ASCEND_QUANTIZER_TYPE
+    from vllm_ascend.torchair.quantization.torchair_quantizer import (
+        TorchairW4A8DYNAMICQuantizer, TorchairW8A8DYNAMICQuantizer)
+
+    SUPPORT_ASCEND_QUANTIZER_TYPE[
+        "W8A8_DYNAMIC"] = TorchairW8A8DYNAMICQuantizer
+    SUPPORT_ASCEND_QUANTIZER_TYPE[
+        "W4A8_DYNAMIC"] = TorchairW4A8DYNAMICQuantizer
