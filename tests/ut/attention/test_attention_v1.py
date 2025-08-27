@@ -445,7 +445,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_actual_tokens = 100
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         layer = self.layer_no_quant
-        mock_fused_infer_attention_score.return_value = MagicMock()
+        mock_fused_infer_attention_score.return_value = torch.ones()
         output = self.impl_swa.forward(layer,
                                        query,
                                        key,
