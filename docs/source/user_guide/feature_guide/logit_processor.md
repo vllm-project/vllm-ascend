@@ -1,3 +1,0 @@
-# LogitsProcessor Guide
-
-## Overview
