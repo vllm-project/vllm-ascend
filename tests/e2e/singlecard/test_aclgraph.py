@@ -33,23 +33,30 @@ MODELS = [
     # "vllm-ascend/Qwen3-30B-A3B-Puring"
 ]
 
+PROMPTS = [
+    "Hello, my name is", "The president of the United States is",
+    "The capital of France is", "The future of AI is"
+]
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-def test_models_with_aclgraph(
-    model: str,
-    max_tokens: int,
-) -> None:
-    prompts = [
-        "Hello, my name is", "The president of the United States is",
-        "The capital of France is", "The future of AI is"
-    ]
+@pytest.mark.parametrize("prompts", [PROMPTS, PROMPTS[:3]])
+def test_models_with_aclgraph(capfd, model: str, max_tokens: int,
+                              prompts: list[str]) -> None:
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-    # TODO: change to use vllmrunner when the registry of custom op is solved
-    # while running pytest
-    vllm_model = LLM(model, max_model_len=1024)
+
+    vllm_model = LLM(
+        model,
+        max_model_len=1024,
+        compilation_config={"cudagraph_capture_sizes": [4]},
+    )
     vllm_aclgraph_outputs = vllm_model.generate(prompts, sampling_params)
+    out, err = capfd.readouterr()
+    log_content = out + err
+    # check if the replaying is done
+    assert "Replaying aclgraph" in log_content
     del vllm_model
     torch.npu.empty_cache()
 
