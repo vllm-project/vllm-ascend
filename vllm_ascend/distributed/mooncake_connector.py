@@ -766,7 +766,15 @@ class MooncakeConnectorWorker:
                       (self.dp_rank + 1) * self.tp_size))
         else:
             device_ids = list(map(int, device_ids_str.split(',')))
-            device_ids = device_ids[self.dp_rank * self.tp_size : (self.dp_rank + 1) * self.tp_size]
+            start_index = self.dp_rank * self.tp_size
+            end_index = start_index + self.tp_size
+            if len(device_ids) < end_index:
+                raise ValueError(
+                    f"Not enough physical devices available for DP rank {self.dp_rank}. "
+                    f"Expected at least {end_index} devices, but found {len(device_ids)} "
+                    "in PHYSICAL_DEVICES."
+                )
+            device_ids = device_ids[start_index:end_index]
         assert len(device_ids) > self.tp_rank  # type: ignore
         self.device_id = device_ids[self.tp_rank]  # type: ignore
 
