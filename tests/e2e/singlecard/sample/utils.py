@@ -137,4 +137,4 @@ class EntryPoints(list):
 
 
 """Fake version of importlib.metadata.entry_points"""
-entry_points = lambda group: EntryPoints(group)
+entry_points = lambda group: EntryPoints(group)  # noqa: E731
