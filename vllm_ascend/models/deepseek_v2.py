@@ -594,12 +594,13 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         # Since new page_attn op with softmax_lse return is not ready yet,
         # need a kv_b_proj without tp while decode + sp,
         # refer to log in mla_v1.py _forward_decode_sp
-        self.kv_b_proj_full = ReplicatedLinear(
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj")
+        # self.kv_b_proj_full = ReplicatedLinear(
+        #     self.kv_lora_rank,
+        #     self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+        #     bias=False,
+        #     quant_config=quant_config,
+        #     prefix=f"{prefix}.kv_b_proj")
+        self.kv_b_proj_full = None
         if (config.n_routed_experts is not None
                 and self.debug_layer_idx >= config.first_k_dense_replace
                 and self.debug_layer_idx % config.moe_layer_freq == 0
@@ -1173,15 +1174,15 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
                     # also load kv_b_proj weights to kv_b_proj_full, for forward_decode_sp
-                    name_split = name.split('.')
-                    if name_split[-2] == 'kv_b_proj':
-                        name_split[-2] = name_split[-2] + '_full'
-                        new_name = '.'.join(name_split)
-                        param = params_dict[new_name]
-                        weight_loader = getattr(param, "weight_loader",
-                                                default_weight_loader)
-                        weight_loader(param, loaded_weight)
-                        loaded_params.add(new_name)
+                    # name_split = name.split('.')
+                    # if name_split[-2] == 'kv_b_proj':
+                    #     name_split[-2] = name_split[-2] + '_full'
+                    #     new_name = '.'.join(name_split)
+                    #     param = params_dict[new_name]
+                    #     weight_loader = getattr(param, "weight_loader",
+                    #                             default_weight_loader)
+                    #     weight_loader(param, loaded_weight)
+                    #     loaded_params.add(new_name)
             loaded_params.add(name)
         return loaded_params
 
