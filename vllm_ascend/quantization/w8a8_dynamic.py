@@ -412,8 +412,8 @@ def fused_experts_with_all2all(
     num_experts = w1.shape[0]
 
     if expert_map is not None:
-        assert ep_group is not None, "ep_group must be provided when expert_map is not None"
-
+        if ep_group is None:
+            raise ValueError("ep_group must be provided when expert_map is not None")
         global_num_experts = len(expert_map) + global_redundant_expert_num
         if hasattr(torch_npu, "npu_moe_init_routing_quant"):
             quantized_tokens, expanded_row_idx, global_expert_tokens, _, token_scales = torch_npu.npu_moe_init_routing_quant(
