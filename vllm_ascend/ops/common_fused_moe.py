@@ -130,7 +130,7 @@ def forward_oot(
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-    topk_weights, topk_ids = select_experts(
+    topk_weights, topk_ids, _ = select_experts(
         hidden_states=x,
         router_logits=router_logits,
         top_k=top_k,

@@ -326,6 +326,7 @@ def fused_experts_with_all2all(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    row_idx: torch.Tensor,
     top_k: int,
     expert_map: torch.Tensor = None,
     ep_group: GroupCoordinator = None,
@@ -336,17 +337,10 @@ def fused_experts_with_all2all(
 
     num_tokens, _ = hidden_states.shape
     num_experts = w1.shape[0]
-    device = hidden_states.device
 
     if expert_map is not None:
         global_num_experts = len(expert_map)
         local_num_experts = global_num_experts // ep_group.world_size
-        row_idx_len = num_tokens * top_k
-        row_idx = (torch.arange(0,
-                                row_idx_len,
-                                dtype=torch.int32,
-                                device=device).view(top_k, -1).permute(
-                                    1, 0).contiguous())
         hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
             row_idx=row_idx,
@@ -380,12 +374,6 @@ def fused_experts_with_all2all(
 
         hidden_states = hidden_states[sorted_idx]
     else:
-        row_idx_len = num_tokens * top_k
-        row_idx = torch.arange(0,
-                               row_idx_len,
-                               dtype=torch.int32,
-                               device=topk_weights.device).view(
-                                   top_k, -1).permute(1, 0).contiguous()
         hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
             row_idx=row_idx,
@@ -459,6 +447,7 @@ def fused_experts_with_all2all_buffer(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    row_idx: torch.Tensor,
     top_k: int,
     max_model_len: int,
     global_batch_size: int,
@@ -470,14 +459,10 @@ def fused_experts_with_all2all_buffer(
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
     num_tokens, _ = hidden_states.shape
-    device = hidden_states.device
 
     global_num_experts = len(expert_map)
     local_num_experts = global_num_experts // ep_group.world_size
     row_idx_len = num_tokens * top_k
-    row_idx = (torch.arange(0, row_idx_len, dtype=torch.int32,
-                            device=device).view(top_k,
-                                                -1).permute(1, 0).contiguous())
     hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
         hidden_states,
         row_idx=row_idx,
@@ -690,6 +675,7 @@ def fused_experts(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    row_idx: torch.Tensor,
     top_k: int,
     expert_map: torch.Tensor = None,
     apply_router_weight_on_input: bool = False,
@@ -781,12 +767,6 @@ def fused_experts(
         # Rearrange hidden_states
         sorted_hidden_states = hidden_states[sorted_token_indices]
     else:
-        row_idx_len = num_tokens * top_k
-        row_idx = (torch.arange(0,
-                                row_idx_len,
-                                dtype=torch.int32,
-                                device=device).view(top_k, -1).permute(
-                                    1, 0).contiguous())
         active_num = max_num_tokens if max_num_tokens is not None else num_tokens
         sorted_hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
@@ -908,7 +888,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         **kwargs,
     ) -> torch.Tensor:
 
-        topk_weights, topk_ids = select_experts(
+        topk_weights, topk_ids, row_idx = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=top_k,
@@ -952,6 +932,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                  w2=layer.w2_weight,
                                  topk_weights=topk_weights,
                                  topk_ids=topk_ids,
+                                 row_idx=row_idx,
                                  top_k=top_k,
                                  expert_map=expert_map)
         elif MOE_ALL2ALL_BUFFER:
@@ -961,6 +942,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                row_idx=row_idx,
                 top_k=top_k,
                 max_model_len=self.max_model_len,
                 global_batch_size=self.global_batch_size,
@@ -982,6 +964,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                               w2=layer.w2_weight,
                                               topk_weights=topk_weights,
                                               topk_ids=topk_ids,
+                                              row_idx=row_idx,
                                               top_k=top_k,
                                               expert_map=expert_map,
                                               ep_group=get_ep_group())
