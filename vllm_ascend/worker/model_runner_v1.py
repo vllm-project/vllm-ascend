@@ -1660,6 +1660,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         moe_comm_method = (self.moe_comm_method
                            if num_input_tokens <= self.mc2_tokens_capacity else
                            self.fallback_moe_comm_method)
+        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
+                                           uniform_decode=False)
+        aclgraph_runtime_mode, batch_descriptor = \
+            self.aclgraph_dispatcher.dispatch(batch_descriptor)
 
         # Run forward pass
         with ProfileExecuteDuration().capture_async("forward"):
@@ -1671,6 +1675,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     with_prefill=self.with_prefill,
                     reserved_mc2_mask=self.reserved_mc2_mask,
                     moe_comm_method=moe_comm_method,
+                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
                     num_actual_tokens=scheduler_output.
                     total_num_scheduled_tokens):
                 self.maybe_setup_kv_connector(scheduler_output)
