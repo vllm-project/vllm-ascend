@@ -38,6 +38,7 @@ from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata,
                                         check_torchair_cache_exist,
                                         converting_weight_acl_format,
                                         register_torchair_model,
+                                        torchair_quant_method_register,
                                         write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_310p)
@@ -67,6 +68,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         self._check_batch_sizes_consistency()
         register_torchair_model()
+        torchair_quant_method_register()
 
     def _get_forward_metadata_across_dp_and_pad(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
