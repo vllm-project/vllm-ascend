@@ -55,6 +55,12 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             torch.randn(self.num_tokens),
         )
         mock_moe_finalize_routing.return_value = self.placeholder
+        row_idx_len = self.num_tokens * 8
+        row_idx = (torch.arange(
+            0,
+            row_idx_len,
+            dtype=torch.int32,
+        ).view(8, -1).permute(1, 0).contiguous())
 
         result = fused_experts_with_all2all(
             hidden_states=self.placeholder,
@@ -64,6 +70,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             w2_scale=self.placeholder,
             topk_weights=self.placeholder,
             topk_ids=self.placeholder,
+            row_idx=row_idx,
             top_k=8,
             expert_map=expert_map,
             ep_group=ep_group,
