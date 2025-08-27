@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import pytest
 import torch
 from pytest_mock import MockerFixture
+
 from tests.ut.base import PytestBase, TestBase
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
     AscendSocVersion, MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig,

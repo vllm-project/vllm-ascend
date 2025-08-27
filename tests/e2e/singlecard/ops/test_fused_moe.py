@@ -149,6 +149,7 @@ def test_token_dispatcher_with_all_gather(
         hidden_states=a,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
+        row_idx=row_idx,
         expert_map=expert_map,
         apply_router_weight_on_input=apply_router_weight_on_input)
 
