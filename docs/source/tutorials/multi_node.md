@@ -57,7 +57,7 @@ hccn_tool -i 0 -ping -g address 10.20.0.20
 ```
 
 ## Run with docker
-Assume you have two Atlas 800 A2(64G*8) nodes, and want to deploy the `deepseek-v3-w8a8` quantitative model across multi-node.
+Assume you have two Atlas 800 A2(64G*8) nodes, and want to deploy the `deepseek-v3.1-w8a8` quantitative model across multi-node.
 
 ```{code-block} bash
    :substitutions:
@@ -127,7 +127,7 @@ vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 --data-parallel-rpc-port 13389 \
 --tensor-parallel-size 4 \
 --seed 1024 \
---served-model-name deepseek_v3 \
+--served-model-name deepseek_v3.1 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
 --max-model-len 32768 \
@@ -169,7 +169,7 @@ vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 --tensor-parallel-size 4 \
 --seed 1024 \
 --quantization ascend \
---served-model-name deepseek_v3 \
+--served-model-name deepseek_v3.1 \
 --max-num-seqs 16 \
 --max-model-len 32768 \
 --max-num-batched-tokens 4096 \
@@ -189,7 +189,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://{ node0 ip:8004 }/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "/root/.cache/ds_v3",
+        "model": "deepseek_v3.1",
         "prompt": "The future of AI is",
         "max_tokens": 50,
         "temperature": 0
@@ -200,7 +200,7 @@ curl http://{ node0 ip:8004 }/v1/completions \
 For details please refer to [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks)
 
 ```shell
-vllm bench serve --model vllm-ascend/DeepSeek-V3.1-W8A8  --served-model-name deepseek_v3 \
+vllm bench serve --model vllm-ascend/DeepSeek-V3.1-W8A8  --served-model-name deepseek_v3.1 \
 --dataset-name random --random-input-len 128 --random-output-len 128 \
 --num-prompts 200  --trust-remote-code --base-url "http://{ node0 ip }:8004" --request-rate 1
 ```
