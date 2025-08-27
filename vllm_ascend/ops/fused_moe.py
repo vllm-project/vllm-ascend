@@ -49,8 +49,8 @@ from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
     MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
-from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
-                               get_all_reduce_merge_state,
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
+                               dispose_tensor, get_all_reduce_merge_state,
                                get_ascend_soc_version,
                                get_rm_router_logits_state, is_310p)
 
@@ -866,6 +866,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         layer.w2_weight = torch.nn.Parameter(self._maybe_pad_weight(
             layer.w2_weight.data),
                                              requires_grad=False)
+        if not is_310p():
+            layer.w13_weight.data = torch_npu.npu_format_cast(
+                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(
+                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
 
     def apply(
         self,
