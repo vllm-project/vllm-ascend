@@ -71,8 +71,9 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
-from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
+from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import \
+    TorchairAscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor, npu_prefetch
 
 
@@ -261,8 +262,9 @@ class TorchairDeepseekV2MLP(nn.Module):
         quant_method = self.gate_up_proj.quant_method
         if isinstance(quant_method, UnquantizedLinearMethod):
             self.act_fn = TorchairDeepseekV2SiluAndMul()
-        elif (isinstance(quant_method, AscendLinearMethod) and isinstance(
-                quant_method.quant_method, AscendW8A8DynamicLinearMethod)):
+        elif (isinstance(quant_method, AscendLinearMethod)
+              and isinstance(quant_method.quant_method,
+                             TorchairAscendW8A8DynamicLinearMethod)):
             # TODO(sdmyzlp): Currently preserved as before:
             # 1. The only quantization supported for silu is W8A8Dynamic
             # 2. Output dtype of gate_up/down is fixed to be int32/bfloat16
