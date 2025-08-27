@@ -1059,24 +1059,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                torch.Tensor, int, torch.Tensor, SpecDecodeMetadata,
                Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
-        # Check input valid
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-        if (self.use_aclgraph and total_num_scheduled_tokens
-                <= self.aclgraph_batch_sizes[-1]):
-            # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                total_num_scheduled_tokens)
-        else:
-            # Eager mode.
-            num_input_tokens = total_num_scheduled_tokens
-
-        # Padding for DP
-        num_pad, num_tokens_across_dp_native = self.get_dp_padding(
-            num_input_tokens)
-        num_input_tokens += num_pad
 
         self.attn_metadata_builder.reorder_batch(self.input_batch,
                                                  scheduler_output)
@@ -1096,6 +1082,42 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
+
+        if (self.use_aclgraph and total_num_scheduled_tokens
+                <= self.aclgraph_batch_sizes[-1]):
+            # Add padding to the batch size.
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                total_num_scheduled_tokens)
+        else:
+            # Eager mode.
+            num_input_tokens = total_num_scheduled_tokens
+
+        # Get the attention state.
+        attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens,
+                                            num_valid_tokens)
+        self.attn_state = attn_state  # type: ignore
+
+        # Determine if it's a splitfuse batch
+        with_prefill = attn_state not in [
+            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
+        ]
+
+        self.query_lens = torch.from_numpy(num_scheduled_tokens)
+        enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
+                                              attn_state,
+                                              total_num_scheduled_tokens)
+
+        # Get info across DP ranks.
+        # NOTE: maybe_padded_num_tokens is only used when using TorchAir with DP,
+        # Otherwise, it's just total_num_scheduled_tokens
+        (maybe_padded_num_tokens, num_tokens_across_dp, with_prefill,
+         enable_dbo) = self._get_forward_metadata_across_dp_and_pad(
+             num_input_tokens, with_prefill, enable_dbo)
+
+        # # Padding for DP
+        # num_pad, num_tokens_across_dp_native = self.get_dp_padding(
+        #     num_input_tokens)
+        # num_input_tokens += num_pad
 
         # Hot-Swap lora model
         if self.lora_config:
@@ -1165,20 +1187,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens[num_reqs:].fill_(0)
         self.query_start_loc[num_reqs + 1:].fill_(-1)
 
-        with_prefill = attn_state not in [
-            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
-        ]
-
-        enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
-                                              attn_state,
-                                              total_num_scheduled_tokens)
-
-        (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
-         enable_dbo) = self._get_forward_metadata_across_dp_and_pad(
-             total_num_scheduled_tokens, with_prefill, enable_dbo)
         self.with_prefill = with_prefill
         self.num_tokens_across_dp = num_tokens_across_dp
-        self._update_graph_pad_size(with_prefill, padded_num_tokens_across_dp)
+        self._update_graph_pad_size(with_prefill, maybe_padded_num_tokens)
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc[:num_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
@@ -1246,7 +1257,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         positions = self.positions[:num_input_tokens]
         input_ids, positions = self._update_input_ids_and_positions(
             input_ids, positions, num_input_tokens, with_prefill,
-            padded_num_tokens_across_dp)
+            maybe_padded_num_tokens)
 
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
@@ -1265,9 +1276,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # MC2 may not be available in eager mode
         # TODO: Unify the padding logic between TorchAir and ACL Graph ASAP
         if self.use_aclgraph:
-            num_tokens_across_dp = num_tokens_across_dp_native
+            # print(f"num_tokens_across_dp: {num_tokens_across_dp}, "
+            #       f"num_tokens_across_dp_native: {num_tokens_across_dp_native}")
+            # num_tokens_across_dp = num_tokens_across_dp_native
+            ...
         else:
-            num_input_tokens = padded_num_tokens_across_dp
+            # num_input_tokens = maybe_padded_num_tokens
+            ...
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -1296,12 +1311,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return (attn_metadata, positions, num_scheduled_tokens,
                 num_input_tokens, num_tokens_across_dp,
-                padded_num_tokens_across_dp, logits_indices,
+                maybe_padded_num_tokens, logits_indices,
                 spec_decode_metadata, input_ids, inputs_embeds,
                 intermediate_tensors)
 
     def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill,
-                                             padded_num_tokens_across_dp,
+                                             maybe_padded_num_tokens,
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds):
@@ -1344,7 +1359,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _update_input_ids_and_positions(self, input_ids, positions,
                                         num_input_tokens, with_prefill,
-                                        padded_num_tokens_across_dp):
+                                        maybe_padded_num_tokens):
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
         return input_ids, positions
@@ -1649,7 +1664,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return self.kv_connector_no_forward(scheduler_output)
             (attn_metadata, positions, num_scheduled_tokens_np,
              num_input_tokens, num_tokens_across_dp,
-             padded_num_tokens_across_dp, logits_indices, spec_decode_metadata,
+             maybe_padded_num_tokens, logits_indices, spec_decode_metadata,
              input_ids, inputs_embeds,
              intermediate_tensors) = (self._prepare_inputs(
                  scheduler_output, intermediate_tensors))
@@ -1680,7 +1695,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 hidden_states = self._generate_process_reqs_hidden_states(
                     attn_metadata, self.with_prefill,
-                    padded_num_tokens_across_dp, input_ids, positions,
+                    maybe_padded_num_tokens, input_ids, positions,
                     intermediate_tensors, inputs_embeds)
 
             self.maybe_wait_for_kv_save()
@@ -2000,9 +2015,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 "Capturing attention in aclgraph is unexpected, because full graph is not supported now"
             )
 
-        # Padding for DP
-        num_pad, num_tokens_across_dp_native = self.get_dp_padding(num_tokens)
-        # num_tokens += num_pad  ## Uncomment this after TorchAir is removed
+        # # Padding for DP
+        # num_pad, num_tokens_across_dp_native = self.get_dp_padding(num_tokens)
+        # # num_tokens += num_pad  ## Uncomment this after TorchAir is removed
 
         # Padding for DP (for TorchAir)
         (num_tokens, num_tokens_across_dp, with_prefill,
