@@ -27,7 +27,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -337,6 +336,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.key_cache is None or self.value_cache is None:
+            raise RuntimeError("key_cache or value_cache is not initialized. "
+                            "Make sure KV caches are created before calling attention.")
         if is_310p():
             # seq_lens_tensor needs to be transferred to the device for 310P.
             attn_metadata.seq_lens = \
@@ -359,6 +361,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.key_cache is None or self.value_cache is None:
+            raise RuntimeError("key_cache or value_cache is not initialized. "
+                            "Make sure KV caches are created before calling attention.")
         # Use chunked prefill for head size 192 scenario, like deepseek
         # paged_attention_splitfuse maybe crash at such scenario.
         # TODO: vanilla path will be removed after the kernel support
