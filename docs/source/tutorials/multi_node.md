@@ -200,6 +200,7 @@ curl http://{ node0 ip:8004 }/v1/completions \
 For details please refer to [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks)
 
 ```shell
+export VLLM_USE_MODELSCOPE=true
 vllm bench serve --model vllm-ascend/DeepSeek-V3.1-W8A8  --served-model-name deepseek_v3.1 \
 --dataset-name random --random-input-len 128 --random-output-len 128 \
 --num-prompts 200  --trust-remote-code --base-url "http://{ node0 ip }:8004" --request-rate 1
