@@ -79,11 +79,10 @@ class EagleProposer:
     def _make_attention_mask(
         self,
         seq_lens,
-        query_lens,
         position,
     ) -> torch.Tensor:
         return self.attn_mask_builder.get_splitfuse_attn_mask(
-            seq_lens, query_lens, position, self.dtype, self.device)
+            seq_lens, position, self.dtype, self.device)
 
     def propose(
         self,
@@ -247,7 +246,6 @@ class EagleProposer:
             positions = positions_cpu.to(device)
             attn_mask = self._make_attention_mask(
                 seq_lens=attn_metadata.seq_lens,
-                query_lens=attn_metadata.max_query_len,
                 position=positions,
             )
             attn_metadata.attn_mask = attn_mask
