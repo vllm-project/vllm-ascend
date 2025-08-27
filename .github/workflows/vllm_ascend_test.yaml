@@ -192,7 +192,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/e2e/singlecard/test_offline_inference.py
-          # pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          #  pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_embedding.py
