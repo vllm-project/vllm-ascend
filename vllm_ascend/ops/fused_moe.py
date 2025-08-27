@@ -984,16 +984,17 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         elif fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
         ]:
-            return fused_experts(hidden_states=x,
-                                 w1=layer.w13_weight,
-                                 w2=layer.w2_weight,
-                                 w1_bias=layer.w13_bias if self.has_bias else None,
-                                 w2_bias=layer.w2_bias if self.has_bias else None,
-                                 topk_weights=topk_weights,
-                                 topk_ids=topk_ids,
-                                 row_idx=row_idx,
-                                 top_k=top_k,
-                                 expert_map=expert_map)
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_bias=layer.w13_bias if self.has_bias else None,
+                w2_bias=layer.w2_bias if self.has_bias else None,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                row_idx=row_idx,
+                top_k=top_k,
+                expert_map=expert_map)
         elif MOE_ALL2ALL_BUFFER:
             return fused_experts_with_all2all_buffer(
                 hidden_states=x,
