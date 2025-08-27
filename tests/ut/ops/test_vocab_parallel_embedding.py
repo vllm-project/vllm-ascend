@@ -32,14 +32,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.org_num_embeddings = 40
         self.padding_size = 8
 
-        # Mock shard indices
-        self.shard_indices = MagicMock()
-        self.shard_indices.org_vocab_start_index = 10
-        self.shard_indices.org_vocab_end_index = 20
-        self.shard_indices.num_org_vocab_padding = 5
-        self.shard_indices.added_vocab_start_index = 30
-        self.shard_indices.added_vocab_end_index = 40
-
     def _create_layer(self):
         # Patch methods and dependencies for VocabParallelEmbedding
         with patch("vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0), \
@@ -55,6 +47,14 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
                 padding_size=self.padding_size,
                 quant_config=None,  # Mock quantization config
                 prefix="")
+
+            layer.shard_indices = MagicMock()
+            layer.shard_indices.org_vocab_start_index = 10
+            layer.shard_indices.org_vocab_end_index = 20
+            layer.shard_indices.num_org_vocab_padding = 5
+            layer.shard_indices.added_vocab_start_index = 30
+            layer.shard_indices.added_vocab_end_index = 40
+
             # Mock the quantization method
             layer.quant_method.embedding = MagicMock(
                 side_effect=lambda _, x: torch.randn(x.shape[0], self.
@@ -124,7 +124,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         # Check that masking was applied correctly
         layer.quant_method.embedding.assert_called_once()
         called_input = layer.quant_method.embedding.call_args[0][1]
-        expected_input = torch.tensor([15, 0])
+        expected_input = torch.tensor([5, 20])  # after offset calculation
         self.assertTrue(torch.all(called_input == expected_input))
 
         # Check that all reduce was called
@@ -135,9 +135,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         """Test that invalid vocab indices are properly masked out."""
         # Create a fresh embedding layer
         layer = self._create_layer()
-
         input_ = torch.tensor([5, 15, 25, 35, 45])  # includes invalid cases
-
         # Create predictable mock output
         mock_output = torch.randn(5, self.embedding_dim)
         layer.quant_method.embedding = MagicMock(
@@ -149,11 +147,12 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
                 side_effect=lambda x: x):
             # Call the forward method
             output = layer.forward(input_)
-        self.assertTrue(torch.all(output[0] == mock_output[0]))
-        self.assertTrue(torch.all(output[1] == mock_output[1]))
+        # Check that invalid positions (0, 2, 4) were zeroed out
+        self.assertTrue(torch.all(output[0] == 0))
         self.assertTrue(torch.all(output[2] == 0))
-        self.assertTrue(torch.all(output[3] == 0))
-        self.assertTrue(torch.all(output[4] == mock_output[4]))
+        self.assertTrue(torch.all(output[4] == 0))
+        self.assertTrue(torch.all(output[1] == mock_output[1]))
+        self.assertTrue(torch.all(output[3] == mock_output[3]))
         self.assertEqual(output.shape, (5, self.embedding_dim))
 
     def test_output_shape(self):
