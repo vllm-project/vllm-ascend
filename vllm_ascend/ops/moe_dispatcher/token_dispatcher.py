@@ -510,7 +510,8 @@ class MoETokenDispatcher(ABC):
                        hidden_states: torch.Tensor,
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
-                       expert_map: torch.Tensor,
+                       row_idx: torch.Tensor,
+                       expert_map: Optional[torch.Tensor] = None,
                        log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
                        shared_experts: Optional[torch.Tensor] = None,
@@ -606,7 +607,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        hidden_states: torch.Tensor,
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
-                       expert_map: torch.Tensor,
+                       row_idx: torch.Tensor,
+                       expert_map: Optional[torch.Tensor] = None,
                        log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
                        shared_experts: Optional[torch.Tensor] = None,
@@ -741,7 +743,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                        hidden_states: torch.Tensor,
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
-                       expert_map: torch.Tensor,
+                       row_idx: torch.Tensor,
+                       expert_map: Optional[torch.Tensor] = None,
                        log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
                        shared_experts: Optional[torch.Tensor] = None,
@@ -750,7 +753,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False):
         self.original_shape = hidden_states.shape
-        # assert len(original_shape) == 2
 
         num_tokens = hidden_states.shape[:-1].numel()
         dtype = hidden_states.dtype
@@ -758,8 +760,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
         self.expert_map = expert_map
         self.topk_weights = topk_weights
         self.topk_ids = topk_ids
-        # assert dtype in [torch.float32, torch.float16, torch.bfloat16
-        #                  ], "Only float32, float16, and bfsloat16 are supported"
         self.apply_router_weight_on_input = apply_router_weight_on_input
         if self.apply_router_weight_on_input:
             assert (topk_weights.dim() == 2
@@ -820,13 +820,6 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                                              dtype=torch.int64)
                 group_list_type = 0
         else:
-            row_idx_len = num_tokens * self.top_k
-            row_idx = (torch.arange(0,
-                                    row_idx_len,
-                                    dtype=torch.int32,
-                                    device=device).view(self.top_k,
-                                                        -1).permute(
-                                                            1, 0).contiguous())
             active_num = self.max_num_tokens if self.max_num_tokens is not None else num_tokens
             sorted_hidden_states, self.expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
                 hidden_states,
@@ -921,7 +914,8 @@ class UnquantizedTokenDispatcherWithFusedExpertsMoge(MoETokenDispatcher):
                        hidden_states: torch.Tensor,
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
-                       expert_map: torch.Tensor,
+                       row_idx: torch.Tensor,
+                       expert_map: Optional[torch.Tensor] = None,
                        log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
                        shared_experts: Optional[torch.Tensor] = None,
@@ -1030,7 +1024,8 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                        hidden_states: torch.Tensor,
                        topk_weights: torch.Tensor,
                        topk_ids: torch.Tensor,
-                       expert_map: torch.Tensor,
+                       row_idx: torch.Tensor,
+                       expert_map: Optional[torch.Tensor] = None,
                        log2phy: Optional[torch.Tensor] = None,
                        global_redundant_expert_num: int = 0,
                        shared_experts: Optional[torch.Tensor] = None,
