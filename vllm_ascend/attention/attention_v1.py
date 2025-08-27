@@ -125,7 +125,7 @@ class AscendAttentionState(Enum):
 class AscendMetadata:
 
     # **************************** Basic Properties ************************** #
-    attn_mask: Optional[torch.Tensor] = None
+    attn_mask: torch.Tensor = None
     # Current state of this attention run.
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
 
