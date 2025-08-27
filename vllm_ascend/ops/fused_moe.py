@@ -272,7 +272,7 @@ def apply_mlp(
     w1_bias: Optional[torch.Tensor],
     w2_bias: Optional[torch.Tensor],
     group_list: torch.Tensor,
-    activation: Optional[str],
+    activation: Optional[str] = None,
     group_list_type: int = 1,
 ) -> torch.Tensor:
     """
@@ -472,6 +472,8 @@ def fused_experts_with_all2all_buffer(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     row_idx: torch.Tensor,
@@ -545,6 +547,8 @@ def fused_experts_with_all2all_buffer(
     hidden_states = apply_mlp(hidden_states,
                               w1,
                               w2,
+                              w1_bias,
+                              w2_bias,
                               expert_tokens,
                               group_list_type=group_list_type)
 
@@ -685,13 +689,15 @@ def fused_experts_with_all2allv(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor]
 ):
     # Enable moe alltoallv, it's a balanced policy for precision and efficiency.
     (share_experts_output, dispatched_input,
      tokens_per_expert) = (token_dispatcher.token_permutation(
          hidden_states, probs, routing_map))
 
-    expert_output = apply_mlp(dispatched_input, w1, w2, tokens_per_expert)
+    expert_output = apply_mlp(dispatched_input, w1, w2, w1_bias, w2_bias, tokens_per_expert)
     output, mlp_bias = token_dispatcher.token_unpermutation(expert_output)
     return output
 
@@ -995,6 +1001,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
+                w1_bias=layer.w13_bias if self.has_bias else None,
+                w2_bias=layer.w2_bias if self.has_bias else None,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 row_idx=row_idx,
@@ -1012,6 +1020,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
+                w1_bias=layer.w13_bias if self.has_bias else None,
+                w2_bias=layer.w2_bias if self.has_bias else None,
             )
         else:
             return fused_experts_with_all2all(hidden_states=x,

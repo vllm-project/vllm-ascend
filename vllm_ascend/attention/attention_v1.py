@@ -264,8 +264,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.key_cache = None
-        self.value_cache = None
+        self.key_cache: torch.Tensor = None
+        self.value_cache: torch.Tensor = None
 
         # For sink attention
         self.sinks = sinks
@@ -291,7 +291,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         attn_metadata: AscendMetadata,
-        output: Optional[torch.Tensor] = None,
+        output: torch.Tensor = None,
         num_tokens=0,
     ) -> torch.Tensor:
         assert attn_metadata is not None
@@ -406,7 +406,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self,
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
-        output: Optional[torch.Tensor] = None,
+        output: torch.Tensor = None,
     ) -> torch.Tensor:
         if is_310p():
             # seq_lens_tensor needs to be transferred to the device for 310P.
@@ -498,7 +498,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self,
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
-        output: Optional[torch.Tensor] = None,
+        output: torch.Tensor = None,
     ) -> torch.Tensor:
         if self.sinks is not None:
             batch_size = attn_metadata.seq_lens.shape[0]
