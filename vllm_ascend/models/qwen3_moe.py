@@ -47,12 +47,11 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
                                                init_metadata_for_sp)
-from vllm_ascend.utils import vllm_version_is,npu_prefetch
-from vllm_ascend.ascend_config import get_ascend_config
-
+from vllm_ascend.utils import npu_prefetch, vllm_version_is
 
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
@@ -205,9 +204,13 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         residual: Optional[torch.Tensor],
         _metadata_for_padding: Optional[MetadataForPadding] = None,
     ) -> torch.Tensor:
-        o_proj_size = self.self_attn.o_proj.weight.numel() * self.self_attn.o_proj.weight.element_size()
+        o_proj_size = self.self_attn.o_proj.weight.numel(
+        ) * self.self_attn.o_proj.weight.element_size()
         prefetch_size = 4 * 1024 * 1024 * self.tp_size if 4 * 1024 * 1024 * self.tp_size <= o_proj_size else o_proj_size
-        npu_prefetch(self.self_attn.o_proj.weight, hidden_states, prefetch_size, enabled=self.enable_prefetch)
+        npu_prefetch(self.self_attn.o_proj.weight,
+                     hidden_states,
+                     prefetch_size,
+                     enabled=self.enable_prefetch)
         # To prevent precision issues during the decoder phase when only prefilling enables SP
         if not self.enable_sequence_parallelism:
             self.self_attn.o_proj.reduce_results = True
