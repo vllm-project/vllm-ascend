@@ -31,6 +31,7 @@ The following table lists the additional configuration options available in vLLM
 | `refresh`                     | bool | `false` | Whether to refresh global ascend config content. This value is usually used by rlhf or ut/e2e test case.     |
 | `expert_map_path`             | str  | `None` | When using expert load balancing for the MOE model, an expert map path needs to be passed in. |
 | `chunked_prefill_for_mla`     | bool | `False` | Whether to enable the fused operator-like chunked_prefill. |
+| `enable_prefetch`     | bool | `False` | Whether to enable weight prefetch. |
 | `kv_cache_dtype`     | str | `None` | When using the kv cache quantization method, kv cache dtype needs to be set, currently only int8 is supported. |
 | `enable_shared_expert_dp`     | bool | `False` | When the shared expert in DP, it has better performance but consumes more memory. Currently only DeepSeek series models are supported to use. |
 

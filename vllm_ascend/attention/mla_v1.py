@@ -479,7 +479,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-        self.enable_mla_prefetch = ascend_config.enable_mla_prefetch
+        self.enable_prefetch = ascend_config.enable_prefetch
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         self.chunked_prefill_for_mla = ascend_config.chunked_prefill_for_mla
 
@@ -906,7 +906,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.q_a_proj is not None:
             npu_prefetch(self.q_a_proj.weight,
                          hidden_states,
-                         enabled=self.enable_mla_prefetch)
+                         enabled=self.enable_prefetch)
             ckq = self.q_a_proj(hidden_states)[0]
             q_c = self.q_a_layernorm(ckq)
         else:
@@ -1031,7 +1031,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             npu_prefetch(self.o_proj.weight,
                          o_proj_input,
                          max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                         enabled=self.enable_mla_prefetch)
+                         enabled=self.enable_prefetch)
 
             output[...] = self.o_proj(
                 o_proj_input,
@@ -1042,7 +1042,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 npu_prefetch(self.o_proj.weight,
                              o_proj_input,
                              max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                             enabled=self.enable_mla_prefetch)
+                             enabled=self.enable_prefetch)
                 output[...] = self.o_proj(
                     o_proj_input,
                     is_prefill=prefill_preprocess_res is not None,
