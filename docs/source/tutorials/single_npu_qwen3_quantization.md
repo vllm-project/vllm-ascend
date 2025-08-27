@@ -32,11 +32,10 @@ see https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8
 :::
 
 ```bash
-git clone https://gitee.com/ascend/msit
-cd msit/msmodelslim
+# The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
+git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitee.com/ascend/msit
 
-# Optional, this commit has been verified
-git checkout f8ab35a772a6c1ee7675368a2aa4bafba3bedd1a
+cd msit/msmodelslim
 
 # Install by run this script
 bash install.sh

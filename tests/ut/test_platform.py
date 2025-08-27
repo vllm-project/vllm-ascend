@@ -3,16 +3,16 @@ import unittest
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
 from vllm.config import CompilationLevel
+from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import PlatformEnum
 
 from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 
 class TestNPUPlatform(TestBase):
@@ -28,6 +28,7 @@ class TestNPUPlatform(TestBase):
         self.mock_vllm_config.scheduler_config = MagicMock()
         self.mock_vllm_config.speculative_config = None
         self.mock_vllm_config.compilation_config.pass_config.enable_sequence_parallelism = False
+        self.mock_vllm_config.compilation_config.cudagraph_mode = None
 
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.torchair_graph_config.enabled = False
@@ -43,7 +44,7 @@ class TestNPUPlatform(TestBase):
                          "ASCEND_RT_VISIBLE_DEVICES")
         self.assertEqual(NPUPlatform.dispatch_key, "PrivateUse1")
         self.assertEqual(NPUPlatform.supported_quantization,
-                         [ASCEND_QUATIZATION_METHOD])
+                         [ASCEND_QUANTIZATION_METHOD])
 
     def test_is_sleep_mode_available(self):
         self.assertTrue(self.platform.is_sleep_mode_available())
@@ -61,7 +62,7 @@ class TestNPUPlatform(TestBase):
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
 
-        self.assertTrue(ASCEND_QUATIZATION_METHOD in mock_action.choices)
+        self.assertTrue(ASCEND_QUANTIZATION_METHOD in mock_action.choices)
         self.assertEqual(len(mock_action.choices), 3)  # original 2 + ascend
 
     @patch("vllm_ascend.utils.adapt_patch")
@@ -89,7 +90,7 @@ class TestNPUPlatform(TestBase):
             self, mock_quant_config, mock_adapt_patch):
         mock_parser = MagicMock()
         mock_action = MagicMock()
-        mock_action.choices = ["awq", ASCEND_QUATIZATION_METHOD]
+        mock_action.choices = ["awq", ASCEND_QUANTIZATION_METHOD]
         mock_parser._option_string_actions = {"--quantization": mock_action}
 
         self.platform.pre_register_and_update(mock_parser)
@@ -269,8 +270,6 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(self.mock_vllm_config)
         self.assertTrue("Model config is missing" in cm.output[0])
 
-    @pytest.mark.skip(
-        reason="TODO: revert me when the occasional failed is fixed")
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
@@ -289,6 +288,10 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(
             self.mock_vllm_config.compilation_config.level,
             CompilationLevel.NO_COMPILATION,
+        )
+        self.assertEqual(
+            self.mock_vllm_config.compilation_config.cudagraph_mode,
+            CUDAGraphMode.NONE,
         )
 
     @patch("vllm_ascend.utils.is_310p", return_value=False)
@@ -310,6 +313,64 @@ class TestNPUPlatform(TestBase):
                 self.mock_vllm_config.compilation_config.level,
                 CompilationLevel.NO_COMPILATION,
             )
+            self.assertEqual(
+                self.mock_vllm_config.compilation_config.cudagraph_mode,
+                CUDAGraphMode.NONE,
+            )
+
+    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch("vllm_ascend.ascend_config.check_ascend_config")
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_unsupported_cudagraph_mode(
+            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+        mock_init_ascend.return_value = self.mock_ascend_config
+        self.mock_vllm_config.model_config.enforce_eager = False
+        self.mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL
+
+        with self.assertLogs(logger="vllm", level="INFO") as cm:
+            from vllm_ascend import platform
+
+            importlib.reload(platform)
+            self.platform.check_and_update_config(self.mock_vllm_config)
+            self.assertTrue(
+                "cudagraph_mode is not support on NPU. falling back to NONE" in
+                cm.output[0])
+            self.assertEqual(
+                self.mock_vllm_config.compilation_config.level,
+                CompilationLevel.NO_COMPILATION,
+            )
+            self.assertEqual(
+                self.mock_vllm_config.compilation_config.cudagraph_mode,
+                CUDAGraphMode.NONE,
+            )
+
+    @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch("vllm_ascend.ascend_config.check_ascend_config")
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    def test_check_and_update_config_disable_aclgraph_when_ray_enabled(
+            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+        mock_init_ascend.return_value = self.mock_ascend_config
+        self.mock_vllm_config.model_config.enforce_eager = False
+        self.mock_vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
+        self.mock_vllm_config.parallel_config.distributed_executor_backend = "ray"
+
+        with self.assertLogs(logger="vllm", level="WARNING") as cm:
+            from vllm_ascend import platform
+
+            importlib.reload(platform)
+            self.platform.check_and_update_config(self.mock_vllm_config)
+            print(30 * "=", f"cm.output: {cm.output}")
+            self.assertTrue(
+                "Ray distributed executor backend is not compatible with ACL Graph mode"
+                in cm.output[0])
+            self.assertEqual(
+                self.mock_vllm_config.compilation_config.level,
+                CompilationLevel.NO_COMPILATION,
+            )
+            self.assertEqual(
+                self.mock_vllm_config.compilation_config.cudagraph_mode,
+                CUDAGraphMode.NONE,
+            )
 
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
@@ -330,6 +391,10 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(
             self.mock_vllm_config.compilation_config.level,
             CompilationLevel.NO_COMPILATION,
+        )
+        self.assertEqual(
+            self.mock_vllm_config.compilation_config.cudagraph_mode,
+            CUDAGraphMode.NONE,
         )
 
     @patch("vllm_ascend.utils.is_310p", return_value=False)
