@@ -372,10 +372,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
         )
 
-        self.moe_comm_method = "mc2"
-        self.fallback_moe_comm_method = "allgather"
-        self.dummy_moe_comm_method = "dummy"
-
     def _use_aclgraph(self) -> bool:
         return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.level == CompilationLevel.PIECEWISE and not self.model_config.enforce_eager
 
@@ -1616,6 +1612,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
 
+    def _select_moe_comm_method(self, num_tokens: int) -> str:
+        return ("mc2"
+                if num_tokens <= self.mc2_tokens_capacity else "allgather")
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1638,9 +1638,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              intermediate_tensors) = (self._prepare_inputs(
                  scheduler_output, intermediate_tensors))
 
-        moe_comm_method = (self.moe_comm_method
-                           if num_input_tokens <= self.mc2_tokens_capacity else
-                           self.fallback_moe_comm_method)
+        moe_comm_method = self._select_moe_comm_method(num_input_tokens)
+
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=False)
         aclgraph_runtime_mode, batch_descriptor = \
@@ -1969,7 +1968,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
-        moe_comm_method: str = "dummy",
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         force_attention: bool = False,
         uniform_decode: bool = False,
@@ -1986,6 +1984,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self._sync_metadata_across_dp(num_tokens, with_prefill, False)
+
+        moe_comm_method = self._select_moe_comm_method(num_tokens)
 
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using
@@ -2494,12 +2494,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self._dummy_run(num_tokens,
                                 aclgraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
-                                uniform_decode=uniform_decode,
-                                moe_comm_method=self.moe_comm_method)
+                                uniform_decode=uniform_decode)
             self._dummy_run(num_tokens,
                             aclgraph_runtime_mode=aclgraph_runtime_mode,
-                            uniform_decode=uniform_decode,
-                            moe_comm_method=self.moe_comm_method)
+                            uniform_decode=uniform_decode)
 
     def _capture_model(self):
         if not self.use_aclgraph:
