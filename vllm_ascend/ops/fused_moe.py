@@ -682,22 +682,18 @@ def fused_experts_moge(
     return final_hidden_states
 
 
-def fused_experts_with_all2allv(
-    token_dispatcher,
-    probs,
-    routing_map,
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_bias: Optional[torch.Tensor],
-    w2_bias: Optional[torch.Tensor]
-):
+def fused_experts_with_all2allv(token_dispatcher, probs, routing_map,
+                                hidden_states: torch.Tensor, w1: torch.Tensor,
+                                w2: torch.Tensor,
+                                w1_bias: Optional[torch.Tensor],
+                                w2_bias: Optional[torch.Tensor]):
     # Enable moe alltoallv, it's a balanced policy for precision and efficiency.
     (share_experts_output, dispatched_input,
      tokens_per_expert) = (token_dispatcher.token_permutation(
          hidden_states, probs, routing_map))
 
-    expert_output = apply_mlp(dispatched_input, w1, w2, w1_bias, w2_bias, tokens_per_expert)
+    expert_output = apply_mlp(dispatched_input, w1, w2, w1_bias, w2_bias,
+                              tokens_per_expert)
     output, mlp_bias = token_dispatcher.token_unpermutation(expert_output)
     return output
 
