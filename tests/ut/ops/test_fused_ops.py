@@ -26,6 +26,7 @@ from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod)
 from vllm_ascend.ops.layers.experts_selector import select_experts
+from vllm_ascend.quantization.w8a8_dynamic import fused_experts_with_allgather
 from vllm_ascend.utils import AscendSocVersion, adapt_patch  # noqa E402
 
 adapt_patch(True)
@@ -87,7 +88,8 @@ def mock_dist_env(mocker: MockerFixture):
                    parallel_config=MagicMock(tensor_parallel_size=2),
                    scheduler_config=MagicMock(max_num_seqs=4),
                    model_config=MagicMock(max_model_len=2048)
-               )):
+               )), \
+        patch('vllm_ascend.quantization.w8a8_dynamic.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)):
         yield
 
 
@@ -420,3 +422,33 @@ class TestExpertsSelector:
 
         assert topk_weights.shape == (8, 2)
         assert topk_ids.shape == (8, 2)
+
+class TestFusedExpertsW8A8Dynamic:
+
+    @pytest.mark.parametrize("global_num_experts", [4])
+    def test_fused_experts_with_allgather(self, mock_dist_env, global_num_experts):
+
+        x = torch.randn(8, 7168, dtype=torch.bfloat16, device="npu")
+        topk_weights = torch.randn(8, 8, dtype=torch.bfloat16, device="npu")
+        topk_ids = torch.randint(low=0, high=global_num_experts, size=(8, 8), dtype=torch.int32, device="npu")
+        top_k = 8
+        layer = MagicMock()
+        layer.w13_weight = torch.randn(1, 7168, 4096, dtype=torch.int8, device="npu")
+        layer.w13_weight_scale = torch.randn(1, 4096, dtype=torch.bfloat16, device="npu")
+        layer.w2_weight = torch.randn(1, 2048, 7168, dtype=torch.int8, device="npu")
+        torch_npu.npu_format_cast_(layer.w2_weight, 29)
+        layer.w2_weight_scale = torch.randn(1, 7168, dtype=torch.bfloat16, device="npu")
+        expert_map = torch.ones(global_num_experts, dtype=torch.int32, device="npu")
+
+        result = fused_experts_with_allgather(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w1_scale=layer.w13_weight_scale,
+            w2=layer.w2_weight,
+            w2_scale=layer.w2_weight_scale,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            top_k=top_k,
+            expert_map=expert_map)
+
+        assert result.shape == (8, 7168)
