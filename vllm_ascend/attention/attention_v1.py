@@ -21,11 +21,13 @@ from typing import List, Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -341,8 +343,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.seq_lens.to(device=query.device)
 
         torch_npu._npu_paged_attention(query=query,
-                                       key_cache=self.key_cache,
-                                       value_cache=self.value_cache,
+                                       key_cache=self.key_cache[..., :self.head_size],
+                                       value_cache=self.value_cache[..., :self.head_size],
                                        num_kv_heads=self.num_kv_heads,
                                        num_heads=self.num_heads,
                                        scale_value=self.scale,
@@ -391,8 +393,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         torch_npu._npu_paged_attention_splitfuse(
             query=query,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
+            key_cache=self.key_cache[..., :self.head_size],
+            value_cache=self.value_cache[..., :self.head_size],
             mask=attn_metadata.attn_mask,
             block_table=attn_metadata.block_tables,
             seq_len=attn_metadata.query_lens,
@@ -474,9 +476,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if self.key_cache is None:
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
                 slots = attn_metadata.slot_mapping
+
+                input_key = key[:num_actual_tokens]
+                input_value = value[:num_actual_tokens]
+                if input_key.shape[-1] < self.key_cache.shape[-1]:
+                    padding_size = self.key_cache.shape[-1] - input_key.shape[-1]
+                    input_key = F.pad(input_key, (0, padding_size), mode="constant", value=0)
+                    input_value = F.pad(input_value, (0, padding_size), mode="constant", value=0)
+
                 torch_npu._npu_reshape_and_cache(
-                    key=key[:num_actual_tokens],
-                    value=value[:num_actual_tokens],
+                    key=input_key,
+                    value=input_value,
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_indices=slots)
