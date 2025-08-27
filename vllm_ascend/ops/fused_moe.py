@@ -269,7 +269,10 @@ def apply_mlp(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
     group_list: torch.Tensor,
+    activation: Optional[str],
     group_list_type: int = 1,
 ) -> torch.Tensor:
     """
@@ -292,7 +295,7 @@ def apply_mlp(
     Returns:
         hidden_states: output hidden states after MLP.
     """
-
+    num_experts, hidden_size, _ = w1.shape
     w1 = w1.transpose(1, 2)
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
@@ -302,8 +305,29 @@ def apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+    # Add w1_bias
+    experts_indices = torch.arange(
+        len(group_list),
+        device=group_list.device).repeat_interleave(group_list)
+    if w1_bias is not None:
+        hidden_states = hidden_states + w1_bias[experts_indices]
 
-    hidden_states = torch_npu.npu_swiglu(hidden_states)
+    # Do activation
+    # TODO: Remove this after we refactor activation behavior
+    def swiglu_oai(gate_up):
+        alpha = 1.702
+        limit = 7.0
+        gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+        gate = gate.clamp(min=None, max=limit)
+        up = up.clamp(min=-limit, max=limit)
+        glu = gate * torch.sigmoid(gate * alpha)
+        gated_output = (up + 1) * glu
+        return gated_output
+
+    if activation == "swigluoai":
+        hidden_states = swiglu_oai(hidden_states.view(-1, hidden_size))
+    else:
+        hidden_states = torch_npu.npu_swiglu(hidden_states)
 
     w2 = w2.transpose(1, 2)
     hidden_states = torch_npu.npu_grouped_matmul(
@@ -314,6 +338,9 @@ def apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+
+    if w2_bias is not None:
+        hidden_states = hidden_states + w2_bias[experts_indices]
 
     return hidden_states
 
@@ -673,6 +700,8 @@ def fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     row_idx: torch.Tensor,
@@ -680,6 +709,7 @@ def fused_experts(
     expert_map: torch.Tensor = None,
     apply_router_weight_on_input: bool = False,
     max_num_tokens: Optional[int] = None,
+    activation: Optional[str] = None,
 ) -> torch.Tensor:
     """
     Fused experts with top-k routing.
@@ -778,6 +808,7 @@ def fused_experts(
             expanded_expert_idx, num_experts)
         expert_tokens = expert_tokens.to(torch.int64)
 
+    E, N, _ = w1.size()
     w1 = w1.transpose(1, 2)
     gate_up_out_list = torch_npu.npu_grouped_matmul(
         x=[sorted_hidden_states],
@@ -788,7 +819,27 @@ def fused_experts(
         group_list=expert_tokens,
     )[0]
 
-    gate_up_out = torch_npu.npu_swiglu(gate_up_out_list)
+    # Add w1_bias
+    if w1_bias is not None:
+        gate_up_out_list = gate_up_out_list + w1_bias[expanded_expert_idx]
+
+    # Do activation
+    # TODO: remove this After we refactor activation behavior
+
+    def swiglu_oai(gate_up):
+        alpha = 1.702
+        limit = 7.0
+        gate, up = gate_up[..., ::2], gate_up[..., 1::2]
+        gate = gate.clamp(min=None, max=limit)
+        up = up.clamp(min=-limit, max=limit)
+        glu = gate * torch.sigmoid(gate * alpha)
+        gated_output = (up + 1) * glu
+        return gated_output
+
+    if activation == "swigluoai":
+        gate_up_out = swiglu_oai(gate_up_out_list.view(-1, N))
+    else:
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out_list)
 
     w2 = w2.transpose(1, 2)
     down_out_list = torch_npu.npu_grouped_matmul(
@@ -799,6 +850,10 @@ def fused_experts(
         group_type=0,
         group_list=expert_tokens,
     )[0]
+
+    # Add w2_bias
+    if w2_bias is not None:
+        down_out_list = down_out_list + w2_bias[expanded_expert_idx]
 
     if expert_map is not None:
         weighted_down_out = down_out_list * sorted_weights.unsqueeze(1)
