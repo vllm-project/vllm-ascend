@@ -6,6 +6,7 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
                                              init_model_parallel_group)
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
@@ -73,7 +74,8 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                             backend,
                                             group_name="mlp_tp")
 
-    lmhead_tensor_parallel_size = parallel_config.lmhead_tensor_parallel_size
+    lmhead_tensor_parallel_size = get_ascend_config(
+    ).lmhead_tensor_parallel_size
     if lmhead_tensor_parallel_size is not None:
         group_ranks = []
         global _LMTP
