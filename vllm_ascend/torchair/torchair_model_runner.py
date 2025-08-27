@@ -419,3 +419,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
     def _build_drafter_prepare_inputs_torchair_param(self):
         return True
+
+    def get_dp_padding(self, num_tokens):
+        """Override from NPUModelRunner to get dp padding"""
+        return 0, None
