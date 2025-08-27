@@ -1,6 +1,21 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
+#
 import os
 import random
 import sys
@@ -10,8 +25,8 @@ import openai
 import pytest
 import pytest_asyncio
 
-from tests.utils import (RemoteOpenAIServerCustom,
-                         create_new_process_for_each_test)
+from tests.e2e.conftest import RemoteOpenAIServerCustom
+from tests.e2e.utils import fork_new_process_for_each_test
 # yapf: disable
 from tests.v1.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                               DUMMY_LOGITPROC_FQCN,
@@ -77,6 +92,7 @@ def default_server_args():
         "2048",
         "--max-num-seqs",
         "128",
+        "--enforce-eager",
     ]
 
 
@@ -125,7 +141,7 @@ api_keyword_args = {
 }
 
 
-@create_new_process_for_each_test()
+@fork_new_process_for_each_test
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
