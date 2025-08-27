@@ -19,14 +19,15 @@ import pytest
 import torch
 import torch.nn as nn
 import torch_npu
-from pytest_mock import MockerFixture
-from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
-
 import vllm_ascend.ops.moe_dispatcher.token_dispatcher as token_dispatcher_module
+from pytest_mock import MockerFixture
+from tests.ut.base import TestBase
+from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 from vllm_ascend.ascend_forward_context import (FusedMoEState,
                                                 _get_fused_moe_state)
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
-                                       AscendUnquantizedFusedMoEMethod)
+                                       AscendUnquantizedFusedMoEMethod,
+                                       unified_apply_mlp)
 from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.utils import AscendSocVersion, adapt_patch
 
@@ -517,3 +518,239 @@ class TestExpertsSelector:
 
         assert topk_weights.shape == (8, 2)
         assert topk_ids.shape == (8, 2)
+
+
+class TestUnifiedApplyMLP(TestBase):
+
+    @patch('vllm_ascend.ops.fused_moe.get_forward_context')
+    @patch('vllm_ascend.ops.fused_moe.get_mc2_group')
+    @patch('vllm_ascend.ops.fused_moe.is_310p')
+    @patch('torch_npu.npu_grouped_matmul')
+    @patch('torch_npu.npu_dynamic_quant')
+    @patch('torch_npu.npu_dequant_swiglu_quant')
+    def test_unified_apply_mlp_with_quantization_mc2(self, mock_npu_dequant,
+                                                     mock_npu_dynamic_quant,
+                                                     mock_npu_grouped_matmul,
+                                                     mock_is_310p,
+                                                     mock_get_mc2_group,
+                                                     mock_get_forward_context):
+
+        mock_forward_context = MagicMock()
+        mock_forward_context.with_quant = True
+        mock_forward_context.fused_moe_state = FusedMoEState.MC2
+        mock_get_forward_context.return_value = mock_forward_context
+
+        mock_mc2_group = MagicMock()
+        mock_get_mc2_group.return_value = mock_mc2_group
+
+        mock_is_310p.return_value = False
+
+        mock_npu_dynamic_quant.return_value = (torch.randint(-128,
+                                                             127, (10, 20),
+                                                             dtype=torch.int8),
+                                               torch.rand(10,
+                                                          1,
+                                                          dtype=torch.float32))
+
+        mock_npu_grouped_matmul.side_effect = [[
+            torch.randint(-2147483648, 2147483647, (10, 40), dtype=torch.int32)
+        ], [torch.randn(10, 20, dtype=torch.bfloat16)]]
+
+        mock_npu_dequant.return_value = (torch.randn(10,
+                                                     40,
+                                                     dtype=torch.bfloat16),
+                                         torch.randn(10,
+                                                     1,
+                                                     dtype=torch.float32))
+
+        hidden_states = torch.randn(10, 20, dtype=torch.bfloat16)
+        w1 = torch.randint(-128, 127, (5, 20, 40), dtype=torch.int8)
+        w1_scale = torch.randn(5, 40, dtype=torch.float32)
+        w2 = torch.randint(-128, 127, (5, 40, 20), dtype=torch.int8)
+        w2_scale = torch.randn(5, 20, dtype=torch.bfloat16)
+        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
+
+        result = unified_apply_mlp(hidden_states=hidden_states,
+                                   w1=w1,
+                                   w1_scale=w1_scale,
+                                   w2=w2,
+                                   w2_scale=w2_scale,
+                                   group_list=group_list,
+                                   dynamic_scale=None,
+                                   group_list_type=1,
+                                   w1_scale_bias=None,
+                                   w2_scale_bias=None,
+                                   topk_scales=None)
+
+        mock_get_forward_context.assert_called()
+        self.assertTrue(mock_forward_context.with_quant)
+        self.assertEqual(mock_forward_context.fused_moe_state,
+                         FusedMoEState.MC2)
+
+        mock_npu_dynamic_quant.assert_called()
+
+        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
+
+        mock_npu_dequant.assert_called_once()
+
+        self.assertEqual(result.dtype, torch.bfloat16)
+
+    @patch('vllm_ascend.ops.fused_moe.get_forward_context')
+    @patch('vllm_ascend.ops.fused_moe.is_310p')
+    @patch('torch_npu.npu_grouped_matmul')
+    @patch('torch_npu.npu_swiglu')
+    @patch('torch_npu.npu_dynamic_quant')
+    def test_unified_apply_mlp_without_quantization(
+            self, mock_npu_dynamic_quant, mock_npu_swiglu,
+            mock_npu_grouped_matmul, mock_is_310p, mock_get_forward_context):
+
+        mock_forward_context = MagicMock()
+        mock_forward_context.with_quant = False
+        mock_get_forward_context.return_value = mock_forward_context
+
+        mock_is_310p.return_value = False
+
+        mock_npu_grouped_matmul.side_effect = [[
+            torch.randn(10, 40, dtype=torch.float16)
+        ], [torch.randn(10, 20, dtype=torch.float16)]]
+        mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.float16)
+        mock_npu_dynamic_quant.return_value = (MagicMock(), MagicMock())
+
+        hidden_states = torch.randn(10, 20, dtype=torch.float16)
+        w1 = torch.randn(5, 20, 40, dtype=torch.float16)
+        w2 = torch.randn(5, 40, 20, dtype=torch.float16)
+        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
+        topk_scales = torch.randn(10, 1, dtype=torch.float16)
+
+        result = unified_apply_mlp(hidden_states=hidden_states,
+                                   w1=w1,
+                                   w1_scale=None,
+                                   w2=w2,
+                                   w2_scale=None,
+                                   group_list=group_list,
+                                   dynamic_scale=None,
+                                   group_list_type=1,
+                                   w1_scale_bias=None,
+                                   w2_scale_bias=None,
+                                   topk_scales=topk_scales)
+
+        mock_get_forward_context.assert_called()
+        self.assertFalse(mock_forward_context.with_quant)
+
+        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
+        mock_npu_swiglu.assert_called_once()
+
+        self.assertEqual(result.shape, hidden_states.shape)
+        self.assertEqual(result.dtype, torch.float16)
+
+    @patch('vllm_ascend.ops.fused_moe.get_forward_context')
+    @patch('torch_npu.npu_grouped_matmul')
+    @patch('torch_npu.npu_swiglu')
+    @patch('torch_npu.npu_dynamic_quant')
+    def test_unified_apply_mlp_with_quantization_and_dynamic_scale(
+            self, mock_npu_dynamic_quant, mock_npu_swiglu,
+            mock_npu_grouped_matmul, mock_get_forward_context):
+
+        mock_forward_context = MagicMock()
+        mock_forward_context.with_quant = True
+        mock_forward_context.fused_moe_state = "NOT_MC2"
+        mock_get_forward_context.return_value = mock_forward_context
+
+        mock_npu_grouped_matmul.side_effect = [[
+            torch.randn(10, 40, dtype=torch.bfloat16)
+        ], [torch.randn(10, 20, dtype=torch.bfloat16)]]
+
+        mock_npu_swiglu.return_value = torch.randn(10,
+                                                   40,
+                                                   dtype=torch.bfloat16)
+
+        mock_npu_dynamic_quant.return_value = (torch.randint(-128,
+                                                             127, (10, 40),
+                                                             dtype=torch.int8),
+                                               torch.rand(10,
+                                                          1,
+                                                          dtype=torch.float32))
+
+        hidden_states = torch.randn(10, 20, dtype=torch.bfloat16)
+        w1 = torch.randn(5, 20, 40, dtype=torch.bfloat16)
+        w1_scale = torch.randn(5, 40, dtype=torch.bfloat16)
+        w2 = torch.randn(5, 40, 20, dtype=torch.bfloat16)
+        w2_scale = torch.randn(5, 20, dtype=torch.bfloat16)
+        w1_scale_bias = torch.randn(5, 40, dtype=torch.bfloat16)
+        w2_scale_bias = torch.randn(5, 20, dtype=torch.bfloat16)
+        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
+        provided_dynamic_scale = torch.rand(10, 1, dtype=torch.float32)
+
+        result = unified_apply_mlp(hidden_states=hidden_states,
+                                   w1=w1,
+                                   w1_scale=w1_scale,
+                                   w2=w2,
+                                   w2_scale=w2_scale,
+                                   group_list=group_list,
+                                   dynamic_scale=provided_dynamic_scale,
+                                   group_list_type=1,
+                                   w1_scale_bias=w1_scale_bias,
+                                   w2_scale_bias=w2_scale_bias,
+                                   topk_scales=None)
+
+        mock_get_forward_context.assert_called()
+        self.assertTrue(mock_forward_context.with_quant)
+
+        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
+        mock_npu_swiglu.assert_called_once()
+        mock_npu_dynamic_quant.assert_called_once()
+
+        self.assertEqual(result.shape, hidden_states.shape)
+        self.assertEqual(result.dtype, torch.bfloat16)
+
+    @patch('vllm_ascend.ops.fused_moe.get_forward_context')
+    @patch('vllm_ascend.ops.fused_moe.is_310p')
+    @patch('torch_npu.npu_grouped_matmul')
+    @patch('torch_npu.npu_swiglu')
+    @patch('torch_npu.npu_dynamic_quant')
+    def test_unified_apply_mlp_without_quantization_310p(
+            self, mock_npu_dynamic_quant, mock_npu_swiglu,
+            mock_npu_grouped_matmul, mock_is_310p, mock_get_forward_context):
+
+        mock_forward_context = MagicMock()
+        mock_forward_context.with_quant = False
+        mock_get_forward_context.return_value = mock_forward_context
+
+        mock_is_310p.return_value = True
+
+        mock_gmm1_out = torch.randn(10, 40, dtype=torch.float16)
+        mock_gmm2_out = torch.randn(10, 20, dtype=torch.float16)
+        mock_npu_grouped_matmul.side_effect = [[mock_gmm1_out],
+                                               [mock_gmm2_out]]
+
+        mock_npu_swiglu.return_value = torch.randn(10, 40, dtype=torch.float16)
+
+        mock_npu_dynamic_quant.return_value = (MagicMock(), MagicMock())
+
+        hidden_states = torch.randn(10, 20, dtype=torch.float16)
+        w1 = torch.randn(5, 20, 40, dtype=torch.float16)
+        w2 = torch.randn(5, 40, 20, dtype=torch.float16)
+        group_list = torch.tensor([2, 4, 6, 8, 10], dtype=torch.int64)
+        topk_scales = torch.randn(10, 1, dtype=torch.float16)
+
+        result = unified_apply_mlp(hidden_states=hidden_states,
+                                   w1=w1,
+                                   w1_scale=None,
+                                   w2=w2,
+                                   w2_scale=None,
+                                   group_list=group_list,
+                                   dynamic_scale=None,
+                                   group_list_type=1,
+                                   w1_scale_bias=None,
+                                   w2_scale_bias=None,
+                                   topk_scales=topk_scales)
+
+        mock_get_forward_context.assert_called()
+        self.assertFalse(mock_forward_context.with_quant)
+        mock_is_310p.assert_called_once()
+
+        self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
+        mock_npu_swiglu.assert_called_once()
+
+        self.assertEqual(result.shape, hidden_states.shape)
+        self.assertEqual(result.dtype, torch.float16)
