@@ -26,15 +26,15 @@ import pytest
 import pytest_asyncio
 
 from tests.e2e.conftest import RemoteOpenAIServerCustom
-from tests.e2e.utils import fork_new_process_for_each_test
 # yapf: disable
-from tests.v1.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
-                                              DUMMY_LOGITPROC_FQCN,
-                                              DUMMY_LOGITPROC_MODULE,
-                                              MAX_TOKENS, MODEL_NAME,
-                                              TEMP_GREEDY, dummy_module)
-from tests.v1.logits_processors.utils import entry_points as fake_entry_points
-from tests.v1.logits_processors.utils import prompts
+from tests.e2e.singlecard.sample.utils import (DUMMY_LOGITPROC_ARG,
+                                               DUMMY_LOGITPROC_FQCN,
+                                               DUMMY_LOGITPROC_MODULE,
+                                               MAX_TOKENS, MODEL_NAME,
+                                               TEMP_GREEDY, dummy_module)
+from tests.e2e.singlecard.sample.utils import entry_points as fake_entry_points
+from tests.e2e.singlecard.sample.utils import prompts
+from tests.e2e.utils import fork_new_process_for_each_test
 
 # yapf: enable
 
@@ -92,22 +92,19 @@ def default_server_args():
         "2048",
         "--max-num-seqs",
         "128",
-        "--enforce-eager",
+        "--enforce-eager"
     ]
 
 
 @pytest.fixture(scope="function",
                 params=[[], ["--logits-processors", DUMMY_LOGITPROC_FQCN]])
-def server(default_server_args, request, monkeypatch):
+def server(default_server_args, request):
     """Consider two server configurations:
     (1) --logits-processors cli arg specifies dummy logits processor via fully-
     qualified class name (FQCN); patch in a dummy logits processor module
     (2) No --logits-processors cli arg; patch in a dummy logits processor
     entrypoint
     """
-
-    # Test that logitproc info is passed to workers
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
 
     if request.param:
         # Launch server, append FQCN argument, inject dummy logitproc module

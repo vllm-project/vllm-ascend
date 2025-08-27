@@ -21,7 +21,7 @@ import functools
 import os
 import signal
 from collections.abc import Sequence
-from typing import Callable, Literal, Optional
+from typing import Callable
 
 import torch
 import torch.nn.functional as F
