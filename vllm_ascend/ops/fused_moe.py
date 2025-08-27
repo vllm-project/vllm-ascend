@@ -987,7 +987,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w2=layer.w2_weight,
-                                 w1=layer.w13_bias if self.has_bias else None,
+                                 w1_bias=layer.w13_bias if self.has_bias else None,
                                  w2_bias=layer.w2_bias if self.has_bias else None,
                                  topk_weights=topk_weights,
                                  topk_ids=topk_ids,
