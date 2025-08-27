@@ -49,9 +49,8 @@ from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
     MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
                                dispose_tensor, get_all_reduce_merge_state,
-                               get_ascend_soc_version,
                                get_rm_router_logits_state, is_310p)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
