@@ -112,6 +112,9 @@ import torch_npu
 
 import vllm_ascend.envs as envs_ascend
 
+# if true, allow tensor initialization and casting with internal format (e.g., NZ)
+torch.npu.config.allow_internal_format = True
+
 if is_310p():
     torch_npu.npu.set_compile_mode(jit_compile=False)
     ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ
