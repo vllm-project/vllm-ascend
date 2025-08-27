@@ -135,6 +135,8 @@ class TestAscendScheduler(TestBase):
         )
         model_config.pooler_config = MagicMock()
         model_config.multimodal_config = MagicMock()
+        model_config.hf_config = MagicMock()
+        model_config.hf_config.is_encoder_decoder = False
         # Cache config, optionally force APC
         kwargs_cache: Dict[str,
                            Any] = ({} if ENABLE_PREFIX_CACHING is None else {
