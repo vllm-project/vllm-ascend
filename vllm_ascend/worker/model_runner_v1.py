@@ -400,6 +400,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if vllm_config.kv_transfer_config is not None:
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
+        self.is_kv_consumer_first_decode = False
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -408,6 +409,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         The SamplingMetadata is updated and copied to the NPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        self.is_kv_consumer_first_decode = False
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -575,6 +577,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 end_token_index += len(spec_token_ids)
                 self.input_batch.token_ids_cpu[
                     req_index, start_index:end_token_index] = spec_token_ids
+            elif self.is_kv_consumer and self.speculative_config and \
+                self.speculative_config.method == 'deepseek_mtp':
+                self.is_kv_consumer_first_decode = True
             # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
             self.input_batch.num_tokens[req_index] = end_token_index
 
@@ -604,6 +609,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.input_batch.token_ids_cpu[
                     req_index, start_index:end_token_index] = spec_token_ids
                 self.input_batch.num_tokens[req_index] = end_token_index
+            elif self.is_kv_consumer and self.speculative_config and \
+                self.speculative_config.method == 'deepseek_mtp':
+                self.is_kv_consumer_first_decode = True
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -1018,7 +1026,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens_list = self.seq_lens_np.tolist()[:num_input_tokens]
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
-        ]
+        ] or self.is_kv_consumer_first_decode
 
         is_only_prefill = bool(np.all(num_valid_tokens != 1))
 
