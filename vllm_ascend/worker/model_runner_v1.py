@@ -88,7 +88,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendCommonLongSequenceMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
                                                      DummyCommImpl,
@@ -1252,6 +1252,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         num_actual_tokens_cp_full = total_num_scheduled_tokens * (
             self.cp_size if is_prefill > 0 else 1)
+        long_seq_metadata = None
         if self.cp_size > 1 and is_prefill > 0:
             cp_kv_recover_idx = torch.zeros(num_actual_tokens_cp_full,
                                             dtype=torch.int32,
@@ -1333,9 +1334,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 'tail_attn_nomask_seqlens': tail_attn_nomask_seqlens,
                 'cp_prefill_mask': cp_prefill_mask
             }
-
-        self.num_actual_tokens_cp_full = num_actual_tokens_cp_full
-        self.num_computed_tokens_of_cp_sp = self.input_batch.num_computed_tokens_of_cp_sp[:self.input_batch.num_reqs]
+            long_seq_metadata = AscendCommonLongSequenceMetadata(
+                cp_kv_recover_idx=self.cp_kv_recover_idx,
+                num_actual_tokens_cp_full=num_actual_tokens_cp_full,
+                num_computed_tokens_of_cp_sp=self.input_batch.num_computed_tokens_of_cp_sp[:self.input_batch.num_reqs],
+                q_head_idx_tensor=self.q_head_idx_tensor,
+                q_tail_idx_tensor=self.q_tail_idx_tensor,
+                q_full_idx=self.q_full_idx,
+                kv_with_q_head_nomask_idx_tensor=self.kv_idx_names['kv_with_q_head_nomask_idx_tensor'],
+                kv_with_q_head_mask_idx_tensor=self.kv_idx_names['kv_with_q_head_mask_idx_tensor'],
+                kv_with_q_tail_nomask_idx_tensor=self.kv_idx_names['kv_with_q_tail_nomask_idx_tensor'],
+                kv_with_q_tail_mask_idx_tensor=self.kv_idx_names['kv_with_q_tail_mask_idx_tensor'],
+                attn_mask_seqlens=self.extra_long_seq_kwargs['attn_mask_seqlens'],
+                head_attn_nomask_seqlens=self.extra_long_seq_kwargs['head_attn_nomask_seqlens'],
+                tail_attn_nomask_seqlens=self.extra_long_seq_kwargs['tail_attn_nomask_seqlens'],
+                cp_prefill_mask=self.extra_long_seq_kwargs['cp_prefill_mask']
+            )
+        else:
+            long_seq_metadata = AscendCommonLongSequenceMetadata(
+                num_actual_tokens_cp_full=num_actual_tokens_cp_full,
+                num_computed_tokens_of_cp_sp=self.input_batch.num_computed_tokens_of_cp_sp[:self.input_batch.num_reqs]
+            )
 
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
@@ -1382,20 +1401,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             max_query_len=max_num_scheduled_tokens,
             graph_pad_size=self.graph_pad_size,
             decode_token_per_req=self.decode_token_per_req,
-            cp_kv_recover_idx=self.cp_kv_recover_idx,
-            num_actual_tokens_cp_full=self.num_actual_tokens_cp_full,
-            num_computed_tokens_of_cp_sp=self.num_computed_tokens_of_cp_sp,
-            q_head_idx_tensor=self.q_head_idx_tensor,
-            q_tail_idx_tensor=self.q_tail_idx_tensor,
-            q_full_idx=self.q_full_idx,
-            kv_with_q_head_nomask_idx_tensor=self.kv_idx_names['kv_with_q_head_nomask_idx_tensor'],
-            kv_with_q_head_mask_idx_tensor=self.kv_idx_names['kv_with_q_head_mask_idx_tensor'],
-            kv_with_q_tail_nomask_idx_tensor=self.kv_idx_names['kv_with_q_tail_nomask_idx_tensor'],
-            kv_with_q_tail_mask_idx_tensor=self.kv_idx_names['kv_with_q_tail_mask_idx_tensor'],
-            attn_mask_seqlens=self.extra_long_seq_kwargs['attn_mask_seqlens'],
-            head_attn_nomask_seqlens=self.extra_long_seq_kwargs['head_attn_nomask_seqlens'],
-            tail_attn_nomask_seqlens=self.extra_long_seq_kwargs['tail_attn_nomask_seqlens'],
-            cp_prefill_mask=self.extra_long_seq_kwargs['cp_prefill_mask']
+            common_long_seq_metadata=long_seq_metadata
         )
         attn_metadata = self.attn_metadata_builder.build(
             common_attn_metadata, self.model)

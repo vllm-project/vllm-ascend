@@ -293,21 +293,21 @@ class AscendMLAMetadataBuilder:
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-
-        cp_kv_recover_idx = common_attn_metadata.cp_kv_recover_idx
-        num_actual_tokens_cp_full = common_attn_metadata.num_actual_tokens_cp_full
-        num_computed_tokens_of_cp_sp = common_attn_metadata.num_computed_tokens_of_cp_sp
-        q_head_idx_tensor = common_attn_metadata.q_head_idx_tensor
-        q_tail_idx_tensor = common_attn_metadata.q_tail_idx_tensor
-        kv_with_q_head_nomask_idx_tensor = common_attn_metadata.kv_with_q_head_nomask_idx_tensor
-        kv_with_q_head_mask_idx_tensor = common_attn_metadata.kv_with_q_head_mask_idx_tensor
-        kv_with_q_tail_nomask_idx_tensor = common_attn_metadata.kv_with_q_tail_nomask_idx_tensor
-        kv_with_q_tail_mask_idx_tensor = common_attn_metadata.kv_with_q_tail_mask_idx_tensor
-        attn_mask_seqlens = common_attn_metadata.attn_mask_seqlens
-        head_attn_nomask_seqlens = common_attn_metadata.head_attn_nomask_seqlens
-        tail_attn_nomask_seqlens = common_attn_metadata.tail_attn_nomask_seqlens
-        q_full_idx = common_attn_metadata.q_full_idx
-        cp_prefill_mask = common_attn_metadata.cp_prefill_mask
+        long_seq_metadata = common_attn_metadata.common_long_seq_metadata
+        cp_kv_recover_idx = long_seq_metadata.cp_kv_recover_idx if long_seq_metadata else None
+        num_actual_tokens_cp_full = long_seq_metadata.num_actual_tokens_cp_full if long_seq_metadata else None
+        num_computed_tokens_of_cp_sp = long_seq_metadata.num_computed_tokens_of_cp_sp if long_seq_metadata else None
+        q_head_idx_tensor = long_seq_metadata.q_head_idx_tensor if long_seq_metadata else None
+        q_tail_idx_tensor = long_seq_metadata.q_tail_idx_tensor if long_seq_metadata else None
+        kv_with_q_head_nomask_idx_tensor = long_seq_metadata.kv_with_q_head_nomask_idx_tensor if long_seq_metadata else None
+        kv_with_q_head_mask_idx_tensor = long_seq_metadata.kv_with_q_head_mask_idx_tensor if long_seq_metadata else None
+        kv_with_q_tail_nomask_idx_tensor = long_seq_metadata.kv_with_q_tail_nomask_idx_tensor if long_seq_metadata else None
+        kv_with_q_tail_mask_idx_tensor = long_seq_metadata.kv_with_q_tail_mask_idx_tensor if long_seq_metadata else None
+        attn_mask_seqlens = long_seq_metadata.attn_mask_seqlens if long_seq_metadata else None
+        head_attn_nomask_seqlens = long_seq_metadata.head_attn_nomask_seqlens if long_seq_metadata else None
+        tail_attn_nomask_seqlens = long_seq_metadata.tail_attn_nomask_seqlens if long_seq_metadata else None
+        q_full_idx = long_seq_metadata.q_full_idx if long_seq_metadata else None
+        cp_prefill_mask = long_seq_metadata.cp_prefill_mask if long_seq_metadata else None
 
         # TODO(xyx): remove the if condition after mla supports torch mode speculative decoding
         decode_threshold = 1
