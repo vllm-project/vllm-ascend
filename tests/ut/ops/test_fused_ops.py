@@ -19,10 +19,11 @@ import pytest
 import torch
 import torch.nn as nn
 import torch_npu
-import vllm_ascend.ops.moe_dispatcher.token_dispatcher as token_dispatcher_module
 from pytest_mock import MockerFixture
-from tests.ut.base import TestBase
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
+
+import vllm_ascend.ops.moe_dispatcher.token_dispatcher as token_dispatcher_module
+from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import (FusedMoEState,
                                                 _get_fused_moe_state)
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
