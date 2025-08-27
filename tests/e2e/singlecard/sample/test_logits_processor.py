@@ -185,7 +185,10 @@ async def test_custom_logitsprocs(client: openai.AsyncOpenAI, model_name: str):
             # output token is repeated
             choices: openai.types.CompletionChoice = batch.choices
             toks = choices[0].logprobs.tokens
-            if not all([x == toks[0] for x in toks]):
+            if not toks:
+                raise AssertionError(
+                    "Expected generated tokens, but got an empty list.")
+            if len(set(toks)) > 1:
                 raise AssertionError(
                     f"Generated {toks} should all be {toks[0]}")
 
