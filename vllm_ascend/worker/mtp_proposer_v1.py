@@ -48,9 +48,6 @@ class MtpProposer:
             device=self.runner.device)
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore
-        self.reserved_mc2_mask = torch.zeros(512,
-                                             dtype=torch.bool,
-                                             device=self.runner.device)
         self.torchair_graph_enabled = get_ascend_config(
         ).torchair_graph_config.enabled
 
