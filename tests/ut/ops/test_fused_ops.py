@@ -27,9 +27,9 @@ from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import (FusedMoEState,
                                                 _get_fused_moe_state)
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
-                                       AscendUnquantizedFusedMoEMethod,
-                                       unified_apply_mlp)
+                                       AscendUnquantizedFusedMoEMethod)
 from vllm_ascend.ops.layers.experts_selector import select_experts
+from vllm_ascend.ops.layers.moe_mlp import unified_apply_mlp
 from vllm_ascend.utils import AscendSocVersion, adapt_patch
 
 adapt_patch(True)

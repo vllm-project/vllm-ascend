@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-# Adapted from vllm/tests/kernels/test_moe.py
 
 from typing import Optional
 
