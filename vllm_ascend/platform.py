@@ -146,23 +146,23 @@ class NPUPlatform(Platform):
 
         compilation_config.cudagraph_num_of_warmups = 1
 
-        if compilation_config.cudagraph_mode is None:
-            # if cudagraph_mode is not explicitly set by users, set default value
-            if compilation_config.level == CompilationLevel.PIECEWISE:
-                compilation_config.cudagraph_mode = \
-                    CUDAGraphMode.PIECEWISE
-            elif compilation_config.level not in [
-                    CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE
-            ]:
-                logger.warning(
-                    "NPU does not support %s compilation level. Setting CUDAGraphMode to NONE",
-                    compilation_config.level)
-                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            else:
-                logger.warning(
-                    "compilation_config.level = CompilationLevel.NO_COMPILATION is set, Setting CUDAGraphMode to NONE"
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        # TODO: make vllm support oot platform to set `compilation_config.cudagraph_mode`
+        # if cudagraph_mode is not explicitly set by users, set default value
+        if compilation_config.level == CompilationLevel.PIECEWISE:
+            compilation_config.cudagraph_mode = \
+                CUDAGraphMode.PIECEWISE
+        elif compilation_config.level not in [
+                CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE
+        ]:
+            logger.warning(
+                "NPU does not support %s compilation level. Setting CUDAGraphMode to NONE",
+                compilation_config.level)
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        else:
+            logger.warning(
+                "compilation_config.level = CompilationLevel.NO_COMPILATION is set, Setting CUDAGraphMode to NONE"
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # set CUDAGraphMode to None when torchair is enabled, no mather what compilation_config.level is.
         if ascend_config.torchair_graph_config.enabled:
