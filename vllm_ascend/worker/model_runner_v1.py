@@ -1093,7 +1093,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_tokens -
             len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
             for num_tokens, i in zip(tokens, req_ids)
-        ], dtype=np.int32)
+        ],
+                                    dtype=np.int32)
 
         # Hot-Swap lora model
         if self.lora_config:
