@@ -59,6 +59,7 @@ class AddRMSNormW8A8Quant(RMSNorm):
 
 
 class AscendRMSNorm(RMSNorm):
+
     def forward_oot(
         self,
         x: torch.Tensor,
@@ -85,6 +86,7 @@ class AscendRMSNorm(RMSNorm):
 
 
 class AscendGemmaRMSNorm(RMSNorm):
+    
     def forward_oot(
         self,
         x: torch.Tensor,
