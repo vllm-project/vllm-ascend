@@ -33,8 +33,8 @@ from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
                                                      MC2CommImpl,
                                                      MoECommMethod)
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe import unquant_apply_mlp
 from vllm_ascend.ops.layers.experts_selector import select_experts
+from vllm_ascend.ops.layers.moe_mlp import unquant_apply_mlp
 from vllm_ascend.utils import is_310p
 
 original_unquantized_fused_moe_init_func = UnquantizedFusedMoEMethod.__init__
