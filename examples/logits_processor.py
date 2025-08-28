@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/examples/offline_inference/data_parallel.py
+# Adapted from vllm-project/vllm/examples/offline_inference/logits_process.py
 #
 """This example demonstrates instantiating vLLM with a custom logits processor
 class object.
