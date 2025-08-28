@@ -538,7 +538,8 @@ class TestNPUWorker(TestBase):
     @patch("torch_npu.profiler.ProfilerLevel")
     @patch("torch_npu.profiler.AiCMetrics")
     @patch("torch_npu.profiler.ProfilerActivity")
-    def test_init_profiler_enabled_without_stack_and_memory(self,
+    def test_init_profiler_enabled_without_stack_and_memory(
+        self,
         mock_profiler_activity,
         mock_aic_metrics,
         mock_profiler_level,
