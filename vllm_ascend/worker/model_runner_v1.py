@@ -363,6 +363,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.use_cached_kv_cache_bytes = ascend_config.torchair_graph_config.use_cached_kv_cache_bytes
         self.torchair_graph_batch_sizes = ascend_config.torchair_graph_config.graph_batch_sizes
 
+        # kv role
+        self.is_kv_producer = False
+        self.is_kv_consumer = False
+        if vllm_config.kv_transfer_config is not None:
+            self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
+            self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
+
         if ascend_config.torchair_graph_config.graph_batch_sizes_init:
             self.init_torchair_graph_batch_sizes()
 
@@ -393,13 +400,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
         self.in_profile_run = False
-
-        # kv role
-        self.is_kv_producer = False
-        self.is_kv_consumer = False
-        if vllm_config.kv_transfer_config is not None:
-            self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
-            self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -2339,7 +2339,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def check_torchair_graph_batch_sizes(self):
         # return graph_batch_sizes according to the number of tokens
         # first pad according to the number of requests
-        if len(self.torchair_graph_batch_sizes) == 0:
+        if self.is_kv_consumer:
+            # pd disaggregation scenario may incorrectly calculate the batch, so we force set it to max_num_reqs
+            self.torchair_graph_batch_sizes = [self.max_num_reqs]
+            logger.warning(
+                "is kv_consumer, torch_graph_batch_sizes sets to [max_num_seqs]"
+            )
+        elif len(self.torchair_graph_batch_sizes) == 0:
             self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
         else:
             self.torchair_graph_batch_sizes = sorted(
@@ -2355,10 +2361,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.torchair_graph_batch_sizes.append(self.max_num_reqs)
 
         # we need to make sure that we can deal with max_num_req when `self.decode_token_per_req` is not 1
-        self.torchair_graph_batch_sizes = [
-            graph_batch_size * self.decode_token_per_req
-            for graph_batch_size in self.torchair_graph_batch_sizes
-        ]
+        if self.decode_token_per_req > 1:
+            # pd disaggregation scenario need redundant_batch_sizes to avoid each batch's seq_len exceed 16 tokens
+            if self.is_kv_consumer:
+                FIA_SEQ_LEN_LIMIT = 16
+                self.torchair_graph_batch_sizes = [
+                    (graph_batch_size +
+                     math.ceil(graph_batch_size / FIA_SEQ_LEN_LIMIT) +
+                     math.ceil(graph_batch_size * self.decode_token_per_req /
+                               FIA_SEQ_LEN_LIMIT / FIA_SEQ_LEN_LIMIT)) *
+                    self.decode_token_per_req
+                    for graph_batch_size in self.torchair_graph_batch_sizes
+                ]
+            else:
+                self.torchair_graph_batch_sizes = [
+                    graph_batch_size * self.decode_token_per_req
+                    for graph_batch_size in self.torchair_graph_batch_sizes
+                ]
 
         # NOTE: when enable_expert_parallel, we need to check if `graph_batch_size` is divisible by `tp_size`
         tp_size = self.parallel_config.tensor_parallel_size
