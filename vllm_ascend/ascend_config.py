@@ -50,6 +50,7 @@ class AscendConfig:
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp", False
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
+        self.enable_prefetch = additional_config.get("enable_prefetch", False)
 
 
 class TorchairGraphConfig:
