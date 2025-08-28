@@ -16,10 +16,10 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.attention.utils import \
-    AscendCommonAttentionMetadata as CommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.distributed.utils import is_lmhead_tp
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
-from vllm_ascend.utils import ProfileExecuteDuration
+from vllm_ascend.utils import TORCHAIR_CACHE_DIR, ProfileExecuteDuration
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
@@ -91,7 +91,6 @@ class MtpProposer:
             cu_target_query_lens: torch.Tensor,
             # [batch_size]
             num_rejected_tokens: torch.Tensor,
-            force_one_token: bool = False,
             is_torchair_graph: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # cu_target_query_lens: [0, a, a + b, a + b + c]
@@ -110,14 +109,6 @@ class MtpProposer:
             cu_num_tokens = cu_target_query_lens
             relative_index = query_len_per_req - num_rejected_tokens - 1
             token_indices = cu_num_tokens[:-1] + relative_index
-        elif force_one_token:
-            # enable force_one_token means we only focus on the last token position of each request
-            # token_indices: [batch_size]
-            cu_num_tokens = torch.arange(cu_target_query_lens.size(0),
-                                         device=cu_target_query_lens.device,
-                                         dtype=torch.int32)
-            relative_index = query_len_per_req - num_rejected_tokens - 1
-            token_indices = cu_target_query_lens[:-1] + relative_index
         else:
             cu_num_tokens = torch.empty_like(cu_target_query_lens)
             torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
@@ -125,7 +116,7 @@ class MtpProposer:
 
             # FIXME(woosuk): Avoid synchronization.
             num_tokens = cu_num_tokens[-1].item()
-            token_indices = torch.empty(
+            token_indices = torch.zeros(
                 num_tokens,
                 dtype=torch.int32,
                 device=cu_num_tokens.device,
@@ -169,11 +160,6 @@ class MtpProposer:
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         if token_indices is not None and self.runner.torchair_graph_enabled:
             last_token_indices = token_indices
-            common_attn_metadata = self.runner.common_attn_metadata
-        else:
-            seq_lens = (target_positions[last_token_indices] + 1)
-            common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=cu_num_tokens, seq_lens=seq_lens)
 
         self.input_ids[last_token_indices] = next_token_ids
 
@@ -206,20 +192,32 @@ class MtpProposer:
             extra_builder_kwargs['num_reqs_pad_size'] = 0
             num_input_tokens = num_tokens
 
-        attn_metadata = self.runner.attn_metadata_builder.build(
+        seq_lens = target_positions[last_token_indices] + 1
+        seq_lens = seq_lens.int()
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=cu_num_tokens[:batch_size + 1],
+            query_start_loc_cpu=cu_num_tokens[:batch_size + 1].cpu(),
+            seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens.cpu(),
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-            **extra_builder_kwargs)
+            actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
+            block_table_tensor=self.runner.input_batch.block_table[0].
+            get_device_tensor(),
+            slot_mapping_cpu=target_slot_mapping,
+            positions=target_positions,
+            attn_mask=self.runner.attn_mask,
+            spec_attn_mask=self.runner.spec_attn_mask,
+            attn_state=self.runner.attn_state,
+            decode_token_per_req=self.runner.decode_token_per_req,
+            max_num_blocks_per_req=self.runner.max_num_blocks_per_req,
+        )
+        attn_metadata = self.runner.attn_metadata_builder.build(
+            common_attn_metadata, **extra_builder_kwargs)
 
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
-
-        if attn_metadata.prefill is not None:
-            attn_metadata.prefill.query_lens = query_lens.cpu()
-            attn_metadata.prefill.input_positions = target_positions
 
         if not self.runner.torchair_graph_enabled:
             # TODO: adapt enable_dbo later
@@ -263,8 +261,22 @@ class MtpProposer:
                         previous_hidden_states=self.
                         hidden_states[:num_input_tokens],
                         kv_caches=self.runner.kv_caches[-1:])
+
+        num_indices = last_token_indices.shape[0]
+        if is_lmhead_tp():
+            if not self.runner.with_prefill:
+                padded_num_indices = num_input_tokens // self.runner.decode_token_per_req
+            else:
+                padded_num_indices = self.vllm_config.scheduler_config.max_num_seqs
+            last_token_indices = nn.functional.pad(
+                last_token_indices, (0, padded_num_indices - num_indices))
+
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+
+        if is_lmhead_tp() and num_indices < logits.shape[0]:
+            logits = logits[:num_indices]
+
         draft_token_ids = logits.argmax(dim=-1)
 
         # [batch_size, 1]
@@ -411,6 +423,7 @@ class MtpProposer:
                     self.model.__dict__[forward_proxy_name],
                     dynamic=True,
                     fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
                     ge_cache=False)
             return self.torchair_compiled_models[batch_size]

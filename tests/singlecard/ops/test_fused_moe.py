@@ -98,7 +98,7 @@ def test_fused_experts(
     output = fused_experts(a, w1, w2, topk_weights, topk_ids, topk, e_map)
     torch_output = torch_moe(a, w1, w2, topk_weights, topk_ids, topk, e_map)
     # TODO: The native params are: atol=2e-2, rtol=0, maybe related to the nan problem
-    torch.testing.assert_close(output, torch_output, atol=4e-2, rtol=1)
+    torch.testing.assert_close(output[0], torch_output, atol=4e-2, rtol=1)
     torch.npu.empty_cache()
 
 

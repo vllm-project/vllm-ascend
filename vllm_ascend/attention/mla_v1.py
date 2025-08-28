@@ -8,7 +8,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
-from vllm.config import get_current_vllm_config
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
@@ -16,8 +16,8 @@ from vllm.utils import cdiv, round_down
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import \
-    AscendCommonAttentionMetadata as CommonAttentionMetadata
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         split_decodes_and_prefills)
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
@@ -173,20 +173,26 @@ class AscendMLAMetadataBuilder:
 
     # _attn_mask_builder = None
     def __init__(self,
+                 vllm_config: VllmConfig,
+                 device: torch.device,
                  runner,
                  metadata_cls: Optional[AscendMLAMetadata] = None):
         self.metadata_cls: Optional[AscendMLAMetadata] = metadata_cls \
             if metadata_cls is not None else AscendMLAMetadata  # type: ignore
         self.runner = runner
-        scheduler_config = runner.scheduler_config
-        model_config = runner.model_config
-        self.block_size = runner.block_size
-        self.chunked_prefill_enabled = runner.chunked_prefill_enabled
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.device = device
+        scheduler_config = vllm_config.scheduler_config
+        self.block_size = vllm_config.cache_config.block_size
+        self.max_blocks = (vllm_config.model_config.max_model_len +
+                           self.block_size - 1) // self.block_size
+        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
                 # Max sure there is enough for 8 full length request or at least
                 # 4 pages of cache per request
-                max(8 * model_config.max_model_len,
+                max(8 * self.model_config.max_model_len,
                     4 * scheduler_config.max_num_seqs * self.block_size),
                 # For long-context models try not to over-allocate limiting
                 # kv-cache space, limiting it to 64k tokens,
@@ -201,17 +207,20 @@ class AscendMLAMetadataBuilder:
                 scheduler_config.max_num_seqs * self.block_size
             self.chunked_prefill_workspace = torch.empty(
                 (self.chunked_prefill_workspace_size,
-                 model_config.get_head_size()),
-                dtype=model_config.dtype,
-                device=runner.device,
+                 self.model_config.get_head_size()),
+                dtype=self.model_config.dtype,
+                device=device,
             )
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        self.rope_dim = self.runner.model_config.hf_text_config.qk_rope_head_dim
+        self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
         self.prefill_attn_mask = torch.triu(
-            torch.ones(512, 512, device=runner.device, dtype=runner.dtype),
+            torch.ones(512,
+                       512,
+                       device=self.device,
+                       dtype=self.model_config.dtype),
             1)  # 512: mask only support 512
 
     def reorder_batch(self, input_batch: "InputBatch",
@@ -224,8 +233,6 @@ class AscendMLAMetadataBuilder:
         # better naming here)
         decodes = []
         prefills = []
-        num_decode_tokens = 0
-        num_prefill_tokens = 0
 
         for i, req_id in enumerate(input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -235,18 +242,14 @@ class AscendMLAMetadataBuilder:
             if self.torchair_graph_enabled:
                 if num_tokens - num_spec_tokens == 1:
                     decodes.append(i)
-                    num_decode_tokens += num_tokens
                 else:
                     prefills.append(i)
-                    num_prefill_tokens += num_tokens
             # For eager mode we treat spec decoding as chunked prefill.
             else:
                 if num_tokens == 1:
                     decodes.append(i)
-                    num_decode_tokens += num_tokens
                 else:
                     prefills.append(i)
-                    num_prefill_tokens += num_tokens
 
         # We hope that this is fairly minimal since decodes
         # should be around for a number of iterations so hopefully they are
@@ -274,50 +277,22 @@ class AscendMLAMetadataBuilder:
             else:
                 break
 
-        # Save for next `build` call
-        # TODO(lucas): this is a bit of a hack, we should probably have a
-        # better way of doing this
-        self._num_decodes = num_decodes
-        self._num_prefills = num_prefills
-        self._num_decode_tokens = num_decode_tokens
-        self._num_prefill_tokens = num_prefill_tokens
-
         return modified_batch
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int, block_tables: torch.Tensor) -> torch.Tensor:
-
-        max_batch_size, max_blocks = self.runner.graph_block_tables.shape
-        assert max_batch_size >= num_seqs, f"max_batch_size: {max_batch_size} should be bigger than cur_num_seqs: {num_seqs}"
-
-        if isinstance(self.runner.graph_block_tables, np.ndarray):
-            graph_block_tables = torch.zeros((max_batch_size, max_blocks),
-                                             dtype=block_tables.dtype,
-                                             device=block_tables.device)
-        else:
-            graph_block_tables = self.runner.graph_block_tables.to(
-                device=block_tables.device, dtype=block_tables.dtype)
-
         num_blocks = block_tables.size(1)
-        if num_blocks <= max_blocks:
-            graph_block_tables[:num_seqs, :
-                               num_blocks] = block_tables[:num_seqs, :
-                                                          num_blocks]
-        else:
-            graph_block_tables[:num_seqs, :
-                               max_blocks] = block_tables[:num_seqs, :
-                                                          max_blocks]
-
-        return graph_block_tables[:num_seqs, :max_blocks]
+        num_blocks = min(num_blocks, self.max_blocks)
+        return block_tables[:num_seqs, :num_blocks]
 
     def build_torchair_graph_dummy(
         self,
         num_reqs: int,
         num_actual_tokens: int,
     ) -> AscendMLAMetadata:
-        device = self.runner.device
-        _, max_blocks = self.runner.graph_block_tables.shape
-        block_table = torch.zeros((num_reqs, max_blocks),
+        device = self.device
+        # does block_table really need to shape of (num_reqs, self.max_blocks)
+        block_table = torch.zeros((num_reqs, self.max_blocks),
                                   dtype=torch.int32,
                                   device=device)
         block_table = self._get_graph_runner_block_tables(
@@ -336,8 +311,8 @@ class AscendMLAMetadataBuilder:
                                      -1,
                                      dtype=torch.int32,
                                      device=device)
-        if self.runner.speculative_config is not None and\
-            self.runner.speculative_config.method == 'deepseek_mtp':
+        if self.vllm_config.speculative_config is not None and\
+            self.vllm_config.speculative_config.method == 'deepseek_mtp':
             attn_state = AscendAttentionState.SpecDecoding
             num_decode_tokens = 2
         else:
@@ -347,13 +322,13 @@ class AscendMLAMetadataBuilder:
                          1,
                          1,
                          self.rope_dim,
-                         dtype=self.runner.dtype,
+                         dtype=self.model_config.dtype,
                          device=device)
         cos = torch.ones(num_tokens,
                          1,
                          1,
                          self.rope_dim,
-                         dtype=self.runner.dtype,
+                         dtype=self.model_config.dtype,
                          device=device)
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
@@ -384,79 +359,110 @@ class AscendMLAMetadataBuilder:
 
     def build(
         self,
-        num_reqs: int,
-        num_actual_tokens: int,
-        max_query_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        common_prefix_len: Optional[int] = None,
+        common_attn_metadata: AscendCommonAttentionMetadata,
         num_token_pad_size: int = -1,
         num_reqs_pad_size: int = 0,
         enable_dbo_across_dp: bool = False,
         *args,
         **kwargs,
     ) -> AscendMLAMetadata:
-        assert self._num_decodes + self._num_prefills == num_reqs
+
+        num_reqs = common_attn_metadata.num_reqs
+        num_tokens = common_attn_metadata.num_actual_tokens
+        max_query_len = common_attn_metadata.max_query_len
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
         device = self.runner.device
-
-        block_table = (self.runner.input_batch.block_table[0].
-                       get_device_tensor()[:num_reqs])
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
+        block_table = common_attn_metadata.block_table_tensor[:num_reqs]
+        slot_mapping = common_attn_metadata.slot_mapping_cpu[:num_tokens].to(
             device, non_blocking=True)
-        input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
-            device, non_blocking=True).long()
 
-        seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
-        query_lens = seq_lens_cpu - self.runner.input_batch.num_computed_tokens_cpu_tensor[:
-                                                                                           num_reqs]
-        seq_lens = seq_lens_cpu
-        max_query_len = query_lens.max().item()
-        max_seq_lens = seq_lens.max().item()
         query_start_loc = common_attn_metadata.query_start_loc
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        seq_lens = common_attn_metadata.seq_lens_cpu
+
+        query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+
+        num_computed_tokens_cpu = (common_attn_metadata.seq_lens_cpu -
+                                   query_seq_lens_cpu)
+
+        if self.runner.torchair_graph_enabled and self.runner.attn_state in [
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        ]:
+            decode_threshold = self.runner.decode_token_per_req
+        else:
+            # TODO(xyx): remove the if condition after mla supports torch mode speculative decoding
+            decode_threshold = 1
+
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
+            split_decodes_and_prefills(common_attn_metadata, decode_threshold=decode_threshold)
+
+        assert num_decodes + num_prefills == num_reqs
+        assert num_decode_tokens + num_prefill_tokens == num_tokens
+
+        input_positions = self.runner.positions_cpu[:num_tokens].to(
+            device, non_blocking=True).long()
+        input_positions = common_attn_metadata.positions[:num_tokens].long()
+
+        max_seq_lens = seq_lens.max().item()
         if self.cos_cache is None:
             self.cos_cache = self.runner.get_model(
             ).model.layers[0].self_attn.rotary_emb.cos_cached
             self.sin_cache = self.runner.get_model(
             ).model.layers[0].self_attn.rotary_emb.sin_cached
-        if self.cos_cache.dtype != self.runner.dtype:  # type: ignore
+        if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
             self.cos_cache = self.cos_cache.to(  # type: ignore
-                self.runner.dtype)  # type: ignore
+                self.model_config.dtype)  # type: ignore
             self.sin_cache = self.sin_cache.to(  # type: ignore
-                self.runner.dtype)  # type: ignore
+                self.model_config.dtype)  # type: ignore
 
         prefill_metadata = None
-        chunked_context_metadata = None
-        if self._num_prefills > 0:
-            reqs_start = self._num_decodes  # prefill_start
-            tokens_start = self._num_decode_tokens
-            max_query_len = query_lens[tokens_start:].max().item()
-            max_seq_lens = seq_lens[tokens_start:].max().item()
-            query_start_loc = common_attn_metadata.query_start_loc
+        if num_prefills > 0:
+            reqs_start = num_decodes  # prefill_start
+
+            context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
+            max_context_len_cpu = context_lens_cpu.max().item()
+            num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = query_start_loc[
                 reqs_start:] - query_start_loc[reqs_start]
 
-            context_lens_cpu = self.runner.input_batch.num_computed_tokens_cpu_tensor[
-                reqs_start:num_reqs]
-            max_context_len_cpu = context_lens_cpu.max().item()
-            num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
+            tokens_start = num_decode_tokens
+            chunked_context_metadata = None
+
             if self.chunked_prefill_enabled and max_context_len_cpu > 0:
+                # currently we allocate an equal amount of workspace for each
+                # prefill in the batch, we could probably use a more advanced
+                # algorithm here and allocate more workspace to prefills with
+                # longer context lengths
                 max_context_chunk = (self.chunked_prefill_workspace_size //
                                      num_prefills_with_context_cpu)
+                # align max_context_chunk to block_size by rounding down,
+                # currently the `gather_cache` kernel cannot handle
+                # `context_chunk_starts` that are not aligned to block_size
                 max_context_chunk = round_down(max_context_chunk,
                                                self.block_size)
 
                 assert max_context_chunk > 0
                 num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
-                chunk_starts = torch.arange(num_chunks, dtype=torch.int32) \
-                    .unsqueeze(1).expand(-1, self._num_prefills) * max_context_chunk
+                # if `max_context_chunk = 256`, `num_chunks = 3`, and
+                #   `num_prefills_with_context = 4`, create a tensor that looks
+                # like
+                #  [[0, 0, 0, 0], [256, 256, 256, 256], [512, 512, 512, 512]]
+                # Note(simon): this is done in CPU because of downstream's
+                # of `to_list`.
+                chunk_starts = \
+                    torch.arange(num_chunks, dtype=torch.int32) \
+                    .unsqueeze(1).expand(-1, num_prefills) \
+                    * max_context_chunk
                 chunk_ends = torch.min(context_lens_cpu.unsqueeze(0),
                                        chunk_starts + max_context_chunk)
                 chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
+
                 cu_seq_lens_cpu = torch.zeros(num_chunks,
-                                              self._num_prefills + 1,
+                                              num_prefills + 1,
                                               dtype=torch.int32,
                                               pin_memory=True)
                 torch.cumsum(chunk_seq_lens,
@@ -473,6 +479,8 @@ class AscendMLAMetadataBuilder:
                     chunk_seq_lens_npu=chunk_seq_lens.npu(),
                     workspace=self.chunked_prefill_workspace,
                 )
+                assert max(chunked_context_metadata.max_seq_lens) <= \
+                    self.chunked_prefill_workspace_size
             prefill_input_positions = input_positions[tokens_start:]
             cos = self.cos_cache[
                 prefill_input_positions].unsqueeze(  # type: ignore
@@ -482,8 +490,8 @@ class AscendMLAMetadataBuilder:
                     1).unsqueeze(2)
             prefill_metadata = AscendMLAPrefillMetadata(
                 attn_mask=self.prefill_attn_mask,
-                query_lens=query_lens[tokens_start:],
-                seq_lens=seq_lens,
+                query_lens=query_seq_lens_cpu[tokens_start:],
+                seq_lens=seq_lens[reqs_start:],
                 context_lens=seq_lens[tokens_start:],
                 input_positions=prefill_input_positions,
                 block_table=block_table[reqs_start:, ...],
@@ -497,12 +505,12 @@ class AscendMLAMetadataBuilder:
 
         decode_metadata = None
         use_torchair_graph = num_token_pad_size != -1
-        if self._num_decodes > 0:
-            actual_seq_lengths_q = query_start_loc[1:].tolist()
-            max_seq_lens = seq_lens[:self._num_decodes].max().item()
-            seq_lens = seq_lens[:self._num_decode_tokens]
-            input_positions = input_positions[:self._num_decode_tokens]
-            block_table = block_table[:self._num_decode_tokens, ...]
+        if num_decodes > 0:
+            actual_seq_lengths_q = query_start_loc[1:num_decodes + 1].tolist()
+            max_seq_lens = seq_lens[:num_decodes].max().item()
+            seq_lens = seq_lens[:num_decodes]
+            input_positions = input_positions[:num_decode_tokens]
+            block_table = block_table[:num_decodes, ...]
             if use_torchair_graph and self.runner.attn_state in [
                     AscendAttentionState.DecodeOnly,
                     AscendAttentionState.SpecDecoding
@@ -517,11 +525,11 @@ class AscendMLAMetadataBuilder:
                 seq_lens = torch.from_numpy(
                     np.array(padded_seq_lens).astype(np.int32))
                 seq_lens_list = padded_seq_lens
-                padding = torch.full((num_token_pad_size, ),
-                                     PAD_SLOT_ID,
-                                     dtype=slot_mapping.dtype,
-                                     device=slot_mapping.device)
-                slot_mapping = torch.cat([slot_mapping, padding])
+                slot_padding = torch.full((num_token_pad_size, ),
+                                          PAD_SLOT_ID,
+                                          dtype=slot_mapping.dtype,
+                                          device=slot_mapping.device)
+                slot_mapping = torch.cat([slot_mapping, slot_padding])
                 block_table_padding = torch.zeros(
                     (num_reqs_pad_size, ) + block_table.shape[1:],
                     dtype=block_table.dtype,
@@ -530,17 +538,19 @@ class AscendMLAMetadataBuilder:
                                         dim=0)
                 block_table = self._get_graph_runner_block_tables(
                     num_reqs + num_reqs_pad_size, block_table)
-                padding_0 = torch.zeros(num_token_pad_size,
-                                        dtype=input_positions.dtype,
-                                        device=input_positions.device)
-                input_positions = torch.cat([input_positions, padding_0])
-                actual_seq_lengths_q = query_start_loc[1:].tolist(
-                ) + self.runner.actual_seq_lengths_q[num_reqs:num_reqs +
-                                                     num_reqs_pad_size]
+                position_padding = torch.zeros(num_token_pad_size,
+                                               dtype=input_positions.dtype,
+                                               device=input_positions.device)
+                input_positions = torch.cat(
+                    [input_positions, position_padding])
+
+                actual_seq_lengths_q = self.pad_actual_seq_len_q(
+                    num_reqs_pad_size, num_reqs, actual_seq_lengths_q)
             else:
                 seq_lens_list = seq_lens.tolist()
             # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to batch_size(num_tokens)
-            batch_size = slot_mapping.size(0)
+            num_token_pad_size = max(0, num_token_pad_size)
+            batch_size = num_decode_tokens + num_token_pad_size
             if actual_seq_lengths_q[-1] != batch_size \
                 and self.runner.attn_state == AscendAttentionState.SpecDecoding:
                 actual_seq_lengths_q[-1] = batch_size
@@ -562,13 +572,13 @@ class AscendMLAMetadataBuilder:
                 cos=cos)
 
         return self.metadata_cls(  # type: ignore
-            num_actual_tokens=num_actual_tokens,
-            query_lens=query_lens.tolist(),
+            num_actual_tokens=num_tokens,
+            query_lens=query_seq_lens_cpu.tolist(),
             slot_mapping=slot_mapping,
             head_dim=self.runner.model_config.get_head_size(),
-            num_decodes=self._num_decodes,
-            num_decode_tokens=self._num_decode_tokens,
-            num_prefills=self._num_prefills,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
             attn_mask=self.runner.attn_mask,
             attn_state=self.runner.attn_state,
             prefill=prefill_metadata,
@@ -576,8 +586,32 @@ class AscendMLAMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
-            enable_dbo_across_dp=enable_dbo_across_dp,
+            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
         )
+
+    def pad_actual_seq_len_q(self, num_reqs_pad_size, num_reqs,
+                             actual_seq_lengths_q):
+        need_padding = num_reqs_pad_size != 0 and \
+            len(self.runner.actual_seq_lengths_q) > num_reqs and \
+            self.runner.actual_seq_lengths_q[num_reqs] - actual_seq_lengths_q[-1] > 16
+        if need_padding:
+            padding_seq_len_q = self.runner.actual_seq_lengths_q[
+                num_reqs:num_reqs + num_reqs_pad_size]
+            start_val = actual_seq_lengths_q[-1]
+            end_val = padding_seq_len_q[-1]
+
+            num_step = len(padding_seq_len_q)
+            interpolated = np.round(
+                np.linspace(start_val, end_val,
+                            num_step + 1)[1:]).astype(int).tolist()
+            assert interpolated[-1] == end_val
+            assert len(interpolated) == len(padding_seq_len_q)
+            actual_seq_lengths_q = actual_seq_lengths_q + interpolated
+        else:
+            actual_seq_lengths_q = actual_seq_lengths_q + self.runner.actual_seq_lengths_q[
+                num_reqs:num_reqs + num_reqs_pad_size]
+
+        return actual_seq_lengths_q
 
 
 class AscendMLAImpl(MLAAttentionImpl):
@@ -945,8 +979,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                                  self.qk_rope_head_dim)
                 input_layout = "BNSD"
 
-            if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
-                assert num_tokens % self.spec_token_num == 0
+            if attn_metadata.attn_state in [
+                    AscendAttentionState.SpecDecoding,
+                    AscendAttentionState.ChunkedPrefill
+            ]:
                 input_layout = "TND"
                 # [bs * q_seq_len, num_heads_per_rank, dim]
                 q_nope = q_nope.view(num_tokens, self.num_heads, -1)

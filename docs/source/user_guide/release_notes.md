@@ -1,5 +1,35 @@
 # Release note
 
+## v0.9.1rc3 - 2025.08.22
+
+This is the 3rd release candidate of v0.9.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/) to get started.
+
+### Core
+
+- MTP supports V1 scheduler [#2371](https://github.com/vllm-project/vllm-ascend/pull/2371)
+- Add LMhead TP communication groups [#1956](https://github.com/vllm-project/vllm-ascend/pull/1956)
+- Fix the bug that qwen3 moe doesn't work with aclgraph [#2478](https://github.com/vllm-project/vllm-ascend/pull/2478)
+- Fix `grammar_bitmask` IndexError caused by outdated `apply_grammar_bitmask` method [#2314](https://github.com/vllm-project/vllm-ascend/pull/2314)
+- Remove `chunked_prefill_for_mla` [#2177](https://github.com/vllm-project/vllm-ascend/pull/2177)
+- Fix bugs and refactor cached mask generation logic [#2326](https://github.com/vllm-project/vllm-ascend/pull/2326)
+- Fix configuration check logic about ascend scheduler [#2327](https://github.com/vllm-project/vllm-ascend/pull/2327)
+- Cancel the verification between deepseek-mtp and non-ascend scheduler in disaggregated-prefill deployment [#2368](https://github.com/vllm-project/vllm-ascend/pull/2368)
+- Fix issue that failed with ray distributed backend [#2306](https://github.com/vllm-project/vllm-ascend/pull/2306)
+- Fix incorrect req block length in ascend scheduler [#2394](https://github.com/vllm-project/vllm-ascend/pull/2394)
+- Fix header include issue in rope [#2398](https://github.com/vllm-project/vllm-ascend/pull/2398)
+- Fix mtp config bug [#2412](https://github.com/vllm-project/vllm-ascend/pull/2412)
+- Fix error info and adapt `attn_metedata` refactor [#2402](https://github.com/vllm-project/vllm-ascend/pull/2402)
+- Fix torchair runtime error caused by configuration mismtaches and `.kv_cache_bytes` file missing [#2312](https://github.com/vllm-project/vllm-ascend/pull/2312)
+- Move `with_prefill` allreduce from cpu to npu [#2230](https://github.com/vllm-project/vllm-ascend/pull/2230)
+
+### Docs
+
+- Add document for deepseek large EP [#2339](https://github.com/vllm-project/vllm-ascend/pull/2339)
+
+### Known Issues
+
+- `test_aclgraph.py` failed with `"full_cuda_graph": True` on A2 (910B1) [#2182](https://github.com/vllm-project/vllm-ascend/issues/2182)
+
 ## v0.9.1rc2 - 2025.08.06
 This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/) to get started.
 
@@ -120,7 +150,7 @@ This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please follow the [
 - Fix the accuracy problem with deploy models with parallel parameters. [#1678](https://github.com/vllm-project/vllm-ascend/pull/1678)
 - The pre-built wheel package now requires lower version of glibc. Users can use it by `pip install vllm-ascend` directly. [#1582](https://github.com/vllm-project/vllm-ascend/pull/1582)
 
-## Other
+### Other
 - Official doc has been updated for better read experience. For example, more deployment tutorials are added, user/developer docs are updated. More guide will coming soon.
 - Fix accuracy problem for deepseek V3/R1 models with torchair graph in long sequence predictions. [#1331](https://github.com/vllm-project/vllm-ascend/pull/1331)
 - A new env variable `VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP` has been added. It enables the fused allgather-experts kernel for Deepseek V3/R1 models. The default value is `0`. [#1335](https://github.com/vllm-project/vllm-ascend/pull/1335)

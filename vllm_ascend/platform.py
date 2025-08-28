@@ -27,8 +27,12 @@ from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
-from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
+from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD,
+                               check_torchair_cache_exist,
+                               delete_torchair_cache_file,
+                               update_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -135,6 +139,28 @@ class NPUPlatform(Platform):
                 parallel_config.world_size_across_dp //
                 parallel_config.expert_tensor_parallel_size)
 
+            # Check and configure lmhead_tp
+            if model_config is not None and "deepseek" not in model_config.hf_config.model_type:
+                if ascend_config.lmhead_tp_size > 0:
+                    logger.warning(
+                        "LMHead TP only supports deepseek now. For other models, parallelism of lmhead"
+                        " is designed by tensor_parallel_size.")
+                parallel_config.lmhead_tp_size = -1
+            elif ascend_config.lmhead_tp_size <= 0:
+                # For deepseek series, although we don't need lmhead_tp in default cases, we still
+                # need to initialize the communication group.
+                parallel_config.lmhead_tp_size = parallel_config.tensor_parallel_size
+            elif parallel_config.tensor_parallel_size > 1:
+                logger.warning(
+                    "LMHead tp_size is separately set while tensor_parallel_size is larger than 1."
+                    "For better performance, we recommend to set LMHead tp_size only when "
+                    "tensor_parallel_size equals 1. LMHead tp_size will be automatically changed "
+                    "to tensor_parallel_size when tensor_parallel_size is larger than 1."
+                )
+                parallel_config.lmhead_tp_size = parallel_config.tensor_parallel_size
+            else:
+                parallel_config.lmhead_tp_size = ascend_config.lmhead_tp_size
+
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
@@ -143,6 +169,13 @@ class NPUPlatform(Platform):
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
         check_ascend_config(vllm_config, enforce_eager)
+
+        if envs_ascend.VLLM_ASCEND_ENABLE_DBO and (
+                "deepseek" not in model_config.hf_config.model_type
+                or vllm_config.speculative_config):
+            raise ValueError(
+                "DBO only supports deepseek(not included MTP) now. Please `export VLLM_ASCEND_ENABLE_DBO=0`"
+            )
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
@@ -157,6 +190,14 @@ class NPUPlatform(Platform):
                 "Torchair compilation enabled on NPU. Setting level to NO_COMPILATION"
             )
             compilation_config.level = CompilationLevel.NO_COMPILATION
+            # Note: We delete the torchair cache folder here to prevent runtime issues caused by dimension
+            # mismatches or configuration inconsistencies when users reuse cached computation graphs. Though
+            # this will increase graph compilation duration, it significantly enhances robustness and decreases
+            # graph launching time during inference. In order to decrease torchair graph compilation time, users
+            # can enable both `use_cached_graph` and `use_cached_kv_cache_bytes` in torchair_graph_config.
+            if check_torchair_cache_exist(
+            ) and not ascend_config.torchair_graph_config.use_cached_kv_cache_bytes:
+                delete_torchair_cache_file()
         elif parallel_config.distributed_executor_backend == "ray":
             logger.warning(
                 "Ray distributed executor backend is not compatible with ACL Graph mode "

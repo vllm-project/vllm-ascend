@@ -48,12 +48,11 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import get_sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import \
+    VocabParallelEmbedding
 from vllm.model_executor.models.deepseek_v2 import \
     DeepseekV2ForCausalLM  # noqa: E501
 from vllm.model_executor.models.deepseek_v2 import \
@@ -68,6 +67,8 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.ops.lmhead import CustomParallelLMHead
+from vllm_ascend.ops.logits_processor import CustomLogitsProcessor
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor, npu_prefetch
@@ -829,20 +830,18 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.num_dense_layers = self.config.first_k_dense_replace
-        self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
         self.model = CustomDeepseekV2Model(vllm_config=vllm_config,
                                            prefix=maybe_prefix(
                                                prefix, "model"))
         if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.hidden_size,
-                                          quant_config=quant_config,
-                                          prefix=maybe_prefix(
-                                              prefix, "lm_head"))
+            self.lm_head = CustomParallelLMHead(config.vocab_size,
+                                                config.hidden_size,
+                                                quant_config=quant_config,
+                                                prefix=maybe_prefix(
+                                                    prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.logits_processor = CustomLogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
@@ -868,34 +867,6 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         loaded_params = super().load_weights(weights)
 
         return loaded_params
-
-    def get_expert_map(self, layer_id):
-        return self.model.layers[layer_id].mlp.experts.get_map()
-
-    def get_log2phy_map(self, layer_id):
-        return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
-
-    def get_all_expert_map(self, num_moe_layers):
-        all_loads = []
-        for layer_id in range(num_moe_layers):
-            load_tensor = self.get_expert_map(
-                layer_id + self.num_dense_layers)  # (num_experts_per_layer,)
-            all_loads.append(load_tensor)
-
-        return torch.stack(all_loads, dim=0)
-
-    def get_all_moe_loads(self):
-        all_moe_loads = torch.stack(
-            [self.model.layers[layer_id + self.num_dense_layers].mlp.experts.moe_load \
-                for layer_id in range(self.num_moe_layers)],
-            dim=0
-        )
-        return all_moe_loads
-
-    def clear_all_moe_loads(self):
-        for layer_id in range(self.num_moe_layers):
-            self.model.layers[
-                layer_id + self.num_dense_layers].mlp.experts.clear_moe_load()
 
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):

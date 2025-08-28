@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.7.3.post1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1007)
-- [[v0.9.0rc2] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1115)
+- [[v0.9.1rc3] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2410)
 
 ## General FAQs
 
@@ -158,12 +158,29 @@ for output in outputs:
 2. Set the following enveriments parameters:
 
 ```bash
-export LCCL_DETERMINISTIC = 1
-export HCCL_DETERMINISTIC = 1
-export ATB_MATMUL_SHUFFLE_K_ENABLE = 0
-export ATB_LLM_LCOC_ENABLE = 0
+export LCCL_DETERMINISTIC=1
+export HCCL_DETERMINISTIC=true
+export ATB_MATMUL_SHUFFLE_K_ENABLE=0
+export ATB_LLM_LCOC_ENABLE=0
 ```
 
 ### 19. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？
 The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met `pip install qwen-omni-utils`,
 this package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring audio processing functionality works correctly.
+
+### 20. Failed to run with `ray` distributed backend?
+You might facing the following errors when running with ray backend in distributed scenarios:
+
+```
+TypeError: can't convert npu:0 device type tensor to numpy. Use Tensor.cpu() to copy the tensor to host memory first.
+```
+
+```
+AttributeError: 'str' object has no attribute 'DESCRIPTOR' when packaging message to dict
+```
+
+This has been solved in `ray>=2.47.1`, thus we could solve this as following:
+
+```
+python3 -m pip install modelscope 'ray>=2.47.1' 'protobuf>3.20.0'
+``` 

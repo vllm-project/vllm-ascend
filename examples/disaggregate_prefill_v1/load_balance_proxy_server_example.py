@@ -4,9 +4,11 @@
 
 import argparse
 import asyncio
+import functools
 import heapq
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from typing import List
 
@@ -54,7 +56,6 @@ class ProxyState:
         ]
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
-        self.req_id_counter = 0
         # Removed selection locks - no longer needed for synchronous methods
 
         # Initialize priority queues for efficient server selection
@@ -110,8 +111,7 @@ class ProxyState:
 
     async def next_req_id(self):
         async with self.req_id_lock:
-            self.req_id_counter += 1
-            return str(self.req_id_counter)
+            return str(uuid.uuid4())
 
     def select_prefiller(self, token_count):  # Changed to synchronous
         # No lock needed - entire function is atomic
@@ -184,15 +184,31 @@ def parse_args():
                         type=str,
                         nargs="+",
                         default=["localhost"])
+    parser.add_argument("--prefiller-hosts-num",
+                        type=int,
+                        nargs="+",
+                        default=None)
     parser.add_argument("--prefiller-ports",
                         type=int,
                         nargs="+",
                         default=[8001])
+    parser.add_argument("--prefiller-ports-inc",
+                        type=int,
+                        nargs="+",
+                        default=None)
     parser.add_argument("--decoder-hosts",
                         type=str,
                         nargs="+",
                         default=["localhost"])
+    parser.add_argument("--decoder-hosts-num",
+                        type=int,
+                        nargs="+",
+                        default=None)
     parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8002])
+    parser.add_argument("--decoder-ports-inc",
+                        type=int,
+                        nargs="+",
+                        default=None)
     parser.add_argument("--max-retries",
                         type=int,
                         default=3,
@@ -209,6 +225,49 @@ def parse_args():
     if len(args.decoder_hosts) != len(args.decoder_ports):
         raise ValueError(
             "Number of decoder hosts must match number of decoder ports")
+    if args.prefiller_hosts_num is not None and (len(args.prefiller_hosts_num)
+                                                 != len(args.prefiller_hosts)):
+        raise ValueError(
+            "Number of prefiller hosts num must match number of prefiller hosts"
+        )
+    if args.prefiller_ports_inc is not None and (len(args.prefiller_ports_inc)
+                                                 != len(args.prefiller_ports)):
+        raise ValueError(
+            "Number of prefiller ports inc must match number of prefiller ports"
+        )
+    if args.decoder_hosts_num is not None and (len(args.decoder_hosts_num) !=
+                                               len(args.decoder_hosts)):
+        raise ValueError(
+            "Number of decoder hosts num must match number of decoder hosts")
+    if args.decoder_ports_inc is not None and (len(args.decoder_ports_inc) !=
+                                               len(args.decoder_ports)):
+        raise ValueError(
+            "Number of decoder ports inc must match number of decoder ports")
+
+    if args.prefiller_hosts_num is not None:
+        args.prefiller_hosts = [
+            host for host, num in zip(args.prefiller_hosts,
+                                      args.prefiller_hosts_num)
+            for _ in range(num)
+        ]
+    if args.prefiller_ports_inc is not None:
+        args.prefiller_ports = [(int(port) + i) for port, inc in zip(
+            args.prefiller_ports, args.prefiller_ports_inc)
+                                for i in range(inc)]
+
+    if args.decoder_hosts_num is not None:
+        args.decoder_hosts = [
+            host
+            for host, num in zip(args.decoder_hosts, args.decoder_hosts_num)
+            for _ in range(num)
+        ]
+    if args.decoder_ports_inc is not None:
+        args.decoder_ports = [
+            (int(port) + i)
+            for port, inc in zip(args.decoder_ports, args.decoder_ports_inc)
+            for i in range(inc)
+        ]
+
     args.prefiller_instances = list(
         zip(args.prefiller_hosts, args.prefiller_ports))
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
@@ -228,6 +287,32 @@ async def lifespan(app: FastAPI):
         await p.client.aclose()
     for d in proxy_state.decoders:
         await d.client.aclose()
+
+
+async def listen_for_disconnect(request: Request) -> None:
+    """Return if a disconnect message is received"""
+    while True:
+        message = await request.receive()
+        if message["type"] == "http.disconnect":
+            break
+
+
+def with_cancellation(handler_func):
+
+    @functools.wraps(handler_func)
+    async def wrapper(*args, **kwargs):
+        request = kwargs["request"]
+        handler_task = asyncio.create_task(handler_func(*args, **kwargs))
+        cancellation_task = asyncio.create_task(listen_for_disconnect(request))
+        done, pending = await asyncio.wait([handler_task, cancellation_task],
+                                           return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        if handler_task in done:
+            return handler_task.result()
+        return None
+
+    return wrapper
 
 
 app = FastAPI(lifespan=lifespan)
@@ -410,11 +495,13 @@ async def _handle_completions(api: str, request: Request):
 
 
 @app.post("/v1/completions")
+@with_cancellation
 async def handle_completions(request: Request):
     return await _handle_completions("/completions", request)
 
 
 @app.post("/v1/chat/completions")
+@with_cancellation
 async def handle_chat_completions(request: Request):
     return await _handle_completions("/chat/completions", request)
 

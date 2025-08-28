@@ -68,8 +68,8 @@ ACL_FORMAT_FRACTAL_NZ = 29
 KV_CACHE_BYTES_CACHE_PATH_NAME = ".kv_cache_bytes"
 KV_CACHE_BYTES_CACHE_FILE_NAME = "kv_cache_bytes"
 TORCHAIR_CACHE_PATH_NAME = ".torchair_cache"
-TORCHAIR_CACHE_DIR = os.getenv(
-    'TORCHAIR_CACHE_HOME', os.path.join(os.getcwd(), TORCHAIR_CACHE_PATH_NAME))
+TORCHAIR_CACHE_DIR = os.path.join(
+    os.getenv('TORCHAIR_CACHE_HOME', os.getcwd()), TORCHAIR_CACHE_PATH_NAME)
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
@@ -450,5 +450,7 @@ def write_kv_cache_bytes_to_file(rank, kv_cache_bytes):
 
 def delete_torchair_cache_file():
     torch_air_abs_path = get_torchair_current_work_dir()
-    if os.path.exists(torch_air_abs_path):
+    try:
         shutil.rmtree(torch_air_abs_path)
+    except FileNotFoundError:
+        pass
