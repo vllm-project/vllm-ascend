@@ -1,8 +1,8 @@
-# Distributed DP Server With Large EP (DeepSeek)
+# Distributed DP Server With Large Scale EP
 
 ## Getting Start
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large **Expert  Parallelism (EP)** scenario. To achieve better performance，the distributed DP server is applied in vLLM-Ascend. In the PD separation scenario, different optimization strategies can be implemented based on the distinct characteristics of PD nodes, thereby enabling more flexible model deployment.
+vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large scale **Expert  Parallelism (EP)** scenario. To achieve better performance，the distributed DP server is applied in vLLM-Ascend. In the PD separation scenario, different optimization strategies can be implemented based on the distinct characteristics of PD nodes, thereby enabling more flexible model deployment.
 
 ## Verify Multi-Node Communication Environment
 
@@ -12,6 +12,10 @@ vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large **Exper
 - All NPUs are connected with optical modules, and the connection status must be normal.
 
 ### Verification Process:
+
+#### 1. A3
+
+##### 1.1 Single Node Verification:
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -30,25 +34,57 @@ Execute the following commands on each node in sequence. The results must all be
  cat /etc/hccn.conf
 ```
 
-### NPU Interconnect Verification:
-
-#### 1. Get NPU IP Addresses
+##### 1.2 Get NPU IP Addresses
 
 ```bash
 for i in {0..15}; do hccn_tool -i $i -vnic -g;done
 ```
 
-#### 2. Get superpodid and SDID
+##### 1.3 Get superpodid and SDID
 
 ```bash
 for i in {0..7}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
 ```
 
-#### 3. Cross-Node PING Test
+##### 1.4 Cross-Node PING Test
 
 ```bash
-# Execute on the target node (replace with actual IP)
+# Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
 for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
+```
+
+#### 2. A2
+
+##### 2.1 Single Node Verification:
+
+Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
+
+```bash
+# Check the remote switch ports
+for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
+# Get the link status of the Ethernet ports (UP or DOWN)
+for i in {0..7}; do hccn_tool -i $i -link -g ; done
+# Check the network health status
+for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
+# View the network detected IP configuration
+for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
+# View gateway configuration
+for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
+# View NPU network configuration
+cat /etc/hccn.conf
+```
+
+##### 2.2 Get NPU IP Addresses
+
+```bash
+for i in {0..7}; do hccn_tool -i $i -ip -g;done
+```
+
+##### 2.3 Cross-Node PING Test
+
+```bash
+# Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
+for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 ```
 
 ## Generate Ranktable
@@ -61,6 +97,14 @@ bash gen_ranktable.sh --ips prefiller_node1_local_ip prefiller_node2_local_ip de
   --npus-per-node  npu_clips --network-card-name nic_name --prefill-device-cnt prefiller_npu_clips --decode-device-cnt decode_npu_clips
 ```
 
+for example A3：
+
+```shell
+cd vllm-ascend/examples/disaggregate_prefill_v1/
+bash gen_ranktable.sh --ips 141.61.39.101 141.61.39.102 141.61.39.103 141.61.39.104 141.61.39.105 141.61.39.106 141.61.39.107 141.61.39.108 \
+  --npus-per-node  16 --network-card-name eth0 --prefill-device-cnt 64 --decode-device-cnt 64
+```
+
 |Parameter  | meaning |
 | --- | --- |
 | --ips | Each node's local ip (prefiller nodes should be front of decoder nodes) |
@@ -69,7 +113,9 @@ bash gen_ranktable.sh --ips prefiller_node1_local_ip prefiller_node2_local_ip de
 |--prefill-device-cnt  | Npu clips used for prefill |
 |--decode-device-cnt |Npu clips used for decode |
 
-## Use the Distributed DP Server
+## Large Scale EP model deployment
+
+### Enable Distributed DP Server for prefill-decode disaggregation
 
 Execute the following commands to use the distributed DP server. (We recommend using this feature on the v0.9.1-dev branch)
 
@@ -77,12 +123,12 @@ Execute the following commands to use the distributed DP server. (We recommend u
 import multiprocessing
 import os
 import sys
-dp_size = "total number of DP workers for decode/prefill"
-dp_size_local = "number of DP workers on the current node"
-dp_rank_start = "starting DP rank for the current node"
-dp_ip = "master node ip"
-dp_port = "port used for communication"
-engine_port = "the starting port for all DP groups on the current node"
+dp_size = 2 # total number of DP engines for decode/prefill
+dp_size_local = 2 # number of DP engines on the current node
+dp_rank_start = 0 # starting DP rank for the current node
+dp_ip = 192.0.0.256 # master node ip for DP communication
+dp_port = 13395 # port used for DP communication
+engine_port = 9000 # starting port for all DP groups on the current node
 template_path = "./run_dp_template.sh"
 if not os.path.exists(template_path):
   print(f"Template file {template_path} does not exist.")
@@ -168,13 +214,29 @@ vllm serve /root/.cache/ds_r1 \
     --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
 ```
 
-In the PD separation scenario, we provide a recommended optimized configuration.
+### Prefill & Decode Configuration
+
+In the PD separation scenario, we provide a optimized configuration. To obtain the complete script, according to FAQ section.
 
 - **prefiller node**
 
 1. set HCCL_BUFFSIZE=256
-2. add '--enforce-eager' commond to 'vllm serve'
-3. Take '--additional-config' as follow
+2. add '--enforce-eager' command to 'vllm serve'
+3. Take '--kv-transfer-config' as follow
+
+```shell
+--kv-transfer-config \
+    '{"kv_connector": "LLMDataDistCMgrConnector",
+      "kv_buffer_device": "npu",
+      "kv_role": "kv_producer",
+      "kv_parallel_size": "1",
+      "kv_port": "20001",
+      "engine_id": "0",
+      "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+    }'
+```
+
+4. Take '--additional-config' as follow
 
 ```shell
 --additional-config '{"ascend_scheduler_config":{"enabled":false}, "torchair_graph_config":{"enabled":false},"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
@@ -183,7 +245,21 @@ In the PD separation scenario, we provide a recommended optimized configuration.
 - **decoder node**
 
 1. set HCCL_BUFFSIZE=1024
-2. Take '--additional-config' as follow
+2. Take '--kv-transfer-config' as follow
+
+```shell
+--kv-transfer-config
+    '{"kv_connector": "LLMDataDistCMgrConnector",
+      "kv_buffer_device": "npu",
+      "kv_role": "kv_consumer",
+      "kv_parallel_size": "1",
+      "kv_port": "20001",
+      "engine_id": "0",
+      "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+    }'
+```
+
+3. Take '--additional-config' as follow
 
 ```shell
 --additional-config '{"ascend_scheduler_config":{"enabled":false}, "torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"enable_multistream_moe":true,"graph_batch_sizes":[28], "enable_super_kernel":true, "use_cached_graph":true},"enable_weight_nz_layout":true}'
@@ -191,7 +267,9 @@ In the PD separation scenario, we provide a recommended optimized configuration.
 
 <br>
 
-'--additional-config'  Parameter Introduction:
+### Parameters Description
+
+1.'--additional-config'  Parameter Introduction:
 
 - **"torchair_graph_config"：** The config options for torchair graph mode.
 - **"ascend_scheduler_config"：** The config options for ascend scheduler.
@@ -199,55 +277,300 @@ In the PD separation scenario, we provide a recommended optimized configuration.
 - **"enable_prefill_optimizations"：** Whether to enable DeepSeek models' prefill optimizations.
   <br>
 
-"torchair_graph_config" Parameter Introduction:
+2."torchair_graph_config" Parameter Introduction:
 
 - **"enable_multistream_mla"：** Whether to put vector ops of MLA to another stream. This option only takes effects on models using MLA.
 - **"enable_multistream_moe"：** Whether to enable multistream shared expert. This option only takes effects on DeepSeek moe models.
 - **"graph_batch_sizes"：**  The batch size for torchair graph cache.
 - **"enable_super_kernel"：** Whether to enable super kernel.
 - **"use_cached_graph"：** Whether to use cached graph
+  <br>
 
-## Toy proxy for Distributed DP Server
-
-In the PD separation scenario, we need a proxy to distribute requests. Execute the following commands to enable the toy proxy:
+3.enable MTP
+Add the following command to your configurations.
 
 ```shell
-python load_balance_proxy_server_example.py \
-  --port "proxy port" \
-  --host 0.0.0.0 \
-  --prefiller-hosts \
-    prefiller node1 local ip \
-    prefiller node2 local ip \
-  --prefiller-ports  \
-    engine_port engine_port \
-  --decoder-hosts \
-    decoder node1 local ip  \
-    decoder node1 local ip  \
-    decoder node2 local ip  \
-    decoder node2 local ip  \
-  --decoder-ports  \
-    engine_port ...  \ # Increase by dp_size_local e.g. 9000 9001
-    engine_port ...  \ # Increase by dp_size_local e.g. 9000 9001
+--speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
 ```
 
-:::{note}
-Each node local ip should repeat the same times as its '**dp_size_local**', at the same time, each node has the same number of ports as '**dp_size_local**', and ther ports increase sequentially starting from '**engine_port**'.
-:::
-
-You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)
-
-## Recommended Configuration
+### Recommended Configuration Example
 
 For example，if the average input length is 3.5k, and the output length is 1.1k, the context length is 16k, the max length of the input dataset is 7K. In this scenario, we give a recommended configuration for distributed DP server with high EP. Here we use 4 nodes for prefill and 4 nodes for decode.
-<br>
 
 | node     | DP | TP | EP | max-model-len | max-num-batched-tokens | max-num-seqs |  gpu-memory-utilization |
 |----------|----|----|----|---------------|------------------------|--------------|-----------|
 | prefill  | 2  |  8 | 16 |     17000     |         16384          |      4       |    0.9    |
 | decode   | 64 |  1 | 64 |     17000     |          256           |      28      |    0.9    |
 
+:::{note}
+Note that these configurations are not related to optimization. You need to adjust these parameters based on actual scenarios.
+:::
+
+## Toy proxy for Distributed DP Server
+
+In the PD separation scenario, we need a proxy to distribute requests. Execute the following commands to enable the toy proxy:
+
+option 1 (recommend)
+
+```shell
+python load_balance_proxy_server_example.py \
+  --port 8000 \
+  --host 0.0.0.0 \
+  --prefiller-hosts \
+    192.0.0.1 \
+    192.0.0.2 \
+    192.0.0.3 \
+    192.0.0.4 \
+  --prefiller-hosts-num \
+    2 2 2 2 \
+  --prefiller-ports \
+    9000 9000 9000 9000 \
+  --prefiller-ports-inc \
+    2 2 2 2\
+  --decoder-hosts \
+    192.0.0.5 \
+    192.0.0.6 \
+    192.0.0.7 \
+    192.0.0.8 \
+  --decoder-hosts-num \
+    16 16 16 16 \
+  --decoder-ports  \
+    9000 9000 9000 9000 \
+  --decoder-ports-inc \
+    16 16 16 16 \
+```
+
+|Parameter  | meaning |
+| --- | --- |
+| --port | Proxy service Port |
+| --host | Proxy service Host IP|
+| --prefiller-hosts | Hosts of prefiller nodes |
+| --prefiller-hosts-num | Number of repetitions for prefiller node hosts |
+| --prefiller-ports | Ports of prefiller nodes |
+| --prefiller-ports-inc | Number of increments for prefiller node ports |
+| --decoder-hosts | Hosts of decoder nodes |
+| --decoder-hosts-num | Number of repetitions for decoder node hosts |
+| --decoder-ports | Ports of decoder nodes |
+| --decoder-ports-inc | Number of increments for decoder node ports |
+
+option 2
+
+```shell
+python load_balance_proxy_server_example.py \
+  --port "proxy port" \
+  --host 0.0.0.0 \
+  --prefiller-hosts \
+    prefiller 192.0.0.1 \ 
+    prefiller 192.0.0.2 \ 
+  --prefiller-ports  \
+    engine_port engine_port \
+  --decoder-hosts \
+    decoder 192.0.0.3  \ 
+    decoder 192.0.0.3  \ 
+    decoder 192.0.0.4  \ 
+    decoder 192.0.0.4  \ 
+  --decoder-ports  \
+    engine_port ...  \ # Increase by dp_size_local e.g. 9000 9001
+    engine_port ...  \ # Increase by dp_size_local e.g. 9000 9001
+```
+
+:::{note}
+In the option2 each node local ip should repeat the same times as its '**dp_size_local**', at the same time, each node has the same number of ports as '**dp_size_local**', and their ports increase sequentially starting from '**engine_port**'.
+:::
+
+You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)
+
+## Benckmark
+
+We recommend use aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark) Execute the following commands to install aisbench
+
+```shell
+git clone https://gitee.com/aisbench/benchmark.git
+cd benchmark/
+pip3 install -e ./
+```
+
+You need to canncel the http proxy before assessing performance, as following
+
+```shell
+# unset proxy
+unset http_proxy
+unset https_proxy
+```
+
+- You can place your datasets in the dir: `benchmark/ais_bench/datasets`
+- You can change the configurationin the dir :`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the ``vllm_api_stream_chat.py`` for examples
+
+```python
+models = [
+    dict(
+        attr="service",
+        type=VLLMCustomAPIChatStream,
+        abbr='vllm-api-stream-chat',
+        path="/root/.cache/ds_r1",
+        model="dsr1",
+        request_rate = 28,
+        retry = 2,
+        host_ip = "192.0.0.10", # Proxy service host IP
+        host_port = 8000,  # Proxy service Port
+        max_out_len = 10,
+        batch_size=1536,
+        trust_remote_code=True,
+        generation_kwargs = dict(
+            temperature = 0,
+            seed = 1024,
+            ignore_eos=False,
+        )
+    )
+]
+```
+
+- Take gsm8k dataset for example, execute the following commands  to assess performance.
+
+```shell
+ais_bench --models vllm_api_stream_chat --datasets gsm8k_gen_0_shot_cot_str_perf  --debug  --mode perf
+```
+
+- For more details for commands and parameters for aisbench, refer to  [aisbench](https://gitee.com/aisbench/benchmark)
+
 ## FAQ
 
 ### 1. Prefiller nodes need to warmup
 
 Since the computation of some NPU operators requires several rounds of warm-up to achieve best performance, we recommend preheating the service with some requests before conducting performance tests to achieve the best end-to-end throughput.
+
+### 2. Scripts for Prefill&Decode Nodes
+
+You can get the complete shell script with recommend configurations here.
+**Prefiller node**
+
+```shell
+# run_dp_template.sh
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip
+nic_name="xxxx"
+local_ip="xxxx"
+
+# basic configuration for HCCL and connection
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export HCCL_BUFFSIZE=256
+export DISAGGREGATED_PREFILL_RANK_TABLE_PATH='ranktable you generate'
+
+# obtain parameters from distributed DP server
+export VLLM_DP_SIZE=$1
+export VLLM_DP_MASTER_IP=$2
+export VLLM_DP_MASTER_PORT=$3
+export VLLM_DP_RANK_LOCAL=$4
+export VLLM_DP_RANK=$5
+export VLLM_DP_SIZE_LOCAL=$7
+
+#pytorch_npu settings and vllm settings
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
+export VLLM_USE_V1=1
+
+# enable the distributed DP server 
+export VLLM_WORKER_MULTIPROC_METHOD="fork"
+export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
+
+# The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8
+# "--additional-config" is used to enable characteristics from vllm-ascend
+vllm serve /root/.cache/ds_r1 \
+    --host 0.0.0.0 \
+    --port $6 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --served-model-name deepseek_r1 \
+    --max-model-len 17000 \
+    --max-num-batched-tokens 16384 \
+    --trust-remote-code \
+    --max-num-seqs 4 \
+    --gpu-memory-utilization 0.9 \
+    --quantization ascend \
+    --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+    --enforce-eager \
+    --kv-transfer-config \
+    '{"kv_connector": "LLMDataDistCMgrConnector",
+      "kv_buffer_device": "npu",
+      "kv_role": "kv_producer",
+      "kv_parallel_size": "1",
+      "kv_port": "20001",
+      "engine_id": "0",
+      "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+    }'
+    --additional-config '{"ascend_scheduler_config":{"enabled":false}, "torchair_graph_config":{"enabled":false},"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
+```
+
+**Decoder node**
+
+```shell
+# run_dp_template.sh
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip
+nic_name="xxxx"
+local_ip="xxxx"
+
+# basic configuration for HCCL and connection
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=10
+export HCCL_BUFFSIZE=1024
+export DISAGGREGATED_PREFILL_RANK_TABLE_PATH='ranktable you generate'
+
+# obtain parameters from distributed DP server
+export VLLM_DP_SIZE=$1
+export VLLM_DP_MASTER_IP=$2
+export VLLM_DP_MASTER_PORT=$3
+export VLLM_DP_RANK_LOCAL=$4
+export VLLM_DP_RANK=$5
+export VLLM_DP_SIZE_LOCAL=$7
+
+#pytorch_npu settings and vllm settings
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export TASK_QUEUE_ENABLE=1
+export VLLM_USE_V1=1
+
+# enable the distributed DP server 
+export VLLM_WORKER_MULTIPROC_METHOD="fork"
+export VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED=1
+
+# The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8
+# "--additional-config" is used to enable characteristics from vllm-ascend
+vllm serve /root/.cache/ds_r1 \
+    --host 0.0.0.0 \
+    --port $6 \
+    --tensor-parallel-size 1 \
+    --enable-expert-parallel \
+    --seed 1024 \
+    --served-model-name deepseek_r1 \
+    --max-model-len 17000 \
+    --max-num-batched-tokens 256 \
+    --trust-remote-code \
+    --max-num-seqs 28 \
+    --gpu-memory-utilization 0.9 \
+    --quantization ascend \
+    --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+    --kv-transfer-config \
+        '{"kv_connector": "LLMDataDistCMgrConnector",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_consumer",
+        "kv_parallel_size": "1",
+        "kv_port": "20001",
+        "engine_id": "0",
+        "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+        }' \
+    --additional-config '{"ascend_scheduler_config":{"enabled":false}, "torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"enable_multistream_moe":true,"graph_batch_sizes":[28], "enable_super_kernel":true, "use_cached_graph":true},"enable_weight_nz_layout":true}'
+```
