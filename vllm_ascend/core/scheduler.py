@@ -33,7 +33,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.10.1.1"):
+if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 else:
     KVCacheBlocks = None
@@ -66,7 +66,7 @@ class AscendScheduler(Scheduler):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
-        if vllm_version_is("0.10.1.1"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             req_to_new_block_ids: dict[str, list[int]] = {}
         else:
             req_to_new_blocks: dict[str, KVCacheBlocks] = {}
@@ -227,7 +227,7 @@ class AscendScheduler(Scheduler):
 
             if self.lora_config and request.lora_request:
                 scheduled_loras.add(request.lora_request.lora_int_id)
-            if vllm_version_is("0.10.1.1"):
+            if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
                 req_to_new_block_ids[request.request_id] = (
                     self.kv_cache_manager.get_block_ids(request.request_id))
             else:
@@ -320,7 +320,7 @@ class AscendScheduler(Scheduler):
                 # Schedule the request.
                 scheduled_running_reqs.append(request)
                 self.scheduled_req_ids.add(request.request_id)
-                if vllm_version_is("0.10.1.1"):
+                if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
                     req_to_new_block_ids[request.request_id] = (
                         new_blocks.get_block_ids())
                 else:
@@ -362,7 +362,7 @@ class AscendScheduler(Scheduler):
                     any_request, len(self.running)))
 
         # Construct the scheduler output.
-        if vllm_version_is("0.10.1.1"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             new_reqs_data = [
                 NewRequestData.from_request(
                     req, req_to_new_block_ids[req.request_id])
@@ -385,7 +385,7 @@ class AscendScheduler(Scheduler):
                 req_to_new_blocks)
         scheduled_cached_reqs = cached_reqs_data
 
-        if vllm_version_is("0.10.1.1"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             scheduler_output = SchedulerOutput(
                 scheduled_new_reqs=new_reqs_data,
                 scheduled_cached_reqs=scheduled_cached_reqs,

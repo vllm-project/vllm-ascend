@@ -50,7 +50,7 @@ from vllm_ascend.utils import (init_ascend_soc_version,
                                try_register_lib, vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
-if not vllm_version_is("0.10.1.1"):
+if not (vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1")):
     from vllm.v1.outputs import DraftTokenIds
 else:
     DraftTokenIds = None
