@@ -111,8 +111,9 @@ class NPUWorker(WorkerBase):
             init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
-        # Buffers saved before sleep
-        self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+        if sleep_mode_enabled():
+            # Buffers saved before sleep
+            self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
     def sleep(self, level: int = 1) -> None:
         if not sleep_mode_enabled():
