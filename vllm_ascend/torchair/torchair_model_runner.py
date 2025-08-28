@@ -70,7 +70,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         register_torchair_model()
         torchair_quant_method_register()
 
-    def _get_forward_metadata_across_dp_and_pad(
+    def _sync_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         """Override from NPUModelRunner to pad num_tokens"""
@@ -81,8 +81,17 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 return maybe_padded_num_tokens, None, with_prefill, enable_dbo
             return num_tokens, None, with_prefill, enable_dbo
 
-        num_tokens_across_dp, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
-            num_tokens, with_prefill, enable_dbo)
+        num_tokens_across_dp = torch.zeros(self.dp_size + 2,
+                                           dtype=torch.int32,
+                                           device="npu")
+        num_tokens_across_dp[self.dp_rank] = num_tokens
+        num_tokens_across_dp[-2] = int(with_prefill)
+        num_tokens_across_dp[-1] = int(not enable_dbo)
+        dist.all_reduce(num_tokens_across_dp,
+                        group=get_dp_group().device_group)
+        with_prefill = bool(num_tokens_across_dp[-2])
+        enable_dbo = not bool(num_tokens_across_dp[-1])
+        num_tokens_across_dp = num_tokens_across_dp[:-2]
 
         if not with_prefill:
             max_num_token = num_tokens_across_dp.max().item()

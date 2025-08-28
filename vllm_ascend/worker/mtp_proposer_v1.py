@@ -194,7 +194,7 @@ class MtpProposer:
             # torch mode need to update num_tokens_across_dp
             # TODO: adapt enable_dbo later
             (num_input_tokens, num_tokens_across_dp, with_prefill,
-             _) = self.runner._get_forward_metadata_across_dp_and_pad(
+             _) = self.runner._sync_metadata_across_dp(
                  num_tokens, self.runner.with_prefill, False)
             attn_metadata.slot_mapping = target_slot_mapping
         else:
@@ -281,8 +281,8 @@ class MtpProposer:
         if not self.torchair_graph_enabled:
             # TODO: adapt enable_dbo later
             (num_tokens, num_tokens_across_dp, with_prefill,
-             _) = self.runner._get_forward_metadata_across_dp_and_pad(
-                 num_tokens, with_prefill, False)
+             _) = self.runner._sync_metadata_across_dp(num_tokens,
+                                                       with_prefill, False)
         is_running_torchair = self.torchair_graph_enabled and \
             not with_prefill
 

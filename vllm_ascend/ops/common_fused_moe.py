@@ -26,7 +26,6 @@ from vllm.model_executor.layers.fused_moe.layer import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
-                                                     DummyCommImpl,
                                                      MC2CommImpl,
                                                      MoECommMethod)
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -230,7 +229,7 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
 
-        for method in {AllGatherCommImpl, DummyCommImpl, MC2CommImpl}:
+        for method in {AllGatherCommImpl, MC2CommImpl}:
             setattr(
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
@@ -241,8 +240,11 @@ class AscendFusedMoE(FusedMoE):
 
         forward_context = get_forward_context()
         moe_comm_method_name = forward_context.moe_comm_method_name
-        if not self.moe_config.use_ep and moe_comm_method_name != "dummycommimpl":
+
+        # TODO: Can we refactor this logic to model_runner?
+        if not self.moe_config.use_ep:
             moe_comm_method_name = "allgathercommimpl"
+
         forward_context.moe_comm_method = getattr(self, moe_comm_method_name)
 
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
