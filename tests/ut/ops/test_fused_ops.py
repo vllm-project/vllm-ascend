@@ -442,11 +442,11 @@ class TestAscendUnquantizedFusedMoEMethod:
             assert result.shape == expected_shape
 
     @pytest.mark.parametrize("others_param",
-                             [[16, False], [1, True], [1, False], [4, False]])
+                             [[16], [1], [4]])
     def test_apply_with_expert_map(self, moe_method, mock_dist_env,
                                    mock_moe_env, others_param):
 
-        ep_size, alltoall_buffer = others_param
+        ep_size = others_param
         is_prefill = False
 
         if ep_size == 1:
@@ -464,9 +464,7 @@ class TestAscendUnquantizedFusedMoEMethod:
                                     with_quant=False,
                                     token_dispatcher=selected_token_dispatcher)
 
-        with patch("vllm_ascend.ops.fused_moe.MOE_ALL2ALL_BUFFER",
-                   alltoall_buffer), \
-             patch("vllm_ascend.ops.fused_moe.get_forward_context", return_value=forward_context), \
+        with patch("vllm_ascend.ops.fused_moe.get_forward_context", return_value=forward_context), \
              patch("vllm_ascend.utils.get_ascend_soc_version", return_value=AscendSocVersion.A3):
 
             expert_map = torch.tensor([0, 1, 2, -1, -1, -1, -1, -1])
@@ -475,8 +473,6 @@ class TestAscendUnquantizedFusedMoEMethod:
             if ep_size == 1:
                 x = x.view(-1, 2)
             router_logits = torch.randn(8, 8)
-            if alltoall_buffer:
-                moe_method.max_model_len = 1
             layer = MagicMock()
 
             local_num_experts = 2
