@@ -1218,5 +1218,4 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             restore_shape=self.hidden_shape_before_permute)
 
         # Reshape the output tensor
-        output = output.view(self.hidden_shape)
-        return output
+        return output.view(self.hidden_shape)
