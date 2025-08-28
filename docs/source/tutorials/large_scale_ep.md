@@ -1,4 +1,4 @@
-# Distributed DP Server With Large Scale EP
+# Distributed DP Server With Large Scale EP (Deepseek)
 
 ## Getting Start
 
@@ -13,9 +13,10 @@ vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large scale *
 
 ### Verification Process:
 
-#### 1. A3
+:::::{tab-set}
+::::{tab-item} A3
 
-##### 1.1 Single Node Verification:
+1. Single Node Verification:
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -34,28 +35,30 @@ Execute the following commands on each node in sequence. The results must all be
  cat /etc/hccn.conf
 ```
 
-##### 1.2 Get NPU IP Addresses
+2. Get NPU IP Addresses
 
 ```bash
 for i in {0..15}; do hccn_tool -i $i -vnic -g;done
 ```
 
-##### 1.3 Get superpodid and SDID
+3. Get superpodid and SDID
 
 ```bash
 for i in {0..7}; do npu-smi info -t spod-info -i $i -c 0;npu-smi info -t spod-info -i $i -c 1;done
 ```
 
-##### 1.4 Cross-Node PING Test
+4. Cross-Node PING Test
 
 ```bash
 # Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
 for i in {0..15}; do hccn_tool -i $i -hccs_ping -g address x.x.x.x;done
 ```
 
-#### 2. A2
+::::
 
-##### 2.1 Single Node Verification:
+::::{tab-item} A2
+
+1. Single Node Verification:
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -74,18 +77,22 @@ for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
 cat /etc/hccn.conf
 ```
 
-##### 2.2 Get NPU IP Addresses
+2. Get NPU IP Addresses
 
 ```bash
 for i in {0..7}; do hccn_tool -i $i -ip -g;done
 ```
 
-##### 2.3 Cross-Node PING Test
+3. Cross-Node PING Test
 
 ```bash
 # Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
 for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 ```
+
+::::
+
+:::::
 
 ## Generate Ranktable
 
@@ -442,7 +449,10 @@ Since the computation of some NPU operators requires several rounds of warm-up t
 ### 2. Scripts for Prefill&Decode Nodes
 
 You can get the complete shell script with recommend configurations here.
-**Prefiller node**
+
+:::::{tab-set}
+
+::::{tab-item} Prefiller node
 
 ```shell
 # run_dp_template.sh
@@ -509,7 +519,9 @@ vllm serve /root/.cache/ds_r1 \
     --additional-config '{"ascend_scheduler_config":{"enabled":false}, "torchair_graph_config":{"enabled":false},"enable_weight_nz_layout":true,"enable_prefill_optimizations":true}'
 ```
 
-**Decoder node**
+::::
+
+::::{tab-item} Decoder node
 
 ```shell
 # run_dp_template.sh
@@ -574,3 +586,6 @@ vllm serve /root/.cache/ds_r1 \
         }' \
     --additional-config '{"ascend_scheduler_config":{"enabled":false}, "torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"enable_multistream_moe":true,"graph_batch_sizes":[28], "enable_super_kernel":true, "use_cached_graph":true},"enable_weight_nz_layout":true}'
 ```
+
+::::
+:::::
