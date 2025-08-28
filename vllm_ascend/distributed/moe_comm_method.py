@@ -14,6 +14,8 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.distributed.communication_op import \
     data_parallel_reduce_scatter
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
+    get_token_dispatcher
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
 
@@ -55,7 +57,7 @@ class MoECommMethod(ABC):
         expert_map: torch.Tensor,
         num_experts: int,
         use_a8: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
         """Pre-process before MLP.
 
         Args:
@@ -161,7 +163,7 @@ class AllGatherCommImpl(MoECommMethod):
         expert_map: torch.Tensor,  # noqa: F841
         num_experts: int,
         use_a8: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
         num_tokens = hidden_states.shape[0]
 
         self.topk_weights = topk_weights
@@ -222,7 +224,7 @@ class NativeAllGatherCommImpl(AllGatherCommImpl):
         expert_map: torch.Tensor,
         num_experts: int,
         use_a8: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
         num_tokens = hidden_states.shape[0]
 
         # Generate token indices and flatten
@@ -379,7 +381,7 @@ class MC2CommImpl(MoECommMethod):
         expert_map: torch.Tensor,
         num_experts: int,
         use_a8: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
         # Store tensors needed for post_process
         self.topk_ids = topk_ids
         self.topk_weights = topk_weights.to(torch.float32)
@@ -461,3 +463,89 @@ class MC2CommImpl(MoECommMethod):
         combine = torch_npu.npu_moe_distribute_combine_v2 if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine
 
         hidden_states[:] = combine(**combine_kwargs)
+
+
+class AlltoAllCommImpl(MoECommMethod):
+    """This implementation is for the scenarios listed below:
+    1. `enable_expert_parallel=True`.
+    2. `npu_grouped_matmul` is available.
+
+    This implementation uses all-to-all communication to exchange tokens
+    between data parallel ranks before and after the MLP computation. It should
+    have better performance than AllGatherCommImpl when DP size > 1.
+    """
+
+    def __init__(self, moe_config: Optional[FusedMoEConfig]):
+        super().__init__(moe_config)
+        self.token_dispatcher = get_token_dispatcher(
+            "TokenDispatcherWithAll2AllV")
+        self._restore_tp_across_dp()
+
+    def _restore_tp_across_dp(self):
+        # NOTE: Since vLLM flatten tp across dp, we need to restore the original
+        # tp_size and tp_rank.
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+
+    def prepare(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self.num_tokens, _ = hidden_states.shape
+        pad_size = self.tp_size - self.num_tokens
+
+        if pad_size > 0:
+            hidden_states = nn.functional.pad(hidden_states,
+                                              (0, 0, 0, pad_size))
+            router_logits = nn.functional.pad(router_logits,
+                                              (0, 0, 0, pad_size))
+
+        if self.tp_size > 1:
+            split_hidden_states = torch.tensor_split(hidden_states,
+                                                     self.tp_size,
+                                                     dim=0)
+            split_router_logits = torch.tensor_split(router_logits,
+                                                     self.tp_size,
+                                                     dim=0)
+            self.split_hidden_states = split_hidden_states
+
+            hidden_states = split_hidden_states[self.tp_rank]
+            router_logits = split_router_logits[self.tp_rank]
+
+        return hidden_states, router_logits
+
+    def finalize(self, hidden_states: torch.Tensor,
+                 reduce_results: bool) -> torch.Tensor:
+        """If TP size > 1, all-gather the hidden states to get the final output.
+
+        Also, unpad the hidden states if needed.
+        """
+        if self.tp_size > 1:
+            dist.all_gather(list(self.split_hidden_states), hidden_states,
+                            self.moe_config.tp_group.device_group)
+            hidden_states = torch.cat(self.split_hidden_states, dim=0)
+
+        if self.num_tokens < hidden_states.shape[0]:
+            hidden_states = hidden_states[:self.num_tokens]
+
+        return hidden_states
+
+    def permute(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        expert_map: torch.Tensor,
+        num_experts: int,
+        use_a8: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
+        results = self.token_dispatcher.token_dispatch(hidden_states,
+                                                       topk_weights,
+                                                       topk_ids,
+                                                       None,
+                                                       log2phy=None)
+        return results["hidden_states"], results["group_list"], results[
+            "dynamic_scale"], results["group_list_type"]
+
+    def unpermute(self, mlp_output: torch.Tensor,
+                  hidden_states: torch.Tensor) -> None:
+        hidden_states[:] = self.token_dispatcher.token_combine(mlp_output)

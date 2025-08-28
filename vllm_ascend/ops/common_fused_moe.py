@@ -27,12 +27,14 @@ from vllm.model_executor.layers.fused_moe.layer import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
-                                                     MC2CommImpl,
-                                                     MoECommMethod)
+                                                     AlltoAllCommImpl,
+                                                     MC2CommImpl)
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe import apply_mlp, fused_experts_moge
+from vllm_ascend.ops.fused_moe import fused_experts_moge
 from vllm_ascend.ops.layers.experts_selector import select_experts
-from vllm_ascend.utils import is_310p, ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
+    setup_token_dispatchers
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
 
 original_unquantized_fused_moe_init_func = UnquantizedFusedMoEMethod.__init__
 
@@ -66,7 +68,6 @@ def fused_experts(
     # Check constraints
     assert hidden_states.shape[1] == w1.shape[1], (
         f"Hidden size mismatch {hidden_states.shape[1]} != {w1.shape[1]}")
-
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.stride(-1) == 1, "Stride of last dimension must be 1"
@@ -74,6 +75,16 @@ def fused_experts(
     assert hidden_states.dtype in [
         torch.float32, torch.float16, torch.bfloat16
     ]
+    if (use_int8_w8a8 or use_int4_w4a8):
+        assert w1_scale is not None and w2_scale is not None, \
+            "INT8 quantization requires weight scales."
+
+        w1_scale = w1_scale.to(torch.float32)
+        down_scale = [w2_scale]
+        down_output_dtype = w2_scale.dtype
+    else:
+        down_scale = None
+        down_output_dtype = None
 
     moe_comm_method = get_forward_context().moe_comm_method
     assert moe_comm_method is not None, "Missing communication context"
@@ -81,11 +92,8 @@ def fused_experts(
     num_experts = w1.shape[0]
 
     permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type = moe_comm_method.permute(
-        hidden_states, topk_ids, topk_weights, expert_map, num_experts, use_int8_w8a8 or use_int4_w4a8)
-    
-    if (use_int8_w8a8 or use_int4_w4a8) and dynamic_scale is None:
-        permuted_hidden_states, dynamic_scale = torch_npu.npu_dynamic_quant(
-            permuted_hidden_states)
+        hidden_states, topk_ids, topk_weights, expert_map, num_experts,
+        use_int8_w8a8 or use_int4_w4a8)
 
     gate_up_output = torch_npu.npu_grouped_matmul(
         x=[permuted_hidden_states],
@@ -97,10 +105,10 @@ def fused_experts(
         output_dtype=torch.int32 if use_int8_w8a8 else None,
     )[0]
 
-    if use_int8_w8a8:
+    if (use_int8_w8a8 or use_int4_w4a8):
         activated_output, activated_output_scale = torch_npu.npu_dequant_swiglu_quant(
             x=gate_up_output,
-            weight_scale=w1_scale.to(torch.float32),
+            weight_scale=w1_scale,
             activation_scale=dynamic_scale,
             bias=None,
             quant_scale=None,
@@ -109,6 +117,7 @@ def fused_experts(
             activate_left=True,
             quant_mode=1,
         )
+        activated_output_scale = [activated_output_scale]
     else:
         activated_output = torch_npu.npu_swiglu(gate_up_output)
         activated_output_scale = None
@@ -116,13 +125,13 @@ def fused_experts(
     down_output = torch_npu.npu_grouped_matmul(
         x=[activated_output],
         weight=[w2],
-        scale=[w2_scale] if use_int8_w8a8 else None,
-        per_token_scale=[activated_output_scale] if use_int8_w8a8 else None,
+        scale=down_scale,
+        per_token_scale=activated_output_scale,
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
         group_list=expert_tokens,
-        output_dtype=w2_scale.dtype if use_int8_w8a8 else None,
+        output_dtype=down_output_dtype,
     )[0]
 
     moe_comm_method.unpermute(down_output, hidden_states)
@@ -132,11 +141,13 @@ def fused_experts(
 
 def unquantized_fused_moe_init_func(self, *args, **kwargs):
     original_unquantized_fused_moe_init_func(self, *args, **kwargs)
+
+    # NOTE: Currently, this self.use_aclgraph is only used in
+    # UnquantizedFusedMoEMethod.forward_oot to decide whether to use in
+    # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
+    # Once torch.randint_like is supported or removed, this flag can be removed.
     vllm_config = get_current_vllm_config()
-    self.max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-
     ascend_config = get_ascend_config()
-
     if ascend_config.torchair_graph_config.enabled:
         self.use_aclgraph = False
     else:
@@ -276,12 +287,19 @@ class AscendFusedMoE(FusedMoE):
             has_bias,
         )
 
+        with_quant = quant_config is not None
+        setup_token_dispatchers(self.moe_config.ep_size,
+                                top_k=self.top_k,
+                                num_experts=self.global_num_experts,
+                                num_local_experts=self.local_num_experts,
+                                with_quant=with_quant)
+
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
 
-        for method in {AllGatherCommImpl, MC2CommImpl}:
+        for method in {AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl}:
             setattr(
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
