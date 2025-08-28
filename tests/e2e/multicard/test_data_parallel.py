@@ -71,3 +71,4 @@ def test_data_parallel_inference(model, max_tokens):
     assert "DP rank 1 needs to process" in output
     assert "Generated text:" in output
     assert proc.returncode == 0
+
