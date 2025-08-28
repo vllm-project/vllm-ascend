@@ -90,7 +90,8 @@ from vllm_ascend.torchair.torchair_attention import AscendTorchairMetadata
 from vllm_ascend.torchair.torchair_mla import AscendMLATorchairMetadata
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                ProfileExecuteDuration, is_310p,
-                               lmhead_tp_enable, vllm_version_is)
+                               lmhead_tp_enable, vllm_version_is,
+                               embedding_tp_enable)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
@@ -2093,7 +2094,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
-
             if need_dummy_logits:
                 max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
                 dummy_indices = torch.zeros(max_num_reqs_across_dp,

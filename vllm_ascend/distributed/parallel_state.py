@@ -8,12 +8,13 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 
+from vllm.utils import logger
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
 _MLP_TP: Optional[GroupCoordinator] = None
 
 _LMTP: Optional[GroupCoordinator] = None
-
+_EMTP: Optional[GroupCoordinator] = None
 
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, ("mc2 group is not initialized")
@@ -25,6 +26,9 @@ def get_lmhead_tp_group() -> GroupCoordinator:
         "lm head tensor parallel group is not initialized")
     return _LMTP
 
+def get_emtp_group() -> GroupCoordinator:
+    assert _EMTP is not None, ("emtp group is not initialized")
+    return _EMTP
 
 def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, ("mlp group is not initialized")
@@ -90,7 +94,23 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                           get_world_group().local_rank,
                                           backend,
                                           group_name="lmheadtp")
-
+    # Embedding tensor parallel group
+    embedding_tensor_parallel_size = parallel_config.embedding_tensor_parallel_size
+    if embedding_tensor_parallel_size is not None:
+        group_ranks = []
+        global _EMTP
+        num_embedding_tensor_parallel_groups: int = (world_size //
+                                                embedding_tensor_parallel_size)
+        for i in range(num_embedding_tensor_parallel_groups):
+            ranks = list(
+                range(i * embedding_tensor_parallel_size,
+                      (i + 1) * embedding_tensor_parallel_size))
+            group_ranks.append(ranks)
+        _EMTP = init_model_parallel_group(group_ranks,
+                                          get_world_group().local_rank,
+                                          backend,
+                                          group_name="emtp")
+        logger.info(f"Successfully established embedding communication parallel group with size {embedding_tensor_parallel_size}")
 
 def get_mlp_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
@@ -112,6 +132,11 @@ def destroy_ascend_model_parallel():
     if _MLP_TP:
         _MLP_TP.destroy()
     _MLP_TP = None
+
+    global _EMTP
+    if _EMTP:
+        _EMTP.destroy()
+    _EMTP = None
 
     global _LMTP
     if _LMTP:
