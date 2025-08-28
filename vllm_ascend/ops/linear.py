@@ -24,11 +24,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
-                                               ColumnParallelLinear,
-                                               LinearBase,
-                                               MergedColumnParallelLinear,
-                                               RowParallelLinear)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
@@ -36,6 +32,14 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tensor_model_parallel_rank,
     get_mlp_tensor_model_parallel_world_size, get_mlp_tp_group)
+from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+from vllm_ascend.utils import (all_gather_and_maybe_unpad,
+                               maybe_pad_and_reduce_scatter)
+
+from vllm.model_executor.layers.linear import (  # isort: skip
+    WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear, LinearBase,
+    MergedColumnParallelLinear, QKVParallelLinear, RowParallelLinear,
+    UnquantizedLinearMethod)
 
 
 class AscendMlpColumnParallelLinear(ColumnParallelLinear):
@@ -304,6 +308,162 @@ class AscendMlpMergedColumnParallelLinear(MergedColumnParallelLinear):
                 output = output_parallel
 
         output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+
+class AscendDenseMergedColumnParallelLinear(MergedColumnParallelLinear):
+    """Linear layer with column parallelism.
+
+    Implemented multiple optimization projects for dense models, such as FlashComm and
+    communication-computation fusion.
+    """
+
+    def forward(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        bias = self.bias if not self.skip_bias_add else None
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        forward_context = get_forward_context()
+        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
+        ag_matmal_enabled = forward_context.ag_matmal_enabled
+        pad_size = forward_context.pad_size
+        if not flashcomm_v1_enabled:
+            output_parallel = self.quant_method.apply(self, input_, bias)
+        # fp or bf
+        elif ag_matmal_enabled and isinstance(self.quant_method,
+                                              UnquantizedLinearMethod):
+            raise NotImplementedError(
+                "Unquantized AllGather+MatMul fusion is not implemented yet.")
+        # w8a8 quant
+        elif ag_matmal_enabled and isinstance(self.quant_method.quant_method,
+                                              AscendW8A8LinearMethod):
+            raise NotImplementedError(
+                "W8A8 quantized AllGather+MatMul fusion is not implemented yet."
+            )
+        else:
+            input_ = all_gather_and_maybe_unpad(input_, pad_size, 0)
+            output_parallel = self.quant_method.apply(self, input_, bias)
+
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = tensor_model_parallel_all_gather(output_parallel)
+        else:
+            output = output_parallel
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+
+class AscendDenseQKVParallelLinear(QKVParallelLinear):
+    """Linear layer with column parallelism.
+
+    Implemented multiple optimization projects for dense models, such as FlashComm and
+    communication-computation fusion.
+    """
+
+    def forward(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        bias = self.bias if not self.skip_bias_add else None
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        forward_context = get_forward_context()
+        layer_num = self.prefix.split('.')[2]
+        if layer_num == '0':
+            flashcomm_v1_enabled = False
+        else:
+            flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
+        ag_matmal_enabled = forward_context.ag_matmal_enabled
+        pad_size = forward_context.pad_size
+        if not flashcomm_v1_enabled:
+            output_parallel = self.quant_method.apply(self, input_, bias)
+        # fp or bf
+        elif ag_matmal_enabled and isinstance(self.quant_method,
+                                              UnquantizedLinearMethod):
+            raise NotImplementedError(
+                "Unquantized AllGather+MatMul fusion is not implemented yet.")
+        # w8a8 quant
+        elif ag_matmal_enabled and isinstance(self.quant_method.quant_method,
+                                              AscendW8A8LinearMethod):
+            raise NotImplementedError(
+                "W8A8 quantized AllGather+MatMul fusion is not implemented yet."
+            )
+        else:
+            input_ = all_gather_and_maybe_unpad(input_, pad_size, 0)
+            output_parallel = self.quant_method.apply(self, input_, bias)
+
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = tensor_model_parallel_all_gather(output_parallel)
+        else:
+            output = output_parallel
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+
+class AscendDenseRowParallelLinear(RowParallelLinear):
+    """Linear layer with row parallelism.
+
+    Implemented multiple optimization projects for dense models, such as FlashComm and
+    communication-computation fusion.
+    """
+
+    def forward(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        tp_rank = get_tensor_model_parallel_rank()
+        forward_context = get_forward_context()
+        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
+        matmul_rs_enabled = forward_context.matmul_rs_enabled
+        pad_size = forward_context.pad_size
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            tp_rank = get_tensor_model_parallel_rank()
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[tp_rank].contiguous()
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        # Only fuse bias add into GEMM for rank 0 (this ensures that
+        # bias will not get added more than once in TP>1 case)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        if self.tp_size == 1 or not self.reduce_results:
+            output = self.quant_method.apply(self, input_parallel, bias=bias_)
+        elif not flashcomm_v1_enabled:
+            output_parallel = self.quant_method.apply(self,
+                                                      input_parallel,
+                                                      bias=bias_)
+            output = tensor_model_parallel_all_reduce(output_parallel)
+        # fp or bf
+        elif matmul_rs_enabled and isinstance(self.quant_method,
+                                              UnquantizedLinearMethod):
+            raise NotImplementedError(
+                "Unquantized MatMul+ReduceScatter fusion is not implemented yet."
+            )
+        # w8a8 quant
+        elif matmul_rs_enabled and isinstance(self.quant_method.quant_method,
+                                              AscendW8A8LinearMethod):
+            raise NotImplementedError(
+                "W8A8 quantized MatMul+ReduceScatter fusion is not implemented yet."
+            )
+        else:
+            output_parallel = self.quant_method.apply(self,
+                                                      input_parallel,
+                                                      bias=bias_)
+            output = maybe_pad_and_reduce_scatter(output_parallel, pad_size, 0)
+
+        output_bias = self.bias if self.skip_bias_add else None
+
         if not self.return_bias:
             return output
         return output, output_bias

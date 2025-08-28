@@ -23,5 +23,12 @@ def register():
 
 
 def register_model():
+    import vllm.envs as envs
+
+    import vllm_ascend.envs as envs_ascend
+
     from .models import register_model
+    if envs.VLLM_USE_V1 and \
+        envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM != 0:
+        import vllm_ascend.patch.platform.patch_main.patch_decorator  # isort: skip  # noqa: F401
     register_model()
