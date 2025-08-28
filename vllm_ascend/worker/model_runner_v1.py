@@ -96,7 +96,7 @@ from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
-if not vllm_version_is("0.10.1.1"):
+if not (vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1")):
     from vllm.v1.outputs import DraftTokenIds
 else:
     DraftTokenIds = None
@@ -384,7 +384,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
-            if vllm_version_is("0.10.1.1"):
+            if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
                 self.encoder_cache.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
@@ -394,7 +394,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # and handling the second as a new request.
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
-        if vllm_version_is("0.10.1.1"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             # Free the cached encoder outputs.
             for req_id, input_id in scheduler_output.free_encoder_input_ids:
                 encoder_outputs = self.encoder_cache.get(req_id)
@@ -455,9 +455,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 lora_request=new_req_data.lora_request,
                 **({
                     "mm_hashes": new_req_data.mm_hashes
-                } if not vllm_version_is("0.10.1.1") else {
-                    "mm_hashes": None
-                }),
+                } if not (vllm_version_is("0.10.1.1")
+                          or vllm_version_is("0.10.1")) else {
+                              "mm_hashes": None
+                          }),
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -893,13 +894,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
-        if vllm_version_is("0.10.1.1"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
         else:
             mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
-            if vllm_version_is("0.10.1.1"):
+            if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
                 for mm_input_id in encoder_input_ids:
                     mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
                     req_ids_pos.append((req_id, mm_input_id,
@@ -942,7 +943,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
-        if vllm_version_is("0.10.1.1"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             # Cache the encoder outputs.
             for (req_id, input_id, pos_info), output in zip(
                     req_ids_pos,
@@ -974,7 +975,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens
             mm_positions = req_state.mm_positions
-            if not vllm_version_is("0.10.1.1"):
+            if not (vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1")):
                 mm_hashes = req_state.mm_hashes
             for i, pos_info in enumerate(mm_positions):
                 start_pos = pos_info.offset
@@ -993,7 +994,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     continue
 
                 start_idx = max(num_computed_tokens - start_pos, 0)
-                if vllm_version_is("0.10.1.1"):
+                if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
                     end_idx = min(
                         num_computed_tokens - start_pos + num_scheduled_tokens,
                         num_encoder_tokens)
@@ -1719,7 +1720,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logits = None
             else:
                 if self.input_batch.pooling_params:
-                    if vllm_version_is("0.10.1.1"):
+                    if vllm_version_is("0.10.1.1") or vllm_version_is(
+                            "0.10.1"):
                         return self._pool_v010(
                             hidden_states,
                             scheduler_output.total_num_scheduled_tokens,
@@ -1867,7 +1869,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         extra_args = ({"kv_connector_output": kv_connector_output})
 
-        if vllm_version_is("0.10.1.1"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             model_runner_output = ModelRunnerOutput(
                 req_ids=self.input_batch.req_ids,
                 req_id_to_index=self.input_batch.req_id_to_index,
@@ -2191,7 +2193,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         dummy_pooling_params = PoolingParams(task=task)
         to_update = model.pooler.get_pooling_updates(task)
         to_update.apply(dummy_pooling_params)
-        if vllm_version_is("0.10.1.1"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             dummy_prompt_lens = torch.tensor(
                 [h.shape[0] for h in hidden_states_list],
                 device=self.device,

@@ -200,7 +200,7 @@ def create_model_runner_output(
     kv_connector_output = KVConnectorOutput(finished_sending=finished_sending,
                                             finished_recving=finished_recving)
     extra_args = {"kv_connector_output": kv_connector_output}
-    if vllm_version_is("0.10.1.1"):
+    if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids,
             req_id_to_index=req_id_to_index,
