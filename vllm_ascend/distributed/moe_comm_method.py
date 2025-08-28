@@ -54,6 +54,7 @@ class MoECommMethod(ABC):
         topk_weights: torch.Tensor,
         expert_map: torch.Tensor,
         num_experts: int,
+        use_a8: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         """Pre-process before MLP.
 
@@ -159,6 +160,7 @@ class AllGatherCommImpl(MoECommMethod):
         topk_weights: torch.Tensor,
         expert_map: torch.Tensor,  # noqa: F841
         num_experts: int,
+        use_a8: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         num_tokens = hidden_states.shape[0]
 
@@ -194,7 +196,7 @@ class AllGatherCommImpl(MoECommMethod):
 
         group_list_type = 1  # `count` mode
 
-        return permuted_hidden_states, expert_tokens, group_list_type
+        return permuted_hidden_states, expert_tokens, None, group_list_type
 
     def unpermute(self, mlp_output: torch.Tensor,
                   hidden_states: torch.Tensor) -> None:
@@ -219,6 +221,7 @@ class NativeAllGatherCommImpl(AllGatherCommImpl):
         topk_weights: torch.Tensor,
         expert_map: torch.Tensor,
         num_experts: int,
+        use_a8: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         num_tokens = hidden_states.shape[0]
 
@@ -269,7 +272,7 @@ class NativeAllGatherCommImpl(AllGatherCommImpl):
 
         group_list_type = 1  # `count` mode
 
-        return permuted_hidden_states, expert_tokens, group_list_type
+        return permuted_hidden_states, expert_tokens, None, group_list_type
 
     def unpermute(self, mlp_output: torch.Tensor,
                   hidden_states: torch.Tensor) -> None:
@@ -375,6 +378,7 @@ class MC2CommImpl(MoECommMethod):
         topk_weights: torch.Tensor,
         expert_map: torch.Tensor,
         num_experts: int,
+        use_a8: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         # Store tensors needed for post_process
         self.topk_ids = topk_ids
@@ -388,7 +392,7 @@ class MC2CommImpl(MoECommMethod):
             "moe_expert_num": self.moe_config.num_experts,
             "global_bs": 0,
             "scales": None,
-            "quant_mode": 0,
+            "quant_mode": 2 if use_a8 else 0,
             "group_ep": self.mc2_comm_name,
             "ep_world_size": self.moe_config.ep_size,
             "ep_rank_id": self.moe_config.ep_rank,
@@ -409,7 +413,7 @@ class MC2CommImpl(MoECommMethod):
 
         (
             permuted_hidden_states,
-            _,  # dynamic_scale is not used
+            dynamic_scale,
             self.assist_info_for_combine,
             expert_tokens,
             self.ep_recv_counts,
@@ -418,7 +422,7 @@ class MC2CommImpl(MoECommMethod):
 
         group_list_type = 1
 
-        return permuted_hidden_states, expert_tokens, group_list_type
+        return permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type
 
     def unpermute(self, mlp_output: torch.Tensor,
                   hidden_states: torch.Tensor) -> None:
