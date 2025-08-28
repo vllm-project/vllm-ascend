@@ -78,7 +78,7 @@ class VLLMAscendQuantizer:
                     "vllm_ascend.ops.layernorm.AscendRMSNorm", "forward_oot",
                     [wrapper_rmsnorm_forward_oot])
                 VLLMAscendQuantizer.apply_patch(
-                    "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding",
+                    "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding",
                     "__init__", [wrapper_vocab_parallel_embedding_init])
                 break
         VLLMAscendQuantizer.patched = True
