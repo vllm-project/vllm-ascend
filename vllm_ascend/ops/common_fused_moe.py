@@ -41,6 +41,8 @@ def fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    w1_bias: Optional[torch.Tensor],
+    w2_bias: Optional[torch.Tensor],
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     activation: str = "silu",
@@ -85,7 +87,10 @@ def fused_experts(
         permuted_hidden_states,
         w1,
         w2,
+        w1_bias,
+        w2_bias,
         expert_tokens,
+        activation,
         group_list_type=group_list_type,
     )
     moe_comm_method.unpermute(mlp_output, hidden_states)
@@ -159,16 +164,17 @@ def forward_oot(
 
     moe_comm_method = get_forward_context().moe_comm_method
 
-    return fused_experts(
-        hidden_states=x,
-        w1=layer.w13_weight,
-        w2=layer.w2_weight,
-        topk_weights=topk_weights,
-        topk_ids=topk_ids,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
-        moe_comm_method=moe_comm_method,
-    )
+    return fused_experts(hidden_states=x,
+                         w1=layer.w13_weight,
+                         w2=layer.w2_weight,
+                         w1_bias=layer.w13_bias if self.has_bias else None,
+                         w2_bias=layer.w2_bias if self.has_bias else None,
+                         topk_weights=topk_weights,
+                         topk_ids=topk_ids,
+                         global_num_experts=global_num_experts,
+                         expert_map=expert_map,
+                         moe_comm_method=moe_comm_method,
+                         activation=activation)
 
 
 class AscendFusedMoE(FusedMoE):

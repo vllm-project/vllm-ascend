@@ -119,9 +119,11 @@ class DummyCommImpl(MoECommMethod):
         top_k_num = topk_ids.shape[1]
         permuted_hidden_states = hidden_states.repeat_interleave(top_k_num,
                                                                  dim=0)
-        expert_tokens = torch.zeros((num_experts, ),
-                                    dtype=torch.int64,
-                                    device=hidden_states.device)
+        expert_tokens = torch.full(
+            (num_experts, ),
+            permuted_hidden_states.shape[0] // num_experts,
+            dtype=torch.int64,
+            device=hidden_states.device)
         group_list_type = 0
         return permuted_hidden_states, expert_tokens, group_list_type
 
@@ -227,7 +229,6 @@ class AllGatherCommImpl(MoECommMethod):
                 quant_mode=-1,
             ))
         self.expanded_row_idx = expanded_row_idx
-        permuted_hidden_states = permuted_hidden_states
 
         group_list_type = 1  # `count` mode
 
