@@ -59,7 +59,3 @@ def register_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "vllm_ascend.models.pangu_moe:PanguProMoEForCausalLM")
-
-    ModelRegistry.register_model(
-        "Gemma3ForCausalLM",
-        "vllm_ascend.models.gemma3:AscendGemma3ForCausalLM")
