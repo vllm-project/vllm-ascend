@@ -18,7 +18,7 @@
 from typing import Optional, Tuple, Union
 
 import torch
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
 class AddRMSNormW8A8Quant(RMSNorm):
@@ -58,7 +58,7 @@ class AddRMSNormW8A8Quant(RMSNorm):
         return x
 
 
-class AscendRMSNorm(RMSNorm):
+class AscendRMSNorm(GemmaRMSNorm):
 
     def forward_oot(
         self,
