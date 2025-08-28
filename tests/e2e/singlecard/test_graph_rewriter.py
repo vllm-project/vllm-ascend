@@ -18,7 +18,7 @@
 
 import copy
 import re
-
+from typing import Dict, Any
 import pytest
 import torch
 import torch.nn as nn
@@ -61,7 +61,7 @@ class ModelWithRMSNormQuant(nn.Module):
 
 class CustomizeCompilationInterface:
 
-    def __init__(self, vllm_config, checking_fusion_pass: str = "torch.ops"):
+    def __init__(self, vllm_config, checking_fusion_pass: Dict[str, tuple[Any, Any]]):
         self.vllm_config = vllm_config
         self.graph_rewriter_manager = GraphRewritePassManager()
         self.graph_rewriter_manager.configure(vllm_config)
@@ -96,6 +96,7 @@ class TestGraphRewriter(PytestBase):
     @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
     @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
     def test_quant_fusion_pass(
+        self,
         num_tokens: int,
         hidden_size: int,
     ) -> None:

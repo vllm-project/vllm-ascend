@@ -16,7 +16,7 @@
 # limitations under the License.
 #
 
-from typing import List, Tuple, Callable
+from typing import Callable, List, Tuple
 
 import torch
 from torch.fx.subgraph_rewriter import replace_pattern
