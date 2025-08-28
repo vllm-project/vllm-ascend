@@ -1089,11 +1089,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         max_num_scheduled_tokens = max(tokens)
-        num_valid_tokens = [
+        num_valid_tokens = np.array([
             num_tokens -
             len(scheduler_output.scheduled_spec_decode_tokens.get(i, []))
             for num_tokens, i in zip(tokens, req_ids)
-        ]
+        ], dtype=np.int32)
 
         # Hot-Swap lora model
         if self.lora_config:
