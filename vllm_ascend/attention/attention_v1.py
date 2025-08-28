@@ -21,6 +21,7 @@ from typing import List, Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
@@ -335,14 +336,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.key_cache is None or self.value_cache is None:
+            raise RuntimeError("key_cache or value_cache is not initialized. "
+                            "Make sure KV caches are created before calling attention.")
         if is_310p():
             # seq_lens_tensor needs to be transferred to the device for 310P.
             attn_metadata.seq_lens = \
                 attn_metadata.seq_lens.to(device=query.device)
 
         torch_npu._npu_paged_attention(query=query,
-                                       key_cache=self.key_cache,
-                                       value_cache=self.value_cache,
+                                       key_cache=self.key_cache[..., :self.head_size],
+                                       value_cache=self.value_cache[..., :self.head_size],
                                        num_kv_heads=self.num_kv_heads,
                                        num_heads=self.num_heads,
                                        scale_value=self.scale,
@@ -357,6 +361,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        if self.key_cache is None or self.value_cache is None:
+            raise RuntimeError("key_cache or value_cache is not initialized. "
+                            "Make sure KV caches are created before calling attention.")
         # Use chunked prefill for head size 192 scenario, like deepseek
         # paged_attention_splitfuse maybe crash at such scenario.
         # TODO: vanilla path will be removed after the kernel support
@@ -391,8 +398,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         torch_npu._npu_paged_attention_splitfuse(
             query=query,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
+            key_cache=self.key_cache[..., :self.head_size],
+            value_cache=self.value_cache[..., :self.head_size],
             mask=attn_metadata.attn_mask,
             block_table=attn_metadata.block_tables,
             seq_len=attn_metadata.query_lens,
@@ -474,9 +481,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if self.key_cache is None:
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
                 slots = attn_metadata.slot_mapping
+
+                input_key = key[:num_actual_tokens]
+                input_value = value[:num_actual_tokens]
+                if input_key.shape[-1] < self.key_cache.shape[-1]:
+                    padding_size = self.key_cache.shape[-1] - input_key.shape[-1]
+                    input_key = F.pad(input_key, (0, padding_size), mode="constant", value=0)
+                    input_value = F.pad(input_value, (0, padding_size), mode="constant", value=0)
+
                 torch_npu._npu_reshape_and_cache(
-                    key=key[:num_actual_tokens],
-                    value=value[:num_actual_tokens],
+                    key=input_key,
+                    value=input_value,
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_indices=slots)

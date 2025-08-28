@@ -155,6 +155,10 @@ class EagleProposer:
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
         attn_metadata.block_tables = block_table.to(device)
+
+        # TODO: qwen3-32B-eagle3目前只能跑非splitfuse的PA接口，需要debug
+        attn_metadata.attn_state = AscendAttentionState.DecodeOnly
+
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
                                         num_tokens=num_input_tokens):
@@ -193,7 +197,7 @@ class EagleProposer:
         if self.num_speculative_tokens > 2:
             raise ValueError("Speculative tokens > 2 are not supported yet.")
 
-        attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        # attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         for now_speculative in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
