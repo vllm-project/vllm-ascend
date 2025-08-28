@@ -452,19 +452,18 @@ def unquant_apply_mlp(
     return hidden_states
 
 
-def unified_apply_mlp(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w1_scale: torch.Tensor,
-        w2: torch.Tensor,
-        w2_scale: torch.Tensor,
-        group_list: torch.Tensor,
-        dynamic_scale: torch.Tensor = None,
-        group_list_type: int = 1,
-        w1_scale_bias: torch.Tensor = None,
-        w2_scale_bias: torch.Tensor = None,
-        topk_scales: Optional[torch.Tensor] = None,
-        fusion: bool = False) -> torch.Tensor:
+def unified_apply_mlp(hidden_states: torch.Tensor,
+                      w1: torch.Tensor,
+                      w1_scale: torch.Tensor,
+                      w2: torch.Tensor,
+                      w2_scale: torch.Tensor,
+                      group_list: torch.Tensor,
+                      dynamic_scale: torch.Tensor = None,
+                      group_list_type: int = 1,
+                      w1_scale_bias: torch.Tensor = None,
+                      w2_scale_bias: torch.Tensor = None,
+                      topk_scales: Optional[torch.Tensor] = None,
+                      fusion: bool = False) -> torch.Tensor:
     if get_forward_context().with_quant:
         return quant_apply_mlp(hidden_states=hidden_states,
                                w1=w1,

@@ -28,7 +28,7 @@ from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
 from vllm_ascend.ops.layers.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
 class AscendW8A8DynamicLinearMethod:
