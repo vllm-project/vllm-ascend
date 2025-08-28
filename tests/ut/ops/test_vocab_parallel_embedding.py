@@ -34,7 +34,11 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
 
     def _create_layer(self):
         # Patch methods and dependencies for VocabParallelEmbedding
-        with patch("vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0), \
+        mock_group = MagicMock()
+        mock_group.world_size = 2
+        mock_group.rank_in_group = 0
+        with patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=mock_group), \
+            patch("vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0), \
             patch("vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_world_size", return_value=2), \
             patch("vllm.model_executor.layers.vocab_parallel_embedding.pad_vocab_size", side_effect=lambda x, y: x + y), \
             patch("vllm.model_executor.layers.vocab_parallel_embedding.divide", side_effect=lambda x, y: x // y):

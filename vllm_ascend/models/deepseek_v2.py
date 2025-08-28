@@ -74,8 +74,6 @@ from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
 
-from vllm_ascend.utils import dispose_tensor, npu_prefetch
-
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
 

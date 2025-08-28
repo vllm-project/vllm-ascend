@@ -486,7 +486,8 @@ def register_ascend_customop():
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
-                                        AscendMlpMergedColumnParallelLinear)
+                                        AscendMlpMergedColumnParallelLinear,
+                                        AscendMlpRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -509,7 +510,8 @@ def register_ascend_customop():
     if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
         CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
                               name="ColumnParallelLinear")
-
+        CustomOp.register_oot(_decorated_op_cls=AscendMlpRowParallelLinear,
+                              name="RowParallelLinear")
         CustomOp.register_oot(
             _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
             name="MergedColumnParallelLinear")
@@ -519,7 +521,6 @@ def register_ascend_customop():
 
     from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
     CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
-
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
