@@ -17,13 +17,15 @@
 
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import pytest
 import torch
+from pytest_mock import MockerFixture
 
-from tests.ut.base import TestBase
+from tests.ut.base import PytestBase, TestBase
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
-    AscendSocVersion, TokenDispatcherWithAll2AllV,
-    TokenDispatcherWithAllGather, TokenDispatcherWithMC2, _Dispatchers,
-    _register_token_dispatcher, get_token_dispatcher, setup_token_dispatchers)
+    AscendSocVersion, TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
+    TokenDispatcherWithMC2, _Dispatchers, _register_token_dispatcher,
+    get_token_dispatcher, setup_token_dispatchers)
 
 
 class TestTokenDispatcherWithMC2(TestBase):

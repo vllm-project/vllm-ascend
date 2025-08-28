@@ -69,8 +69,7 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
                                 shared_gate_up: Optional[Any] = None,
                                 shared_dequant_scale: Optional[Any] = None,
                                 mc2_mask: Optional[torch.Tensor] = None,
-                                apply_router_weight_on_input: bool = False,
-                                with_quant: bool = False):
+                                apply_router_weight_on_input: bool = False):
     token_dispatcher = get_forward_context().token_dispatcher
 
     results = token_dispatcher.token_dispatch(
@@ -85,8 +84,7 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
         shared_gate_up=shared_gate_up,
         shared_dequant_scale=shared_dequant_scale,
         mc2_mask=mc2_mask,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-        with_quant=with_quant)
+        apply_router_weight_on_input=apply_router_weight_on_input)
 
     expert_output = unified_apply_mlp(
         hidden_states=results["hidden_states"],
@@ -99,8 +97,7 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
         group_list_type=results.get("group_list_type"),
         w1_scale_bias=w1_scale_bias,
         w2_scale_bias=w2_scale_bias,
-        topk_scales=results.get("topk_scales"),
-        with_quant=with_quant)
+        topk_scales=results.get("topk_scales"))
     final_hidden_states = token_dispatcher.token_combine(expert_output)
     return final_hidden_states
 
@@ -192,8 +189,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                            expert_map=expert_map,
                                            shared_experts=shared_experts,
                                            mc2_mask=kwargs.get(
-                                               "mc2_mask", None),
-                                           with_quant=False)
+                                               "mc2_mask", None))
 
 
 class AscendFusedMoE(FusedMoE):
@@ -359,6 +355,7 @@ class AscendFusedMoE(FusedMoE):
 
         ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
+        with_quant = quant_config is not None
         from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
             setup_token_dispatchers
         setup_token_dispatchers(
@@ -366,7 +363,8 @@ class AscendFusedMoE(FusedMoE):
             top_k=self.top_k,
             num_experts=self.global_num_experts,
             num_global_redundant_experts=self.global_redundant_expert_num,
-            num_local_experts=self.local_num_experts)
+            num_local_experts=self.local_num_experts,
+            with_quant=with_quant)
 
     def naive_multicast(self, x: torch.Tensor,
                         cu_tokens_across_dp_cpu: torch.Tensor):
