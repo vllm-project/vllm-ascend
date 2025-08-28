@@ -23,6 +23,7 @@ from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
@@ -116,6 +117,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         self.transpose_weight = True
 
         self.ep_group = get_ep_group()
+        self.fusion_mlp = not get_ascend_config().torchair_graph_config.enabled
 
         try:
             device_group = get_mc2_group().device_group
@@ -228,7 +230,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         return unified_fused_experts_eager(
             hidden_states=x,
             w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale,
+            w1_scale=layer.w13_weight_scale_fp32,
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
             topk_weights=topk_weights,
@@ -240,7 +242,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             shared_experts=shared_experts,
             shared_gate_up=shared_gate_up,
             shared_dequant_scale=shared_dequant_scale,
-            mc2_mask=kwargs.get("mc2_mask", None))
+            mc2_mask=kwargs.get("mc2_mask", None),
+            fusion_mlp=self.fusion_mlp)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
@@ -248,6 +251,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
+        torch_npu.npu_format_cast_(layer.w13_weight, ACL_FORMAT_FRACTAL_NZ)
         if envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP:
             torch_npu.npu_format_cast_(layer.w2_weight, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
