@@ -207,7 +207,7 @@ class AscendLogitsProcessor(LogitsProcessor):
         self,
         hidden_states: torch.Tensor,
         lm_head: AscendParallelLMHead,
-        embedding_bias: Optional[torch.Tensor],
+        embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         if lmhead_tp_enable():
             return self._get_logits_lmheadtp(hidden_states, lm_head,

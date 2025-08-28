@@ -1278,7 +1278,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logits_indices = spec_decode_metadata.logits_indices
 
         if lmhead_tp_enable():
-            max_num_reqs_across_dp = padded_num_tokens_across_dp if not with_prefill else self.max_num_reqs
+            max_num_reqs_across_dp = maybe_padded_num_tokens if not with_prefill else self.max_num_reqs
             logits_indices = nn.functional.pad(
                 logits_indices,
                 (0, max_num_reqs_across_dp - logits_indices.shape[0]))
