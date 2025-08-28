@@ -726,7 +726,7 @@ class InputBatch:
             pooling_params = [
                 self.pooling_params[req_id] for req_id in self.req_ids
             ]
-        if vllm_version_is("0.10.1.1"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             return PoolingMetadata(
                 prompt_lens=torch.from_numpy(
                     self.num_prompt_tokens[:self.num_reqs]).to(self.device),

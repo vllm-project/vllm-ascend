@@ -254,7 +254,7 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         quant_config = vllm_config.quant_config
 
         parallel_config = vllm_config.parallel_config
-        if vllm_version_is("0.10.1.1"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             self.num_redundant_experts = parallel_config.num_redundant_experts
         else:
             eplb_config = parallel_config.eplb_config
