@@ -547,9 +547,8 @@ def fused_experts_with_allgather(hidden_states: torch.Tensor,
     batch_size, hidden_size = hidden_states.shape
     topk_weights = topk_weights.to(hidden_states.dtype)
 
-    ep_group = get_ep_group().device_group
-    ep_rank = torch.distributed.get_rank(group=ep_group)
-    ep_size = torch.distributed.get_world_size(ep_group)
+    ep_rank = get_ep_group().rank_in_group
+    ep_size = get_ep_group().world_size
 
     global_num_experts = len(expert_map)
     local_num_experts = global_num_experts // ep_size

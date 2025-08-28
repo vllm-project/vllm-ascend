@@ -24,10 +24,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import torch_npu
+from pytest_mock import MockerFixture
 from vllm.model_executor.layers.activation import SiluAndMul
 
 from vllm_ascend.ops.fused_moe import fused_experts
 from vllm_ascend.ops.layers.experts_selector import select_experts
+from vllm_ascend.quantization.w8a8_dynamic import fused_experts_with_allgather
 
 NUM_EXPERTS = [8, 64]
 EP_SIZE = [1, 4]
@@ -192,3 +195,50 @@ def test_select_experts_missing_group_params(device: str):
                        use_grouped_topk=True,
                        renormalize=False,
                        scoring_func="softmax")
+
+
+def mock_ep_and_group(mocker):
+    mock_group = mocker.MagicMock()
+    mock_group.rank_in_group = 0
+    mock_group.rank = 0
+    mock_group.world_size = 4
+    mock_group.device_group = "mock_group_ep"
+    return mock_group
+
+
+@pytest.fixture
+def mock_dist_env(mocker: MockerFixture):
+    with patch('vllm_ascend.quantization.w8a8_dynamic.get_ep_group',
+               return_value=mock_ep_and_group(mocker)):
+        yield
+
+
+@pytest.mark.parametrize("global_num_experts", [4])
+def test_fused_experts_with_allgather(mock_dist_env, global_num_experts):
+    x = torch.randn(8, 7168, dtype=torch.bfloat16, device="npu")
+    topk_weights = torch.randn(8, 8, dtype=torch.bfloat16, device="npu")
+    topk_ids = torch.randint(low=0,
+                             high=global_num_experts,
+                             size=(8, 8),
+                             dtype=torch.int32,
+                             device="npu")
+    top_k = 8
+    w13_weight = torch.randn(1, 7168, 4096, dtype=torch.int8, device="npu")
+    w13_weight_scale = torch.randn(1, 4096, dtype=torch.bfloat16, device="npu")
+    w2_weight = torch.randn(1, 2048, 7168, dtype=torch.int8, device="npu")
+    w2_weight_nz = torch_npu.npu_format_cast(w2_weight, 29)
+    w2_weight_scale = torch.randn(1, 7168, dtype=torch.bfloat16, device="npu")
+    expert_map = torch.ones(global_num_experts,
+                            dtype=torch.int32,
+                            device="npu")
+
+    result = fused_experts_with_allgather(hidden_states=x,
+                                          w1=w13_weight,
+                                          w1_scale=w13_weight_scale,
+                                          w2=w2_weight_nz,
+                                          w2_scale=w2_weight_scale,
+                                          topk_weights=topk_weights,
+                                          topk_ids=topk_ids,
+                                          top_k=top_k,
+                                          expert_map=expert_map)
+    assert result.shape == (8, 7168)
