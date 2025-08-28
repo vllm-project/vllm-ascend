@@ -136,11 +136,23 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
+    # FlashComm optimization: Enable v1 and v2 by setting this flag to 1 or 2 respectively
+    "VLLM_ASCEND_ENABLE_FLASHCOMM":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0')),
+    # LcocMatmulReduceScatter optimization
+    "VLLM_ASCEND_ENABLE_LCOC_MATMUL_RS":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_LCOC_MATMUL_RS", '0')),
+    # LcocAllGatherMatmul optimization
+    "VLLM_ASCEND_ENABLE_LCOC_AG_MATMUL":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_LCOC_AG_MATMUL", '0')),
     # Whether to enable the alltoall_seq flag, this provides a basic framework on the basis of alltoall for easy expansion.
     #   0: default, normal init.
     #   1: enable moe all2all seq.
     "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ":
     lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ', '0'))),
+    # Whether to enable dense model and general optimizations for better performance.
+    "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE", '0'))),
     # Whether to enable mlp optimize when tensor parallel is enabled.
     # this feature in eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
