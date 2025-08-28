@@ -60,6 +60,7 @@ class TorchairGraphConfig:
 
     def __init__(self, torchair_graph_config):
         self.enabled = torchair_graph_config.get("enabled", False)
+        self.mode = torchair_graph_config.get("mode", 'max-autotune')
         self.use_cached_graph = torchair_graph_config.get(
             "use_cached_graph", False)
         self.graph_batch_sizes = torchair_graph_config.get(
