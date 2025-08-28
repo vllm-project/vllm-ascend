@@ -865,4 +865,3 @@ class TestUnifiedApplyMLP(TestBase):
 
         self.assertEqual(result.shape, hidden_states.shape)
         self.assertEqual(result.dtype, torch.bfloat16)
-
