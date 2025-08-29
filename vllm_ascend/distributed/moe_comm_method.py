@@ -54,7 +54,7 @@ class MoECommMethod(ABC):
         topk_weights: torch.Tensor,
         expert_map: torch.Tensor,
         num_experts: int,
-        use_a8: bool,
+        apply_a8_quantization: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
         """Pre-process before MLP.
 
@@ -65,6 +65,7 @@ class MoECommMethod(ABC):
             expert_map (torch.Tensor): Tensor of shape (global_num_experts, )
                 Mapping from global expert IDs to local expert IDs.
             num_experts (int): Number of local experts (experts on this device).
+            apply_a8_quantization (bool): Whether to apply A8 quantization (W4A8 and W8A8).
 
         Returns:
             tuple[torch.Tensor, torch.Tensor, int]: Return a tuple containing:
@@ -73,6 +74,8 @@ class MoECommMethod(ABC):
                     hidden_states based on topk_ids.
                 - expert_tokens (torch.Tensor): Tensor of shape (num_experts, )
                     Number of tokens assigned to each expert.
+                - dynamic_scale (torch.Tensor, optional): Tensor of shape (num_experts, )
+                    Dynamic scale for each expert, used for quantization.
                 - group_list_type (int): Type of group list, 0 for `cumsum`
                     and 1 for `count`. This is mainly for `npu_grouped_matmul`
                     to determine how to handle the output.
@@ -160,7 +163,7 @@ class AllGatherCommImpl(MoECommMethod):
         topk_weights: torch.Tensor,
         expert_map: torch.Tensor,  # noqa: F841
         num_experts: int,
-        use_a8: bool,
+        apply_a8_quantization: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
         num_tokens = hidden_states.shape[0]
 
@@ -221,7 +224,7 @@ class NativeAllGatherCommImpl(AllGatherCommImpl):
         topk_weights: torch.Tensor,
         expert_map: torch.Tensor,
         num_experts: int,
-        use_a8: bool,
+        apply_a8_quantization: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
         num_tokens = hidden_states.shape[0]
 
@@ -378,7 +381,7 @@ class MC2CommImpl(MoECommMethod):
         topk_weights: torch.Tensor,
         expert_map: torch.Tensor,
         num_experts: int,
-        use_a8: bool,
+        apply_a8_quantization: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
         # Store tensors needed for post_process
         self.topk_ids = topk_ids
@@ -392,7 +395,7 @@ class MC2CommImpl(MoECommMethod):
             "moe_expert_num": self.moe_config.num_experts,
             "global_bs": 0,
             "scales": None,
-            "quant_mode": 2 if use_a8 else 0,
+            "quant_mode": 2 if apply_a8_quantization else 0,
             "group_ep": self.mc2_comm_name,
             "ep_world_size": self.moe_config.ep_size,
             "ep_rank_id": self.moe_config.ep_rank,
@@ -536,13 +539,15 @@ class AlltoAllCommImpl(MoECommMethod):
         topk_weights: torch.Tensor,
         expert_map: torch.Tensor,
         num_experts: int,
-        use_a8: bool,
+        apply_a8_quantization: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], int]:
-        results = self.token_dispatcher.token_dispatch(hidden_states,
-                                                       topk_weights,
-                                                       topk_ids,
-                                                       None,
-                                                       log2phy=None)
+        results = self.token_dispatcher.token_dispatch(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            None,
+            log2phy=None,
+            with_quant=apply_a8_quantization)
         return results["hidden_states"], results["group_list"], results[
             "dynamic_scale"], results["group_list_type"]
 

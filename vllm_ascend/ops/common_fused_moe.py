@@ -287,12 +287,10 @@ class AscendFusedMoE(FusedMoE):
             has_bias,
         )
 
-        with_quant = quant_config is not None
         setup_token_dispatchers(self.moe_config.ep_size,
                                 top_k=self.top_k,
                                 num_experts=self.global_num_experts,
-                                num_local_experts=self.local_num_experts,
-                                with_quant=with_quant)
+                                num_local_experts=self.local_num_experts)
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
