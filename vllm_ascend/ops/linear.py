@@ -57,7 +57,6 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         *,
         return_bias: bool = True,
     ):
-        # Divide the weight matrix along the last dimension.
         self.comm_group = None
         if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
             self.comm_group = get_mlp_tp_group()
@@ -133,7 +132,6 @@ class AscendRowParallelLinear(RowParallelLinear):
         *,
         return_bias: bool = True,
     ):
-
         if prefix.find("down_proj") != -1 and mlp_tp_enable():
             comm_group = get_mlp_tp_group()
             self.forward_type = "mlp_tp"
@@ -301,8 +299,6 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         *,
         return_bias: bool = True,
     ):
-
-        # Divide the weight matrix along the last dimension.
         self.comm_group = None
         if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
             self.comm_group = get_mlp_tp_group()
