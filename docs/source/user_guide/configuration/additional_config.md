@@ -34,6 +34,7 @@ The following table lists the additional configuration options available in vLLM
 | `enable_prefetch`     | bool | `False` | Whether to enable weight prefetch. |
 | `kv_cache_dtype`     | str | `None` | When using the kv cache quantization method, kv cache dtype needs to be set, currently only int8 is supported. |
 | `enable_shared_expert_dp`     | bool | `False` | When the shared expert in DP, it has better performance but consumes more memory. Currently only DeepSeek series models are supported to use. |
+| `lmhead_tensor_parallel_size` | int | `None` | The custom tensor parallel size of lmhead. |
 
 The details of each config option are as follows:
 

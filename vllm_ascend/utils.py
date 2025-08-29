@@ -33,6 +33,7 @@ from torch_npu.npu.streams import Event
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -489,6 +490,9 @@ def register_ascend_customop():
                                         AscendMlpRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+    from vllm_ascend.ops.vocab_parallel_embedding import (
+        AscendLogitsProcessor, AscendParallelLMHead,
+        AscendVocabParallelEmbedding)
     CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
     CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
                           name="SiluAndMul")
@@ -497,6 +501,12 @@ def register_ascend_customop():
     CustomOp.register_oot(
         _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
         name="DeepseekScalingRotaryEmbedding")
+    CustomOp.register_oot(_decorated_op_cls=AscendVocabParallelEmbedding,
+                          name="VocabParallelEmbedding")
+    CustomOp.register_oot(_decorated_op_cls=AscendParallelLMHead,
+                          name="ParallelLMHead")
+    CustomOp.register_oot(_decorated_op_cls=AscendLogitsProcessor,
+                          name="LogitsProcessor")
     if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
         CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
                               name="ColumnParallelLinear")
@@ -511,11 +521,6 @@ def register_ascend_customop():
 
     from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
     CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
-
-    from vllm_ascend.ops.vocab_parallel_embedding import \
-        AscendVocabParallelEmbedding
-    CustomOp.register_oot(_decorated_op_cls=AscendVocabParallelEmbedding,
-                          name="VocabParallelEmbedding")
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
@@ -547,3 +552,7 @@ def get_ascend_soc_version():
     global _ascend_soc_version
     assert _ascend_soc_version is not None
     return _ascend_soc_version
+
+
+def lmhead_tp_enable() -> bool:
+    return get_ascend_config().lmhead_tensor_parallel_size is not None

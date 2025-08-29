@@ -31,6 +31,11 @@ class TestTorchairDeepSeekMultiTokenPredictorLayer(PytestBase):
         mocker_deepseek_v2_decode_layer = mocker.patch(
             "vllm_ascend.torchair.models.torchair_deepseek_v2.TorchairDeepseekV2DecoderLayer.__init__",
             return_value=None)
+        mocker.patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
+            return_value=None)
+        mocker.patch("vllm_ascend.utils.get_ascend_config",
+                     return_value=mocker.Mock())
 
         mtp_layer = TorchairDeepSeekMultiTokenPredictorLayer(config, "", None)
         mocker_deepseek_v2_decode_layer.assert_called_once()
@@ -83,6 +88,11 @@ class TestTorchairDeepSeekMultiTokenPredictor(PytestBase):
         mocker.patch(
             "vllm_ascend.torchair.models.torchair_deepseek_mtp.TorchairDeepSeekMultiTokenPredictorLayer.__init__",
             return_value=None)
+        mocker.patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
+            return_value=None)
+        mocker.patch("vllm_ascend.utils.get_ascend_config",
+                     return_value=mocker.Mock())
 
         predictor = TorchairDeepSeekMultiTokenPredictor(
             vllm_config=mock_vllm_config)
@@ -157,6 +167,11 @@ class TestTorchairDeepSeekMTP(PytestBase):
             return_value=None)
         mocker.patch("vllm.model_executor.layers.sampler.get_sampler",
                      return_value=None)
+        mocker.patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
+            return_value=None)
+        mocker.patch("vllm_ascend.utils.get_ascend_config",
+                     return_value=mocker.Mock())
 
         mtp = TorchairDeepSeekMTP(vllm_config=vllm_config)
         return mtp

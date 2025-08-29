@@ -16,7 +16,7 @@
 import os
 
 from transformers import PretrainedConfig
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (_check_torchair_supported,
@@ -75,7 +75,7 @@ class TestAscendConfig(TestBase):
                 "enabled": True
             },
             "expert_map_path": "test_expert_map_path",
-            "refresh": True
+            "refresh": True,
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
@@ -303,4 +303,13 @@ class TestAscendConfig(TestBase):
                 },
                 "refresh": True
             }
+            init_ascend_config(test_vllm_config)
+
+        with self.assertRaises(AssertionError):
+            test_vllm_config.additional_config = {
+                "lmhead_tensor_parallel_size": 2,
+                "refresh": True
+            }
+            test_vllm_config.parallel_config = ParallelConfig(
+                data_parallel_size=4, tensor_parallel_size=2)
             init_ascend_config(test_vllm_config)
