@@ -1,6 +1,6 @@
 # Multi-Node-Ray (Qwen/Qwen3-235B-A22B)
 
-Multi-node inference is suitable for scenarios where the model cannot be deployed on a single NPU. In such cases, the model can be distributed using tensor parallelism and pipeline parallelism. The specific parallelism strategies will be covered in the following sections. To successfully deploy multi-node inference, the following three steps need to be completed:
+Multi-node inference is suitable for the scenarios that the model cannot be deployed on a single machine. In such cases, the model can be distributed using tensor parallelism or pipeline parallelism. The specific parallelism strategies will be covered in the following sections. To successfully deploy multi-node inference, the following three steps need to be completed:
 
 * **Verify Multi-Node Communication Environment**
 * **Set Up and Start the Ray Cluster**
@@ -10,7 +10,7 @@ Multi-node inference is suitable for scenarios where the model cannot be deploye
 
 ### Physical Layer Requirements:
 
-* The physical machines must be located on the same WLAN, with network connectivity.
+* The physical machines must be located on the same LAN, with network connectivity.
 * All NPUs are connected with optical modules, and the connection status must be normal.
 
 ### Verification Process:
@@ -82,7 +82,7 @@ docker run --rm \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /mnt/sfs_turbo/.cache:/root/.cache \
+-v /path/to/shared/cache:/root/.cache \ # IMPORTANT: This must be a shared directory accessible by all nodes
 -it $IMAGE bash
 ```
 
@@ -148,7 +148,6 @@ vllm Qwen/Qwen3-235B-A22B \
   --max-num-seqs 25 \
   --served-model-name qwen \
   --trust-remote-code \
-  --enforce-eager \
   --gpu-memory-utilization 0.9
 ```
 
@@ -164,7 +163,6 @@ vllm Qwen/Qwen3-235B-A22B \
   --max-num-seqs 25 \
   --served-model-name qwen \
   --trust-remote-code \
-  --enforce-eager \
   --gpu-memory-utilization 0.9
 ```
 
