@@ -22,10 +22,10 @@ import torch_npu
 from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEParallelConfig  # isort: skip
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE, UnquantizedFusedMoEMethod)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,

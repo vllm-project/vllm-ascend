@@ -29,10 +29,7 @@ import torch_npu
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.distributed.tensor_parallel import (
-    all_gather_last_dim_from_tensor_parallel_region, all_to_all_hp2sp,
-    all_to_all_sp2hp, gather_from_sequence_parallel_region,
-    reduce_scatter_last_dim_to_tensor_parallel_region)
+from vllm_ascend.distributed.tensor_parallel import gather_from_sequence_parallel_region
 from vllm_ascend.ops.comm_utils import async_all_to_all
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 

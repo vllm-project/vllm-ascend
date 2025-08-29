@@ -38,7 +38,6 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.communication_op import \
