@@ -211,5 +211,5 @@ Try to adjust the arg `cuda-capture-sizes` to address this:
 
 ```bash
 vllm serve ... \
-cuda-capture-sizes=num_capture_sizes
+--cuda-capture-sizes=num_capture_sizes
 ```
