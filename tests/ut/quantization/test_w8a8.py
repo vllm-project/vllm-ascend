@@ -716,8 +716,19 @@ class TestSelectExperts(TestBase):
         self.hidden_states = torch.randn(self.num_tokens, self.hidden_size)
         self.router_logits = torch.randn(self.num_tokens, self.num_experts)
 
-    def test_softmax_scoring(self):
+    @patch('torch_npu.npu_moe_gating_top_k_softmax')
+    def test_softmax_scoring(self, mock_topk):
         """Test softmax scoring function"""
+        mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
+                                  torch.zeros(self.num_tokens,
+                                              self.top_k,
+                                              dtype=torch.long),
+                                  torch.arange(0,
+                                               self.num_tokens * self.top_k,
+                                               dtype=torch.int32).view(
+                                                   self.top_k,
+                                                   -1).permute(1,
+                                                               0).contiguous())
 
         weights, ids, _ = select_experts(hidden_states=self.hidden_states,
                                          router_logits=self.router_logits,
@@ -816,13 +827,19 @@ class TestSelectExperts(TestBase):
         self.assertEqual(ids.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.dtype, torch.int32)
 
-    @patch('torch.topk')
+    @patch('torch_npu.npu_moe_gating_top_k_softmax')
     def test_renormalize(self, mock_topk):
-        """Test weight renormalization"""
+        """Test renormalization"""
         mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
                                   torch.zeros(self.num_tokens,
                                               self.top_k,
-                                              dtype=torch.long))
+                                              dtype=torch.long),
+                                  torch.arange(0,
+                                               self.num_tokens * self.top_k,
+                                               dtype=torch.int32).view(
+                                                   self.top_k,
+                                                   -1).permute(1,
+                                                               0).contiguous())
 
         weights, ids, _ = select_experts(
             hidden_states=self.hidden_states,
@@ -836,13 +853,19 @@ class TestSelectExperts(TestBase):
         sums = weights.sum(dim=-1)
         self.assertTrue(torch.allclose(sums, torch.ones_like(sums)))
 
-    @patch('torch.topk')
+    @patch('torch_npu.npu_moe_gating_top_k_softmax')
     def test_output_dtypes(self, mock_topk):
         """Test output dtypes"""
         mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
                                   torch.zeros(self.num_tokens,
                                               self.top_k,
-                                              dtype=torch.long))
+                                              dtype=torch.long),
+                                  torch.arange(0,
+                                               self.num_tokens * self.top_k,
+                                               dtype=torch.int32).view(
+                                                   self.top_k,
+                                                   -1).permute(1,
+                                                               0).contiguous())
 
         weights, ids, _ = select_experts(
             hidden_states=self.hidden_states,
