@@ -243,6 +243,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             shared_gate_up=shared_gate_up,
             shared_dequant_scale=shared_dequant_scale,
             mc2_mask=kwargs.get("mc2_mask", None),
+            with_quant=True,
             fusion_mlp=self.fusion_mlp)
 
     def process_weights_after_loading(self, layer):

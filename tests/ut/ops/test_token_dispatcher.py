@@ -263,7 +263,6 @@ class TestTokenDispatcherWithAllGather(TestBase):
             "max_num_tokens": 100,
             "ep_size": 2,
             "num_experts": 128,
-            "with_quant": True,
         }
         self.dispatcher_quant = TokenDispatcherWithAllGather(**kwargs)
 
@@ -460,8 +459,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
     def test_token_dispatch_with_quant(self):
         self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2,
                                                       num_experts=4,
-                                                      num_local_experts=2,
-                                                      with_quant=True)
+                                                      num_local_experts=2)
 
         hidden_states = torch.randn(8, 16)
         topk_weights = torch.rand(8, 4)
@@ -476,7 +474,8 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
                                                 topk_weights=topk_weights,
                                                 topk_ids=topk_ids,
                                                 row_idx=self.row_idx,
-                                                expert_map=expert_map)
+                                                expert_map=expert_map,
+                                                with_quant=True)
 
         self.assertIsNotNone(result["hidden_states"])
         self.assertIsNotNone(result["group_list"])
@@ -486,8 +485,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
     def test_token_dispatch_with_quant_no_active_tokens(self):
         self.dispatcher = TokenDispatcherWithAll2AllV(top_k=2,
                                                       num_experts=4,
-                                                      num_local_experts=2,
-                                                      with_quant=True)
+                                                      num_local_experts=2)
 
         self.mock_repeat_interleave.return_value = torch.tensor(
             [], dtype=torch.long)
@@ -505,7 +503,8 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
                                                 topk_weights=topk_weights,
                                                 topk_ids=topk_ids,
                                                 row_idx=self.row_idx,
-                                                expert_map=expert_map)
+                                                expert_map=expert_map,
+                                                with_quant=True)
 
         self.assertIsNotNone(result["hidden_states"])
         self.assertIsNotNone(result["group_list"])
