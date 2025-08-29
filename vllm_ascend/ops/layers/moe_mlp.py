@@ -177,8 +177,10 @@ def unified_apply_mlp(
         group_list_type: int = 1,
         w1_scale_bias: torch.Tensor = None,
         w2_scale_bias: torch.Tensor = None,
-        topk_scales: Optional[torch.Tensor] = None) -> torch.Tensor:
-    if get_forward_context().with_quant:
+        topk_scales: Optional[torch.Tensor] = None,
+        with_quant: bool = False) -> torch.Tensor:
+
+    if with_quant:
         return quant_apply_mlp(hidden_states=hidden_states,
                                w1=w1,
                                w1_scale=w1_scale,
