@@ -58,7 +58,7 @@ class AddRMSNormW8A8Quant(RMSNorm):
         return x
 
 
-class AscendRMSNorm(GemmaRMSNorm):
+class AscendRMSNorm(RMSNorm):
 
     def forward_oot(
         self,
@@ -85,7 +85,7 @@ class AscendRMSNorm(GemmaRMSNorm):
         return x
 
 
-class AscendGemmaRMSNorm(RMSNorm):
+class AscendGemmaRMSNorm(GemmaRMSNorm):
 
     def forward_oot(
         self,
