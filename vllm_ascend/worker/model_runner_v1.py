@@ -90,8 +90,7 @@ from vllm_ascend.torchair.torchair_attention import AscendTorchairMetadata
 from vllm_ascend.torchair.torchair_mla import AscendMLATorchairMetadata
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                ProfileExecuteDuration, is_310p,
-                               lmhead_tp_enable, vllm_version_is,
-                               embedding_tp_enable)
+                               lmhead_tp_enable, vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch

@@ -21,8 +21,8 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 from vllm.distributed import divide, tensor_model_parallel_all_reduce
-from vllm.distributed.parallel_state import get_tp_group
-import torch.distributed as dist
+from vllm.distributed.parallel_state import get_dp_group, get_tp_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
@@ -30,12 +30,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, UnquantizedEmbeddingMethod,
     VocabParallelEmbedding, pad_vocab_size)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.distributed.parallel_state import get_dp_group
-from vllm.forward_context import get_forward_context   
 from vllm.utils import logger
 
-from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group, get_emtp_group
-from vllm_ascend.utils import lmhead_tp_enable, embedding_tp_enable
+from vllm_ascend.distributed.parallel_state import (get_emtp_group,
+                                                    get_lmhead_tp_group)
+from vllm_ascend.utils import embedding_tp_enable, lmhead_tp_enable
 
 
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
@@ -150,30 +149,41 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         input_ = vocab_mask * (input_ - valid_offset)
         return input_, ~vocab_mask
 
-    def _get_local_batch_slice(self, tensor: torch.Tensor, 
-                              batch_sizes: list, 
-                              local_batch_size: int, 
-                              rank: int) -> torch.Tensor:
+    def _get_local_batch_slice(self, tensor: torch.Tensor, batch_sizes: list,
+                               local_batch_size: int,
+                               rank: int) -> torch.Tensor:
         end_idx = batch_sizes[rank]
         start_idx = end_idx - local_batch_size
         return tensor[start_idx:end_idx]
-    
+
     def forward(self, input_):
         if embedding_tp_enable():
-            logger.info(f"rank:{get_dp_group().rank_in_group}  embedding_tp_enable")
+            logger.info(
+                f"rank:{get_dp_group().rank_in_group}  embedding_tp_enable")
             return self._forward_embed_tp(input_)
         else:
             return self._forward_normal(input_)
-        
+
     def _forward_embed_tp(self, input_):
-        cu_tokens_across_dp_cpu = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
-        global_dp_batch_size = torch.diff(cu_tokens_across_dp_cpu, prepend=cu_tokens_across_dp_cpu.new_zeros(1))
-        logger.info(f"debug input_: {input_.shape} \n global_dp_batch_size: {global_dp_batch_size}\n ")
-        lmhead_group_batch_size = [global_dp_batch_size[x] for x in get_lmhead_tp_group().ranks]
+        cu_tokens_across_dp_cpu = get_forward_context(
+        ).dp_metadata.cu_tokens_across_dp_cpu
+        global_dp_batch_size = torch.diff(
+            cu_tokens_across_dp_cpu,
+            prepend=cu_tokens_across_dp_cpu.new_zeros(1))
+        logger.info(
+            f"debug input_: {input_.shape} \n global_dp_batch_size: {global_dp_batch_size}\n "
+        )
+        lmhead_group_batch_size = [
+            global_dp_batch_size[x] for x in get_lmhead_tp_group().ranks
+        ]
         local_batch_size = input_.size(0)
-        gathered_input = [torch.empty(batch_size, dtype=input_.dtype, device='npu') for batch_size in lmhead_group_batch_size]
-        torch.distributed.all_gather(
-            gathered_input, input_, group=get_lmhead_tp_group().device_group)
+        gathered_input = [
+            torch.empty(batch_size, dtype=input_.dtype, device='npu')
+            for batch_size in lmhead_group_batch_size
+        ]
+        torch.distributed.all_gather(gathered_input,
+                                     input_,
+                                     group=get_lmhead_tp_group().device_group)
         complete_input = torch.cat(gathered_input, dim=0)
         masked_input, input_mask = self._get_masked_input_and_mask(
             complete_input, self.shard_indices.org_vocab_start_index,
@@ -182,26 +192,24 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
             self.shard_indices.added_vocab_start_index,
             self.shard_indices.added_vocab_end_index)
         logger.info(f"all_gather_down complete_input: {complete_input.shape}")
-        
+
         output = self.quant_method.embedding(self, masked_input.long())
         output.masked_fill_(input_mask.unsqueeze(-1), 0)
         output = tensor_model_parallel_all_reduce(output)
         #         output = output[lmhead_group_batch_size[get_lmhead_tp_group().rank_in_group]-local_batch_size :lmhead_group_batch_size[get_lmhead_tp_group().rank_in_group]]
         # Extract the local batch portion from the gathered output
         lmhead_tp_group = get_lmhead_tp_group()
-        output = self._get_local_batch_slice(
-            output, 
-            lmhead_group_batch_size, 
-            local_batch_size, 
-            lmhead_tp_group.rank_in_group
-        )
-        logger.info(f"rank:{get_dp_group().rank_in_group}  output: {output.shape}")
+        output = self._get_local_batch_slice(output, lmhead_group_batch_size,
+                                             local_batch_size,
+                                             lmhead_tp_group.rank_in_group)
+        logger.info(
+            f"rank:{get_dp_group().rank_in_group}  output: {output.shape}")
         return output
 
     def _forward_normal(self, input_):
         if self.tp_size > 1:
             # Build the mask.
-            masked_input, input_mask = get_masked_input_and_mask(
+            masked_input, input_mask = self._get_masked_input_and_mask(
                 input_, self.shard_indices.org_vocab_start_index,
                 self.shard_indices.org_vocab_end_index,
                 self.shard_indices.num_org_vocab_padding,
@@ -209,16 +217,23 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
                 self.shard_indices.added_vocab_end_index)
         else:
             masked_input = input_
-        logger.info(f"rank:{get_dp_group().rank_in_group}  masked_input:{masked_input.shape}")
+        logger.info(
+            f"rank:{get_dp_group().rank_in_group}  masked_input:{masked_input.shape}"
+        )
         # Get the embeddings.
-        output_parallel = self.quant_method.embedding(self, masked_input.long())
-        logger.info(f"rank:{get_dp_group().rank_in_group}  output_parallel:{output_parallel.shape}")
+        output_parallel = self.quant_method.embedding(self,
+                                                      masked_input.long())
+        logger.info(
+            f"rank:{get_dp_group().rank_in_group}  output_parallel:{output_parallel.shape}"
+        )
         # Mask the output embedding.
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
         # Reduce across all the model parallel GPUs.
         output = tensor_model_parallel_all_reduce(output_parallel)
-        logger.info(f"rank:{get_dp_group().rank_in_group}  forward_normal output:{output.shape}")
+        logger.info(
+            f"rank:{get_dp_group().rank_in_group}  forward_normal output:{output.shape}"
+        )
         return output
 
 
