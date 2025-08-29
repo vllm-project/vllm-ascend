@@ -51,6 +51,16 @@ class AscendConfig:
             "enable_shared_expert_dp", False
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
         self.enable_prefetch = additional_config.get("enable_prefetch", False)
+        self.lmhead_tensor_parallel_size = additional_config.get(
+            "lmhead_tensor_parallel_size", None)
+        if self.lmhead_tensor_parallel_size is not None:
+            logger.info(
+                f"Enable lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size} in pure DP scenario"
+            )
+            if vllm_config.parallel_config.tensor_parallel_size != 1:
+                raise AssertionError(
+                    "lmhead_tensor_parallel_size is only supported in the pure DP scenario"
+                )
 
 
 class TorchairGraphConfig:

@@ -6,15 +6,24 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
                                              init_model_parallel_group)
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
 _MLP_TP: Optional[GroupCoordinator] = None
 
+_LMTP: Optional[GroupCoordinator] = None
+
 
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, ("mc2 group is not initialized")
     return _MC2
+
+
+def get_lmhead_tp_group() -> GroupCoordinator:
+    assert _LMTP is not None, (
+        "lm head tensor parallel group is not initialized")
+    return _LMTP
 
 
 def get_mlp_tp_group() -> GroupCoordinator:
@@ -65,6 +74,23 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                             backend,
                                             group_name="mlp_tp")
 
+    lmhead_tensor_parallel_size = get_ascend_config(
+    ).lmhead_tensor_parallel_size
+    if lmhead_tensor_parallel_size is not None:
+        group_ranks = []
+        global _LMTP
+        num_lmhead_tensor_parallel_groups: int = (world_size //
+                                                  lmhead_tensor_parallel_size)
+        for i in range(num_lmhead_tensor_parallel_groups):
+            ranks = list(
+                range(i * lmhead_tensor_parallel_size,
+                      (i + 1) * lmhead_tensor_parallel_size))
+            group_ranks.append(ranks)
+        _LMTP = init_model_parallel_group(group_ranks,
+                                          get_world_group().local_rank,
+                                          backend,
+                                          group_name="lmheadtp")
+
 
 def get_mlp_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
@@ -86,3 +112,8 @@ def destroy_ascend_model_parallel():
     if _MLP_TP:
         _MLP_TP.destroy()
     _MLP_TP = None
+
+    global _LMTP
+    if _LMTP:
+        _LMTP.destroy()
+    _LMTP = None
