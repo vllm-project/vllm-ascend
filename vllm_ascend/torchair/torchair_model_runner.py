@@ -100,7 +100,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             num_tokens_across_dp = torch.full((self.dp_size, ),
                                               maybe_padded_num_tokens,
                                               dtype=torch.int32,
-                                              device="cpu")
+                                              device="npu")
         else:
             maybe_padded_num_tokens = num_tokens
 
