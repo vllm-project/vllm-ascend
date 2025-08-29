@@ -99,8 +99,6 @@ def set_ascend_forward_context(
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
 
-        with_quant = vllm_config.quant_config is not None
-        forward_context.with_quant = with_quant
         from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
             get_token_dispatcher
         dispatcher_name = get_dispatcher_name(ep_size, with_prefill)

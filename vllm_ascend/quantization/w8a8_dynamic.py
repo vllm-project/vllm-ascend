@@ -406,7 +406,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             shared_experts=shared_experts,
             shared_gate_up=shared_gate_up,
             shared_dequant_scale=shared_dequant_scale,
-            mc2_mask=kwargs.get("mc2_mask", None))
+            mc2_mask=kwargs.get("mc2_mask", None),
+            with_quant=True)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
