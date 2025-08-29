@@ -193,6 +193,10 @@ This is more likely to happen when you're using A3. Please refer to the empirica
 
 ```python
 # pg_num: the number of process groups for communication
+pg_num = sum(size > 1 for size in [
+    parallel_config.data_parallel_size,
+    parallel_config.tensor_parallel_size,
+])
 # num_hidden_layer: number of hidden layers of the model
 
 # for A2:
