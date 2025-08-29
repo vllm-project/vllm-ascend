@@ -6,6 +6,7 @@ import pytest
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
+from vllm_ascend.ascend_config import clear_ascend_config
 
 MODELS = [
     # for MHA
@@ -102,6 +103,8 @@ def test_prefix_cache_with_ascend_scheduler(model: str,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_output = vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
 
+    clear_ascend_config()
+
     with VllmRunner(model,
                     additional_config={
                         'ascend_scheduler_config': {
@@ -115,6 +118,8 @@ def test_prefix_cache_with_ascend_scheduler(model: str,
                     gpu_memory_utilization=0.7) as vllm_model:
         prefix_cache_output = vllm_model.generate_greedy(
             INPUT_PROMPTS, max_tokens)
+
+    clear_ascend_config()
 
     with VllmRunner(model,
                     additional_config={
@@ -130,6 +135,8 @@ def test_prefix_cache_with_ascend_scheduler(model: str,
                     gpu_memory_utilization=0.7) as vllm_model:
         chunk_prefill_prefix_cache_output = vllm_model.generate_greedy(
             INPUT_PROMPTS, max_tokens)
+
+    clear_ascend_config()
 
     check_outputs_equal(
         outputs_0_lst=vllm_output,
