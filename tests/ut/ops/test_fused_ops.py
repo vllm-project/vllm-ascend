@@ -538,6 +538,7 @@ class TestUnifiedApplyMLP(TestBase):
                                                      mock_get_forward_context):
 
         mock_forward_context = MagicMock()
+        mock_forward_context.with_quant = True
         mock_forward_context.fused_moe_state = FusedMoEState.MC2
         mock_get_forward_context.return_value = mock_forward_context
 
@@ -578,10 +579,10 @@ class TestUnifiedApplyMLP(TestBase):
                                    group_list_type=1,
                                    w1_scale_bias=None,
                                    w2_scale_bias=None,
-                                   topk_scales=None,
-                                   with_quant=True)
+                                   topk_scales=None)
 
         mock_get_forward_context.assert_called()
+        self.assertTrue(mock_forward_context.with_quant)
         self.assertEqual(mock_forward_context.fused_moe_state,
                          FusedMoEState.MC2)
 
@@ -593,15 +594,19 @@ class TestUnifiedApplyMLP(TestBase):
 
         self.assertEqual(result.dtype, torch.bfloat16)
 
+    @patch('vllm_ascend.ops.layers.moe_mlp.get_forward_context')
     @patch('vllm_ascend.ops.layers.moe_mlp.is_310p')
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_swiglu')
     @patch('torch_npu.npu_dynamic_quant')
-    def test_unified_apply_mlp_without_quantization(self,
-                                                    mock_npu_dynamic_quant,
-                                                    mock_npu_swiglu,
-                                                    mock_npu_grouped_matmul,
-                                                    mock_is_310p):
+    def test_unified_apply_mlp_without_quantization(
+            self, mock_npu_dynamic_quant, mock_npu_swiglu,
+            mock_npu_grouped_matmul, mock_is_310p, mock_get_forward_context):
+
+        mock_forward_context = MagicMock()
+        mock_forward_context.with_quant = False
+        mock_get_forward_context.return_value = mock_forward_context
+
         mock_is_310p.return_value = False
 
         mock_npu_grouped_matmul.side_effect = [[
@@ -626,8 +631,10 @@ class TestUnifiedApplyMLP(TestBase):
                                    group_list_type=1,
                                    w1_scale_bias=None,
                                    w2_scale_bias=None,
-                                   topk_scales=topk_scales,
-                                   with_quant=False)
+                                   topk_scales=topk_scales)
+
+        mock_get_forward_context.assert_called()
+        self.assertFalse(mock_forward_context.with_quant)
 
         self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
         mock_npu_swiglu.assert_called_once()
@@ -683,10 +690,10 @@ class TestUnifiedApplyMLP(TestBase):
                                    group_list_type=1,
                                    w1_scale_bias=w1_scale_bias,
                                    w2_scale_bias=w2_scale_bias,
-                                   topk_scales=None,
-                                   with_quant=True)
+                                   topk_scales=None)
 
         mock_get_forward_context.assert_called()
+        self.assertTrue(mock_forward_context.with_quant)
 
         self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
         mock_npu_swiglu.assert_called_once()
@@ -695,13 +702,19 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertEqual(result.shape, hidden_states.shape)
         self.assertEqual(result.dtype, torch.bfloat16)
 
+    @patch('vllm_ascend.ops.layers.moe_mlp.get_forward_context')
     @patch('vllm_ascend.ops.layers.moe_mlp.is_310p')
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_swiglu')
     @patch('torch_npu.npu_dynamic_quant')
     def test_unified_apply_mlp_without_quantization_310p(
             self, mock_npu_dynamic_quant, mock_npu_swiglu,
-            mock_npu_grouped_matmul, mock_is_310p):
+            mock_npu_grouped_matmul, mock_is_310p, mock_get_forward_context):
+
+        mock_forward_context = MagicMock()
+        mock_forward_context.with_quant = False
+        mock_get_forward_context.return_value = mock_forward_context
+
         mock_is_310p.return_value = True
 
         mock_gmm1_out = torch.randn(10, 40, dtype=torch.float16)
@@ -729,9 +742,10 @@ class TestUnifiedApplyMLP(TestBase):
                                    group_list_type=1,
                                    w1_scale_bias=None,
                                    w2_scale_bias=None,
-                                   topk_scales=topk_scales,
-                                   with_quant=False)
+                                   topk_scales=topk_scales)
 
+        mock_get_forward_context.assert_called()
+        self.assertFalse(mock_forward_context.with_quant)
         mock_is_310p.assert_called_once()
 
         self.assertEqual(mock_npu_grouped_matmul.call_count, 2)
