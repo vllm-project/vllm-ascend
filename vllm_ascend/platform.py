@@ -140,10 +140,10 @@ class NPUPlatform(Platform):
                 parallel_config.expert_tensor_parallel_size)
 
             # Check and configure lmhead_tp
-            if model_config is not None and "deepseek" not in model_config.hf_config.model_type:
+            if model_config is not None and "deepseek" not in model_config.hf_config.model_type and "kimi" not in model_config.hf_config.model_type:
                 if ascend_config.lmhead_tp_size > 0:
                     logger.warning(
-                        "LMHead TP only supports deepseek now. For other models, parallelism of lmhead"
+                        "LMHead TP only supports deepseek and kimi models now. For other models, parallelism of lmhead"
                         " is designed by tensor_parallel_size.")
                 parallel_config.lmhead_tp_size = -1
             elif ascend_config.lmhead_tp_size <= 0:
