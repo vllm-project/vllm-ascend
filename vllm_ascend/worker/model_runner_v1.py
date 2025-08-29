@@ -1095,9 +1095,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
          enable_dbo) = self._sync_metadata_across_dp(num_input_tokens,
                                                      with_prefill, enable_dbo)
 
-        if self.use_aclgraph:
-            # When using TorchAir with DP, we have other plans for padding
-            num_input_tokens = maybe_padded_num_tokens
+        # TODO: Now that num_input_tokens is basically identical with maybe_padded_num_tokens
+        # We should consider removing maybe_padded_num_tokens later
+        num_input_tokens = maybe_padded_num_tokens
 
         # Hot-Swap lora model
         if self.lora_config:
