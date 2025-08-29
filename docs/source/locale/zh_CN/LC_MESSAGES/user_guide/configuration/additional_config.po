@@ -189,6 +189,16 @@ msgid ""
 msgstr "是否启用 torchair 图模式。目前仅支持 DeepSeek 系列模型和 PanguProMoE 使用 torchair 图模式。"
 
 #: ../../user_guide/configuration/additional_config.md
+msgid "`mode`"
+msgstr "`mode`"
+
+#: ../../user_guide/configuration/additional_config.md
+msgid ""
+"The default torchair mode is max-autotune. "
+"Reduce-overhead can also be configured."
+msgstr "torchair图模式默认为max-autotune。可以选配reduce-overhead"
+
+#: ../../user_guide/configuration/additional_config.md
 msgid "`enable_multistream_mla`"
 msgstr "`enable_multistream_mla`"
 
