@@ -31,6 +31,11 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
         mocker_deepseek_v2_decode_layer = mocker.patch(
             "vllm_ascend.models.deepseek_v2.CustomDeepseekV2DecoderLayer.__init__",
             return_value=None)
+        mocker.patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
+            return_value=None)
+        mocker.patch("vllm_ascend.utils.get_ascend_config",
+                     return_value=mocker.Mock())
 
         mtp_layer = CustomDeepSeekMultiTokenPredictorLayer(config, "", None)
         mocker_deepseek_v2_decode_layer.assert_called_once()
@@ -83,6 +88,11 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
         mocker.patch(
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekMultiTokenPredictorLayer.__init__",
             return_value=None)
+        mocker.patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
+            return_value=None)
+        mocker.patch("vllm_ascend.utils.get_ascend_config",
+                     return_value=mocker.Mock())
 
         predictor = CustomDeepSeekMultiTokenPredictor(
             vllm_config=mock_vllm_config)
@@ -157,6 +167,11 @@ class TestCustomDeepSeekMTP(PytestBase):
             return_value=None)
         mocker.patch("vllm.model_executor.layers.sampler.get_sampler",
                      return_value=None)
+        mocker.patch(
+            "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
+            return_value=None)
+        mocker.patch("vllm_ascend.utils.get_ascend_config",
+                     return_value=mocker.Mock())
 
         mtp = CustomDeepSeekMTP(vllm_config=vllm_config)
         return mtp
