@@ -21,9 +21,9 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
-    AscendSocVersion, TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
-    TokenDispatcherWithMC2, _Dispatchers, _register_token_dispatcher,
-    get_token_dispatcher, setup_token_dispatchers)
+    AscendSocVersion, TokenDispatcherWithAll2AllV,
+    TokenDispatcherWithAllGather, TokenDispatcherWithMC2, _Dispatchers,
+    _register_token_dispatcher, get_token_dispatcher, setup_token_dispatchers)
 
 
 class TestTokenDispatcherWithMC2(TestBase):

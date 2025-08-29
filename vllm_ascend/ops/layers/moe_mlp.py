@@ -19,8 +19,9 @@ from typing import Optional
 import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
+
 from vllm_ascend.ascend_forward_context import FusedMoEState
-from vllm_ascend.utils import (dispose_tensor, is_310p)
+from vllm_ascend.utils import dispose_tensor, is_310p
 
 
 def quant_apply_mlp(hidden_states: torch.Tensor,
