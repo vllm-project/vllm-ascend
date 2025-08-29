@@ -94,43 +94,6 @@ class MoECommMethod(ABC):
         pass
 
 
-class DummyCommImpl(MoECommMethod):
-
-    def prepare(
-            self, hidden_states: torch.Tensor,
-            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Dummy prepare method that does nothing."""
-        return hidden_states, router_logits
-
-    def finalize(self, hidden_states: torch.Tensor,
-                 reduce_results: bool) -> torch.Tensor:
-        """Dummy finalize method that does nothing."""
-        return hidden_states
-
-    def permute(
-        self,
-        hidden_states: torch.Tensor,
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
-        expert_map: torch.Tensor,
-        num_experts: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        """Dummy implementation, make sure the output shapes are correct."""
-        top_k_num = topk_ids.shape[1]
-        permuted_hidden_states = hidden_states.repeat_interleave(top_k_num,
-                                                                 dim=0)
-        expert_tokens = torch.zeros((num_experts, ),
-                                    dtype=torch.int64,
-                                    device=hidden_states.device)
-        group_list_type = 0
-        return permuted_hidden_states, expert_tokens, group_list_type
-
-    def unpermute(self, mlp_output: torch.Tensor,
-                  hidden_states: torch.Tensor) -> None:
-        """Dummy implementation that does nothing."""
-        pass
-
-
 class AllGatherCommImpl(MoECommMethod):
     """This implementation is the same as NativeAllGatherCommImpl,
     but uses NPU-specific ops for better performance.
