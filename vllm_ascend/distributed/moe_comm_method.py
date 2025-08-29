@@ -14,8 +14,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.distributed.communication_op import \
     data_parallel_reduce_scatter
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
-    get_token_dispatcher
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
 
@@ -477,6 +475,8 @@ class AlltoAllCommImpl(MoECommMethod):
 
     def __init__(self, moe_config: Optional[FusedMoEConfig]):
         super().__init__(moe_config)
+        from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
+            get_token_dispatcher
         self.token_dispatcher = get_token_dispatcher(
             "TokenDispatcherWithAll2AllV")
         self._restore_tp_across_dp()

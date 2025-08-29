@@ -1632,8 +1632,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
-        logger.debug(f"num_tokens: {num_tokens}, "
-                     f"moe_comm_method: {moe_comm_method}")
+        if is_global_first_rank():
+            logger.debug(f"num_tokens: {num_tokens}, "
+                         f"moe_comm_method: {moe_comm_method}")
 
         return moe_comm_method
 
