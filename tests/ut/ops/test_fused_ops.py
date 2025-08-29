@@ -441,7 +441,7 @@ class TestAscendUnquantizedFusedMoEMethod:
 
             assert result.shape == expected_shape
 
-    @pytest.mark.parametrize("others_param", [[16], [1], [4]])
+    @pytest.mark.parametrize("others_param", [16, 1, 4])
     def test_apply_with_expert_map(self, moe_method, mock_dist_env,
                                    mock_moe_env, others_param):
 
