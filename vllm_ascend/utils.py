@@ -498,12 +498,14 @@ def register_ascend_customop():
                           name="SiluAndMul")
     CustomOp.register_oot(_decorated_op_cls=AscendRotaryEmbedding,
                           name="RotaryEmbedding")
-    CustomOp.register_oot(_decorated_op_cls=AscendColumnParallelLinear,
-                          name="ColumnParallelLinear")
-    CustomOp.register_oot(_decorated_op_cls=AscendRowParallelLinear,
-                          name="RowParallelLinear")
-    CustomOp.register_oot(_decorated_op_cls=AscendMergedColumnParallelLinear,
-                          name="MergedColumnParallelLinear")
+    if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
+        CustomOp.register_oot(_decorated_op_cls=AscendColumnParallelLinear,
+                              name="ColumnParallelLinear")
+        CustomOp.register_oot(_decorated_op_cls=AscendRowParallelLinear,
+                              name="RowParallelLinear")
+        CustomOp.register_oot(
+            _decorated_op_cls=AscendMergedColumnParallelLinear,
+            name="MergedColumnParallelLinear")
     CustomOp.register_oot(
         _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
         name="DeepseekScalingRotaryEmbedding")
