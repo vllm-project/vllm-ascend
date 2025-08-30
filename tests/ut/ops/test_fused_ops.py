@@ -841,6 +841,7 @@ class TestUnifiedApplyMLP(TestBase):
                                    w1_scale_bias=w1_scale_bias,
                                    w2_scale_bias=w2_scale_bias,
                                    topk_scales=None,
+                                   with_quant=True,
                                    fusion=True)
 
         mock_get_forward_context.assert_called()
