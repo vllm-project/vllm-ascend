@@ -22,7 +22,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, CompilationLevel, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -32,8 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.qwen3_moe import (Qwen3MoeAttention,
                                                   Qwen3MoeForCausalLM,
-                                                  Qwen3MoeMLP, Qwen3MoeModel,
-                                                  Qwen3MoeSparseMoeBlock)
+                                                  Qwen3MoeMLP, Qwen3MoeModel)
 from vllm.model_executor.models.utils import (
     extract_layer_index, make_empty_intermediate_tensors_factory, make_layers,
     maybe_prefix)
@@ -79,21 +78,12 @@ class AscendQwen3MoeDecoderLayer(nn.Module):
         layer_idx = extract_layer_index(prefix)
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
-        use_aclgraph = (vllm_config is not None
-                        and vllm_config.compilation_config.level
-                        == CompilationLevel.PIECEWISE
-                        and not vllm_config.model_config.enforce_eager)
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
-            if not use_aclgraph:
-                self.mlp = AscendSparseMoeBlock(config=config,
-                                                quant_config=quant_config,
-                                                prefix=f"{prefix}.mlp")
-            else:
-                self.mlp = Qwen3MoeSparseMoeBlock(config=config,
-                                                  quant_config=quant_config,
-                                                  prefix=f"{prefix}.mlp")
+            self.mlp = AscendSparseMoeBlock(config=config,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,
                                    intermediate_size=config.intermediate_size,
