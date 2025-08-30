@@ -171,6 +171,11 @@ def register_torchair_model():
         "Qwen3ForCausalLM",
         "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
 
+    ModelRegistry.register_model(
+        "PanguProMoEForCausalLM",
+        "vllm_ascend.torchair.models.torchair_pangu_moe:PanguProMoEForCausalLM"
+    )
+
 
 def torchair_quant_method_register():
     from vllm_ascend.quantization.quantizer import \
