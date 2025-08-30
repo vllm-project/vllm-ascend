@@ -68,7 +68,7 @@ yum update -y && yum install -y curl
 ::::
 :::::
 
-The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)(`pip install -e`) to help developer immediately take place changes without requiring a new installation.
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/v0.9.1-dev/userguide/development_mode.html)(`pip install -e`) to help developer immediately take place changes without requiring a new installation.
 
 ## Usage
 
@@ -92,6 +92,9 @@ Try to run below Python script directly or use `python3` shell to generate texts
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
 ```python
+import os
+os.environ["VLLM_USE_V1"] = "1"
+
 from vllm import LLM, SamplingParams
 
 prompts = [

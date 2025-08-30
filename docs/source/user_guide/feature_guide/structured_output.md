@@ -145,6 +145,9 @@ To use Structured Output, we'll need to configure the guided decoding using the 
 One example for the usage of the choice parameter is shown below:
 
 ```python
+import os
+os.environ["VLLM_USE_V1"] = "1"
+
 from vllm import LLM, SamplingParams
 from vllm.sampling_params import GuidedDecodingParams
 

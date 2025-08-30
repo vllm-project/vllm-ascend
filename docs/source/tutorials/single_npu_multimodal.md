@@ -47,6 +47,9 @@ pip install torchvision==0.20.1 qwen_vl_utils --extra-index-url https://download
 ```
 
 ```python
+import os
+os.environ["VLLM_USE_V1"] = "1"
+
 from transformers import AutoProcessor
 from vllm import LLM, SamplingParams
 from qwen_vl_utils import process_vision_info
@@ -141,6 +144,7 @@ docker run --rm \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
+-e VLLM_USE_V1=1 \
 -it $IMAGE \
 vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
 --dtype bfloat16 \
