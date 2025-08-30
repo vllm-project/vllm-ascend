@@ -70,7 +70,8 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
                                 shared_dequant_scale: Optional[Any] = None,
                                 mc2_mask: Optional[torch.Tensor] = None,
                                 apply_router_weight_on_input: bool = False,
-                                with_quant: bool = False):
+                                with_quant: bool = False,
+                                fusion_mlp: bool = False):
     token_dispatcher = get_forward_context().token_dispatcher
 
     results = token_dispatcher.token_dispatch(
@@ -100,7 +101,8 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
         w1_scale_bias=w1_scale_bias,
         w2_scale_bias=w2_scale_bias,
         topk_scales=results.get("topk_scales"),
-        with_quant=with_quant)
+        with_quant=with_quant,
+        fusion=fusion_mlp)
     final_hidden_states = token_dispatcher.token_combine(expert_output)
     return final_hidden_states
 
