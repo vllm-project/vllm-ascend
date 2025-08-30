@@ -28,7 +28,7 @@ class AscendSchedulerConfig(SchedulerConfig):
     num_scheduler_steps: int = 1
     scheduler_cls: Union[str, Type[object]] = (
         "vllm_ascend.core.scheduler.AscendScheduler")
-    decode_batch_size = 0
+    decode_batch_size: int = 0
 
     @classmethod
     def initialize_from_config(

@@ -89,7 +89,7 @@ class AscendScheduler(Scheduler):
         # and put back at the head of the waiting queue later
         skipped_waiting_requests: deque[Request] = deque()
 
-        # if max_num_decode_running_reqs configed, pop request that finished prefill to finished_prefill_reqs
+        # if max_num_decode_running_reqs configured, pop request that finished prefill to finished_prefill_reqs
         if self.max_num_decode_running_reqs != self.max_num_running_reqs:
             req_idx = 0
             while self.phase == "prefill" and req_idx < len(self.running):
