@@ -165,3 +165,12 @@ class TestAscendSchedulerConfig(TestBase):
         )
         self.assertIn("max_num_batched_tokens (2048)", str(context.exception))
         self.assertIn("max_model_len (4096)", str(context.exception))
+
+    def test_initialize_from_config_with_decode_bs(self):
+        ascend_config = AscendSchedulerConfig.initialize_from_config(
+            self.basic_scheduler_config,
+            AscendSchedulerConfig(
+                decode_batch_size=128,
+            ),
+        )
+        self.assertEqual(ascend_config.decode_batch_size, 128)
