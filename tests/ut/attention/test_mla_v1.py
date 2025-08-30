@@ -465,8 +465,6 @@ class TestAscendMLAImpl(TestBase):
         hidden_size = 1024
         hidden_states = torch.randn(batch_size * seq_len, hidden_size)
 
-        qk_nope_head_dim = 64
-        qk_rope_head_dim = 128
         kv_cache = MagicMock()
 
         attn_metadata = MagicMock()
