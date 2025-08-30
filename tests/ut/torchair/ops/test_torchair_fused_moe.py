@@ -353,8 +353,7 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
             else:
                 assert result.shape == x.shape
 
-    @pytest.mark.parametrize("others_param",
-                             [[16, False], [1, True], [1, False], [4, False]])
+    @pytest.mark.parametrize("others_param", [16, 1, 4])
     def test_apply_with_expert_map(self, moe_method, mock_dist_env,
                                    mock_moe_env, others_param):
         """
@@ -363,13 +362,11 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
         3 test use_select_experts and fused_experts_with_all2all
         4 test use_select_experts and fused_experts
         """
-        ep_size, alltoall_buffer = others_param
+        ep_size = others_param
         is_prefill = False
         forward_context = MagicMock(
             fused_moe_state=_get_fused_moe_state(ep_size, is_prefill, True))
-        with patch("vllm_ascend.torchair.ops.torchair_fused_moe.MOE_ALL2ALL_BUFFER",
-                   alltoall_buffer), \
-             patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context", return_value=forward_context), \
+        with patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context", return_value=forward_context), \
              patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_soc_version", return_value=AscendSocVersion.A3):
             expert_map = torch.tensor([0, 1, 2, -1, -1, -1, -1, -1])
             moe_method.ep_size = ep_size
@@ -377,8 +374,6 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
             if ep_size == 1:
                 x = x.view(-1, 2)
             router_logits = torch.randn(8, 8)
-            if alltoall_buffer:
-                moe_method.max_model_len = 1
             layer = MagicMock()
             layer.w13_weight = torch.randn(8, 16, 1)
             layer.w2_weight = torch.randn(16, 8, 1)

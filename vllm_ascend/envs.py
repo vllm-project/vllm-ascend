@@ -90,11 +90,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
                  ),
-    # MOE_ALL2ALL_BUFFER:
-    #   0: default, normal init.
-    #   1: enable moe_all2all_buffer.
-    "MOE_ALL2ALL_BUFFER":
-    lambda: bool(int(os.getenv("MOE_ALL2ALL_BUFFER", '0'))),
     # Some models are optimized by vllm ascend. While in some case, e.g. rlhf
     # training, the optimized model may not be suitable. In this case, set this
     # value to False to disable the optimized model.
@@ -136,11 +131,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
-    # Whether to enable the alltoall_seq flag, this provides a basic framework on the basis of alltoall for easy expansion.
-    #   0: default, normal init.
-    #   1: enable moe all2all seq.
-    "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ":
-    lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ', '0'))),
     # Whether to enable mlp optimize when tensor parallel is enabled.
     # this feature in eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":

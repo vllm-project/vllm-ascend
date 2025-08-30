@@ -35,10 +35,6 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
             return FusedMoEState.NaiveMulticast
         else:
             return FusedMoEState.AllGather
-    elif envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
-        # MC2 Dispatch/Combine performs better than alltoall_seq in decoding stage.
-        return (FusedMoEState.All2AllSeq if
-                (ep_size < 16 or with_prefill) else FusedMoEState.MC2)
     # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
     elif ep_size < 16 or with_prefill:
         return FusedMoEState.All2All
