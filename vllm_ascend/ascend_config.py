@@ -70,6 +70,7 @@ class TorchairGraphConfig:
 
     def __init__(self, torchair_graph_config):
         self.enabled = torchair_graph_config.get("enabled", False)
+        self.mode = torchair_graph_config.get("mode", '')
         self.use_cached_graph = torchair_graph_config.get(
             "use_cached_graph", False)
         self.graph_batch_sizes = torchair_graph_config.get(
@@ -91,6 +92,9 @@ class TorchairGraphConfig:
                 "graph_batch_sizes_init is only valid when graph_batch_sizes is empty"
             )
         if not self.enabled:
+            if self.mode:
+                raise RuntimeError(
+                    "mode is valid only when Torchair graph mode is enabled")
             if self.use_cached_graph:
                 raise RuntimeError(
                     "use_cached_graph is valid only when Torchair graph mode is enabled"

@@ -46,6 +46,7 @@ class TestAscendConfig(TestBase):
 
         torchair_graph_config = ascend_config.torchair_graph_config
         self.assertFalse(torchair_graph_config.enabled)
+        self.assertEqual(torchair_graph_config.mode, '')
         self.assertFalse(torchair_graph_config.use_cached_graph)
         self.assertEqual(torchair_graph_config.graph_batch_sizes, [])
         self.assertFalse(torchair_graph_config.graph_batch_sizes_init)
