@@ -178,6 +178,13 @@ class TestTokenDispatcherWithAllGather(TestBase):
             torch.tensor([0, 1, 2, 3, 4, 5]),  # expanded_row_idx
             torch.tensor([0, 1, 0, 1, 0, 1])  # expanded_expert_idx
         )
+        self.patcher_moe_init_routing_v2 = patch('torch_npu.npu_moe_init_routing_v2')
+        self.mock_moe_init_routing_v2 = self.patcher_moe_init_routing_v2.start()
+        self.mock_moe_init_routing_v2.return_value = (
+            torch.randn(6, 128),  # sorted_hidden_states
+            torch.tensor([0, 1, 2, 3, 4, 5]),  # expanded_row_idx
+            torch.tensor([0, 1, 0, 1, 0, 1])  # expanded_expert_idx
+        )
 
         self.patcher_moe_compute_expert_tokens = patch(
             'torch_npu.npu_moe_compute_expert_tokens')

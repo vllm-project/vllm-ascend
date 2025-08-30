@@ -146,6 +146,10 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+    is_gatherep = get_forward_context().fused_moe_state == FusedMoEState.AllGatherEP
+    if is_gatherep:
+        vector_stream = get_forward_context().vector_stream
+        torch.npu.current_stream().wait_stream(vector_stream)
     if is_310p():
         gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
             torch.float16)

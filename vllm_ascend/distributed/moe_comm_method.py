@@ -178,8 +178,7 @@ class AllGatherCommImpl(MoECommMethod):
             mask = expert_map[topk_ids] != -1
             # NOTE: This is equivalent to self.topk_weights[~mask] = 0.0,
             # but ~mask will dispatch to aclnnNonzeroV2, which is not supported in ACL Graph
-            self.topk_weights = torch.where(mask, topk_weights, 0.0)
-
+            self.topk_weights = self.topk_weights * mask
             first_expert_idx = self.moe_config.ep_rank * num_experts
         last_expert_idx = first_expert_idx + num_experts
 
@@ -198,7 +197,6 @@ class AllGatherCommImpl(MoECommMethod):
         permuted_hidden_states = permuted_hidden_states
 
         group_list_type = 1  # `count` mode
-
         return permuted_hidden_states, expert_tokens, None, group_list_type
 
     def unpermute(self, mlp_output: torch.Tensor,

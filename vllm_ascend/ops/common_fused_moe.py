@@ -279,7 +279,8 @@ def forward_oot(
         custom_routing_function=custom_routing_function,
         scoring_func=scoring_func,
         e_score_correction_bias=e_score_correction_bias,
-        global_num_experts=global_num_experts)
+        global_num_experts=global_num_experts,
+        is_unquantized=True)
 
     if topk_ids.shape[1] < top_k or is_310p():
         assert global_num_experts is not None
