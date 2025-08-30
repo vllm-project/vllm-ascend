@@ -1,0 +1,286 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/configuration/additional_config.md:1
+msgid "Additional Configuration"
+msgstr "附加配置"
+
+#: ../../source/user_guide/configuration/additional_config.md:3
+msgid ""
+"additional configuration is a mechanism provided by vLLM to allow plugins"
+" to control inner behavior by their own. vLLM Ascend uses this mechanism "
+"to make the project more flexible."
+msgstr "额外配置是 vLLM 提供的一种机制，允许插件自行控制内部行为。vLLM Ascend 利用这种机制使项目更加灵活。"
+
+#: ../../source/user_guide/configuration/additional_config.md:5
+msgid "How to use"
+msgstr "如何使用"
+
+#: ../../source/user_guide/configuration/additional_config.md:7
+msgid ""
+"With either online mode or offline mode, users can use additional "
+"configuration. Take Qwen3 as an example:"
+msgstr "无论是在线模式还是离线模式，用户都可以使用额外的配置。以 Qwen3 为例："
+
+#: ../../source/user_guide/configuration/additional_config.md:9
+msgid "**Online mode**:"
+msgstr "**在线模式**："
+
+#: ../../source/user_guide/configuration/additional_config.md:15
+msgid "**Offline mode**:"
+msgstr "**离线模式**："
+
+#: ../../source/user_guide/configuration/additional_config.md:23
+msgid "Configuration options"
+msgstr "配置选项"
+
+#: ../../source/user_guide/configuration/additional_config.md:25
+msgid ""
+"The following table lists the additional configuration options available "
+"in vLLM Ascend:"
+msgstr "下表列出了 vLLM Ascend 中可用的其他配置选项："
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Name"
+msgstr "名称"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Type"
+msgstr "类型"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Default"
+msgstr "默认"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Description"
+msgstr "描述"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`torchair_graph_config`"
+msgstr "`torchair_graph_config`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "dict"
+msgstr "dict"
+
+#: ../../source/user_guide/configuration/additional_config.md
+#, python-brace-format
+msgid "`{}`"
+msgstr "`{}`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "The config options for torchair graph mode"
+msgstr "torchair 图模式的配置选项"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`ascend_scheduler_config`"
+msgstr "`ascend_scheduler_config`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "The config options for ascend scheduler"
+msgstr "ascend 调度器的配置选项"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`refresh`"
+msgstr "`刷新`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "bool"
+msgstr "bool"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`false`"
+msgstr "`false`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to refresh global ascend config content. This value is usually "
+"used by rlhf or ut/e2e test case."
+msgstr "是否刷新全局 ascend 配置信息。此值通常由 rlhf 或 ut/e2e 测试用例使用。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`expert_map_path`"
+msgstr "`expert_map_path`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "str"
+msgstr "str"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`None`"
+msgstr "`None`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"When using expert load balancing for the MOE model, an expert map path "
+"needs to be passed in."
+msgstr "在为MOE模型使用专家负载均衡时，需要传入专家映射路径。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`kv_cache_dtype`"
+msgstr "`kv_cache_dtype`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"When using the kv cache quantization method, kv cache dtype needs to be "
+"set, currently only int8 is supported."
+msgstr "当使用kv缓存量化方法时，需要设置kv缓存的数据类型，目前仅支持int8。"
+
+#: ../../source/user_guide/configuration/additional_config.md:35
+msgid "The details of each config option are as follows:"
+msgstr "每个配置选项的详细信息如下："
+
+#: ../../source/user_guide/configuration/additional_config.md:37
+msgid "**torchair_graph_config**"
+msgstr "**torchair_graph_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enabled`"
+msgstr "`启用`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`False`"
+msgstr "`False`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable torchair graph mode. Currently only DeepSeek series "
+"models and PanguProMoE are supported to use torchair graph mode"
+msgstr "是否启用 torchair 图模式。目前仅支持 DeepSeek 系列模型和 PanguProMoE 使用 torchair 图模式。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_multistream_mla`"
+msgstr "`enable_multistream_mla`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to put vector ops of MLA to another stream. This option only "
+"takes effects on models using MLA (e.g., DeepSeek)."
+msgstr "是否将MLA的向量操作放到另一个流中。此选项仅对使用MLA的模型（例如，DeepSeek）有效。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_multistream_moe`"
+msgstr "`enable_multistream_moe`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable multistream shared expert. This option only takes "
+"effects on DeepSeek moe models."
+msgstr "是否启用多流共享专家功能。此选项仅对 DeepSeek MoE 模型生效。"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_view_optimize`"
+msgstr "`enable_view_optimize` （启用视图优化）"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`True`"
+msgstr "`True`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable torchair view optimization"
+msgstr "是否启用torchair视图优化"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`use_cached_graph`"
+msgstr "`use_cached_graph`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to use cached graph"
+msgstr "是否使用缓存的图"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`graph_batch_sizes`"
+msgstr "`graph_batch_sizes`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "list[int]"
+msgstr "list[int]"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`[]`"
+msgstr "`[]`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "The batch size for torchair graph cache"
+msgstr "torchair 图缓存的批量大小"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`graph_batch_sizes_init`"
+msgstr "`graph_batch_sizes_init`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Init graph batch size dynamically if `graph_batch_sizes` is empty"
+msgstr "如果 `graph_batch_sizes` 为空，则动态初始化图批大小"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "`enable_kv_nz`"
+msgstr "`enable_kv_nz`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid ""
+"Whether to enable kvcache NZ layout. This option only takes effects on "
+"models using MLA (e.g., DeepSeek)."
+msgstr "是否启用 kvcache NZ 布局。此选项仅对使用 MLA 的模型（例如 DeepSeek）生效。"
+
+#: ../../source/user_guide/configuration/additional_config.md:50
+msgid "**ascend_scheduler_config**"
+msgstr "**ascend_scheduler_config**"
+
+#: ../../source/user_guide/configuration/additional_config.md
+msgid "Whether to enable ascend scheduler for V1 engine"
+msgstr "是否为 V1 引擎启用 ascend 调度器"
+
+#: ../../source/user_guide/configuration/additional_config.md:56
+msgid ""
+"ascend_scheduler_config also support the options from [vllm scheduler "
+"config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig)."
+" For example, you can add `enable_chunked_prefill: True` to "
+"ascend_scheduler_config as well."
+msgstr ""
+"ascend_scheduler_config 也支持来自 [vllm scheduler "
+"config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig)"
+" 的选项。例如，你也可以在 ascend_scheduler_config 中添加 `enable_chunked_prefill: True`。"
+
+#: ../../source/user_guide/configuration/additional_config.md:58
+msgid "Example"
+msgstr "示例"
+
+#: ../../source/user_guide/configuration/additional_config.md:60
+msgid "An example of additional configuration is as follows:"
+msgstr "以下是额外配置的一个示例："
+
+#~ msgid "`expert_tensor_parallel_size`"
+#~ msgstr "`expert_tensor_parallel_size`"
+
+#~ msgid "`0`"
+#~ msgstr "`0`"
+
+#~ msgid "Expert tensor parallel size the model to use."
+#~ msgstr "专家张量并行的模型大小设置。"
+
+#~ msgid "`chunked_prefill_for_mla`"
+#~ msgstr "`chunked_prefill_for_mla`"
+
+#~ msgid "Whether to enable the fused operator-like chunked_prefill."
+#~ msgstr "是否启用类似算子融合的 chunked_prefill 功能。"
+

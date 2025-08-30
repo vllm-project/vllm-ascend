@@ -1,0 +1,222 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:1
+msgid "Model Support"
+msgstr "模型支持"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:3
+#, fuzzy
+msgid ""
+"Get the newest info here: https://github.com/vllm-project/vllm-"
+"ascend/issues/1608"
+msgstr "[#496](https://github.com/vllm-project/vllm-ascend/issues/496)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:5
+msgid "Text-only Language Models"
+msgstr "纯文本语言模型"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:7
+#: ../../source/user_guide/support_matrix/supported_models.md:39
+msgid "Generative Models"
+msgstr "生成模型"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Model"
+msgstr "模型"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Supported"
+msgstr "支持"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Note"
+msgstr "注释"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "DeepSeek v3"
+msgstr "DeepSeek v3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "✅"
+msgstr "✅"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "DeepSeek R1"
+msgstr "DeepSeek R1"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "DeepSeek Distill (Qwen/LLama)"
+msgstr "DeepSeek 精炼（Qwen/LLama）"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Qwen3"
+msgstr "Qwen3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Qwen3-Moe"
+msgstr "Qwen3-Moe"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Qwen2.5"
+msgstr "Qwen2.5"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "QwQ-32B"
+msgstr "QwQ-32B"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "LLama3.1/3.2"
+msgstr "LLama3.1/3.2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Internlm"
+msgstr "Internlm"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Baichuan"
+msgstr "百川"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Phi-4-mini"
+msgstr "Phi-4-mini"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "MiniCPM"
+msgstr "MiniCPM"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "MiniCPM3"
+msgstr "MiniCPM3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "LLama4"
+msgstr "LLama4"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Mistral"
+msgstr "Mistral"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Need test"
+msgstr "需要测试"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "DeepSeek v2.5"
+msgstr "DeepSeek v2.5"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Gemma-2"
+msgstr "Gemma-2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Mllama"
+msgstr "Mllama"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Gemma-3"
+msgstr "Gemma-3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "❌"
+msgstr "❌"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "[#496](https://github.com/vllm-project/vllm-ascend/issues/496)"
+msgstr "[#496](https://github.com/vllm-project/vllm-ascend/issues/496)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "ChatGLM"
+msgstr "ChatGLM"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
+msgstr "[#554](https://github.com/vllm-project/vllm-ascend/issues/554)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:31
+msgid "Pooling Models"
+msgstr "池化模型"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "XLM-RoBERTa-based"
+msgstr "基于XLM-RoBERTa"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Molmo"
+msgstr "Molmo"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:37
+msgid "Multimodal Language Models"
+msgstr "多模态语言模型"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Qwen2-VL"
+msgstr "Qwen2-VL"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Qwen2.5-VL"
+msgstr "Qwen2.5-VL"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "LLaVA 1.5"
+msgstr "LLaVA 1.5"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "LLaVA 1.6"
+msgstr "LLaVA 1.6"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "[#553](https://github.com/vllm-project/vllm-ascend/issues/553)"
+msgstr "[#553](https://github.com/vllm-project/vllm-ascend/issues/553)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "InternVL2"
+msgstr "InternVL2"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "InternVL2.5"
+msgstr "InternVL2.5"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Qwen2-Audio"
+msgstr "Qwen2-Audio"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "LLaVA-Next"
+msgstr "LLaVA-Next"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "LLaVA-Next-Video"
+msgstr "LLaVA-Next-Video"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Phi-3-Vison/Phi-3.5-Vison"
+msgstr "Phi-3-Vison/Phi-3.5-Vison"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "GLM-4v"
+msgstr "GLM-4v"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "Ultravox"
+msgstr "Ultravox"
+

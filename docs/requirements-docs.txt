@@ -7,3 +7,4 @@ sphinx-togglebutton
 myst-parser
 msgspec
 sphinx-substitution-extensions
+sphinx-intl

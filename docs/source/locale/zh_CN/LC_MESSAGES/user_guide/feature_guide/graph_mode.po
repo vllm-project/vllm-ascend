@@ -1,0 +1,121 @@
+# Translations template for PROJECT.
+# Copyright (C) 2025 ORGANIZATION
+# This file is distributed under the same license as the PROJECT project.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PROJECT VERSION\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: LANGUAGE <LL@li.org>\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../user_guide/feature_guide/graph_mode.md:1
+msgid "Graph Mode Guide"
+msgstr "图模式指南"
+
+#: ../../user_guide/feature_guide/graph_mode.md:4
+msgid ""
+"This feature is currently experimental. In future versions, there may be "
+"behavioral changes around configuration, coverage, performance improvement."
+msgstr "此功能目前为实验性功能。在未来的版本中，配置、覆盖率和性能改进等方面的行为可能会有变化。"
+
+#: ../../user_guide/feature_guide/graph_mode.md:7
+msgid ""
+"This guide provides instructions for using Ascend Graph Mode with vLLM "
+"Ascend. Please note that graph mode is only available on V1 Engine. And only"
+" Qwen, DeepSeek series models are well tested from 0.9.0rc1. We'll make it "
+"stable and generalize in the next release."
+msgstr ""
+"本指南提供了在 vLLM Ascend 上使用 Ascend 图模式的操作说明。请注意，图模式仅在 V1 引擎上可用，并且从 0.9.0rc1 起，仅对"
+" Qwen、DeepSeek 系列模型进行了充分测试。我们将在下一个版本中使其更加稳定和通用。"
+
+#: ../../user_guide/feature_guide/graph_mode.md:9
+msgid "Getting Started"
+msgstr "快速入门"
+
+#: ../../user_guide/feature_guide/graph_mode.md:11
+msgid ""
+"From v0.9.1rc1 with V1 Engine, vLLM Ascend will run models in graph mode by "
+"default to keep the same behavior with vLLM. If you hit any issues, please "
+"feel free to open an issue on GitHub and fallback to eager mode temporarily "
+"by set `enforce_eager=True` when initializing the model."
+msgstr ""
+"从 v0.9.1rc1 版本起，使用 V1 引擎时，vLLM Ascend 默认将在图模式下运行模型，以保持与 vLLM "
+"同样的行为。如果遇到任何问题，欢迎在 GitHub 上提交 issue，并在初始化模型时通过设置 `enforce_eager=True` 临时切换回 "
+"eager 模式。"
+
+#: ../../user_guide/feature_guide/graph_mode.md:13
+msgid "There are two kinds for graph mode supported by vLLM Ascend:"
+msgstr "vLLM Ascend 支持两种图模式："
+
+#: ../../user_guide/feature_guide/graph_mode.md:14
+msgid ""
+"**ACLGraph**: This is the default graph mode supported by vLLM Ascend. In "
+"v0.9.1rc1, only Qwen series models are well tested."
+msgstr ""
+"**ACLGraph**：这是 vLLM Ascend 支持的默认图模式。在 v0.9.1rc1 版本中，只有 Qwen 系列模型得到了充分测试。"
+
+#: ../../user_guide/feature_guide/graph_mode.md:15
+msgid ""
+"**TorchAirGraph**: This is the GE graph mode. In v0.9.1rc1, only DeepSeek "
+"series models are supported."
+msgstr "**TorchAirGraph**：这是GE图模式。在v0.9.1rc1版本中，仅支持DeepSeek系列模型。"
+
+#: ../../user_guide/feature_guide/graph_mode.md:17
+msgid "Using ACLGraph"
+msgstr "使用 ACLGraph"
+
+#: ../../user_guide/feature_guide/graph_mode.md:18
+msgid ""
+"ACLGraph is enabled by default. Take Qwen series models as an example, just "
+"set to use V1 Engine is enough."
+msgstr "ACLGraph 默认启用。以 Qwen 系列模型为例，只需设置为使用 V1 引擎即可。"
+
+#: ../../user_guide/feature_guide/graph_mode.md:20
+#: ../../user_guide/feature_guide/graph_mode.md:41
+#: ../../user_guide/feature_guide/graph_mode.md:64
+msgid "offline example:"
+msgstr "离线示例："
+
+#: ../../user_guide/feature_guide/graph_mode.md:31
+#: ../../user_guide/feature_guide/graph_mode.md:52
+#: ../../user_guide/feature_guide/graph_mode.md:74
+msgid "online example:"
+msgstr "在线示例："
+
+#: ../../user_guide/feature_guide/graph_mode.md:37
+msgid "Using TorchAirGraph"
+msgstr "使用 TorchAirGraph"
+
+#: ../../user_guide/feature_guide/graph_mode.md:39
+msgid ""
+"If you want to run DeepSeek series models with graph mode, you should use "
+"[TorchAirGraph](https://www.hiascend.com/document/detail/zh/Pytorch/700/modthirdparty/torchairuseguide/torchair_0002.html)."
+" In this case, additional config is required."
+msgstr ""
+"如果你想通过图模式运行 DeepSeek 系列模型，你应该使用 "
+"[TorchAirGraph](https://www.hiascend.com/document/detail/zh/Pytorch/700/modthirdparty/torchairuseguide/torchair_0002.html)。在这种情况下，需要额外的配置。"
+
+#: ../../user_guide/feature_guide/graph_mode.md:58
+msgid ""
+"You can find more detail about additional config "
+"[here](../configuration/additional_config.md)."
+msgstr "你可以在[这里](../configuration/additional_config.md)找到关于附加配置的更多详细信息。"
+
+#: ../../user_guide/feature_guide/graph_mode.md:60
+msgid "Fallback to Eager Mode"
+msgstr "回退到 Eager 模式"
+
+#: ../../user_guide/feature_guide/graph_mode.md:62
+msgid ""
+"If both `ACLGraph` and `TorchAirGraph` fail to run, you should fallback to "
+"eager mode."
+msgstr "如果 `ACLGraph` 和 `TorchAirGraph` 都无法运行，你应该退回到 eager 模式。"

@@ -1,0 +1,112 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:1
+msgid "Using EvalScope"
+msgstr "使用 EvalScope"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:3
+msgid ""
+"This document will guide you have model inference stress testing and "
+"accuracy testing using [EvalScope](https://github.com/modelscope/evalscope)."
+msgstr ""
+"本文档将指导您如何使用 [EvalScope](https://github.com/modelscope/evalscope) "
+"进行模型推理压力测试和精度测试。"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:5
+msgid "1. Online serving"
+msgstr "1. 在线服务"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:7
+msgid "You can run docker container to start the vLLM server on a single NPU:"
+msgstr "你可以运行 docker 容器，在单个 NPU 上启动 vLLM 服务器："
+
+#: ../../developer_guide/evaluation/using_evalscope.md:34
+msgid "If your service start successfully, you can see the info shown below:"
+msgstr "如果你的服务启动成功，你会看到如下所示的信息："
+
+#: ../../developer_guide/evaluation/using_evalscope.md:42
+msgid ""
+"Once your server is started, you can query the model with input prompts in "
+"new terminal:"
+msgstr "一旦你的服务器启动后，你可以在新的终端中用输入提示词查询模型："
+
+#: ../../developer_guide/evaluation/using_evalscope.md:55
+msgid "2. Install EvalScope using pip"
+msgstr "2. 使用 pip 安装 EvalScope"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:57
+msgid "You can install EvalScope by using:"
+msgstr "你可以使用以下方式安装 EvalScope："
+
+#: ../../developer_guide/evaluation/using_evalscope.md:65
+msgid "3. Run gsm8k accuracy test using EvalScope"
+msgstr "3. 使用 EvalScope 运行 gsm8k 准确率测试"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:67
+msgid "You can `evalscope eval` run gsm8k accuracy test:"
+msgstr "你可以使用 `evalscope eval` 运行 gsm8k 准确率测试："
+
+#: ../../developer_guide/evaluation/using_evalscope.md:78
+#: ../../developer_guide/evaluation/using_evalscope.md:114
+msgid "After 1-2 mins, the output is as shown below:"
+msgstr "1-2 分钟后，输出如下所示："
+
+#: ../../developer_guide/evaluation/using_evalscope.md:88
+msgid ""
+"See more detail in: [EvalScope doc - Model API Service "
+"Evaluation](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html#model-"
+"api-service-evaluation)."
+msgstr ""
+"更多详情请见：[EvalScope 文档 - 模型 API "
+"服务评测](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html#model-"
+"api-service-evaluation)。"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:90
+msgid "4. Run model inference stress testing using EvalScope"
+msgstr "4. 使用 EvalScope 运行模型推理压力测试"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:92
+msgid "Install EvalScope[perf] using pip"
+msgstr "使用 pip 安装 EvalScope[perf]"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:98
+msgid "Basic usage"
+msgstr "基本用法"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:100
+msgid "You can use `evalscope perf` run perf test:"
+msgstr "你可以使用 `evalscope perf` 运行性能测试："
+
+#: ../../developer_guide/evaluation/using_evalscope.md:112
+msgid "Output results"
+msgstr "输出结果"
+
+#: ../../developer_guide/evaluation/using_evalscope.md:173
+msgid ""
+"See more detail in: [EvalScope doc - Model Inference Stress "
+"Testing](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-"
+"usage)."
+msgstr ""
+"更多详情见：[EvalScope 文档 - "
+"模型推理压力测试](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-"
+"usage)。"

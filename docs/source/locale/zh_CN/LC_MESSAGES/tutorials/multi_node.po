@@ -1,0 +1,196 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/multi_node.md:1
+msgid "Multi-Node-DP (DeepSeek)"
+msgstr "多节点分布式处理（DeepSeek）"
+
+#: ../../source/tutorials/multi_node.md:3
+msgid "Getting Start"
+msgstr "快速开始"
+
+#: ../../source/tutorials/multi_node.md:4
+msgid ""
+"vLLM-Ascend now supports Data Parallel (DP) deployment, enabling model "
+"weights to be replicated across multiple NPUs or instances, each "
+"processing independent batches of requests. This is particularly useful "
+"for scaling throughput across devices while maintaining high resource "
+"utilization."
+msgstr ""
+"vLLM-Ascend 现在支持数据并行（DP）部署，可以在多个 NPU "
+"或实例之间复制模型权重，每个实例处理独立的请求批次。这对于在保证高资源利用率的同时，实现跨设备的吞吐量扩展特别有用。"
+
+#: ../../source/tutorials/multi_node.md:6
+msgid ""
+"Each DP rank is deployed as a separate “core engine” process which "
+"communicates with front-end process(es) via ZMQ sockets. Data Parallel "
+"can be combined with Tensor Parallel, in which case each DP engine owns a"
+" number of per-NPU worker processes equal to the TP size."
+msgstr ""
+"每个 DP 进程作为一个单独的“核心引擎”进程部署，并通过 ZMQ 套接字与前端进程通信。数据并行可以与张量并行结合使用，此时每个 DP "
+"引擎拥有数量等于 TP 大小的每 NPU 工作进程。"
+
+#: ../../source/tutorials/multi_node.md:8
+msgid ""
+"For Mixture-of-Experts (MoE) models — especially advanced architectures "
+"like DeepSeek that utilize Multi-head Latent Attention (MLA) — a hybrid "
+"parallelism approach is recommended:     - Use **Data Parallelism (DP)** "
+"for attention layers, which are replicated across devices and handle "
+"separate batches.     - Use **Expert or Tensor Parallelism (EP/TP)** for "
+"expert layers, which are sharded across devices to distribute the "
+"computation."
+msgstr ""
+"对于混合专家（Mixture-of-Experts, MoE）模型——尤其是像 DeepSeek 这样采用多头潜在注意力（Multi-head "
+"Latent Attention, MLA）的高级架构——推荐使用混合并行策略：\n"
+"    - 对于注意力层，使用 **数据并行（Data Parallelism, DP）**，这些层会在各设备间复刻，并处理不同的批次。\n"
+"    - 对于专家层，使用 **专家并行或张量并行（Expert or Tensor Parallelism, "
+"EP/TP）**，这些层会在设备间分片，从而分担计算。"
+
+#: ../../source/tutorials/multi_node.md:12
+msgid ""
+"This division enables attention layers to be replicated across Data "
+"Parallel (DP) ranks, enabling them to process different batches "
+"independently. Meanwhile, expert layers are partitioned (sharded) across "
+"devices using Expert or Tensor Parallelism(DP*TP), maximizing hardware "
+"utilization and efficiency."
+msgstr "这种划分使得注意力层能够在数据并行（DP）组内复制，从而能够独立处理不同的批次。同时，专家层通过专家或张量并行（DP*TP）在设备间进行分区（切片），最大化硬件利用率和效率。"
+
+#: ../../source/tutorials/multi_node.md:14
+msgid ""
+"In these cases the data parallel ranks are not completely independent, "
+"forward passes must be aligned and expert layers across all ranks are "
+"required to synchronize during every forward pass, even if there are "
+"fewer requests to be processed than DP ranks."
+msgstr ""
+"在这些情况下，数据并行的各个 rank 不是完全独立的，前向传播必须对齐，并且所有 rank "
+"上的专家层在每次前向传播时都需要同步，即使待处理的请求数量少于 DP rank 的数量。"
+
+#: ../../source/tutorials/multi_node.md:16
+msgid ""
+"For MoE models, when any requests are in progress in any rank, we must "
+"ensure that empty “dummy” forward passes are performed in all ranks which"
+" don’t currently have any requests scheduled. This is handled via a "
+"separate DP `Coordinator` process which communicates with all of the "
+"ranks, and a collective operation performed every N steps to determine "
+"when all ranks become idle and can be paused. When TP is used in "
+"conjunction with DP, expert layers form an EP or TP group of size (DP x "
+"TP)."
+msgstr ""
+"对于 MoE 模型，当任何一个 rank 有请求正在进行时，必须确保所有当前没有请求的 rank 都执行空的“虚拟”前向传播。这是通过一个单独的 "
+"DP `Coordinator` 协调器进程来实现的，该进程与所有 rank 通信，并且每隔 N 步执行一次集体操作，以判断所有 rank "
+"是否都处于空闲状态并可以暂停。当 TP 与 DP 结合使用时，专家层会组成一个规模为（DP x TP）的 EP 或 TP 组。"
+
+#: ../../source/tutorials/multi_node.md:18
+msgid "Verify Multi-Node Communication Environment"
+msgstr "验证多节点通信环境"
+
+#: ../../source/tutorials/multi_node.md:20
+msgid "Physical Layer Requirements:"
+msgstr "物理层要求："
+
+#: ../../source/tutorials/multi_node.md:22
+msgid ""
+"The physical machines must be located on the same WLAN, with network "
+"connectivity."
+msgstr "物理机器必须位于同一个 WLAN 中，并且具有网络连接。"
+
+#: ../../source/tutorials/multi_node.md:23
+msgid ""
+"All NPUs are connected with optical modules, and the connection status "
+"must be normal."
+msgstr "所有 NPU 都通过光模块连接，且连接状态必须正常。"
+
+#: ../../source/tutorials/multi_node.md:25
+msgid "Verification Process:"
+msgstr "验证流程："
+
+#: ../../source/tutorials/multi_node.md:27
+msgid ""
+"Execute the following commands on each node in sequence. The results must"
+" all be `success` and the status must be `UP`:"
+msgstr "在每个节点上依次执行以下命令。所有结果必须为 `success` 且状态必须为 `UP`："
+
+#: ../../source/tutorials/multi_node.md:44
+msgid "NPU Interconnect Verification:"
+msgstr "NPU 互连验证："
+
+#: ../../source/tutorials/multi_node.md:45
+msgid "1. Get NPU IP Addresses"
+msgstr "1. 获取 NPU IP 地址"
+
+#: ../../source/tutorials/multi_node.md:51
+msgid "2. Cross-Node PING Test"
+msgstr "2. 跨节点PING测试"
+
+#: ../../source/tutorials/multi_node.md:58
+msgid "Run with docker"
+msgstr "用 docker 运行"
+
+#: ../../source/tutorials/multi_node.md:59
+msgid ""
+"Assume you have two Atlas 800 A2(64G*8) nodes, and want to deploy the "
+"`deepseek-v3-w8a8` quantitative model across multi-node."
+msgstr "假设你有两台 Atlas 800 A2（64G*8）节点，并且想要在多节点上部署 `deepseek-v3-w8a8` 量化模型。"
+
+#: ../../source/tutorials/multi_node.md:94
+msgid ""
+"Before launch the inference server, ensure some environment variables are"
+" set for multi node communication"
+msgstr "在启动推理服务器之前，确保已经为多节点通信设置了一些环境变量。"
+
+#: ../../source/tutorials/multi_node.md:97
+msgid "Run the following scripts on two nodes respectively"
+msgstr "分别在两台节点上运行以下脚本"
+
+#: ../../source/tutorials/multi_node.md:99
+msgid "**node0**"
+msgstr "**节点0**"
+
+#: ../../source/tutorials/multi_node.md:140
+msgid "**node1**"
+msgstr "**节点1**"
+
+#: ../../source/tutorials/multi_node.md:180
+#, fuzzy
+msgid "The Deployment view looks like: ![alt text](../assets/multi_node_dp.png)"
+msgstr "部署视图如下所示：![替代文本](../assets/multi_node_dp.png)"
+
+#: ../../source/tutorials/multi_node.md:180
+msgid "alt text"
+msgstr "替代文本"
+
+#: ../../source/tutorials/multi_node.md:183
+msgid "Once your server is started, you can query the model with input prompts:"
+msgstr "一旦你的服务器启动，你可以通过输入提示词来查询模型："
+
+#: ../../source/tutorials/multi_node.md:196
+msgid "Run benchmarks"
+msgstr "运行基准测试"
+
+#: ../../source/tutorials/multi_node.md:197
+msgid ""
+"For details please refer to [benchmark](https://github.com/vllm-project"
+"/vllm-ascend/tree/main/benchmarks)"
+msgstr ""
+"详细信息请参阅 [benchmark](https://github.com/vllm-project/vllm-"
+"ascend/tree/main/benchmarks)"
+

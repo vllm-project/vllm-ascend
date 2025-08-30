@@ -1,0 +1,2699 @@
+# Chinese translations for PROJECT.
+# Copyright (C) 2025 ORGANIZATION
+# This file is distributed under the same license as the PROJECT project.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: PROJECT VERSION\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"PO-Revision-Date: 2025-07-18 10:11+0800\n"
+"Last-Translator: \n"
+"Language: zh\n"
+"Language-Team: \n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/release_notes.md:1
+msgid "Release note"
+msgstr "版本说明"
+
+#: ../../source/user_guide/release_notes.md:3
+#, fuzzy
+msgid "v0.9.1rc3 - 2025.08.22"
+msgstr "v0.9.1rc1 - 2025.06.22"
+
+#: ../../source/user_guide/release_notes.md:5
+#, fuzzy
+msgid ""
+"This is the 3rd release candidate of v0.9.1 for vLLM Ascend. Please "
+"follow the [official doc](https://vllm-"
+"ascend.readthedocs.io/en/v0.9.1-dev/) to get started."
+msgstr ""
+"这是 vLLM Ascend v0.9.1 的第一个候选发布版本。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/)开始使用。"
+
+#: ../../source/user_guide/release_notes.md:7
+#: ../../source/user_guide/release_notes.md:146
+#: ../../source/user_guide/release_notes.md:173
+#: ../../source/user_guide/release_notes.md:217
+#: ../../source/user_guide/release_notes.md:280
+#: ../../source/user_guide/release_notes.md:302
+#: ../../source/user_guide/release_notes.md:325
+#: ../../source/user_guide/release_notes.md:346
+#: ../../source/user_guide/release_notes.md:370
+#: ../../source/user_guide/release_notes.md:392
+#: ../../source/user_guide/release_notes.md:425
+msgid "Core"
+msgstr "核心"
+
+#: ../../source/user_guide/release_notes.md:9
+#, fuzzy
+msgid ""
+"MTP supports V1 scheduler [#2371](https://github.com/vllm-project/vllm-"
+"ascend/pull/2371)"
+msgstr ""
+"在 vLLM 上初步支持 Ascend NPU。[#3](https://github.com/vllm-project/vllm-"
+"ascend/pull/3)"
+
+#: ../../source/user_guide/release_notes.md:10
+#, fuzzy
+msgid ""
+"Add LMhead TP communication groups [#1956](https://github.com/vllm-"
+"project/vllm-ascend/pull/1956)"
+msgstr ""
+"[Docker] 添加 vllm-ascend 容器镜像 [#64](https://github.com/vllm-project/vllm-"
+"ascend/pull/64)"
+
+#: ../../source/user_guide/release_notes.md:11
+#, fuzzy
+msgid ""
+"Fix the bug that qwen3 moe doesn't work with aclgraph "
+"[#2478](https://github.com/vllm-project/vllm-ascend/pull/2478)"
+msgstr ""
+"修复了一个 bug，使前缀缓存功能能够以正确的准确性运行。[#424](https://github.com/vllm-project/vllm-"
+"ascend/pull/424)"
+
+#: ../../source/user_guide/release_notes.md:12
+#, fuzzy
+msgid ""
+"Fix `grammar_bitmask` IndexError caused by outdated "
+"`apply_grammar_bitmask` method [#2314](https://github.com/vllm-project"
+"/vllm-ascend/pull/2314)"
+msgstr ""
+"**GatherV3** 错误已通过 **aclgraph** 模式修复。[#1416](https://github.com/vllm-"
+"project/vllm-ascend/pull/1416)"
+
+#: ../../source/user_guide/release_notes.md:13
+#, fuzzy
+msgid ""
+"Remove `chunked_prefill_for_mla` [#2177](https://github.com/vllm-project"
+"/vllm-ascend/pull/2177)"
+msgstr ""
+"为MLA初步支持分块预填充。 [#1172](https://github.com/vllm-project/vllm-"
+"ascend/pull/1172)"
+
+#: ../../source/user_guide/release_notes.md:14
+#, fuzzy
+msgid ""
+"Fix bugs and refactor cached mask generation logic "
+"[#2326](https://github.com/vllm-project/vllm-ascend/pull/2326)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:15
+#, fuzzy
+msgid ""
+"Fix configuration check logic about ascend scheduler "
+"[#2327](https://github.com/vllm-project/vllm-ascend/pull/2327)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:16
+#, fuzzy
+msgid ""
+"Cancel the verification between deepseek-mtp and non-ascend scheduler in "
+"disaggregated-prefill deployment [#2368](https://github.com/vllm-project"
+"/vllm-ascend/pull/2368)"
+msgstr ""
+"基于 llm_datadist 的 P2P 分布式 Prefill 初步支持 [#694](https://github.com/vllm-"
+"project/vllm-ascend/pull/694)"
+
+#: ../../source/user_guide/release_notes.md:17
+#, fuzzy
+msgid ""
+"Fix issue that failed with ray distributed backend "
+"[#2306](https://github.com/vllm-project/vllm-ascend/pull/2306)"
+msgstr "添加单元测试框架 [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)"
+
+#: ../../source/user_guide/release_notes.md:18
+#, fuzzy
+msgid ""
+"Fix incorrect req block length in ascend scheduler "
+"[#2394](https://github.com/vllm-project/vllm-ascend/pull/2394)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:19
+#, fuzzy
+msgid ""
+"Fix header include issue in rope [#2398](https://github.com/vllm-project"
+"/vllm-ascend/pull/2398)"
+msgstr ""
+"修复 setup.py 中的 `PYTHON_INCLUDE_PATH` 拼写错误 [#762](https://github.com/vllm-"
+"project/vllm-ascend/pull/762)"
+
+#: ../../source/user_guide/release_notes.md:20
+#, fuzzy
+msgid ""
+"Fix mtp config bug [#2412](https://github.com/vllm-project/vllm-"
+"ascend/pull/2412)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:21
+#, fuzzy
+msgid ""
+"Fix error info and adapt `attn_metedata` refactor "
+"[#2402](https://github.com/vllm-project/vllm-ascend/pull/2402)"
+msgstr "添加准确性测试报告 [#542](https://github.com/vllm-project/vllm-ascend/pull/542)"
+
+#: ../../source/user_guide/release_notes.md:22
+#, fuzzy
+msgid ""
+"Fix torchair runtime error caused by configuration mismtaches and "
+"`.kv_cache_bytes` file missing [#2312](https://github.com/vllm-project"
+"/vllm-ascend/pull/2312)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:23
+#, fuzzy
+msgid ""
+"Move `with_prefill` allreduce from cpu to npu [#2230](https://github.com"
+"/vllm-project/vllm-ascend/pull/2230)"
+msgstr "添加单元测试框架 [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)"
+
+#: ../../source/user_guide/release_notes.md:25
+#: ../../source/user_guide/release_notes.md:263
+msgid "Docs"
+msgstr "文档"
+
+#: ../../source/user_guide/release_notes.md:27
+#, fuzzy
+msgid ""
+"Add document for deepseek large EP [#2339](https://github.com/vllm-"
+"project/vllm-ascend/pull/2339)"
+msgstr "添加准确性测试报告 [#542](https://github.com/vllm-project/vllm-ascend/pull/542)"
+
+#: ../../source/user_guide/release_notes.md:29
+#: ../../source/user_guide/release_notes.md:132
+#: ../../source/user_guide/release_notes.md:193
+msgid "Known Issues"
+msgstr "已知问题"
+
+#: ../../source/user_guide/release_notes.md:31
+#, fuzzy
+msgid ""
+"`test_aclgraph.py` failed with `\"full_cuda_graph\": True` on A2 (910B1) "
+"[#2182](https://github.com/vllm-project/vllm-ascend/issues/2182)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:33
+#, fuzzy
+msgid "v0.9.1rc2 - 2025.08.06"
+msgstr "v0.9.1rc1 - 2025.06.22"
+
+#: ../../source/user_guide/release_notes.md:34
+#, fuzzy
+msgid ""
+"This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please "
+"follow the [official doc](https://vllm-"
+"ascend.readthedocs.io/en/v0.9.1-dev/) to get started."
+msgstr ""
+"这是 vLLM Ascend v0.9.1 的第一个候选发布版本。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/)开始使用。"
+
+#: ../../source/user_guide/release_notes.md:36
+#: ../../source/user_guide/release_notes.md:141
+#: ../../source/user_guide/release_notes.md:168
+#: ../../source/user_guide/release_notes.md:204
+#: ../../source/user_guide/release_notes.md:212
+#: ../../source/user_guide/release_notes.md:250
+#: ../../source/user_guide/release_notes.md:274
+#: ../../source/user_guide/release_notes.md:297
+#: ../../source/user_guide/release_notes.md:320
+#: ../../source/user_guide/release_notes.md:340
+#: ../../source/user_guide/release_notes.md:365
+#: ../../source/user_guide/release_notes.md:387
+#: ../../source/user_guide/release_notes.md:419
+msgid "Highlights"
+msgstr "亮点"
+
+#: ../../source/user_guide/release_notes.md:37
+#, fuzzy
+msgid ""
+"MOE and dense w4a8 quantization support now: [#1320](https://github.com"
+"/vllm-project/vllm-ascend/pull/1320) [#1910](https://github.com/vllm-"
+"project/vllm-ascend/pull/1910) [#1275](https://github.com/vllm-project"
+"/vllm-ascend/pull/1275) [#1480](https://github.com/vllm-project/vllm-"
+"ascend/pull/1480)"
+msgstr ""
+"DeepSeek 的性能已得到提升。[#1194](https://github.com/vllm-project/vllm-"
+"ascend/pull/1194) [#1395](https://github.com/vllm-project/vllm-"
+"ascend/pull/1395) [#1380](https://github.com/vllm-project/vllm-"
+"ascend/pull/1380)"
+
+#: ../../source/user_guide/release_notes.md:38
+#, fuzzy
+msgid ""
+"Dynamic EPLB support in [#1943](https://github.com/vllm-project/vllm-"
+"ascend/pull/1943)"
+msgstr ""
+"MiniCPM 现在已被支持 [#164](https://github.com/vllm-project/vllm-"
+"ascend/pull/164)"
+
+#: ../../source/user_guide/release_notes.md:39
+msgid ""
+"Disaggregated Prefilling support for V1 Engine and improvement, continued"
+" development and stabilization of the disaggregated prefill feature, "
+"including performance enhancements and bug fixes for single-machine "
+"setups:[#1953](https://github.com/vllm-project/vllm-ascend/pull/1953) "
+"[#1612](https://github.com/vllm-project/vllm-ascend/pull/1612) "
+"[#1361](https://github.com/vllm-project/vllm-ascend/pull/1361) "
+"[#1746](https://github.com/vllm-project/vllm-ascend/pull/1746) "
+"[#1552](https://github.com/vllm-project/vllm-ascend/pull/1552) "
+"[#1801](https://github.com/vllm-project/vllm-ascend/pull/1801) "
+"[#2083](https://github.com/vllm-project/vllm-ascend/pull/2083) "
+"[#1989](https://github.com/vllm-project/vllm-ascend/pull/1989)"
+msgstr ""
+
+#: ../../source/user_guide/release_notes.md:41
+#, fuzzy
+msgid "Models improvement:"
+msgstr "其他改进"
+
+#: ../../source/user_guide/release_notes.md:42
+msgid ""
+"DeepSeek DeepSeek DBO support and improvement: [#1285](https://github.com"
+"/vllm-project/vllm-ascend/pull/1285) [#1291](https://github.com/vllm-"
+"project/vllm-ascend/pull/1291) [#1328](https://github.com/vllm-project"
+"/vllm-ascend/pull/1328) [#1420](https://github.com/vllm-project/vllm-"
+"ascend/pull/1420) [#1445](https://github.com/vllm-project/vllm-"
+"ascend/pull/1445) [#1589](https://github.com/vllm-project/vllm-"
+"ascend/pull/1589) [#1759](https://github.com/vllm-project/vllm-"
+"ascend/pull/1759) [#1827](https://github.com/vllm-project/vllm-"
+"ascend/pull/1827) [#2093](https://github.com/vllm-project/vllm-"
+"ascend/pull/2093)"
+msgstr ""
+
+#: ../../source/user_guide/release_notes.md:43
+msgid ""
+"DeepSeek MTP improvement and bugfix: [#1214](https://github.com/vllm-"
+"project/vllm-ascend/pull/1214) [#943](https://github.com/vllm-project"
+"/vllm-ascend/pull/943) [#1584](https://github.com/vllm-project/vllm-"
+"ascend/pull/1584) [#1473](https://github.com/vllm-project/vllm-"
+"ascend/pull/1473) [#1294](https://github.com/vllm-project/vllm-"
+"ascend/pull/1294) [#1632](https://github.com/vllm-project/vllm-"
+"ascend/pull/1632) [#1694](https://github.com/vllm-project/vllm-"
+"ascend/pull/1694) [#1840](https://github.com/vllm-project/vllm-"
+"ascend/pull/1840) [#2076](https://github.com/vllm-project/vllm-"
+"ascend/pull/2076) [#1990](https://github.com/vllm-project/vllm-"
+"ascend/pull/1990) [#2019](https://github.com/vllm-project/vllm-"
+"ascend/pull/2019)"
+msgstr ""
+
+#: ../../source/user_guide/release_notes.md:44
+#, fuzzy
+msgid ""
+"Qwen3 MoE support improvement and bugfix around graph mode and DP:  "
+"[#1940](https://github.com/vllm-project/vllm-ascend/pull/1940) "
+"[#2006](https://github.com/vllm-project/vllm-ascend/pull/2006) "
+"[#1832](https://github.com/vllm-project/vllm-ascend/pull/1832)"
+msgstr ""
+"通过使用 TorchAir 图对 DeepSeek 进行了性能提升。[#1098](https://github.com/vllm-project"
+"/vllm-ascend/pull/1098), [#1131](https://github.com/vllm-project/vllm-"
+"ascend/pull/1131)"
+
+#: ../../source/user_guide/release_notes.md:45
+#, fuzzy
+msgid ""
+"Qwen3 performance improvement around rmsnorm/repo/mlp ops: "
+"[#1545](https://github.com/vllm-project/vllm-ascend/pull/1545) "
+"[#1719](https://github.com/vllm-project/vllm-ascend/pull/1719) "
+"[#1726](https://github.com/vllm-project/vllm-ascend/pull/1726) "
+"[#1782](https://github.com/vllm-project/vllm-ascend/pull/1782) "
+"[#1745](https://github.com/vllm-project/vllm-ascend/pull/1745)"
+msgstr ""
+"DeepSeek V3/R1 现在已经支持 DP、TP 和 MTP。请注意，目前仍处于实验阶段。如果遇到任何问题，请告知我们。 "
+"[#429](https://github.com/vllm-project/vllm-ascend/pull/429) "
+"[#585](https://github.com/vllm-project/vllm-ascend/pull/585) "
+"[#626](https://github.com/vllm-project/vllm-ascend/pull/626) "
+"[#636](https://github.com/vllm-project/vllm-ascend/pull/636) "
+"[#671](https://github.com/vllm-project/vllm-ascend/pull/671)"
+
+#: ../../source/user_guide/release_notes.md:46
+#, fuzzy
+msgid ""
+"DeepSeek MLA chunked prefill/graph mode/multistream improvement and "
+"bugfix: [#1240](https://github.com/vllm-project/vllm-ascend/pull/1240) "
+"[#933](https://github.com/vllm-project/vllm-ascend/pull/933) "
+"[#1135](https://github.com/vllm-project/vllm-ascend/pull/1135) "
+"[#1311](https://github.com/vllm-project/vllm-ascend/pull/1311) "
+"[#1750](https://github.com/vllm-project/vllm-ascend/pull/1750) "
+"[#1872](https://github.com/vllm-project/vllm-ascend/pull/1872) "
+"[#2170](https://github.com/vllm-project/vllm-ascend/pull/2170) "
+"[#1551](https://github.com/vllm-project/vllm-ascend/pull/1551)"
+msgstr ""
+"一批性能改进的 PR 已被合并。[#784](https://github.com/vllm-project/vllm-"
+"ascend/pull/784) [#803](https://github.com/vllm-project/vllm-"
+"ascend/pull/803) [#966](https://github.com/vllm-project/vllm-"
+"ascend/pull/966) [#839](https://github.com/vllm-project/vllm-"
+"ascend/pull/839) [#970](https://github.com/vllm-project/vllm-"
+"ascend/pull/970) [#947](https://github.com/vllm-project/vllm-"
+"ascend/pull/947) [#987](https://github.com/vllm-project/vllm-"
+"ascend/pull/987) [#1085](https://github.com/vllm-project/vllm-"
+"ascend/pull/1085)"
+
+#: ../../source/user_guide/release_notes.md:47
+#, fuzzy
+msgid ""
+"Qwen2.5 VL improvement via mrope/padding mechanism improvement: "
+"[#1261](https://github.com/vllm-project/vllm-ascend/pull/1261) "
+"[#1705](https://github.com/vllm-project/vllm-ascend/pull/1705) "
+"[#1929](https://github.com/vllm-project/vllm-ascend/pull/1929) "
+"[#2007](https://github.com/vllm-project/vllm-ascend/pull/2007)"
+msgstr ""
+"DeepSeek 的性能已得到提升。[#1194](https://github.com/vllm-project/vllm-"
+"ascend/pull/1194) [#1395](https://github.com/vllm-project/vllm-"
+"ascend/pull/1395) [#1380](https://github.com/vllm-project/vllm-"
+"ascend/pull/1380)"
+
+#: ../../source/user_guide/release_notes.md:48
+#, fuzzy
+msgid ""
+"Ray: Fix the device error when using ray and add initialize_cache and "
+"improve warning info: [#1234](https://github.com/vllm-project/vllm-"
+"ascend/pull/1234) [#1501](https://github.com/vllm-project/vllm-"
+"ascend/pull/1501)"
+msgstr ""
+"Spec 解码和 MTP 功能现在已经支持 V1 引擎。[#874](https://github.com/vllm-project/vllm-"
+"ascend/pull/874) [#890](https://github.com/vllm-project/vllm-"
+"ascend/pull/890)"
+
+#: ../../source/user_guide/release_notes.md:50
+#, fuzzy
+msgid "Graph mode improvement:"
+msgstr "其他改进"
+
+#: ../../source/user_guide/release_notes.md:51
+#, fuzzy
+msgid ""
+"Fix DeepSeek with deepseek with mc2 in [#1269](https://github.com/vllm-"
+"project/vllm-ascend/pull/1269)"
+msgstr ""
+"DP 功能现在可以与 DeepSeek 一起使用。[#1012](https://github.com/vllm-project/vllm-"
+"ascend/pull/1012)"
+
+#: ../../source/user_guide/release_notes.md:52
+#, fuzzy
+msgid ""
+"Fix accuracy problem for deepseek V3/R1 models with torchair graph in "
+"long sequence predictions in [#1332](https://github.com/vllm-project"
+"/vllm-ascend/pull/1332)"
+msgstr ""
+"修复 deepseek V3/R1 模型在使用 torchair "
+"图进行长序列预测时的精度问题。[#1331](https://github.com/vllm-project/vllm-"
+"ascend/pull/1331)"
+
+#: ../../source/user_guide/release_notes.md:53
+#, fuzzy
+msgid ""
+"Fix torchair_graph_batch_sizes bug in [#1570](https://github.com/vllm-"
+"project/vllm-ascend/pull/1570)"
+msgstr ""
+"LLama4 现在可以使用了。[#740](https://github.com/vllm-project/vllm-"
+"ascend/pull/740)"
+
+#: ../../source/user_guide/release_notes.md:54
+#, fuzzy
+msgid ""
+"Enable the limit of tp <= 4 for torchair graph mode in "
+"[#1404](https://github.com/vllm-project/vllm-ascend/pull/1404)"
+msgstr "添加单元测试框架 [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)"
+
+#: ../../source/user_guide/release_notes.md:55
+#, fuzzy
+msgid ""
+"Fix rope accruracy bug [#1887](https://github.com/vllm-project/vllm-"
+"ascend/pull/1887)"
+msgstr "添加准确性测试报告 [#542](https://github.com/vllm-project/vllm-ascend/pull/542)"
+
+#: ../../source/user_guide/release_notes.md:56
+#, fuzzy
+msgid ""
+"Support multistream of shared experts in FusedMoE "
+"[#997](https://github.com/vllm-project/vllm-ascend/pull/997)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:57
+#, fuzzy
+msgid ""
+"Enable kvcache_nz for the decode process in torchair graph "
+"mode[#1098](https://github.com/vllm-project/vllm-ascend/pull/1098)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:58
+msgid ""
+"Fix chunked-prefill with torchair case to resolve UnboundLocalError: "
+"local variable 'decode_hs_or_q_c' issue in [#1378](https://github.com"
+"/vllm-project/vllm-ascend/pull/1378)"
+msgstr ""
+
+#: ../../source/user_guide/release_notes.md:59
+#, fuzzy
+msgid ""
+"Improve shared experts multi-stream perf for w8a8 dynamic. in "
+"[#1561](https://github.com/vllm-project/vllm-ascend/pull/1561)"
+msgstr ""
+"为MLA初步支持分块预填充。 [#1172](https://github.com/vllm-project/vllm-"
+"ascend/pull/1172)"
+
+#: ../../source/user_guide/release_notes.md:60
+#, fuzzy
+msgid ""
+"Repair moe error when set multistream. in [#1882](https://github.com"
+"/vllm-project/vllm-ascend/pull/1882)"
+msgstr "添加单元测试框架 [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)"
+
+#: ../../source/user_guide/release_notes.md:61
+#, fuzzy
+msgid ""
+"Round up graph batch size to tp size in EP case "
+"[#1610](https://github.com/vllm-project/vllm-ascend/pull/1610)"
+msgstr ""
+"DP 功能现在可以与 DeepSeek 一起使用。[#1012](https://github.com/vllm-project/vllm-"
+"ascend/pull/1012)"
+
+#: ../../source/user_guide/release_notes.md:62
+#, fuzzy
+msgid ""
+"Fix torchair bug when DP is enabled in [#1727](https://github.com/vllm-"
+"project/vllm-ascend/pull/1727)"
+msgstr ""
+"MiniCPM 现在已被支持 [#164](https://github.com/vllm-project/vllm-"
+"ascend/pull/164)"
+
+#: ../../source/user_guide/release_notes.md:63
+#, fuzzy
+msgid ""
+"Add extra checking to torchair_graph_config. in "
+"[#1675](https://github.com/vllm-project/vllm-ascend/pull/1675)"
+msgstr "添加每晚持续集成 [#668](https://github.com/vllm-project/vllm-ascend/pull/668)"
+
+#: ../../source/user_guide/release_notes.md:64
+#, fuzzy
+msgid ""
+"Fix rope bug in torchair+chunk-prefill scenario in "
+"[#1693](https://github.com/vllm-project/vllm-ascend/pull/1693)"
+msgstr ""
+"为MLA初步支持分块预填充。 [#1172](https://github.com/vllm-project/vllm-"
+"ascend/pull/1172)"
+
+#: ../../source/user_guide/release_notes.md:65
+#, fuzzy
+msgid ""
+"torchair_graph bugfix when chunked_prefill is true in "
+"[#1748](https://github.com/vllm-project/vllm-ascend/pull/1748)"
+msgstr ""
+"为MLA初步支持分块预填充。 [#1172](https://github.com/vllm-project/vllm-"
+"ascend/pull/1172)"
+
+#: ../../source/user_guide/release_notes.md:66
+#, fuzzy
+msgid ""
+"Improve prefill optimization to support torchair graph mode in "
+"[#2090](https://github.com/vllm-project/vllm-ascend/pull/2090)"
+msgstr ""
+"在 vLLM 上初步支持 Ascend NPU。[#3](https://github.com/vllm-project/vllm-"
+"ascend/pull/3)"
+
+#: ../../source/user_guide/release_notes.md:67
+#, fuzzy
+msgid ""
+"Fix rank set in DP scenario [#1247](https://github.com/vllm-project/vllm-"
+"ascend/pull/1247)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:68
+#, fuzzy
+msgid ""
+"Reset all unused positions to prevent out-of-bounds to resolve GatherV3 "
+"bug in [#1397](https://github.com/vllm-project/vllm-ascend/pull/1397)"
+msgstr ""
+"支持使用 prompt logprobs 恢复 V1 的 ceval 准确率 [#1483](https://github.com/vllm-"
+"project/vllm-ascend/pull/1483)"
+
+#: ../../source/user_guide/release_notes.md:69
+#, fuzzy
+msgid ""
+"Remove duplicate multimodal codes in ModelRunner in "
+"[#1393](https://github.com/vllm-project/vllm-ascend/pull/1393)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:70
+#, fuzzy
+msgid ""
+"Fix block table shape to resolve accuracy issue in "
+"[#1297](https://github.com/vllm-project/vllm-ascend/pull/1297)"
+msgstr ""
+"支持使用 prompt logprobs 恢复 V1 的 ceval 准确率 [#1483](https://github.com/vllm-"
+"project/vllm-ascend/pull/1483)"
+
+#: ../../source/user_guide/release_notes.md:71
+#, fuzzy
+msgid ""
+"Implement primal full graph with limited scenario in "
+"[#1503](https://github.com/vllm-project/vllm-ascend/pull/1503)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:72
+#, fuzzy
+msgid ""
+"Restore paged attention kernel in Full Graph for performance in "
+"[#1677](https://github.com/vllm-project/vllm-ascend/pull/1677)"
+msgstr ""
+"为MLA初步支持分块预填充。 [#1172](https://github.com/vllm-project/vllm-"
+"ascend/pull/1172)"
+
+#: ../../source/user_guide/release_notes.md:73
+#, fuzzy
+msgid ""
+"Fix DeepSeek OOM issue in extreme `--gpu-memory-utilization` scenario in "
+"[#1829](https://github.com/vllm-project/vllm-ascend/pull/1829)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:74
+#, fuzzy
+msgid ""
+"Turn off aclgraph when enabling TorchAir in [#2154](https://github.com"
+"/vllm-project/vllm-ascend/pull/2154)"
+msgstr ""
+"将 vllm 升级到 0.9.1 [#1165]https://github.com/vllm-project/vllm-"
+"ascend/pull/1165"
+
+#: ../../source/user_guide/release_notes.md:76
+#, fuzzy
+msgid "Ops improvement:"
+msgstr "其他改进"
+
+#: ../../source/user_guide/release_notes.md:77
+#, fuzzy
+msgid ""
+"add custom ascendc kernel vocabparallelembedding "
+"[#796](https://github.com/vllm-project/vllm-ascend/pull/796)"
+msgstr ""
+"[Docker] 添加 vllm-ascend 容器镜像 [#64](https://github.com/vllm-project/vllm-"
+"ascend/pull/64)"
+
+#: ../../source/user_guide/release_notes.md:78
+#, fuzzy
+msgid ""
+"fix rope sin/cos cache bug in [#1267](https://github.com/vllm-project"
+"/vllm-ascend/pull/1267)"
+msgstr "添加每晚持续集成 [#668](https://github.com/vllm-project/vllm-ascend/pull/668)"
+
+#: ../../source/user_guide/release_notes.md:79
+#, fuzzy
+msgid ""
+"Refactoring AscendFusedMoE (#1229) in [#1264](https://github.com/vllm-"
+"project/vllm-ascend/pull/1264)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:80
+#, fuzzy
+msgid ""
+"Use fused ops npu_top_k_top_p in sampler [#1920](https://github.com/vllm-"
+"project/vllm-ascend/pull/1920)"
+msgstr "添加单元测试框架 [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)"
+
+#: ../../source/user_guide/release_notes.md:82
+#, fuzzy
+msgid "Core:"
+msgstr "核心"
+
+#: ../../source/user_guide/release_notes.md:83
+#, fuzzy
+msgid ""
+"Upgrade CANN to 8.2.rc1 in [#2036](https://github.com/vllm-project/vllm-"
+"ascend/pull/2036)"
+msgstr ""
+"将 vllm 升级到 0.9.1 [#1165]https://github.com/vllm-project/vllm-"
+"ascend/pull/1165"
+
+#: ../../source/user_guide/release_notes.md:84
+#, fuzzy
+msgid ""
+"Upgrade torch-npu to 2.5.1.post1 in [#2135](https://github.com/vllm-"
+"project/vllm-ascend/pull/2135)"
+msgstr ""
+"将 vLLM 升级到 0.8.5.post1 [#715](https://github.com/vllm-project/vllm-"
+"ascend/pull/715)"
+
+#: ../../source/user_guide/release_notes.md:85
+#, fuzzy
+msgid ""
+"Upgrade python to 3.11 in [#2136](https://github.com/vllm-project/vllm-"
+"ascend/pull/2136)"
+msgstr ""
+"将 vllm 升级到 0.9.1 [#1165]https://github.com/vllm-project/vllm-"
+"ascend/pull/1165"
+
+#: ../../source/user_guide/release_notes.md:86
+#, fuzzy
+msgid ""
+"Disable quantization in mindie_turbo  in [#1749](https://github.com/vllm-"
+"project/vllm-ascend/pull/1749)"
+msgstr ""
+"W8A8 量化现在可以在 Atlas 300I 系列上运行了。[#1560](https://github.com/vllm-project"
+"/vllm-ascend/pull/1560)"
+
+#: ../../source/user_guide/release_notes.md:87
+#, fuzzy
+msgid ""
+"fix v0 spec decode in [#1323](https://github.com/vllm-project/vllm-"
+"ascend/pull/1323)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:88
+#, fuzzy
+msgid ""
+"Enable `ACL_OP_INIT_MODE=1` directly only when using V0 spec decode in "
+"[#1271](https://github.com/vllm-project/vllm-ascend/pull/1271)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:89
+#, fuzzy
+msgid ""
+"Refactoring forward_context and model_runner_v1 in "
+"[#1422](https://github.com/vllm-project/vllm-ascend/pull/1422)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:90
+#, fuzzy
+msgid ""
+"Fix sampling params in [#1423](https://github.com/vllm-project/vllm-"
+"ascend/pull/1423)"
+msgstr ""
+"MiniCPM 现在已被支持 [#164](https://github.com/vllm-project/vllm-"
+"ascend/pull/164)"
+
+#: ../../source/user_guide/release_notes.md:91
+#, fuzzy
+msgid ""
+"add a switch for enabling NZ layout in weights and enable NZ for GMM. in "
+"[#1409](https://github.com/vllm-project/vllm-ascend/pull/1409)"
+msgstr ""
+"DeepSeek 现在支持前缀缓存了。[#1498](https://github.com/vllm-project/vllm-"
+"ascend/pull/1498)"
+
+#: ../../source/user_guide/release_notes.md:92
+#, fuzzy
+msgid ""
+"Resolved bug in ascend_forward_context in [#1449](https://github.com"
+"/vllm-project/vllm-ascend/pull/1449) [#1554](https://github.com/vllm-"
+"project/vllm-ascend/pull/1554) [#1598](https://github.com/vllm-project"
+"/vllm-ascend/pull/1598)"
+msgstr ""
+"已修复了一批与数据并行相关的 bug [#1273](https://github.com/vllm-project/vllm-"
+"ascend/pull/1273) [#1322](https://github.com/vllm-project/vllm-"
+"ascend/pull/1322) [#1275](https://github.com/vllm-project/vllm-"
+"ascend/pull/1275) [#1478](https://github.com/vllm-project/vllm-"
+"ascend/pull/1478)"
+
+#: ../../source/user_guide/release_notes.md:93
+#, fuzzy
+msgid ""
+"Address PrefillCacheHit state to fix prefix cache accuracy bug in "
+"[#1492](https://github.com/vllm-project/vllm-ascend/pull/1492)"
+msgstr ""
+"DeepSeek 现在支持前缀缓存了。[#1498](https://github.com/vllm-project/vllm-"
+"ascend/pull/1498)"
+
+#: ../../source/user_guide/release_notes.md:94
+#, fuzzy
+msgid ""
+"Fix load weight error and add new e2e case in [#1651](https://github.com"
+"/vllm-project/vllm-ascend/pull/1651)"
+msgstr ""
+"修复 ModuleNotFoundError 错误以使 Lora 正常工作 [#600](https://github.com/vllm-"
+"project/vllm-ascend/pull/600)"
+
+#: ../../source/user_guide/release_notes.md:95
+#, fuzzy
+msgid ""
+"Optimize the number of rope-related index selections in deepseek. in "
+"[#1614](https://github.com/vllm-project/vllm-ascend/pull/1614)"
+msgstr ""
+"DP 功能现在可以与 DeepSeek 一起使用。[#1012](https://github.com/vllm-project/vllm-"
+"ascend/pull/1012)"
+
+#: ../../source/user_guide/release_notes.md:96
+#, fuzzy
+msgid ""
+"add mc2 mask in [#1642](https://github.com/vllm-project/vllm-"
+"ascend/pull/1642)"
+msgstr "添加每晚持续集成 [#668](https://github.com/vllm-project/vllm-ascend/pull/668)"
+
+#: ../../source/user_guide/release_notes.md:97
+#, fuzzy
+msgid ""
+"Fix static EPLB log2phy condition and improve unit test in "
+"[#1667](https://github.com/vllm-project/vllm-ascend/pull/1667) "
+"[#1896](https://github.com/vllm-project/vllm-ascend/pull/1896) "
+"[#2003](https://github.com/vllm-project/vllm-ascend/pull/2003)"
+msgstr ""
+"DeepSeek 的性能已得到提升。[#1194](https://github.com/vllm-project/vllm-"
+"ascend/pull/1194) [#1395](https://github.com/vllm-project/vllm-"
+"ascend/pull/1395) [#1380](https://github.com/vllm-project/vllm-"
+"ascend/pull/1380)"
+
+#: ../../source/user_guide/release_notes.md:98
+#, fuzzy
+msgid ""
+"add chunk mc2 for prefill in [#1703](https://github.com/vllm-project"
+"/vllm-ascend/pull/1703)"
+msgstr "添加单元测试框架 [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)"
+
+#: ../../source/user_guide/release_notes.md:99
+#, fuzzy
+msgid ""
+"Fix mc2 op GroupCoordinator bug in [#1711](https://github.com/vllm-"
+"project/vllm-ascend/pull/1711)"
+msgstr ""
+"LLama4 现在可以使用了。[#740](https://github.com/vllm-project/vllm-"
+"ascend/pull/740)"
+
+#: ../../source/user_guide/release_notes.md:100
+#, fuzzy
+msgid ""
+"Fix the failure to recognize the actual type of quantization in "
+"[#1721](https://github.com/vllm-project/vllm-ascend/pull/1721)"
+msgstr ""
+"在线服务现已支持Ascend量化。[#877](https://github.com/vllm-project/vllm-"
+"ascend/pull/877)"
+
+#: ../../source/user_guide/release_notes.md:101
+#, fuzzy
+msgid ""
+"Fix deepseek bug when tp_size == 1  in [#1755](https://github.com/vllm-"
+"project/vllm-ascend/pull/1755)"
+msgstr ""
+"添加 Qwen3-0.6B 测试 [#717](https://github.com/vllm-project/vllm-"
+"ascend/pull/717)"
+
+#: ../../source/user_guide/release_notes.md:102
+#, fuzzy
+msgid ""
+"Added support for delay-free blocks in prefill nodes in "
+"[#1691](https://github.com/vllm-project/vllm-ascend/pull/1691)"
+msgstr ""
+"为MLA初步支持分块预填充。 [#1172](https://github.com/vllm-project/vllm-"
+"ascend/pull/1172)"
+
+#: ../../source/user_guide/release_notes.md:103
+#, fuzzy
+msgid ""
+"Moe alltoallv communication optimization for unquantized RL training & "
+"alltoallv support dpo in [#1547](https://github.com/vllm-project/vllm-"
+"ascend/pull/1547)"
+msgstr ""
+"W8A8 量化现在可以在 Atlas 300I 系列上运行了。[#1560](https://github.com/vllm-project"
+"/vllm-ascend/pull/1560)"
+
+#: ../../source/user_guide/release_notes.md:104
+#, fuzzy
+msgid ""
+"Adapt dispatchV2 interface in [#1822](https://github.com/vllm-project"
+"/vllm-ascend/pull/1822)"
+msgstr "添加每晚持续集成 [#668](https://github.com/vllm-project/vllm-ascend/pull/668)"
+
+#: ../../source/user_guide/release_notes.md:105
+#, fuzzy
+msgid ""
+"Fix disaggregate prefill hang issue in long output in "
+"[#1807](https://github.com/vllm-project/vllm-ascend/pull/1807)"
+msgstr ""
+"基于 llm_datadist 的 P2P 分布式 Prefill 初步支持 [#694](https://github.com/vllm-"
+"project/vllm-ascend/pull/694)"
+
+#: ../../source/user_guide/release_notes.md:106
+#, fuzzy
+msgid ""
+"Fix flashcomm_v1 when engine v0 in [#1859](https://github.com/vllm-"
+"project/vllm-ascend/pull/1859)"
+msgstr ""
+"前缀缓存功能现在已在 V1 引擎上工作。[#559](https://github.com/vllm-project/vllm-"
+"ascend/pull/559)"
+
+#: ../../source/user_guide/release_notes.md:107
+#, fuzzy
+msgid ""
+"ep_group is not equal to word_size in some cases. in "
+"[#1862](https://github.com/vllm-project/vllm-ascend/pull/1862)"
+msgstr ""
+"DeepSeek 现在支持前缀缓存了。[#1498](https://github.com/vllm-project/vllm-"
+"ascend/pull/1498)"
+
+#: ../../source/user_guide/release_notes.md:108
+#, fuzzy
+msgid ""
+"Fix wheel glibc version incompatibility in [#1808](https://github.com"
+"/vllm-project/vllm-ascend/pull/1808)"
+msgstr ""
+"修复 setup.py 中的 `PYTHON_INCLUDE_PATH` 拼写错误 [#762](https://github.com/vllm-"
+"project/vllm-ascend/pull/762)"
+
+#: ../../source/user_guide/release_notes.md:109
+#, fuzzy
+msgid ""
+"Fix mc2 process group to resolve self.cpu_group is None  in "
+"[#1831](https://github.com/vllm-project/vllm-ascend/pull/1831)"
+msgstr ""
+"支持使用 prompt logprobs 恢复 V1 的 ceval 准确率 [#1483](https://github.com/vllm-"
+"project/vllm-ascend/pull/1483)"
+
+#: ../../source/user_guide/release_notes.md:110
+#, fuzzy
+msgid ""
+"Pin vllm version to v0.9.1 to make mypy check passed  in "
+"[#1904](https://github.com/vllm-project/vllm-ascend/pull/1904)"
+msgstr ""
+"将 vllm 升级到 0.9.1 [#1165]https://github.com/vllm-project/vllm-"
+"ascend/pull/1165"
+
+#: ../../source/user_guide/release_notes.md:111
+#, fuzzy
+msgid ""
+"Apply npu_moe_gating_top_k_softmax for moe to improve perf in "
+"[#1902](https://github.com/vllm-project/vllm-ascend/pull/1902)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:112
+#, fuzzy
+msgid ""
+"Fix bug in path_decorator when engine v0 in [#1919](https://github.com"
+"/vllm-project/vllm-ascend/pull/1919)"
+msgstr ""
+"输入嵌入特性现在已支持 V0 引擎。[#916](https://github.com/vllm-project/vllm-"
+"ascend/pull/916)"
+
+#: ../../source/user_guide/release_notes.md:113
+#, fuzzy
+msgid ""
+"Avoid performing cpu all_reduce in disaggregated-prefill scenario.  in "
+"[#1644](https://github.com/vllm-project/vllm-ascend/pull/1644)"
+msgstr ""
+"基于 llm_datadist 的 P2P 分布式 Prefill 初步支持 [#694](https://github.com/vllm-"
+"project/vllm-ascend/pull/694)"
+
+#: ../../source/user_guide/release_notes.md:114
+#, fuzzy
+msgid ""
+"add super kernel in decode moe in [#1916](https://github.com/vllm-project"
+"/vllm-ascend/pull/1916)"
+msgstr "添加单元测试框架 [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)"
+
+#: ../../source/user_guide/release_notes.md:115
+#, fuzzy
+msgid ""
+"[Prefill Perf] Parallel Strategy Optimizations (VRAM-for-Speed Tradeoff) "
+"in [#1802](https://github.com/vllm-project/vllm-ascend/pull/1802)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:116
+#, fuzzy
+msgid ""
+"Remove unnecessary reduce_results access in shared_experts.down_proj in "
+"[#2016](https://github.com/vllm-project/vllm-ascend/pull/2016)"
+msgstr "添加单元测试框架 [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)"
+
+#: ../../source/user_guide/release_notes.md:117
+#, fuzzy
+msgid ""
+"Optimize greedy reject sampler with vectorization. in "
+"[#2002](https://github.com/vllm-project/vllm-ascend/pull/2002)"
+msgstr ""
+"在线服务现已支持Ascend量化。[#877](https://github.com/vllm-project/vllm-"
+"ascend/pull/877)"
+
+#: ../../source/user_guide/release_notes.md:118
+#, fuzzy
+msgid ""
+"Make multiple Ps and Ds work on a single machine in "
+"[#1936](https://github.com/vllm-project/vllm-ascend/pull/1936)"
+msgstr ""
+"前缀缓存功能现在已在 V1 引擎上工作。[#559](https://github.com/vllm-project/vllm-"
+"ascend/pull/559)"
+
+#: ../../source/user_guide/release_notes.md:119
+msgid ""
+"Fixes the shape conflicts between shared & routed experts for deepseek "
+"model when tp > 1 and multistream_moe enabled in "
+"[#2075](https://github.com/vllm-project/vllm-ascend/pull/2075)"
+msgstr ""
+
+#: ../../source/user_guide/release_notes.md:120
+#, fuzzy
+msgid ""
+"Add cpu binding support [#2031](https://github.com/vllm-project/vllm-"
+"ascend/pull/2031)"
+msgstr "添加单元测试框架 [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)"
+
+#: ../../source/user_guide/release_notes.md:121
+#, fuzzy
+msgid ""
+"Add with_prefill cpu allreduce to handle D-node recomputatio in "
+"[#2129](https://github.com/vllm-project/vllm-ascend/pull/2129)"
+msgstr ""
+"DeepSeek 现在支持前缀缓存了。[#1498](https://github.com/vllm-project/vllm-"
+"ascend/pull/1498)"
+
+#: ../../source/user_guide/release_notes.md:122
+#, fuzzy
+msgid ""
+"Add D2H & initRoutingQuantV2 to improve prefill perf in "
+"[#2038](https://github.com/vllm-project/vllm-ascend/pull/2038)"
+msgstr ""
+"为MLA初步支持分块预填充。 [#1172](https://github.com/vllm-project/vllm-"
+"ascend/pull/1172)"
+
+#: ../../source/user_guide/release_notes.md:124
+#, fuzzy
+msgid "Docs:"
+msgstr "文档"
+
+#: ../../source/user_guide/release_notes.md:125
+#, fuzzy
+msgid ""
+"Provide an e2e guide for execute duration profiling "
+"[#1113](https://github.com/vllm-project/vllm-ascend/pull/1113)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:126
+#, fuzzy
+msgid ""
+"Add Referer header for CANN package download url. "
+"[#1192](https://github.com/vllm-project/vllm-ascend/pull/1192)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:127
+#, fuzzy
+msgid ""
+"Add reinstall instructions doc [#1370](https://github.com/vllm-project"
+"/vllm-ascend/pull/1370)"
+msgstr ""
+"添加了“使用 EvalScope 评估”文档 [#611](https://github.com/vllm-project/vllm-"
+"ascend/pull/611)"
+
+#: ../../source/user_guide/release_notes.md:128
+#, fuzzy
+msgid ""
+"Update Disaggregate prefill README [#1379](https://github.com/vllm-"
+"project/vllm-ascend/pull/1379)"
+msgstr ""
+"基于 llm_datadist 的 P2P 分布式 Prefill 初步支持 [#694](https://github.com/vllm-"
+"project/vllm-ascend/pull/694)"
+
+#: ../../source/user_guide/release_notes.md:129
+#, fuzzy
+msgid ""
+"Disaggregate prefill for kv cache register style  "
+"[#1296](https://github.com/vllm-project/vllm-ascend/pull/1296)"
+msgstr "已支持猜测性解码功能。[#252](https://github.com/vllm-project/vllm-ascend/pull/252)"
+
+#: ../../source/user_guide/release_notes.md:130
+#, fuzzy
+msgid ""
+"Fix errors and non-standard parts in "
+"examples/disaggregate_prefill_v1/README.md in [#1965](https://github.com"
+"/vllm-project/vllm-ascend/pull/1965)"
+msgstr ""
+"基于 llm_datadist 的 P2P 分布式 Prefill 初步支持 [#694](https://github.com/vllm-"
+"project/vllm-ascend/pull/694)"
+
+#: ../../source/user_guide/release_notes.md:133
+#, fuzzy
+msgid ""
+"Full graph mode support are not yet available for specific hardware types"
+" with full_cuda_graphenable. [#2182](https://github.com/vllm-project"
+"/vllm-ascend/issues/2182)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:134
+#, fuzzy
+msgid ""
+"Qwen3 MoE aclgraph mode with tp failed when enable ep due to bincount "
+"error [#2226](https://github.com/vllm-project/vllm-ascend/issues/2226)"
+msgstr ""
+"Qwen2.5 VL 现在可以与 V1 引擎协同工作。[#736](https://github.com/vllm-project/vllm-"
+"ascend/pull/736)"
+
+#: ../../source/user_guide/release_notes.md:135
+msgid ""
+"As mentioend in v0.9.1rc1 release note, Altlas 300I series support will "
+"NOT be included."
+msgstr ""
+
+#: ../../source/user_guide/release_notes.md:137
+msgid "v0.9.2rc1 - 2025.07.11"
+msgstr ""
+
+#: ../../source/user_guide/release_notes.md:139
+msgid ""
+"This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please "
+"follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get "
+"started. From this release, V1 engine will be enabled by default, there "
+"is no need to set `VLLM_USE_V1=1` any more. And this release is the last "
+"version to support V0 engine, V0 code will be clean up in the future."
+msgstr ""
+"这是 vLLM Ascend v0.9.2 的第一个候选发布版本。请参阅[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/)开始使用。从本次发布起，V1 引擎将默认启用，不再需要设置 "
+"`VLLM_USE_V1=1`。此外，该版本也是最后一个支持 V0 引擎的版本，V0 相关代码将在未来被清理。"
+
+#: ../../source/user_guide/release_notes.md:142
+msgid ""
+"Pooling model works with V1 engine now. You can take a try with Qwen3 "
+"embedding model [#1359](https://github.com/vllm-project/vllm-"
+"ascend/pull/1359)."
+msgstr ""
+"Pooling 模型现在可以与 V1 引擎一起使用。你可以尝试使用 Qwen3 embedding 模型 "
+"[#1359](https://github.com/vllm-project/vllm-ascend/pull/1359)。"
+
+#: ../../source/user_guide/release_notes.md:143
+msgid ""
+"The performance on Atlas 300I series has been improved. "
+"[#1591](https://github.com/vllm-project/vllm-ascend/pull/1591)"
+msgstr ""
+"Atlas 300I 系列的性能已经提升。 [#1591](https://github.com/vllm-project/vllm-"
+"ascend/pull/1591)"
+
+#: ../../source/user_guide/release_notes.md:144
+msgid ""
+"aclgraph mode works with Moe models now. Currently, only Qwen3 Moe is "
+"well tested. [#1381](https://github.com/vllm-project/vllm-"
+"ascend/pull/1381)"
+msgstr ""
+"aclgraph 模式现在可以与 Moe 模型一起使用。目前，仅对 Qwen3 Moe "
+"进行了充分测试。[#1381](https://github.com/vllm-project/vllm-ascend/pull/1381)"
+
+#: ../../source/user_guide/release_notes.md:147
+msgid ""
+"Ascend PyTorch adapter (torch_npu) has been upgraded to "
+"`2.5.1.post1.dev20250619`. Don’t forget to update it in your environment."
+" [#1347](https://github.com/vllm-project/vllm-ascend/pull/1347)"
+msgstr ""
+"Ascend PyTorch 适配器（torch_npu）已升级到 "
+"`2.5.1.post1.dev20250619`。请不要忘记在您的环境中进行更新。 [#1347](https://github.com"
+"/vllm-project/vllm-ascend/pull/1347)"
+
+#: ../../source/user_guide/release_notes.md:148
+msgid ""
+"The **GatherV3** error has been fixed with **aclgraph** mode. "
+"[#1416](https://github.com/vllm-project/vllm-ascend/pull/1416)"
+msgstr ""
+"**GatherV3** 错误已通过 **aclgraph** 模式修复。[#1416](https://github.com/vllm-"
+"project/vllm-ascend/pull/1416)"
+
+#: ../../source/user_guide/release_notes.md:149
+msgid ""
+"W8A8 quantization works on Atlas 300I series now. "
+"[#1560](https://github.com/vllm-project/vllm-ascend/pull/1560)"
+msgstr ""
+"W8A8 量化现在可以在 Atlas 300I 系列上运行了。[#1560](https://github.com/vllm-project"
+"/vllm-ascend/pull/1560)"
+
+#: ../../source/user_guide/release_notes.md:150
+msgid ""
+"Fix the accuracy problem with deploy models with parallel parameters. "
+"[#1678](https://github.com/vllm-project/vllm-ascend/pull/1678)"
+msgstr ""
+"修复了使用并行参数部署模型时的准确性问题。[#1678](https://github.com/vllm-project/vllm-"
+"ascend/pull/1678)"
+
+#: ../../source/user_guide/release_notes.md:151
+msgid ""
+"The pre-built wheel package now requires lower version of glibc. Users "
+"can use it by `pip install vllm-ascend` directly. "
+"[#1582](https://github.com/vllm-project/vllm-ascend/pull/1582)"
+msgstr ""
+"预编译的 wheel 包现在要求更低版本的 glibc。用户可以直接通过 `pip install vllm-ascend` "
+"使用它。[#1582](https://github.com/vllm-project/vllm-ascend/pull/1582)"
+
+#: ../../source/user_guide/release_notes.md:153
+#: ../../source/user_guide/release_notes.md:233
+#: ../../source/user_guide/release_notes.md:287
+#: ../../source/user_guide/release_notes.md:311
+#: ../../source/user_guide/release_notes.md:329
+#: ../../source/user_guide/release_notes.md:353
+#: ../../source/user_guide/release_notes.md:376
+#: ../../source/user_guide/release_notes.md:400
+#: ../../source/user_guide/release_notes.md:430
+msgid "Other"
+msgstr "其它"
+
+#: ../../source/user_guide/release_notes.md:154
+msgid ""
+"Official doc has been updated for better read experience. For example, "
+"more deployment tutorials are added, user/developer docs are updated. "
+"More guide will coming soon."
+msgstr "官方文档已更新，以提升阅读体验。例如，增加了更多部署教程，用户/开发者文档已更新。更多指南即将推出。"
+
+#: ../../source/user_guide/release_notes.md:155
+msgid ""
+"Fix accuracy problem for deepseek V3/R1 models with torchair graph in "
+"long sequence predictions. [#1331](https://github.com/vllm-project/vllm-"
+"ascend/pull/1331)"
+msgstr ""
+"修复 deepseek V3/R1 模型在使用 torchair "
+"图进行长序列预测时的精度问题。[#1331](https://github.com/vllm-project/vllm-"
+"ascend/pull/1331)"
+
+#: ../../source/user_guide/release_notes.md:156
+msgid ""
+"A new env variable `VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP` has been "
+"added. It enables the fused allgather-experts kernel for Deepseek V3/R1 "
+"models. The default value is `0`. [#1335](https://github.com/vllm-project"
+"/vllm-ascend/pull/1335)"
+msgstr ""
+"新增了一个环境变量 `VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP`。它用于启用 Deepseek V3/R1 "
+"模型的 fused allgather-experts 内核。默认值为 `0`。[#1335](https://github.com/vllm-"
+"project/vllm-ascend/pull/1335)"
+
+#: ../../source/user_guide/release_notes.md:157
+msgid ""
+"A new env variable `VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION` has been "
+"added to improve the performance of topk-topp sampling. The default value"
+" is 0, we'll consider to enable it by default in the "
+"future[#1732](https://github.com/vllm-project/vllm-ascend/pull/1732)"
+msgstr ""
+"新增了一个环境变量 `VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION`，用于提升 topk-topp "
+"采样的性能。该变量默认值为 0，未来我们会考虑默认启用此选项[#1732](https://github.com/vllm-project"
+"/vllm-ascend/pull/1732)。"
+
+#: ../../source/user_guide/release_notes.md:158
+msgid ""
+"A batch of bugs have been fixed for Data Parallelism case "
+"[#1273](https://github.com/vllm-project/vllm-ascend/pull/1273) "
+"[#1322](https://github.com/vllm-project/vllm-ascend/pull/1322) "
+"[#1275](https://github.com/vllm-project/vllm-ascend/pull/1275) "
+"[#1478](https://github.com/vllm-project/vllm-ascend/pull/1478)"
+msgstr ""
+"已修复了一批与数据并行相关的 bug [#1273](https://github.com/vllm-project/vllm-"
+"ascend/pull/1273) [#1322](https://github.com/vllm-project/vllm-"
+"ascend/pull/1322) [#1275](https://github.com/vllm-project/vllm-"
+"ascend/pull/1275) [#1478](https://github.com/vllm-project/vllm-"
+"ascend/pull/1478)"
+
+#: ../../source/user_guide/release_notes.md:159
+msgid ""
+"The DeepSeek performance has been improved. [#1194](https://github.com"
+"/vllm-project/vllm-ascend/pull/1194) [#1395](https://github.com/vllm-"
+"project/vllm-ascend/pull/1395) [#1380](https://github.com/vllm-project"
+"/vllm-ascend/pull/1380)"
+msgstr ""
+"DeepSeek 的性能已得到提升。[#1194](https://github.com/vllm-project/vllm-"
+"ascend/pull/1194) [#1395](https://github.com/vllm-project/vllm-"
+"ascend/pull/1395) [#1380](https://github.com/vllm-project/vllm-"
+"ascend/pull/1380)"
+
+#: ../../source/user_guide/release_notes.md:160
+msgid ""
+"Ascend scheduler works with prefix cache now. [#1446](https://github.com"
+"/vllm-project/vllm-ascend/pull/1446)"
+msgstr ""
+"Ascend 调度器现在支持前缀缓存。[#1446](https://github.com/vllm-project/vllm-"
+"ascend/pull/1446)"
+
+#: ../../source/user_guide/release_notes.md:161
+msgid ""
+"DeepSeek now works with prefix cache now. [#1498](https://github.com"
+"/vllm-project/vllm-ascend/pull/1498)"
+msgstr ""
+"DeepSeek 现在支持前缀缓存了。[#1498](https://github.com/vllm-project/vllm-"
+"ascend/pull/1498)"
+
+#: ../../source/user_guide/release_notes.md:162
+msgid ""
+"Support prompt logprobs to recover ceval accuracy in V1 "
+"[#1483](https://github.com/vllm-project/vllm-ascend/pull/1483)"
+msgstr ""
+"支持使用 prompt logprobs 恢复 V1 的 ceval 准确率 [#1483](https://github.com/vllm-"
+"project/vllm-ascend/pull/1483)"
+
+#: ../../source/user_guide/release_notes.md:164
+msgid "v0.9.1rc1 - 2025.06.22"
+msgstr "v0.9.1rc1 - 2025.06.22"
+
+#: ../../source/user_guide/release_notes.md:166
+msgid ""
+"This is the 1st release candidate of v0.9.1 for vLLM Ascend. Please "
+"follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get "
+"started."
+msgstr ""
+"这是 vLLM Ascend v0.9.1 的第一个候选发布版本。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/)开始使用。"
+
+#: ../../source/user_guide/release_notes.md:170
+msgid ""
+"Atlas 300I series is experimental supported in this release. "
+"[#1333](https://github.com/vllm-project/vllm-ascend/pull/1333) After "
+"careful consideration, this feature **will NOT be included in v0.9.1-dev "
+"branch** taking into account the v0.9.1 release quality and the feature "
+"rapid iteration to improve performance on Atlas 300I series. We will "
+"improve this from 0.9.2rc1 and later."
+msgstr ""
+"本版本对 Atlas 300I 系列提供了实验性支持。[#1333](https://github.com/vllm-project/vllm-"
+"ascend/pull/1333) 经过慎重考虑，鉴于 v0.9.1 版本发布的质量要求以及 Atlas 300I "
+"系列性能优化的快速迭代，该功能**不会被包含在 v0.9.1-dev 分支中**。我们将在 0.9.2rc1 及之后的版本中进一步完善该功能。"
+
+#: ../../source/user_guide/release_notes.md:171
+msgid ""
+"Support EAGLE-3 for speculative decoding. [#1032](https://github.com"
+"/vllm-project/vllm-ascend/pull/1032)"
+msgstr ""
+"支持 EAGLE-3 进行推测式解码。[#1032](https://github.com/vllm-project/vllm-"
+"ascend/pull/1032)"
+
+#: ../../source/user_guide/release_notes.md:174
+msgid ""
+"Ascend PyTorch adapter (torch_npu) has been upgraded to "
+"`2.5.1.post1.dev20250528`. Don’t forget to update it in your environment."
+" [#1235](https://github.com/vllm-project/vllm-ascend/pull/1235)"
+msgstr ""
+"Ascend PyTorch 适配器（torch_npu）已升级到 "
+"`2.5.1.post1.dev20250528`。请不要忘记在您的环境中进行更新。[#1235](https://github.com"
+"/vllm-project/vllm-ascend/pull/1235)"
+
+#: ../../source/user_guide/release_notes.md:175
+msgid ""
+"Support Atlas 300I series container image. You can get it from "
+"[quay.io](https://quay.io/repository/vllm/vllm-ascend)"
+msgstr ""
+"支持Atlas 300I系列的容器镜像。你可以从[quay.io](https://quay.io/repository/vllm/vllm-"
+"ascend)获取。"
+
+#: ../../source/user_guide/release_notes.md:176
+msgid ""
+"Fix token-wise padding mechanism to make multi-card graph mode work. "
+"[#1300](https://github.com/vllm-project/vllm-ascend/pull/1300)"
+msgstr ""
+"修复按 token 填充机制以支持多卡图模式。 [#1300](https://github.com/vllm-project/vllm-"
+"ascend/pull/1300)"
+
+#: ../../source/user_guide/release_notes.md:177
+msgid ""
+"Upgrade vllm to 0.9.1 [#1165]https://github.com/vllm-project/vllm-"
+"ascend/pull/1165"
+msgstr ""
+"将 vllm 升级到 0.9.1 [#1165]https://github.com/vllm-project/vllm-"
+"ascend/pull/1165"
+
+#: ../../source/user_guide/release_notes.md:179
+msgid "Other Improvements"
+msgstr "其他改进"
+
+#: ../../source/user_guide/release_notes.md:180
+msgid ""
+"Initial support Chunked Prefill for MLA. [#1172](https://github.com/vllm-"
+"project/vllm-ascend/pull/1172)"
+msgstr ""
+"为MLA初步支持分块预填充。 [#1172](https://github.com/vllm-project/vllm-"
+"ascend/pull/1172)"
+
+#: ../../source/user_guide/release_notes.md:181
+msgid ""
+"An example of best practices to run DeepSeek with ETP has been added. "
+"[#1101](https://github.com/vllm-project/vllm-ascend/pull/1101)"
+msgstr ""
+"已新增一个使用 ETP 运行 DeepSeek 的最佳实践示例。[#1101](https://github.com/vllm-project"
+"/vllm-ascend/pull/1101)"
+
+#: ../../source/user_guide/release_notes.md:182
+msgid ""
+"Performance improvements for DeepSeek using the TorchAir graph. "
+"[#1098](https://github.com/vllm-project/vllm-ascend/pull/1098), "
+"[#1131](https://github.com/vllm-project/vllm-ascend/pull/1131)"
+msgstr ""
+"通过使用 TorchAir 图对 DeepSeek 进行了性能提升。[#1098](https://github.com/vllm-project"
+"/vllm-ascend/pull/1098), [#1131](https://github.com/vllm-project/vllm-"
+"ascend/pull/1131)"
+
+#: ../../source/user_guide/release_notes.md:183
+msgid ""
+"Supports the speculative decoding feature with AscendScheduler. "
+"[#943](https://github.com/vllm-project/vllm-ascend/pull/943)"
+msgstr ""
+"支持 AscendScheduler 的预测性解码功能。[#943](https://github.com/vllm-project/vllm-"
+"ascend/pull/943)"
+
+#: ../../source/user_guide/release_notes.md:184
+msgid ""
+"Improve `VocabParallelEmbedding` custom op performance. It will be "
+"enabled in the next release. [#796](https://github.com/vllm-project/vllm-"
+"ascend/pull/796)"
+msgstr ""
+"提升 `VocabParallelEmbedding` "
+"自定义算子的性能。该优化将在下一个版本中启用。[#796](https://github.com/vllm-project/vllm-"
+"ascend/pull/796)"
+
+#: ../../source/user_guide/release_notes.md:185
+msgid ""
+"Fixed a device discovery and setup bug when running vLLM Ascend on Ray "
+"[#884](https://github.com/vllm-project/vllm-ascend/pull/884)"
+msgstr ""
+"修复了在 Ray 上运行 vLLM Ascend 时的设备发现和设置错误 [#884](https://github.com/vllm-"
+"project/vllm-ascend/pull/884)"
+
+#: ../../source/user_guide/release_notes.md:186
+msgid ""
+"DeepSeek with "
+"[MC2](https://www.hiascend.com/document/detail/zh/canncommercial/81RC1/developmentguide/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0043.html)"
+" (Merged Compute and Communication) now works properly. "
+"[#1268](https://github.com/vllm-project/vllm-ascend/pull/1268)"
+msgstr ""
+"DeepSeek 现已可以与 "
+"[MC2](https://www.hiascend.com/document/detail/zh/canncommercial/81RC1/developmentguide/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0043.html)（计算与通信融合）正常工作。[#1268](https://github.com"
+"/vllm-project/vllm-ascend/pull/1268)"
+
+#: ../../source/user_guide/release_notes.md:187
+msgid ""
+"Fixed log2phy NoneType bug with static EPLB feature. "
+"[#1186](https://github.com/vllm-project/vllm-ascend/pull/1186)"
+msgstr ""
+"修复了带有静态 EPLB 特性时 log2phy 为 NoneType 的 bug。[#1186](https://github.com"
+"/vllm-project/vllm-ascend/pull/1186)"
+
+#: ../../source/user_guide/release_notes.md:188
+msgid ""
+"Improved performance for DeepSeek with DBO enabled. "
+"[#997](https://github.com/vllm-project/vllm-ascend/pull/997), "
+"[#1135](https://github.com/vllm-project/vllm-ascend/pull/1135)"
+msgstr ""
+"启用 DBO 后，DeepSeek 的性能得到提升。[#997](https://github.com/vllm-project/vllm-"
+"ascend/pull/997)，[#1135](https://github.com/vllm-project/vllm-"
+"ascend/pull/1135)"
+
+#: ../../source/user_guide/release_notes.md:189
+msgid ""
+"Refactoring AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+msgstr ""
+"重构 AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-"
+"ascend/pull/1229)"
+
+#: ../../source/user_guide/release_notes.md:190
+msgid ""
+"Add initial user stories page (include LLaMA-Factory/TRL/verl/MindIE "
+"Turbo/GPUStack) [#1224](https://github.com/vllm-project/vllm-"
+"ascend/pull/1224)"
+msgstr ""
+"新增初始用户故事页面（包括 LLaMA-Factory/TRL/verl/MindIE "
+"Turbo/GPUStack）[#1224](https://github.com/vllm-project/vllm-"
+"ascend/pull/1224)"
+
+#: ../../source/user_guide/release_notes.md:191
+msgid ""
+"Add unit test framework [#1201](https://github.com/vllm-project/vllm-"
+"ascend/pull/1201)"
+msgstr "添加单元测试框架 [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)"
+
+#: ../../source/user_guide/release_notes.md:194
+msgid ""
+"In some cases, the vLLM process may crash with a **GatherV3** error when "
+"**aclgraph** is enabled. We are working on this issue and will fix it in "
+"the next release. [#1038](https://github.com/vllm-project/vllm-"
+"ascend/issues/1038)"
+msgstr ""
+"在某些情况下，当启用 **aclgraph** 时，vLLM 进程可能会因 **GatherV3** "
+"错误而崩溃。我们正在解决此问题，并将在下一个版本中修复。[#1038](https://github.com/vllm-project/vllm-"
+"ascend/issues/1038)"
+
+#: ../../source/user_guide/release_notes.md:195
+msgid ""
+"Prefix cache feature does not work with the Ascend Scheduler but without "
+"chunked prefill enabled. This will be fixed in the next release. "
+"[#1350](https://github.com/vllm-project/vllm-ascend/issues/1350)"
+msgstr ""
+"前缀缓存功能在未启用分块预填充的情况下无法与 Ascend "
+"调度器一同工作。此问题将在下一个版本中修复。[#1350](https://github.com/vllm-project/vllm-"
+"ascend/issues/1350)"
+
+#: ../../source/user_guide/release_notes.md:197
+msgid "Full Changelog"
+msgstr "完整更新日志"
+
+#: ../../source/user_guide/release_notes.md:198
+msgid "https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1"
+msgstr "https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1"
+
+#: ../../source/user_guide/release_notes.md:200
+msgid "v0.9.0rc2 - 2025.06.10"
+msgstr "v0.9.0rc2 - 2025.06.10"
+
+#: ../../source/user_guide/release_notes.md:202
+msgid ""
+"This release contains some quick fixes for v0.9.0rc1. Please use this "
+"release instead of v0.9.0rc1."
+msgstr "本次发布包含了一些针对 v0.9.0rc1 的快速修复。请使用本次发布版本，而不是 v0.9.0rc1。"
+
+#: ../../source/user_guide/release_notes.md:206
+msgid ""
+"Fix the import error when vllm-ascend is installed without editable way. "
+"[#1152](https://github.com/vllm-project/vllm-ascend/pull/1152)"
+msgstr ""
+"修复当以非可编辑方式安装 vllm-ascend 时的导入错误。[#1152](https://github.com/vllm-project"
+"/vllm-ascend/pull/1152)"
+
+#: ../../source/user_guide/release_notes.md:208
+msgid "v0.9.0rc1 - 2025.06.09"
+msgstr "v0.9.0rc1 - 2025.06.09"
+
+#: ../../source/user_guide/release_notes.md:210
+msgid ""
+"This is the 1st release candidate of v0.9.0 for vllm-ascend. Please "
+"follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to "
+"start the journey. From this release, V1 Engine is recommended to use. "
+"The code of V0 Engine is frozen and will not be maintained any more. "
+"Please set environment `VLLM_USE_V1=1` to enable V1 Engine."
+msgstr ""
+"这是 vllm-ascend v0.9.0 的第一个候选发布版本。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/)开始使用。从此版本起，推荐使用 V1 引擎。V0 引擎的代码已被冻结，不再维护。如需启用 V1"
+" 引擎，请设置环境变量 `VLLM_USE_V1=1`。"
+
+#: ../../source/user_guide/release_notes.md:214
+msgid ""
+"DeepSeek works with graph mode now. Follow the [official doc](https"
+"://vllm-"
+"ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html)"
+" to take a try. [#789](https://github.com/vllm-project/vllm-"
+"ascend/pull/789)"
+msgstr ""
+"DeepSeek 现在已支持图模式。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html)进行尝试。[#789](https://github.com"
+"/vllm-project/vllm-ascend/pull/789)"
+
+#: ../../source/user_guide/release_notes.md:215
+msgid ""
+"Qwen series models works with graph mode now. It works by default with V1"
+" Engine. Please note that in this release, only Qwen series models are "
+"well tested with graph mode. We'll make it stable and generalize in the "
+"next release. If you hit any issues, please feel free to open an issue on"
+" GitHub and fallback to eager mode temporarily by set "
+"`enforce_eager=True` when initializing the model."
+msgstr ""
+"Qwen 系列模型现在支持图模式。默认情况下，它在 V1 引擎下运行。请注意，本次发布中，仅 Qwen "
+"系列模型经过了充分的图模式测试。我们将在下一个版本中进一步提升其稳定性并推广至更广泛的场景。如果你遇到任何问题，请随时在 GitHub 上提交 "
+"issue，并在初始化模型时通过设置 `enforce_eager=True` 临时切换回 eager 模式。"
+
+#: ../../source/user_guide/release_notes.md:219
+msgid ""
+"The performance of multi-step scheduler has been improved. Thanks for the"
+" contribution from China Merchants Bank. [#814](https://github.com/vllm-"
+"project/vllm-ascend/pull/814)"
+msgstr ""
+"多步调度器的性能得到了提升。感谢招商银行的贡献。[#814](https://github.com/vllm-project/vllm-"
+"ascend/pull/814)"
+
+#: ../../source/user_guide/release_notes.md:220
+msgid ""
+"LoRA、Multi-LoRA And Dynamic Serving is supported for V1 Engine now. "
+"Thanks for the contribution from China Merchants Bank. "
+"[#893](https://github.com/vllm-project/vllm-ascend/pull/893)"
+msgstr ""
+"V1 引擎现在支持 LoRA、多 LoRA 以及动态服务。感谢招商银行的贡献。[#893](https://github.com/vllm-"
+"project/vllm-ascend/pull/893)"
+
+#: ../../source/user_guide/release_notes.md:221
+msgid ""
+"Prefix cache and chunked prefill feature works now "
+"[#782](https://github.com/vllm-project/vllm-ascend/pull/782) "
+"[#844](https://github.com/vllm-project/vllm-ascend/pull/844)"
+msgstr ""
+"前缀缓存和分块预填充功能现已可用 [#782](https://github.com/vllm-project/vllm-"
+"ascend/pull/782) [#844](https://github.com/vllm-project/vllm-"
+"ascend/pull/844)"
+
+#: ../../source/user_guide/release_notes.md:222
+msgid ""
+"Spec decode and MTP features work with V1 Engine now. "
+"[#874](https://github.com/vllm-project/vllm-ascend/pull/874) "
+"[#890](https://github.com/vllm-project/vllm-ascend/pull/890)"
+msgstr ""
+"Spec 解码和 MTP 功能现在已经支持 V1 引擎。[#874](https://github.com/vllm-project/vllm-"
+"ascend/pull/874) [#890](https://github.com/vllm-project/vllm-"
+"ascend/pull/890)"
+
+#: ../../source/user_guide/release_notes.md:223
+msgid ""
+"DP feature works with DeepSeek now. [#1012](https://github.com/vllm-"
+"project/vllm-ascend/pull/1012)"
+msgstr ""
+"DP 功能现在可以与 DeepSeek 一起使用。[#1012](https://github.com/vllm-project/vllm-"
+"ascend/pull/1012)"
+
+#: ../../source/user_guide/release_notes.md:224
+msgid ""
+"Input embedding feature works with V0 Engine now. "
+"[#916](https://github.com/vllm-project/vllm-ascend/pull/916)"
+msgstr ""
+"输入嵌入特性现在已支持 V0 引擎。[#916](https://github.com/vllm-project/vllm-"
+"ascend/pull/916)"
+
+#: ../../source/user_guide/release_notes.md:225
+msgid ""
+"Sleep mode feature works with V1 Engine now. [#1084](https://github.com"
+"/vllm-project/vllm-ascend/pull/1084)"
+msgstr ""
+"休眠模式功能现在已支持 V1 引擎。[#1084](https://github.com/vllm-project/vllm-"
+"ascend/pull/1084)"
+
+#: ../../source/user_guide/release_notes.md:227
+#: ../../source/user_guide/release_notes.md:283
+#: ../../source/user_guide/release_notes.md:373
+#: ../../source/user_guide/release_notes.md:396
+msgid "Model"
+msgstr "模型"
+
+#: ../../source/user_guide/release_notes.md:229
+msgid ""
+"Qwen2.5 VL works with V1 Engine now. [#736](https://github.com/vllm-"
+"project/vllm-ascend/pull/736)"
+msgstr ""
+"Qwen2.5 VL 现在可以与 V1 引擎协同工作。[#736](https://github.com/vllm-project/vllm-"
+"ascend/pull/736)"
+
+#: ../../source/user_guide/release_notes.md:230
+msgid ""
+"LLama4 works now. [#740](https://github.com/vllm-project/vllm-"
+"ascend/pull/740)"
+msgstr ""
+"LLama4 现在可以使用了。[#740](https://github.com/vllm-project/vllm-"
+"ascend/pull/740)"
+
+#: ../../source/user_guide/release_notes.md:231
+msgid ""
+"A new kind of DeepSeek model called dual-batch overlap(DBO) is added. "
+"Please set `VLLM_ASCEND_ENABLE_DBO=1` to use it. "
+"[#941](https://github.com/vllm-project/vllm-ascend/pull/941)"
+msgstr ""
+"新增了一种名为双批次重叠（dual-batch overlap，DBO）的 DeepSeek 模型。请设置 "
+"`VLLM_ASCEND_ENABLE_DBO=1` 以启用。 [#941](https://github.com/vllm-project"
+"/vllm-ascend/pull/941)"
+
+#: ../../source/user_guide/release_notes.md:235
+msgid ""
+"online serve with ascend quantization works now. "
+"[#877](https://github.com/vllm-project/vllm-ascend/pull/877)"
+msgstr ""
+"在线服务现已支持Ascend量化。[#877](https://github.com/vllm-project/vllm-"
+"ascend/pull/877)"
+
+#: ../../source/user_guide/release_notes.md:236
+msgid ""
+"A batch of bugs for graph mode and moe model have been fixed. "
+"[#773](https://github.com/vllm-project/vllm-ascend/pull/773) "
+"[#771](https://github.com/vllm-project/vllm-ascend/pull/771) "
+"[#774](https://github.com/vllm-project/vllm-ascend/pull/774) "
+"[#816](https://github.com/vllm-project/vllm-ascend/pull/816) "
+"[#817](https://github.com/vllm-project/vllm-ascend/pull/817) "
+"[#819](https://github.com/vllm-project/vllm-ascend/pull/819) "
+"[#912](https://github.com/vllm-project/vllm-ascend/pull/912) "
+"[#897](https://github.com/vllm-project/vllm-ascend/pull/897) "
+"[#961](https://github.com/vllm-project/vllm-ascend/pull/961) "
+"[#958](https://github.com/vllm-project/vllm-ascend/pull/958) "
+"[#913](https://github.com/vllm-project/vllm-ascend/pull/913) "
+"[#905](https://github.com/vllm-project/vllm-ascend/pull/905)"
+msgstr ""
+"已修复一批关于图模式和moe模型的bug。[#773](https://github.com/vllm-project/vllm-"
+"ascend/pull/773) [#771](https://github.com/vllm-project/vllm-"
+"ascend/pull/771) [#774](https://github.com/vllm-project/vllm-"
+"ascend/pull/774) [#816](https://github.com/vllm-project/vllm-"
+"ascend/pull/816) [#817](https://github.com/vllm-project/vllm-"
+"ascend/pull/817) [#819](https://github.com/vllm-project/vllm-"
+"ascend/pull/819) [#912](https://github.com/vllm-project/vllm-"
+"ascend/pull/912) [#897](https://github.com/vllm-project/vllm-"
+"ascend/pull/897) [#961](https://github.com/vllm-project/vllm-"
+"ascend/pull/961) [#958](https://github.com/vllm-project/vllm-"
+"ascend/pull/958) [#913](https://github.com/vllm-project/vllm-"
+"ascend/pull/913) [#905](https://github.com/vllm-project/vllm-"
+"ascend/pull/905)"
+
+#: ../../source/user_guide/release_notes.md:237
+msgid ""
+"A batch of performance improvement PRs have been merged. "
+"[#784](https://github.com/vllm-project/vllm-ascend/pull/784) "
+"[#803](https://github.com/vllm-project/vllm-ascend/pull/803) "
+"[#966](https://github.com/vllm-project/vllm-ascend/pull/966) "
+"[#839](https://github.com/vllm-project/vllm-ascend/pull/839) "
+"[#970](https://github.com/vllm-project/vllm-ascend/pull/970) "
+"[#947](https://github.com/vllm-project/vllm-ascend/pull/947) "
+"[#987](https://github.com/vllm-project/vllm-ascend/pull/987) "
+"[#1085](https://github.com/vllm-project/vllm-ascend/pull/1085)"
+msgstr ""
+"一批性能改进的 PR 已被合并。[#784](https://github.com/vllm-project/vllm-"
+"ascend/pull/784) [#803](https://github.com/vllm-project/vllm-"
+"ascend/pull/803) [#966](https://github.com/vllm-project/vllm-"
+"ascend/pull/966) [#839](https://github.com/vllm-project/vllm-"
+"ascend/pull/839) [#970](https://github.com/vllm-project/vllm-"
+"ascend/pull/970) [#947](https://github.com/vllm-project/vllm-"
+"ascend/pull/947) [#987](https://github.com/vllm-project/vllm-"
+"ascend/pull/987) [#1085](https://github.com/vllm-project/vllm-"
+"ascend/pull/1085)"
+
+#: ../../source/user_guide/release_notes.md:238
+msgid ""
+"From this release, binary wheel package will be released as well. "
+"[#775](https://github.com/vllm-project/vllm-ascend/pull/775)"
+msgstr ""
+"从本版本开始，将同时发布二进制 wheel 包。[#775](https://github.com/vllm-project/vllm-"
+"ascend/pull/775)"
+
+#: ../../source/user_guide/release_notes.md:239
+msgid ""
+"The contributor doc site is [added](https://vllm-"
+"ascend.readthedocs.io/en/latest/community/contributors.html)"
+msgstr ""
+"贡献者文档站点已[添加](https://vllm-"
+"ascend.readthedocs.io/en/latest/community/contributors.html)"
+
+#: ../../source/user_guide/release_notes.md:241
+msgid "Known Issue"
+msgstr "已知问题"
+
+#: ../../source/user_guide/release_notes.md:243
+msgid ""
+"In some case, vLLM process may be crashed with aclgraph enabled. We're "
+"working this issue and it'll be fixed in the next release."
+msgstr "在某些情况下，启用 aclgraph 时 vLLM 进程可能会崩溃。我们正在处理这个问题，并将在下一个版本中修复。"
+
+#: ../../source/user_guide/release_notes.md:244
+msgid ""
+"Multi node data-parallel doesn't work with this release. This is a known "
+"issue in vllm and has been fixed on main branch. "
+"[#18981](https://github.com/vllm-project/vllm/pull/18981)"
+msgstr ""
+"多节点数据并行在此版本中无法使用。这是 vllm 中已知的问题，并已在主分支中修复。 [#18981](https://github.com"
+"/vllm-project/vllm/pull/18981)"
+
+#: ../../source/user_guide/release_notes.md:246
+msgid "v0.7.3.post1 - 2025.05.29"
+msgstr "v0.7.3.post1 - 2025.05.29"
+
+#: ../../source/user_guide/release_notes.md:248
+msgid ""
+"This is the first post release of 0.7.3. Please follow the [official "
+"doc](https://vllm-ascend.readthedocs.io/en/v0.7.3-dev) to start the "
+"journey. It includes the following changes:"
+msgstr ""
+"这是 0.7.3 的第一个补丁发布。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev)开始使用。本次更新包括以下更改："
+
+#: ../../source/user_guide/release_notes.md:252
+msgid ""
+"Qwen3 and Qwen3MOE is supported now. The performance and accuracy of "
+"Qwen3 is well tested. You can try it now. Mindie Turbo is recomanded to "
+"improve the performance of Qwen3. [#903](https://github.com/vllm-project"
+"/vllm-ascend/pull/903) [#915](https://github.com/vllm-project/vllm-"
+"ascend/pull/915)"
+msgstr ""
+"现在已支持 Qwen3 和 Qwen3MOE。Qwen3 的性能和精度已经过充分测试，你可以立即试用。推荐使用 Mindie Turbo 以提升 "
+"Qwen3 的性能。[#903](https://github.com/vllm-project/vllm-ascend/pull/903) "
+"[#915](https://github.com/vllm-project/vllm-ascend/pull/915)"
+
+#: ../../source/user_guide/release_notes.md:253
+msgid ""
+"Added a new performance guide. The guide aims to help users to improve "
+"vllm-ascend performance on system level. It includes OS configuration, "
+"library optimization, deploy guide and so on. [#878](https://github.com"
+"/vllm-project/vllm-ascend/pull/878) [Doc Link](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/developer_guide/performance/optimization_and_tuning.html)"
+msgstr ""
+"新增了一个性能指南。该指南旨在帮助用户在系统层面提升 vllm-ascend 的性能。内容包括操作系统配置、库优化、部署指南等。 "
+"[#878](https://github.com/vllm-project/vllm-ascend/pull/878) [文档链接](https"
+"://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/developer_guide/performance/optimization_and_tuning.html)"
+
+#: ../../source/user_guide/release_notes.md:255
+msgid "Bug Fix"
+msgstr "漏洞修复"
+
+#: ../../source/user_guide/release_notes.md:257
+msgid ""
+"Qwen2.5-VL  works for RLHF scenarios now. [#928](https://github.com/vllm-"
+"project/vllm-ascend/pull/928)"
+msgstr ""
+"Qwen2.5-VL 现在已支持 RLHF 场景。[#928](https://github.com/vllm-project/vllm-"
+"ascend/pull/928)"
+
+#: ../../source/user_guide/release_notes.md:258
+msgid ""
+"Users can launch the model from online weights now. e.g. from huggingface"
+" or modelscope directly [#858](https://github.com/vllm-project/vllm-"
+"ascend/pull/858) [#918](https://github.com/vllm-project/vllm-"
+"ascend/pull/918)"
+msgstr ""
+"用户现在可以直接从在线权重启动模型。例如，可以直接从 huggingface 或 modelscope "
+"获取。[#858](https://github.com/vllm-project/vllm-ascend/pull/858) "
+"[#918](https://github.com/vllm-project/vllm-ascend/pull/918)"
+
+#: ../../source/user_guide/release_notes.md:259
+msgid ""
+"The meaningless log info `UserWorkspaceSize0` has been cleaned. "
+"[#911](https://github.com/vllm-project/vllm-ascend/pull/911)"
+msgstr ""
+"无意义的日志信息 `UserWorkspaceSize0` 已被清理。[#911](https://github.com/vllm-project"
+"/vllm-ascend/pull/911)"
+
+#: ../../source/user_guide/release_notes.md:260
+msgid ""
+"The log level for `Failed to import vllm_ascend_C` has been changed to "
+"`warning` instead of `error`. [#956](https://github.com/vllm-project"
+"/vllm-ascend/pull/956)"
+msgstr ""
+"`Failed to import vllm_ascend_C` 的日志级别已从 `error` 更改为 "
+"`warning`。[#956](https://github.com/vllm-project/vllm-ascend/pull/956)"
+
+#: ../../source/user_guide/release_notes.md:261
+msgid ""
+"DeepSeek MLA now works with chunked prefill in V1 Engine. Please note "
+"that V1 engine in 0.7.3 is just expermential and only for test usage. "
+"[#849](https://github.com/vllm-project/vllm-ascend/pull/849) "
+"[#936](https://github.com/vllm-project/vllm-ascend/pull/936)"
+msgstr ""
+"DeepSeek MLA 现已在 V1 引擎中支持分块预填充。请注意，0.7.3 版本中的 V1 "
+"引擎仅为实验性，仅供测试使用。[#849](https://github.com/vllm-project/vllm-"
+"ascend/pull/849) [#936](https://github.com/vllm-project/vllm-"
+"ascend/pull/936)"
+
+#: ../../source/user_guide/release_notes.md:265
+msgid ""
+"The benchmark doc is updated for Qwen2.5 and Qwen2.5-VL "
+"[#792](https://github.com/vllm-project/vllm-ascend/pull/792)"
+msgstr ""
+"基准文档已针对 Qwen2.5 和 Qwen2.5-VL 更新 [#792](https://github.com/vllm-project"
+"/vllm-ascend/pull/792)"
+
+#: ../../source/user_guide/release_notes.md:266
+msgid ""
+"Add the note to clear that only \"modelscope<1.23.0\" works with 0.7.3. "
+"[#954](https://github.com/vllm-project/vllm-ascend/pull/954)"
+msgstr ""
+"添加说明，明确只有 \"modelscope<1.23.0\" 能与 0.7.3 一起使用。[#954](https://github.com"
+"/vllm-project/vllm-ascend/pull/954)"
+
+#: ../../source/user_guide/release_notes.md:268
+msgid "v0.7.3 - 2025.05.08"
+msgstr "v0.7.3 - 2025.05.08"
+
+#: ../../source/user_guide/release_notes.md:270
+#: ../../source/user_guide/release_notes.md:411
+msgid "🎉 Hello, World!"
+msgstr "🎉 你好，世界！"
+
+#: ../../source/user_guide/release_notes.md:272
+msgid ""
+"We are excited to announce the release of 0.7.3 for vllm-ascend. This is "
+"the first official release. The functionality, performance, and stability"
+" of this release are fully tested and verified. We encourage you to try "
+"it out and provide feedback. We'll post bug fix versions in the future if"
+" needed. Please follow the [official doc](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev) to start the journey."
+msgstr ""
+"我们很高兴地宣布 vllm-ascend 0.7.3 "
+"版本正式发布。这是首个正式发布的版本。该版本的功能、性能和稳定性已充分测试和验证。我们鼓励您试用并反馈意见。如有需要，未来我们将发布修复版本。请参阅[官方文档](https"
+"://vllm-ascend.readthedocs.io/en/v0.7.3-dev)开启您的体验之旅。"
+
+#: ../../source/user_guide/release_notes.md:275
+msgid ""
+"This release includes all features landed in the previous release "
+"candidates ([v0.7.1rc1](https://github.com/vllm-project/vllm-"
+"ascend/releases/tag/v0.7.1rc1), [v0.7.3rc1](https://github.com/vllm-"
+"project/vllm-ascend/releases/tag/v0.7.3rc1), "
+"[v0.7.3rc2](https://github.com/vllm-project/vllm-"
+"ascend/releases/tag/v0.7.3rc2)). And all the features are fully tested "
+"and verified. Visit the official doc the get the detail [feature](https"
+"://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/user_guide/suppoted_features.html) "
+"and [model](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/user_guide/supported_models.html) "
+"support matrix."
+msgstr ""
+"本次发布包含了所有在之前候选版本中加入的功能（[v0.7.1rc1](https://github.com/vllm-project/vllm-"
+"ascend/releases/tag/v0.7.1rc1)、[v0.7.3rc1](https://github.com/vllm-"
+"project/vllm-"
+"ascend/releases/tag/v0.7.3rc1)、[v0.7.3rc2](https://github.com/vllm-"
+"project/vllm-"
+"ascend/releases/tag/v0.7.3rc2)）。所有功能都经过了全面测试和验证。请访问官方文档获取详细的[功能](https"
+"://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/user_guide/suppoted_features.html)和[模型](https"
+"://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/user_guide/supported_models.html)支持矩阵。"
+
+#: ../../source/user_guide/release_notes.md:276
+msgid ""
+"Upgrade CANN to 8.1.RC1 to enable chunked prefill and automatic prefix "
+"caching features. You can now enable them now."
+msgstr "将 CANN 升级到 8.1.RC1 以启用分块预填充和自动前缀缓存功能。您现在可以启用这些功能了。"
+
+#: ../../source/user_guide/release_notes.md:277
+msgid ""
+"Upgrade PyTorch to 2.5.1. vLLM Ascend no longer relies on the dev version"
+" of torch-npu now. Now users don't need to install the torch-npu by hand."
+" The 2.5.1 version of torch-npu will be installed automatically. "
+"[#662](https://github.com/vllm-project/vllm-ascend/pull/662)"
+msgstr ""
+"升级 PyTorch 至 2.5.1。vLLM Ascend 现在不再依赖于 torch-npu 的开发版本。用户现在无需手动安装 torch-"
+"npu，2.5.1 版本的 torch-npu 会被自动安装。[#662](https://github.com/vllm-project"
+"/vllm-ascend/pull/662)"
+
+#: ../../source/user_guide/release_notes.md:278
+msgid ""
+"Integrate MindIE Turbo into vLLM Ascend to improve DeepSeek V3/R1, Qwen 2"
+" series performance. [#708](https://github.com/vllm-project/vllm-"
+"ascend/pull/708)"
+msgstr ""
+"将 MindIE Turbo 集成到 vLLM Ascend 以提升 DeepSeek V3/R1、Qwen 2 "
+"系列的性能。[#708](https://github.com/vllm-project/vllm-ascend/pull/708)"
+
+#: ../../source/user_guide/release_notes.md:281
+msgid ""
+"LoRA、Multi-LoRA And Dynamic Serving is supported now. The performance "
+"will be improved in the next release. Please follow the official doc for "
+"more usage information. Thanks for the contribution from China Merchants "
+"Bank. [#700](https://github.com/vllm-project/vllm-ascend/pull/700)"
+msgstr ""
+"现在已经支持 LoRA、多LoRA "
+"和动态服务。下一个版本中性能将会提升。请参阅官方文档以获取更多用法信息。感谢招商银行的贡献。[#700](https://github.com"
+"/vllm-project/vllm-ascend/pull/700)"
+
+#: ../../source/user_guide/release_notes.md:284
+msgid ""
+"The performance of Qwen2 vl and Qwen2.5 vl is improved. "
+"[#702](https://github.com/vllm-project/vllm-ascend/pull/702)"
+msgstr ""
+"Qwen2 vl 和 Qwen2.5 vl 的性能得到了提升。 [#702](https://github.com/vllm-project"
+"/vllm-ascend/pull/702)"
+
+#: ../../source/user_guide/release_notes.md:285
+msgid ""
+"The performance of `apply_penalties` and `topKtopP` ops are improved. "
+"[#525](https://github.com/vllm-project/vllm-ascend/pull/525)"
+msgstr ""
+"`apply_penalties` 和 `topKtopP` 操作的性能得到了提升。 [#525](https://github.com"
+"/vllm-project/vllm-ascend/pull/525)"
+
+#: ../../source/user_guide/release_notes.md:288
+msgid ""
+"Fixed a issue that may lead CPU memory leak. [#691](https://github.com"
+"/vllm-project/vllm-ascend/pull/691) [#712](https://github.com/vllm-"
+"project/vllm-ascend/pull/712)"
+msgstr ""
+"修复了可能导致CPU内存泄漏的问题。 [#691](https://github.com/vllm-project/vllm-"
+"ascend/pull/691) [#712](https://github.com/vllm-project/vllm-"
+"ascend/pull/712)"
+
+#: ../../source/user_guide/release_notes.md:289
+msgid ""
+"A new environment `SOC_VERSION` is added. If you hit any soc detection "
+"error when building with custom ops enabled, please set `SOC_VERSION` to "
+"a suitable value. [#606](https://github.com/vllm-project/vllm-"
+"ascend/pull/606)"
+msgstr ""
+"新增了一个环境变量 `SOC_VERSION`。如果在启用自定义算子时构建过程中遇到 soc 检测错误，请将 `SOC_VERSION` "
+"设置为合适的值。[#606](https://github.com/vllm-project/vllm-ascend/pull/606)"
+
+#: ../../source/user_guide/release_notes.md:290
+msgid ""
+"openEuler container image supported with v0.7.3-openeuler tag. "
+"[#665](https://github.com/vllm-project/vllm-ascend/pull/665)"
+msgstr ""
+"openEuler 容器镜像已支持 v0.7.3-openeuler 标签。[#665](https://github.com/vllm-"
+"project/vllm-ascend/pull/665)"
+
+#: ../../source/user_guide/release_notes.md:291
+msgid ""
+"Prefix cache feature works on V1 engine now. [#559](https://github.com"
+"/vllm-project/vllm-ascend/pull/559)"
+msgstr ""
+"前缀缓存功能现在已在 V1 引擎上工作。[#559](https://github.com/vllm-project/vllm-"
+"ascend/pull/559)"
+
+#: ../../source/user_guide/release_notes.md:293
+msgid "v0.8.5rc1 - 2025.05.06"
+msgstr "v0.8.5rc1 - 2025.05.06"
+
+#: ../../source/user_guide/release_notes.md:295
+msgid ""
+"This is the 1st release candidate of v0.8.5 for vllm-ascend. Please "
+"follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to "
+"start the journey. Now you can enable V1 egnine by setting the "
+"environment variable `VLLM_USE_V1=1`, see the feature support status of "
+"vLLM Ascend in [here](https://vllm-"
+"ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html)."
+msgstr ""
+"这是 vllm-ascend v0.8.5 的第一个候选发布版本。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/)开始使用。现在，您可以通过设置环境变量 `VLLM_USE_V1=1` 启用 V1 引擎。关于"
+" vLLM Ascend 的特性支持情况，请参见[这里](https://vllm-"
+"ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html)。"
+
+#: ../../source/user_guide/release_notes.md:298
+msgid ""
+"Upgrade CANN version to 8.1.RC1 to support chunked prefill and automatic "
+"prefix caching (`--enable_prefix_caching`) when V1 is enabled "
+"[#747](https://github.com/vllm-project/vllm-ascend/pull/747)"
+msgstr ""
+"将 CANN 版本升级到 8.1.RC1，以支持在启用 V1 "
+"时的分块预填充和自动前缀缓存（`--enable_prefix_caching`）[#747](https://github.com/vllm-"
+"project/vllm-ascend/pull/747)"
+
+#: ../../source/user_guide/release_notes.md:299
+msgid ""
+"Optimize Qwen2 VL and Qwen 2.5 VL [#701](https://github.com/vllm-project"
+"/vllm-ascend/pull/701)"
+msgstr ""
+"优化 Qwen2 VL 和 Qwen 2.5 VL [#701](https://github.com/vllm-project/vllm-"
+"ascend/pull/701)"
+
+#: ../../source/user_guide/release_notes.md:300
+#, python-brace-format
+msgid ""
+"Improve Deepseek V3 eager mode and graph mode performance, now you can "
+"use --additional_config={'enable_graph_mode': True} to enable graph mode."
+" [#598](https://github.com/vllm-project/vllm-ascend/pull/598) "
+"[#719](https://github.com/vllm-project/vllm-ascend/pull/719)"
+msgstr ""
+"改进了 Deepseek V3 的 eager 模式和图模式性能，现在你可以使用 "
+"--additional_config={'enable_graph_mode': True} "
+"来启用图模式。[#598](https://github.com/vllm-project/vllm-ascend/pull/598) "
+"[#719](https://github.com/vllm-project/vllm-ascend/pull/719)"
+
+#: ../../source/user_guide/release_notes.md:303
+msgid ""
+"Upgrade vLLM to 0.8.5.post1 [#715](https://github.com/vllm-project/vllm-"
+"ascend/pull/715)"
+msgstr ""
+"将 vLLM 升级到 0.8.5.post1 [#715](https://github.com/vllm-project/vllm-"
+"ascend/pull/715)"
+
+#: ../../source/user_guide/release_notes.md:304
+msgid ""
+"Fix early return in CustomDeepseekV2MoE.forward during profile_run "
+"[#682](https://github.com/vllm-project/vllm-ascend/pull/682)"
+msgstr ""
+"修复在 profile_run 期间 CustomDeepseekV2MoE.forward 过早返回的问题 "
+"[#682](https://github.com/vllm-project/vllm-ascend/pull/682)"
+
+#: ../../source/user_guide/release_notes.md:305
+msgid ""
+"Adapts for new quant model generated by modelslim "
+"[#719](https://github.com/vllm-project/vllm-ascend/pull/719)"
+msgstr ""
+"适配由 modelslim 生成的新量化模型 [#719](https://github.com/vllm-project/vllm-"
+"ascend/pull/719)"
+
+#: ../../source/user_guide/release_notes.md:306
+msgid ""
+"Initial support on P2P Disaggregated Prefill based on llm_datadist "
+"[#694](https://github.com/vllm-project/vllm-ascend/pull/694)"
+msgstr ""
+"基于 llm_datadist 的 P2P 分布式 Prefill 初步支持 [#694](https://github.com/vllm-"
+"project/vllm-ascend/pull/694)"
+
+#: ../../source/user_guide/release_notes.md:307
+msgid ""
+"Use `/vllm-workspace` as code path and include `.git` in container image "
+"to fix issue when start vllm under `/workspace` [#726](https://github.com"
+"/vllm-project/vllm-ascend/pull/726)"
+msgstr ""
+"使用 `/vllm-workspace` 作为代码路径，并在容器镜像中包含 `.git` ，以修复在 `/workspace` 下启动 vllm "
+"时的问题 [#726](https://github.com/vllm-project/vllm-ascend/pull/726)"
+
+#: ../../source/user_guide/release_notes.md:308
+msgid ""
+"Optimize NPU memory usage to make DeepSeek R1 W8A8 32K model len work. "
+"[#728](https://github.com/vllm-project/vllm-ascend/pull/728)"
+msgstr ""
+"优化NPU内存使用，以使 DeepSeek R1 W8A8 32K 模型长度能够运行。[#728](https://github.com"
+"/vllm-project/vllm-ascend/pull/728)"
+
+#: ../../source/user_guide/release_notes.md:309
+msgid ""
+"Fix `PYTHON_INCLUDE_PATH` typo in setup.py [#762](https://github.com"
+"/vllm-project/vllm-ascend/pull/762)"
+msgstr ""
+"修复 setup.py 中的 `PYTHON_INCLUDE_PATH` 拼写错误 [#762](https://github.com/vllm-"
+"project/vllm-ascend/pull/762)"
+
+#: ../../source/user_guide/release_notes.md:312
+msgid ""
+"Add Qwen3-0.6B test [#717](https://github.com/vllm-project/vllm-"
+"ascend/pull/717)"
+msgstr ""
+"添加 Qwen3-0.6B 测试 [#717](https://github.com/vllm-project/vllm-"
+"ascend/pull/717)"
+
+#: ../../source/user_guide/release_notes.md:313
+msgid ""
+"Add nightly CI [#668](https://github.com/vllm-project/vllm-"
+"ascend/pull/668)"
+msgstr "添加每晚持续集成 [#668](https://github.com/vllm-project/vllm-ascend/pull/668)"
+
+#: ../../source/user_guide/release_notes.md:314
+msgid ""
+"Add accuracy test report [#542](https://github.com/vllm-project/vllm-"
+"ascend/pull/542)"
+msgstr "添加准确性测试报告 [#542](https://github.com/vllm-project/vllm-ascend/pull/542)"
+
+#: ../../source/user_guide/release_notes.md:316
+msgid "v0.8.4rc2 - 2025.04.29"
+msgstr "v0.8.4rc2 - 2025.04.29"
+
+#: ../../source/user_guide/release_notes.md:318
+msgid ""
+"This is the second release candidate of v0.8.4 for vllm-ascend. Please "
+"follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to "
+"start the journey. Some experimental features are included in this "
+"version, such as W8A8 quantization and EP/DP support. We'll make them "
+"stable enough in the next release."
+msgstr ""
+"这是 vllm-ascend 的 v0.8.4 第二个候选版本。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/)开始使用。本版本包含了一些实验性功能，如 W8A8 量化和 EP/DP "
+"支持。我们将在下一个版本中使这些功能更加稳定。"
+
+#: ../../source/user_guide/release_notes.md:321
+msgid ""
+"Qwen3 and Qwen3MOE is supported now. Please follow the [official "
+"doc](https://vllm-"
+"ascend.readthedocs.io/en/latest/tutorials/single_npu.html) to run the "
+"quick demo. [#709](https://github.com/vllm-project/vllm-ascend/pull/709)"
+msgstr ""
+"现在已支持 Qwen3 和 Qwen3MOE。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/latest/tutorials/single_npu.html)运行快速演示。[#709](https://github.com"
+"/vllm-project/vllm-ascend/pull/709)"
+
+#: ../../source/user_guide/release_notes.md:322
+msgid ""
+"Ascend W8A8 quantization method is supported now. Please take the "
+"[official doc](https://vllm-"
+"ascend.readthedocs.io/en/latest/tutorials/multi_npu_quantization.html) "
+"for example. Any [feedback](https://github.com/vllm-project/vllm-"
+"ascend/issues/619) is welcome. [#580](https://github.com/vllm-project"
+"/vllm-ascend/pull/580)"
+msgstr ""
+"现在支持 Ascend W8A8 量化方法。请参考[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/latest/tutorials/multi_npu_quantization.html) "
+"示例。欢迎提供任何[反馈](https://github.com/vllm-project/vllm-"
+"ascend/issues/619)。[#580](https://github.com/vllm-project/vllm-"
+"ascend/pull/580)"
+
+#: ../../source/user_guide/release_notes.md:323
+msgid ""
+"DeepSeek V3/R1 works with DP, TP and MTP now. Please note that it's still"
+" in experimental status. Let us know if you hit any problem. "
+"[#429](https://github.com/vllm-project/vllm-ascend/pull/429) "
+"[#585](https://github.com/vllm-project/vllm-ascend/pull/585)  "
+"[#626](https://github.com/vllm-project/vllm-ascend/pull/626) "
+"[#636](https://github.com/vllm-project/vllm-ascend/pull/636) "
+"[#671](https://github.com/vllm-project/vllm-ascend/pull/671)"
+msgstr ""
+"DeepSeek V3/R1 现在已经支持 DP、TP 和 MTP。请注意，目前仍处于实验阶段。如果遇到任何问题，请告知我们。 "
+"[#429](https://github.com/vllm-project/vllm-ascend/pull/429) "
+"[#585](https://github.com/vllm-project/vllm-ascend/pull/585) "
+"[#626](https://github.com/vllm-project/vllm-ascend/pull/626) "
+"[#636](https://github.com/vllm-project/vllm-ascend/pull/636) "
+"[#671](https://github.com/vllm-project/vllm-ascend/pull/671)"
+
+#: ../../source/user_guide/release_notes.md:326
+msgid ""
+"ACLGraph feature is supported with V1 engine now. It's disabled by "
+"default because this feature rely on CANN 8.1 release. We'll make it "
+"available by default in the next release [#426](https://github.com/vllm-"
+"project/vllm-ascend/pull/426)"
+msgstr ""
+"ACLGraph 特性现在已被 V1 引擎支持。它默认是禁用的，因为该特性依赖于 CANN 8.1 版本。我们将在下一个版本中默认启用此特性 "
+"[#426](https://github.com/vllm-project/vllm-ascend/pull/426)。"
+
+#: ../../source/user_guide/release_notes.md:327
+msgid ""
+"Upgrade PyTorch to 2.5.1. vLLM Ascend no longer relies on the dev version"
+" of torch-npu now. Now users don't need to install the torch-npu by hand."
+" The 2.5.1 version of torch-npu will be installed automatically. "
+"[#661](https://github.com/vllm-project/vllm-ascend/pull/661)"
+msgstr ""
+"升级 PyTorch 至 2.5.1。vLLM Ascend 现在不再依赖 dev 版本的 torch-npu，用户无需手动安装 torch-"
+"npu。torch-npu 的 2.5.1 版本将会自动安装。[#661](https://github.com/vllm-project"
+"/vllm-ascend/pull/661)"
+
+#: ../../source/user_guide/release_notes.md:330
+msgid ""
+"MiniCPM model works now. [#645](https://github.com/vllm-project/vllm-"
+"ascend/pull/645)"
+msgstr ""
+"MiniCPM 模型现在可以使用了。[#645](https://github.com/vllm-project/vllm-"
+"ascend/pull/645)"
+
+#: ../../source/user_guide/release_notes.md:331
+msgid ""
+"openEuler container image supported with `v0.8.4-openeuler` tag and "
+"customs Ops build is enabled by default for openEuler OS. "
+"[#689](https://github.com/vllm-project/vllm-ascend/pull/689)"
+msgstr ""
+"openEuler 容器镜像已支持 `v0.8.4-openeuler` 标签，并且 openEuler 操作系统默认启用了自定义 Ops "
+"构建。[#689](https://github.com/vllm-project/vllm-ascend/pull/689)"
+
+#: ../../source/user_guide/release_notes.md:332
+msgid ""
+"Fix ModuleNotFoundError bug to make Lora work [#600](https://github.com"
+"/vllm-project/vllm-ascend/pull/600)"
+msgstr ""
+"修复 ModuleNotFoundError 错误以使 Lora 正常工作 [#600](https://github.com/vllm-"
+"project/vllm-ascend/pull/600)"
+
+#: ../../source/user_guide/release_notes.md:333
+msgid ""
+"Add \"Using EvalScope evaluation\" doc [#611](https://github.com/vllm-"
+"project/vllm-ascend/pull/611)"
+msgstr ""
+"添加了“使用 EvalScope 评估”文档 [#611](https://github.com/vllm-project/vllm-"
+"ascend/pull/611)"
+
+#: ../../source/user_guide/release_notes.md:334
+msgid ""
+"Add a `VLLM_VERSION` environment to make vLLM version configurable to "
+"help developer set correct vLLM version if the code of vLLM is changed by"
+" hand locally. [#651](https://github.com/vllm-project/vllm-"
+"ascend/pull/651)"
+msgstr ""
+"新增了一个 `VLLM_VERSION` 环境变量，使 vLLM 版本可以配置，帮助开发者在本地手动修改 vLLM 代码后，设置正确的 vLLM "
+"版本。[#651](https://github.com/vllm-project/vllm-ascend/pull/651)"
+
+#: ../../source/user_guide/release_notes.md:336
+msgid "v0.8.4rc1 - 2025.04.18"
+msgstr "v0.8.4rc1 - 2025.04.18"
+
+#: ../../source/user_guide/release_notes.md:338
+msgid ""
+"This is the first release candidate of v0.8.4 for vllm-ascend. Please "
+"follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to "
+"start the journey. From this version, vllm-ascend will follow the newest "
+"version of vllm and release every two weeks. For example, if vllm "
+"releases v0.8.5 in the next two weeks, vllm-ascend will release v0.8.5rc1"
+" instead of v0.8.4rc2. Please find the detail from the [official "
+"documentation](https://vllm-"
+"ascend.readthedocs.io/en/latest/community/versioning_policy.html#release-"
+"window)."
+msgstr ""
+"这是 vllm-ascend v0.8.4 的第一个候选发布版本。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/)开始使用。本版本起，vllm-ascend 将跟随 vllm "
+"的最新版本并每两周发布一次。例如，如果 vllm 在接下来的两周内发布 v0.8.5，vllm-ascend 将发布 v0.8.5rc1，而不是 "
+"v0.8.4rc2。详细信息请参考[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/latest/community/versioning_policy.html#release-"
+"window)。"
+
+#: ../../source/user_guide/release_notes.md:342
+msgid ""
+"vLLM V1 engine experimental support is included in this version. You can "
+"visit [official "
+"guide](https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html)"
+" to get more detail. By default, vLLM will fallback to V0 if V1 doesn't "
+"work, please set `VLLM_USE_V1=1` environment if you want to use V1 "
+"forcely."
+msgstr ""
+"本版本包含了对 vLLM V1 "
+"引擎的实验性支持。你可以访问[官方指南](https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html)获取更多详细信息。默认情况下，如果"
+" V1 不可用，vLLM 会自动回退到 V0。如果你想强制使用 V1，请设置 `VLLM_USE_V1=1` 环境变量。"
+
+#: ../../source/user_guide/release_notes.md:343
+msgid ""
+"LoRA、Multi-LoRA And Dynamic Serving is supported now. The performance "
+"will be improved in the next release. Please follow the [official "
+"doc](https://docs.vllm.ai/en/latest/features/lora.html) for more usage "
+"information. Thanks for the contribution from China Merchants Bank. "
+"[#521](https://github.com/vllm-project/vllm-ascend/pull/521)."
+msgstr ""
+"现在已支持 LoRA、Multi-LoRA "
+"和动态服务。性能将在下一个版本中得到提升。请参阅[官方文档](https://docs.vllm.ai/en/latest/features/lora.html)获取更多使用信息。感谢招商银行的贡献。[#521](https://github.com"
+"/vllm-project/vllm-ascend/pull/521)。"
+
+#: ../../source/user_guide/release_notes.md:344
+msgid ""
+"Sleep Mode feature is supported. Currently it's only work on V0 engine. "
+"V1 engine support will come soon. [#513](https://github.com/vllm-project"
+"/vllm-ascend/pull/513)"
+msgstr ""
+"已支持休眠模式功能。目前它只在V0引擎上有效，V1引擎的支持即将到来。[#513](https://github.com/vllm-project"
+"/vllm-ascend/pull/513)"
+
+#: ../../source/user_guide/release_notes.md:348
+msgid ""
+"The Ascend scheduler is added for V1 engine. This scheduler is more "
+"affinity with Ascend hardware. More scheduler policy will be added in the"
+" future. [#543](https://github.com/vllm-project/vllm-ascend/pull/543)"
+msgstr ""
+"为V1引擎新增了Ascend调度器。该调度器与Ascend硬件更加适配。未来还将添加更多调度策略。 "
+"[#543](https://github.com/vllm-project/vllm-ascend/pull/543)"
+
+#: ../../source/user_guide/release_notes.md:349
+msgid ""
+"Disaggregated Prefill feature is supported. Currently only 1P1D works. "
+"NPND is under design by vllm team. vllm-ascend will support it once it's "
+"ready from vLLM. Follow the [official "
+"guide](https://docs.vllm.ai/en/latest/features/disagg_prefill.html) to "
+"use. [#432](https://github.com/vllm-project/vllm-ascend/pull/432)"
+msgstr ""
+"支持分离式预填充（Disaggregated Prefill）功能。目前仅支持1P1D，NPND正在由vllm团队设计中。一旦vLLM支持"
+"，vllm-"
+"ascend将会支持。请按照[官方指南](https://docs.vllm.ai/en/latest/features/disagg_prefill.html)使用。[#432](https://github.com"
+"/vllm-project/vllm-ascend/pull/432)"
+
+#: ../../source/user_guide/release_notes.md:350
+msgid ""
+"Spec decode feature works now. Currently it's only work on V0 engine. V1 "
+"engine support will come soon. [#500](https://github.com/vllm-project"
+"/vllm-ascend/pull/500)"
+msgstr ""
+"Spec 解码功能现在可以使用。目前它只在 V0 引擎上工作，对 V1 引擎的支持即将到来。[#500](https://github.com"
+"/vllm-project/vllm-ascend/pull/500)"
+
+#: ../../source/user_guide/release_notes.md:351
+msgid ""
+"Structured output feature works now on V1 Engine. Currently it only "
+"supports xgrammar backend while using guidance backend may get some "
+"errors. [#555](https://github.com/vllm-project/vllm-ascend/pull/555)"
+msgstr ""
+"结构化输出功能现在已在V1引擎上生效。目前仅支持xgrammar后端，使用guidance后端可能会出现一些错误。[#555](https://github.com"
+"/vllm-project/vllm-ascend/pull/555)"
+
+#: ../../source/user_guide/release_notes.md:355
+msgid ""
+"A new communicator `pyhccl` is added. It's used for call CANN HCCL "
+"library directly instead of using `torch.distribute`. More usage of it "
+"will be added in the next release [#503](https://github.com/vllm-project"
+"/vllm-ascend/pull/503)"
+msgstr ""
+"新增了一个通信器 `pyhccl`。它用于直接调用 CANN HCCL 库，而不是使用 "
+"`torch.distribute`。将在下一个版本中添加更多用法 [#503](https://github.com/vllm-project"
+"/vllm-ascend/pull/503)。"
+
+#: ../../source/user_guide/release_notes.md:356
+msgid ""
+"The custom ops build is enabled by default. You should install the "
+"packages like `gcc`, `cmake` first to build `vllm-ascend` from source. "
+"Set `COMPILE_CUSTOM_KERNELS=0` environment to disable the compilation if "
+"you don't need it. [#466](https://github.com/vllm-project/vllm-"
+"ascend/pull/466)"
+msgstr ""
+"自定义算子的构建默认是启用的。你应该先安装如 `gcc`、`cmake` 等包以便从源码编译 `vllm-"
+"ascend`。如果不需要自定义算子的编译，可以设置环境变量 `COMPILE_CUSTOM_KERNELS=0` 来禁用编译。 "
+"[#466](https://github.com/vllm-project/vllm-ascend/pull/466)"
+
+#: ../../source/user_guide/release_notes.md:357
+msgid ""
+"The custom op `rotay embedding` is enabled by default now to improve the "
+"performance. [#555](https://github.com/vllm-project/vllm-ascend/pull/555)"
+msgstr ""
+"自定义算子 `rotay embedding` 现在已默认启用，以提升性能。[#555](https://github.com/vllm-"
+"project/vllm-ascend/pull/555)"
+
+#: ../../source/user_guide/release_notes.md:359
+msgid "v0.7.3rc2 - 2025.03.29"
+msgstr "v0.7.3rc2 - 2025.03.29"
+
+#: ../../source/user_guide/release_notes.md:361
+msgid ""
+"This is 2nd release candidate of v0.7.3 for vllm-ascend. Please follow "
+"the [official doc](https://vllm-ascend.readthedocs.io/en/v0.7.3-dev) to "
+"start the journey."
+msgstr ""
+"这是 vllm-ascend v0.7.3 的第二个候选发布版本。请根据[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev)开始使用。"
+
+#: ../../source/user_guide/release_notes.md:362
+#: ../../source/user_guide/release_notes.md:384
+msgid ""
+"Quickstart with container: https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/quick_start.html"
+msgstr "容器快速入门： https://vllm-ascend.readthedocs.io/en/v0.7.3-dev/quick_start.html"
+
+#: ../../source/user_guide/release_notes.md:363
+#: ../../source/user_guide/release_notes.md:385
+msgid ""
+"Installation: https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/installation.html"
+msgstr "安装: https://vllm-ascend.readthedocs.io/en/v0.7.3-dev/installation.html"
+
+#: ../../source/user_guide/release_notes.md:366
+msgid ""
+"Add Ascend Custom Ops framewrok. Developers now can write customs ops "
+"using AscendC. An example ops `rotary_embedding` is added. More tutorials"
+" will come soon. The Custom Ops compilation is disabled by default when "
+"installing vllm-ascend. Set `COMPILE_CUSTOM_KERNELS=1` to enable it.  "
+"[#371](https://github.com/vllm-project/vllm-ascend/pull/371)"
+msgstr ""
+"新增了Ascend自定义算子框架。开发者现在可以使用AscendC编写自定义算子。新增了一个示例算子 `rotary_embedding` "
+"。更多教程即将发布。安装vllm-ascend时，自定义算子的编译默认是关闭的。可通过设置 `COMPILE_CUSTOM_KERNELS=1` "
+"启用。[#371](https://github.com/vllm-project/vllm-ascend/pull/371)"
+
+#: ../../source/user_guide/release_notes.md:367
+msgid ""
+"V1 engine is basic supported in this release. The full support will be "
+"done in 0.8.X release. If you hit any issue or have any requirement of V1"
+" engine. Please tell us [here](https://github.com/vllm-project/vllm-"
+"ascend/issues/414). [#376](https://github.com/vllm-project/vllm-"
+"ascend/pull/376)"
+msgstr ""
+"本版本对 V1 引擎提供了基础支持，全面支持将在 0.8.X 版本中完成。如果您遇到任何问题或有 V1 "
+"引擎的相关需求，请在[这里](https://github.com/vllm-project/vllm-"
+"ascend/issues/414)告诉我们。[#376](https://github.com/vllm-project/vllm-"
+"ascend/pull/376)"
+
+#: ../../source/user_guide/release_notes.md:368
+msgid ""
+"Prefix cache feature works now. You can set `enable_prefix_caching=True` "
+"to enable it. [#282](https://github.com/vllm-project/vllm-"
+"ascend/pull/282)"
+msgstr ""
+"前缀缓存功能现在已经可用。你可以通过设置 `enable_prefix_caching=True` "
+"来启用该功能。[#282](https://github.com/vllm-project/vllm-ascend/pull/282)"
+
+#: ../../source/user_guide/release_notes.md:371
+msgid ""
+"Bump torch_npu version to dev20250320.3 to improve accuracy to fix `!!!` "
+"output problem. [#406](https://github.com/vllm-project/vllm-"
+"ascend/pull/406)"
+msgstr ""
+"将 torch_npu 版本升级到 dev20250320.3 以提升精度，修复 `!!!` "
+"输出问题。[#406](https://github.com/vllm-project/vllm-ascend/pull/406)"
+
+#: ../../source/user_guide/release_notes.md:374
+msgid ""
+"The performance of Qwen2-vl is improved by optimizing patch embedding "
+"(Conv3D). [#398](https://github.com/vllm-project/vllm-ascend/pull/398)"
+msgstr ""
+"通过优化 patch embedding（Conv3D），Qwen2-vl 的性能得到了提升。[#398](https://github.com"
+"/vllm-project/vllm-ascend/pull/398)"
+
+#: ../../source/user_guide/release_notes.md:378
+msgid ""
+"Fixed a bug to make sure multi step scheduler feature work. "
+"[#349](https://github.com/vllm-project/vllm-ascend/pull/349)"
+msgstr ""
+"修复了一个错误，以确保多步调度器功能正常工作。[#349](https://github.com/vllm-project/vllm-"
+"ascend/pull/349)"
+
+#: ../../source/user_guide/release_notes.md:379
+msgid ""
+"Fixed a bug to make prefix cache feature works with correct accuracy. "
+"[#424](https://github.com/vllm-project/vllm-ascend/pull/424)"
+msgstr ""
+"修复了一个 bug，使前缀缓存功能能够以正确的准确性运行。[#424](https://github.com/vllm-project/vllm-"
+"ascend/pull/424)"
+
+#: ../../source/user_guide/release_notes.md:381
+msgid "v0.7.3rc1 - 2025.03.14"
+msgstr "v0.7.3rc1 - 2025.03.14"
+
+#: ../../source/user_guide/release_notes.md:383
+msgid ""
+"🎉 Hello, World! This is the first release candidate of v0.7.3 for vllm-"
+"ascend. Please follow the [official doc](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev) to start the journey."
+msgstr ""
+"🎉 你好，世界！这是 vllm-ascend v0.7.3 的第一个候选发布版本。请按照[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev)开始你的旅程。"
+
+#: ../../source/user_guide/release_notes.md:388
+msgid ""
+"DeepSeek V3/R1 works well now. Read the [official guide](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/tutorials/multi_node.html) to start! "
+"[#242](https://github.com/vllm-project/vllm-ascend/pull/242)"
+msgstr ""
+"DeepSeek V3/R1 现在运行良好。请阅读[官方指南](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/tutorials/multi_node.html)开始！[#242](https://github.com"
+"/vllm-project/vllm-ascend/pull/242)"
+
+#: ../../source/user_guide/release_notes.md:389
+msgid ""
+"Speculative decoding feature is supported. [#252](https://github.com"
+"/vllm-project/vllm-ascend/pull/252)"
+msgstr "已支持猜测性解码功能。[#252](https://github.com/vllm-project/vllm-ascend/pull/252)"
+
+#: ../../source/user_guide/release_notes.md:390
+msgid ""
+"Multi step scheduler feature is supported. [#300](https://github.com"
+"/vllm-project/vllm-ascend/pull/300)"
+msgstr "已支持多步调度器功能。[#300](https://github.com/vllm-project/vllm-ascend/pull/300)"
+
+#: ../../source/user_guide/release_notes.md:393
+msgid "Bump torch_npu version to dev20250308.3 to improve `_exponential` accuracy"
+msgstr "将 torch_npu 版本升级到 dev20250308.3，以提升 `_exponential` 的精度"
+
+#: ../../source/user_guide/release_notes.md:394
+msgid ""
+"Added initial support for pooling models. Bert based model, such as `BAAI"
+"/bge-base-en-v1.5` and `BAAI/bge-reranker-v2-m3` works now. "
+"[#229](https://github.com/vllm-project/vllm-ascend/pull/229)"
+msgstr ""
+"新增了对池化模型的初步支持。现在支持 Bert 基础模型，如 `BAAI/bge-base-en-v1.5` 和 `BAAI/bge-"
+"reranker-v2-m3`。 [#229](https://github.com/vllm-project/vllm-"
+"ascend/pull/229)"
+
+#: ../../source/user_guide/release_notes.md:397
+msgid ""
+"The performance of Qwen2-VL is improved. [#241](https://github.com/vllm-"
+"project/vllm-ascend/pull/241)"
+msgstr ""
+"Qwen2-VL 的性能得到了提升。[#241](https://github.com/vllm-project/vllm-"
+"ascend/pull/241)"
+
+#: ../../source/user_guide/release_notes.md:398
+msgid ""
+"MiniCPM is now supported [#164](https://github.com/vllm-project/vllm-"
+"ascend/pull/164)"
+msgstr ""
+"MiniCPM 现在已被支持 [#164](https://github.com/vllm-project/vllm-"
+"ascend/pull/164)"
+
+#: ../../source/user_guide/release_notes.md:401
+msgid ""
+"Support MTP(Multi-Token Prediction) for DeepSeek V3/R1 "
+"[#236](https://github.com/vllm-project/vllm-ascend/pull/236)"
+msgstr ""
+"为 DeepSeek V3/R1 支持 MTP（多标记预测） [#236](https://github.com/vllm-project"
+"/vllm-ascend/pull/236)"
+
+#: ../../source/user_guide/release_notes.md:402
+msgid ""
+"[Docs] Added more model tutorials, include DeepSeek, QwQ, Qwen and Qwen "
+"2.5VL. See the [official doc](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.3-dev/tutorials/index.html) for detail"
+msgstr ""
+"[文档] 增加了更多的模型教程，包括 DeepSeek、QwQ、Qwen 和 Qwen 2.5VL。详情请参见[官方文档](https"
+"://vllm-ascend.readthedocs.io/en/v0.7.3-dev/tutorials/index.html)。"
+
+#: ../../source/user_guide/release_notes.md:403
+msgid ""
+"Pin modelscope<1.23.0 on vLLM v0.7.3 to resolve: https://github.com/vllm-"
+"project/vllm/pull/13807"
+msgstr ""
+"在 vLLM v0.7.3 上锁定 modelscope 版本低于 1.23.0，以解决：https://github.com/vllm-"
+"project/vllm/pull/13807"
+
+#: ../../source/user_guide/release_notes.md:405
+#: ../../source/user_guide/release_notes.md:436
+msgid "Known issues"
+msgstr "已知问题"
+
+#: ../../source/user_guide/release_notes.md:406
+msgid ""
+"In [some cases](https://github.com/vllm-project/vllm-ascend/issues/324), "
+"especially when the input/output is very long, the accuracy of output may"
+" be incorrect. We are working on it. It'll be fixed in the next release."
+msgstr ""
+"在[某些情况下](https://github.com/vllm-project/vllm-"
+"ascend/issues/324)，特别是当输入或输出非常长时，输出的准确性可能会有误。我们正在解决这个问题。将在下一个版本中修复。"
+
+#: ../../source/user_guide/release_notes.md:407
+msgid ""
+"Improved and reduced the garbled code in model output. But if you still "
+"hit the issue, try to change the generation config value, such as "
+"`temperature`, and try again. There is also a knonwn issue shown below. "
+"Any [feedback](https://github.com/vllm-project/vllm-ascend/issues/267) is"
+" welcome. [#277](https://github.com/vllm-project/vllm-ascend/pull/277)"
+msgstr ""
+"改进并减少了模型输出中的乱码问题。但如果你仍然遇到该问题，请尝试更改生成配置的参数，例如 "
+"`temperature`，然后再试一次。下面还列出了一个已知问题。欢迎提供任何[反馈](https://github.com/vllm-"
+"project/vllm-ascend/issues/267)。[#277](https://github.com/vllm-project"
+"/vllm-ascend/pull/277)"
+
+#: ../../source/user_guide/release_notes.md:409
+msgid "v0.7.1rc1 - 2025.02.19"
+msgstr "v0.7.1rc1 - 2025.02.19"
+
+#: ../../source/user_guide/release_notes.md:413
+msgid ""
+"We are excited to announce the first release candidate of v0.7.1 for "
+"vllm-ascend."
+msgstr "我们很高兴地宣布 vllm-ascend v0.7.1 的第一个候选版本发布。"
+
+#: ../../source/user_guide/release_notes.md:415
+msgid ""
+"vLLM Ascend Plugin (vllm-ascend) is a community maintained hardware "
+"plugin for running vLLM on the Ascend NPU. With this release, users can "
+"now enjoy the latest features and improvements of vLLM on the Ascend NPU."
+msgstr ""
+"vLLM Ascend 插件（vllm-ascend）是一个由社区维护的硬件插件，用于在 Ascend NPU 上运行 "
+"vLLM。通过此版本，用户现在可以在 Ascend NPU 上享受到 vLLM 的最新功能和改进。"
+
+#: ../../source/user_guide/release_notes.md:417
+msgid ""
+"Please follow the [official doc](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.1-dev) to start the journey. Note that this"
+" is a release candidate, and there may be some bugs or issues. We "
+"appreciate your feedback and suggestions [here](https://github.com/vllm-"
+"project/vllm-ascend/issues/19)"
+msgstr ""
+"请参阅[官方文档](https://vllm-"
+"ascend.readthedocs.io/en/v0.7.1-dev)开始您的体验之旅。请注意，这是一个候选发布版本，可能会有一些漏洞或问题。我们非常欢迎您在[这里](https://github.com"
+"/vllm-project/vllm-ascend/issues/19)提交反馈和建议。"
+
+#: ../../source/user_guide/release_notes.md:421
+msgid ""
+"Initial supports for Ascend NPU on vLLM. [#3](https://github.com/vllm-"
+"project/vllm-ascend/pull/3)"
+msgstr ""
+"在 vLLM 上初步支持 Ascend NPU。[#3](https://github.com/vllm-project/vllm-"
+"ascend/pull/3)"
+
+#: ../../source/user_guide/release_notes.md:422
+msgid ""
+"DeepSeek is now supported. [#88](https://github.com/vllm-project/vllm-"
+"ascend/pull/88) [#68](https://github.com/vllm-project/vllm-"
+"ascend/pull/68)"
+msgstr ""
+"现在已支持 DeepSeek。 [#88](https://github.com/vllm-project/vllm-"
+"ascend/pull/88) [#68](https://github.com/vllm-project/vllm-"
+"ascend/pull/68)"
+
+#: ../../source/user_guide/release_notes.md:423
+msgid ""
+"Qwen, Llama series and other popular models are also supported, you can "
+"see more details in [here](https://vllm-"
+"ascend.readthedocs.io/en/latest/user_guide/supported_models.html)."
+msgstr ""
+"Qwen、Llama 系列及其他流行的模型也受支持，更多详情可参见[这里](https://vllm-"
+"ascend.readthedocs.io/en/latest/user_guide/supported_models.html)。"
+
+#: ../../source/user_guide/release_notes.md:427
+msgid ""
+"Added the Ascend quantization config option, the implementation will "
+"coming soon. [#7](https://github.com/vllm-project/vllm-ascend/pull/7) "
+"[#73](https://github.com/vllm-project/vllm-ascend/pull/73)"
+msgstr ""
+"新增了 Ascend 量化配置选项，具体实现即将推出。[#7](https://github.com/vllm-project/vllm-"
+"ascend/pull/7) [#73](https://github.com/vllm-project/vllm-ascend/pull/73)"
+
+#: ../../source/user_guide/release_notes.md:428
+msgid ""
+"Add silu_and_mul and rope ops and add mix ops into attention layer. "
+"[#18](https://github.com/vllm-project/vllm-ascend/pull/18)"
+msgstr ""
+"添加 silu_and_mul 和 rope 操作，并将混合操作加入到 attention 层。 [#18](https://github.com"
+"/vllm-project/vllm-ascend/pull/18)"
+
+#: ../../source/user_guide/release_notes.md:432
+msgid ""
+"[CI] Enable Ascend CI to actively monitor and improve quality for vLLM on"
+" Ascend. [#3](https://github.com/vllm-project/vllm-ascend/pull/3)"
+msgstr ""
+"[CI] 启用 Ascend CI，主动监测并提升 vLLM 在 Ascend 上的质量。[#3](https://github.com"
+"/vllm-project/vllm-ascend/pull/3)"
+
+#: ../../source/user_guide/release_notes.md:433
+msgid ""
+"[Docker] Add vllm-ascend container image [#64](https://github.com/vllm-"
+"project/vllm-ascend/pull/64)"
+msgstr ""
+"[Docker] 添加 vllm-ascend 容器镜像 [#64](https://github.com/vllm-project/vllm-"
+"ascend/pull/64)"
+
+#: ../../source/user_guide/release_notes.md:434
+msgid ""
+"[Docs] Add a [live doc](https://vllm-ascend.readthedocs.org) "
+"[#55](https://github.com/vllm-project/vllm-ascend/pull/55)"
+msgstr ""
+"[文档] 添加了一个 [在线文档](https://vllm-ascend.readthedocs.org) "
+"[#55](https://github.com/vllm-project/vllm-ascend/pull/55)"
+
+#: ../../source/user_guide/release_notes.md:438
+msgid ""
+"This release relies on an unreleased torch_npu version. It has been "
+"installed within official container image already. Please [install](https"
+"://vllm-ascend.readthedocs.io/en/v0.7.1rc1/installation.html) it manually"
+" if you are using non-container environment."
+msgstr ""
+"此版本依赖于尚未发布的 torch_npu 版本。该版本已集成在官方容器镜像中。如果您使用的是非容器环境，请[手动安装](https"
+"://vllm-ascend.readthedocs.io/en/v0.7.1rc1/installation.html)。"
+
+#: ../../source/user_guide/release_notes.md:439
+msgid ""
+"There are logs like `No platform detected, vLLM is running on "
+"UnspecifiedPlatform` or `Failed to import from vllm._C with "
+"ModuleNotFoundError(\"No module named 'vllm._C'\")` shown when running "
+"vllm-ascend. It actually doesn't affect any functionality and "
+"performance. You can just ignore it. And it has been fixed in this "
+"[PR](https://github.com/vllm-project/vllm/pull/12432) which will be "
+"included in v0.7.3 soon."
+msgstr ""
+"在运行 vllm-ascend 时，会显示类似 `No platform detected, vLLM is running on "
+"UnspecifiedPlatform` 或 `Failed to import from vllm._C with "
+"ModuleNotFoundError(\"No module named 'vllm._C'\")` "
+"的日志。这实际上不会影响任何功能和性能，你可以直接忽略它。这个问题已在此 [PR](https://github.com/vllm-"
+"project/vllm/pull/12432) 中修复，并很快会在 v0.7.3 版本中包含。"
+
+#: ../../source/user_guide/release_notes.md:440
+msgid ""
+"There are logs like `# CPU blocks: 35064, # CPU blocks: 2730` shown when "
+"running vllm-ascend which should be `# NPU blocks:` . It actually doesn't"
+" affect any functionality and performance. You can just ignore it. And it"
+" has been fixed in this [PR](https://github.com/vllm-"
+"project/vllm/pull/13378) which will be included in v0.7.3 soon."
+msgstr ""
+"在运行 vllm-ascend 时，会显示类似 `# CPU blocks: 35064, # CPU blocks: 2730` "
+"的日志，实际应该为 `# NPU blocks:`。这实际上不会影响任何功能和性能，你可以忽略它。该问题已在这个 "
+"[PR](https://github.com/vllm-project/vllm/pull/13378) 中修复，并将在 v0.7.3 "
+"版本中包含。"
+

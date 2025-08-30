@@ -1,0 +1,65 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../developer_guide/evaluation/using_lm_eval.md:1
+msgid "Using lm-eval"
+msgstr "使用 lm-eval"
+
+#: ../../developer_guide/evaluation/using_lm_eval.md:2
+msgid ""
+"This document will guide you have a accuracy testing using [lm-"
+"eval](https://github.com/EleutherAI/lm-evaluation-harness)."
+msgstr ""
+"本文将指导你如何使用 [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness) "
+"进行准确率测试。"
+
+#: ../../developer_guide/evaluation/using_lm_eval.md:4
+msgid "1. Run docker container"
+msgstr "1. 运行 docker 容器"
+
+#: ../../developer_guide/evaluation/using_lm_eval.md:6
+msgid "You can run docker container on a single NPU:"
+msgstr "你可以在单个NPU上运行docker容器："
+
+#: ../../developer_guide/evaluation/using_lm_eval.md:33
+msgid "2. Run ceval accuracy test using lm-eval"
+msgstr "2. 使用 lm-eval 运行 ceval 准确性测试"
+
+#: ../../developer_guide/evaluation/using_lm_eval.md:34
+msgid "Install lm-eval in the container."
+msgstr "在容器中安装 lm-eval。"
+
+#: ../../developer_guide/evaluation/using_lm_eval.md:39
+msgid "Run the following command:"
+msgstr "运行以下命令："
+
+#: ../../developer_guide/evaluation/using_lm_eval.md:50
+msgid "After 1-2 mins, the output is as shown below:"
+msgstr "1-2 分钟后，输出如下所示："
+
+#: ../../developer_guide/evaluation/using_lm_eval.md:62
+msgid ""
+"You can see more usage on [Lm-eval Docs](https://github.com/EleutherAI/lm-"
+"evaluation-harness/blob/main/docs/README.md)."
+msgstr ""
+"你可以在 [Lm-eval 文档](https://github.com/EleutherAI/lm-evaluation-"
+"harness/blob/main/docs/README.md) 上查看更多用法。"
