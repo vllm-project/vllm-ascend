@@ -71,7 +71,8 @@ def set_ascend_forward_context(
         moe_comm_method: str = "",
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        batch_descriptor: Optional[BatchDescriptor] = None):
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        vector_stream: torch.npu.Stream = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -88,6 +89,7 @@ def set_ascend_forward_context(
         forward_context = get_forward_context()
         forward_context.moe_comm_method_name = moe_comm_method + "commimpl"
         forward_context.with_prefill = with_prefill
+        forward_context.vector_stream = vector_stream
         ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
 

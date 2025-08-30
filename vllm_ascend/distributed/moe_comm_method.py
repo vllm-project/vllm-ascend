@@ -172,14 +172,6 @@ class AllGatherCommImpl(MoECommMethod):
 
         first_expert_idx = 0
         if expert_map is not None:
-            # FIXME: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
-            # So we need to filter out invalid tokens by zeroing their weights.
-            # This is a workaround and should be removed after the issue is fixed
-            mask = expert_map[topk_ids] != -1
-            # NOTE: This is equivalent to self.topk_weights[~mask] = 0.0,
-            # but ~mask will dispatch to aclnnNonzeroV2, which is not supported in ACL Graph
-            self.topk_weights = torch.where(mask, topk_weights, 0.0)
-
             first_expert_idx = self.moe_config.ep_rank * num_experts
         last_expert_idx = first_expert_idx + num_experts
 
@@ -198,7 +190,19 @@ class AllGatherCommImpl(MoECommMethod):
         permuted_hidden_states = permuted_hidden_states
 
         group_list_type = 1  # `count` mode
+        if expert_map is not None:
+            # FIXME: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
+            # So we need to filter out invalid tokens by zeroing their weights.
+            # This is a workaround and should be removed after the issue is fixed
+            s_cmo = get_forward_context().vector_stream
+            s_cmo.wait_stream(torch.npu.current_stream())
+            with torch.npu.stream(s_cmo):
+                mask = expert_map[topk_ids] != -1
+                # NOTE: This is equivalent to self.topk_weights[~mask] = 0.0,
+                # but ~mask will dispatch to aclnnNonzeroV2, which is not supported in ACL Graph
+                self.topk_weights = self.topk_weights * mask
 
+            first_expert_idx = self.moe_config.ep_rank * num_experts
         return permuted_hidden_states, expert_tokens, None, group_list_type
 
     def unpermute(self, mlp_output: torch.Tensor,
