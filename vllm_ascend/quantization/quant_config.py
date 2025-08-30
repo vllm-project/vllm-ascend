@@ -23,8 +23,7 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               RowParallelLinear,
-                                               UnquantizedLinearMethod)
+                                               RowParallelLinear)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
@@ -36,6 +35,7 @@ from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
 from .quantizer import AscendQuantizer
@@ -89,7 +89,7 @@ class AscendQuantConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
-                return UnquantizedLinearMethod()
+                return AscendUnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping)
         elif isinstance(layer, Attention) and \

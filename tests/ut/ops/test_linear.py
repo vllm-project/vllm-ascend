@@ -3,11 +3,45 @@ import unittest
 from unittest import mock
 
 import torch
+import torch_npu
 
+from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
                                     AscendMlpMergedColumnParallelLinear,
-                                    AscendMlpRowParallelLinear, LinearBase,
+                                    AscendMlpRowParallelLinear,
+                                    AscendUnquantizedLinearMethod, LinearBase,
                                     QuantizationConfig)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ
+
+
+class TestAscendUnquantizedLinearMethod(TestBase):
+
+    def setUp(self):
+        self.method = AscendUnquantizedLinearMethod()
+
+    @mock.patch("torch.version")
+    def test_process_weights_after_loading_is_cann_8_3(self, mock_version):
+        layer = mock.MagicMock()
+
+        mock_version.cann = "8.3.RC1"
+        torch_npu.npu.config.allow_internal_format = True
+        layer.weight.data = torch.randn(128, 256).to(torch.float16).npu()
+        self.method.process_weights_after_loading(layer)
+
+        self.assertEqual(torch_npu.get_npu_format(layer.weight.data),
+                         ACL_FORMAT_FRACTAL_NZ)
+
+    @mock.patch("torch.version")
+    def test_process_weights_after_loading_not_cann_8_3(self, mock_version):
+        layer = mock.MagicMock()
+
+        mock_version.cann = "8.2.RC1"
+        torch_npu.npu.config.allow_internal_format = True
+        layer.weight.data = torch.randn(128, 256).to(torch.float16).npu()
+        self.method.process_weights_after_loading(layer)
+
+        self.assertEqual(torch_npu.get_npu_format(layer.weight.data),
+                         ACL_FORMAT_FRACTAL_ND)
 
 
 class TestAscendMlpRowParallelLinear(unittest.TestCase):
