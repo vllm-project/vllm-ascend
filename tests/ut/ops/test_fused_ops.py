@@ -30,6 +30,7 @@ from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod,
                                        unified_apply_mlp)
 from vllm_ascend.ops.layers.experts_selector import select_experts
+from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.utils import AscendSocVersion, adapt_patch
 
 adapt_patch(True)
@@ -318,6 +319,19 @@ class TestAscendFusedMoe:
 
         assert moe.quant_method is not None
         assert moe.quant_method == mock_quant_method
+
+    def test_init_with_mixed_quant(self, mock_dist_env, default_moe_config):
+        mock_quant_config = MagicMock()
+        mock_quant_method = MockFusedMoEMethod()
+        mock_quant_config.get_quant_method.return_value = mock_quant_method
+        mock_quant_config.is_layer_skipped_ascend.return_value = True
+
+        quantized_moe = AscendFusedMoE(**default_moe_config,
+                                       quant_config=mock_quant_config)
+
+        assert quantized_moe.quant_method is not None
+        assert isinstance(quantized_moe.quant_method,
+                          AscendUnquantizedFusedMoEMethod)
 
     @pytest.mark.parametrize(
         "others_param",
