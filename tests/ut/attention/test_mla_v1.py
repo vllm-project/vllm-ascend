@@ -467,8 +467,6 @@ class TestAscendMLAImpl(TestBase):
 
         qk_nope_head_dim = 64
         qk_rope_head_dim = 128
-        qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-        kv_lora_rank = 512
         kv_cache = MagicMock()
 
         attn_metadata = MagicMock()
