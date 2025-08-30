@@ -28,6 +28,7 @@ class AscendSchedulerConfig(SchedulerConfig):
     num_scheduler_steps: int = 1
     scheduler_cls: Union[str, Type[object]] = (
         "vllm_ascend.core.scheduler.AscendScheduler")
+    decode_batch_size = 0
 
     @classmethod
     def initialize_from_config(
@@ -45,6 +46,7 @@ class AscendSchedulerConfig(SchedulerConfig):
         scheduler_config["num_scheduler_steps"] = 1
         scheduler_config["scheduler_cls"] = (
             "vllm_ascend.core.scheduler.AscendScheduler")
+        scheduler_config["decode_batch_size"] = 0
         # Override params in original SchedulerConfig with params in ascend_scheduler_config
         for k, _ in scheduler_config.items():
             if hasattr(ascend_scheduler_config, k):
