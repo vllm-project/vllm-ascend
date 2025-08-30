@@ -54,18 +54,25 @@ def create_requests(
                                      prompt_logprobs=prompt_logprobs)
     requests = []
     for i in range(num_requests):
-        mm_position = None
-        mm_inputs = None
-        request = Request(request_id=f"{i}",
-                          prompt_token_ids=[i] * num_tokens,
-                          sampling_params=sampling_params,
-                          multi_modal_kwargs=mm_inputs,
-                          multi_modal_placeholders=mm_position,
-                          multi_modal_hashes=None,
-                          eos_token_id=EOS_TOKEN_ID,
-                          pooling_params=None,
-                          block_hasher=get_request_block_hasher(
-                              block_size, hash_fn))
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
+            request = Request(request_id=f"{i}",
+                              prompt_token_ids=[i] * num_tokens,
+                              sampling_params=sampling_params,
+                              multi_modal_kwargs=None,
+                              multi_modal_placeholders=None,
+                              multi_modal_hashes=None,
+                              eos_token_id=EOS_TOKEN_ID,
+                              pooling_params=None,
+                              block_hasher=get_request_block_hasher(
+                                  block_size, hash_fn))
+        else:
+            request = Request(request_id=f"{i}",
+                              prompt_token_ids=[i] * num_tokens,
+                              sampling_params=sampling_params,
+                              eos_token_id=EOS_TOKEN_ID,
+                              pooling_params=None,
+                              block_hasher=get_request_block_hasher(
+                                  block_size, hash_fn))
         requests.append(request)
     return requests
 
