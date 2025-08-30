@@ -1371,7 +1371,7 @@ class AscendFusedMoE(FusedMoE):
         #     chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
         #     mc2_mask = chunk_mc2_mask[tp_rank]
 
-        if fused_moe_state != FusedMoEState.AllGather and not enable_sp:
+        if fused_moe_state != FusedMoEState.AllGather and not enable_sp and not (self.enable_sp and is_prefill):
             if fused_moe_state in {
                     FusedMoEState.MC2, FusedMoEState.MC2_PREFILL
             }:
@@ -1456,7 +1456,7 @@ class AscendFusedMoE(FusedMoE):
             self.moe_load += expert_token_num if group_list_type else \
                 torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
 
-        if not self.enable_prefill_optimizations and fused_moe_state != FusedMoEState.AllGather and not enable_sp:
+        if not self.enable_prefill_optimizations and fused_moe_state != FusedMoEState.AllGather and not enable_sp and not (self.enable_sp and is_prefill):
             if tp_size > 1:
                 dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                                 self.tp_group)
