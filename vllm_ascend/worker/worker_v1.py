@@ -303,7 +303,8 @@ class NPUWorker(WorkerBase):
                                      self.local_rank, "hccl")
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size)
+            self.parallel_config.pipeline_parallel_size,
+            self.parallel_config.context_parallel_size)
         init_ascend_model_parallel(self.parallel_config.expert_parallel_size,
                                    self.parallel_config.lmhead_tp_size)
         ensure_kv_transfer_initialized(self.vllm_config)

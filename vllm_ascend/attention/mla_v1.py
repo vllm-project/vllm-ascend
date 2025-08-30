@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, TypeVar
 import numpy as np
 import torch
 import torch_npu
+import torch.distributed as dist
+import torch.nn.functional as F
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
@@ -12,6 +14,12 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              get_tensor_model_parallel_rank,
+                              get_tp_group,
+                              get_context_model_parallel_world_size,
+                              get_context_model_parallel_rank,
+                              get_cp_group)
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
@@ -70,6 +78,21 @@ class AscendMLAPrefillMetadata:
         chunk_seq_lens: torch.Tensor
         chunk_seq_lens_npu: torch.Tensor
 
+    @dataclass
+    class ContextParallelMetadata:
+        cp_kv_recover_idx: list[int] = None
+        q_head_idx: torch.Tensor = None
+        q_tail_idx: torch.Tensor = None
+        kv_with_q_head_nomask_idx: torch.Tensor = None
+        kv_with_q_head_mask_idx: torch.Tensor = None
+        kv_with_q_tail_nomask_idx: torch.Tensor = None
+        kv_with_q_tail_mask_idx: torch.Tensor = None
+        attn_mask_seqlens: torch.Tensor = None
+        head_attn_nomask_seqlens: torch.Tensor = None
+        tail_attn_nomask_seqlens: torch.Tensor = None
+        q_full_idx: torch.Tensor = None
+        cp_prefill_mask: torch.Tensor = None
+
     attn_mask: torch.Tensor
     query_lens: list[int]
     seq_lens: list[int]
@@ -82,6 +105,9 @@ class AscendMLAPrefillMetadata:
     chunked_context: Optional[ChunkedContextMetadata] = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
+
+    # Context parallel
+    cp_metadata: Optional[ContextParallelMetadata] = None
 
 
 @dataclass
@@ -97,6 +123,7 @@ class AscendMLADecodeMetadata:
     attn_mask: Optional[torch.Tensor] = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
+    num_computed_tokens_of_cp_sp: list[list[list[int]]] = None
 
 
 @dataclass
@@ -370,13 +397,33 @@ class AscendMLAMetadataBuilder:
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
+        long_seq_metadata = common_attn_metadata.common_long_seq_metadata
+        num_actual_tokens_cp_full = num_tokens
+        cp_metadata = None
+        if long_seq_metadata is not None:
+            # when context parallel
+            num_actual_tokens_cp_full = long_seq_metadata.num_actual_tokens_cp_full
+            cp_metadata = AscendMLAPrefillMetadata.ContextParallelMetadata(
+                cp_kv_recover_idx=long_seq_metadata.cp_kv_recover_idx,
+                q_head_idx=long_seq_metadata.q_head_idx_tensor,
+                q_tail_idx=long_seq_metadata.q_tail_idx_tensor,
+                kv_with_q_head_nomask_idx=long_seq_metadata.kv_with_q_head_nomask_idx_tensor,
+                kv_with_q_head_mask_idx=long_seq_metadata.kv_with_q_head_mask_idx_tensor,
+                kv_with_q_tail_nomask_idx=long_seq_metadata.kv_with_q_tail_nomask_idx_tensor,
+                kv_with_q_tail_mask_idx=long_seq_metadata.kv_with_q_tail_mask_idx_tensor,
+                attn_mask_seqlens=long_seq_metadata.attn_mask_seqlens,
+                head_attn_nomask_seqlens=long_seq_metadata.head_attn_nomask_seqlens,
+                tail_attn_nomask_seqlens=long_seq_metadata.tail_attn_nomask_seqlens,
+                q_full_idx=long_seq_metadata.q_full_idx,
+                cp_prefill_mask=long_seq_metadata.cp_prefill_mask
+            )
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
         device = self.runner.device
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
-        slot_mapping = common_attn_metadata.slot_mapping_cpu[:num_tokens].to(
+        slot_mapping = common_attn_metadata.slot_mapping_cpu[:num_actual_tokens_cp_full].to(
             device, non_blocking=True)
 
         query_start_loc = common_attn_metadata.query_start_loc
@@ -501,6 +548,7 @@ class AscendMLAMetadataBuilder:
                 chunked_context=chunked_context_metadata,
                 sin=sin,
                 cos=cos,
+                cp_metadata=cp_metadata,
             )
 
         decode_metadata = None
@@ -569,7 +617,8 @@ class AscendMLAMetadataBuilder:
                 attn_mask=self.runner.spec_attn_mask,
                 actual_seq_lengths_q=actual_seq_lengths_q,
                 sin=sin,
-                cos=cos)
+                cos=cos,
+                num_computed_tokens_of_cp_sp=long_seq_metadata.num_computed_tokens_of_cp_sp)
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_tokens,
@@ -665,6 +714,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         if speculative_config is not None:
             self.spec_token_num = speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
+
+        self.kv_b_proj_full = kwargs['kv_b_proj_full']
+
+        self.cp_size = get_context_model_parallel_world_size()
+        self.cp_rank = get_context_model_parallel_rank()
+        self.cp_group = get_cp_group().device_group
+
+        self.enable_sp = kwargs.get('enable_sp', False)
+        self.sp_size = get_tensor_model_parallel_world_size() if self.enable_sp else 1
+        self.sp_rank = get_tensor_model_parallel_rank() if self.enable_sp else 0
+        self.sp_group = get_tp_group().device_group
 
     def _v_up_proj_and_o_proj(self, x, enable_multistream_mla: bool = False):
         # Convert from (B, N, L) to (N, B, L)
@@ -1121,8 +1181,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                     decode_k_pe, decode_k_nope = self.exec_kv(
                         hidden_states_or_kv_c_normed, cos, sin, kv_cache,
                         attn_metadata.slot_mapping)
-            decode_ql_nope, decode_q_pe = \
-                self._q_proj_and_k_up_proj(decode_hs_or_q_c)
+            if self.cp_size * self.sp_size > 1:
+                decode_q_wo_k_up = self.q_proj(decode_hs_or_q_c)[0] \
+                    .view(-1, self.num_heads, self.qk_head_dim)
+                # decode_hs_or_q_c: [seq, q_lora_rank/hidden_size(2048)],
+                # decode_q_wo_k_up: [seq, num_heads(16/tp), qk_nope_head_dim(128) + qk_rope_head_dim(64)]
+            else:
+                decode_ql_nope, decode_q_pe = \
+                    self._q_proj_and_k_up_proj(decode_hs_or_q_c)
             if self.running_in_graph:
                 with npu_stream_switch("mla_secondary",
                                        0,
@@ -1132,9 +1198,22 @@ class AscendMLAImpl(MLAAttentionImpl):
                                     enabled=enable_multistream_mla)
                     decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
             else:
-                decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
-                    attn_metadata.decode.input_positions,
-                    decode_q_pe.contiguous(), decode_k_pe)
+                if self.sp_size > 1:
+                    decode_q_wo_k_up = decode_q_wo_k_up.contiguous()
+                    decode_q_wo_k_up = get_tp_group().all_gather(decode_q_wo_k_up, 1)
+
+                if self.cp_size * self.sp_size > 1:
+                    decode_q_wo_k_up_pe = decode_q_wo_k_up[...,
+                                          self.qk_nope_head_dim:]  # [seq, num_heads_full(16), qk_rope_head_dim(64)]
+                    # decode_q_wo_k_up_nope = decode_q_wo_k_up[..., :self.qk_nope_head_dim] # [seq, num_heads_full(16), qk_nope_head_dim(128)]
+                    decode_q_wo_k_up_pe[...], decode_k_pe[...] = self.rotary_emb(
+                        attn_metadata.decode.input_positions,
+                        decode_q_wo_k_up_pe.contiguous(),
+                        decode_k_pe)
+                else:
+                    decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
+                        attn_metadata.decode.input_positions,
+                        decode_q_pe.contiguous(), decode_k_pe)
         if has_prefill:
             assert attn_metadata.prefill is not None
             prefill_q = self.q_proj(prefill_hs_or_q_c)[0]\
@@ -1189,6 +1268,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             kv_c_normed = kv_c_normed.view(
                 [num_actual_toks, self.num_kv_heads, -1])
+
+            if self.cp_size > 1 and attn_metadata.num_prefills > 0:
+                prefill_k_c_normed = prefill_k_c_normed.unsqueeze(1)
+                prefill_kv_c_k_pe = torch.cat([prefill_k_c_normed, prefill_k_pe], dim=-1)
+                prefill_kv_c_k_pe = get_cp_group().all_gather(prefill_kv_c_k_pe, 0)
+                prefill_kv_c_k_pe = torch.index_select(prefill_kv_c_k_pe, 0, attn_metadata.prefill.cp_metadata.cp_kv_recover_idx)
+                prefill_k_c_normed, prefill_k_pe = prefill_kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim],
+                                                                           dim=-1)
+
+                kv_c_normed, k_pe = prefill_k_c_normed, prefill_k_pe
+                prefill_k_c_normed = prefill_k_c_normed.squeeze()
+
             torch_npu._npu_reshape_and_cache(
                 key=kv_c_normed,
                 value=k_pe,
@@ -1205,10 +1296,16 @@ class AscendMLAImpl(MLAAttentionImpl):
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
             # TODO: use an elegant way to overlap
-            output_prefill = self._forward_prefill(prefill_q,
-                                                   prefill_k_c_normed,
-                                                   prefill_k_pe, kv_cache,
-                                                   attn_metadata)
+            if self.cp_size > 1:
+                output_prefill = self._forward_prefill_cp(prefill_q,
+                                                          prefill_k_c_normed,
+                                                          prefill_k_pe,
+                                                          attn_metadata)
+            else:
+                output_prefill = self._forward_prefill(prefill_q,
+                                                       prefill_k_c_normed,
+                                                       prefill_k_pe, kv_cache,
+                                                       attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 current_ms_metadata.before_comm_event.record()
@@ -1225,11 +1322,16 @@ class AscendMLAImpl(MLAAttentionImpl):
                                             kv_cache, attn_metadata,
                                             enable_multistream_mla)
             else:
-                output_decode = self._forward_decode(decode_ql_nope,
-                                                     decode_q_pe,
-                                                     decode_k_nope,
-                                                     decode_k_pe, kv_cache,
-                                                     attn_metadata)
+                if self.cp_size * self.sp_size > 1:
+                    output_decode = self._forward_decode_sp(decode_q_wo_k_up,
+                                                            kv_cache,
+                                                            attn_metadata)
+                else:
+                    output_decode = self._forward_decode(decode_ql_nope,
+                                                         decode_q_pe,
+                                                         decode_k_nope,
+                                                         decode_k_pe, kv_cache,
+                                                         attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
@@ -1255,3 +1357,318 @@ class AscendMLAImpl(MLAAttentionImpl):
                 current_ms_metadata.after_comm_event.record()
         del o_proj_input
         return output_padded
+
+    def _forward_prefill_cp(
+            self,
+            query: torch.Tensor,
+            kv_c_normed: torch.Tensor,
+            k_pe: torch.Tensor,
+            attn_metadata: AscendMLAMetadata,
+    ) -> torch.Tensor:
+        num_tokens = query.size(0)  # 单卡的token数
+        # 构造存放attention的，分别存储requests以及单block的attention的值
+        # attn_output_requests = []
+        k_nope, value = self.kv_b_proj(kv_c_normed)[0].view(
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim).split(
+                [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
+        q_pe = query[..., self.qk_nope_head_dim:]
+        q_nope = query[..., :self.qk_nope_head_dim]
+
+        # Use precomputed indices from the metadata (already converted to tensors and on device)
+        q_head_idx = attn_metadata.prefill.cp_metadata.q_head_idx
+        q_tail_idx = attn_metadata.prefill.cp_metadata.q_tail_idx
+        kv_with_q_head_nomask_idx = attn_metadata.prefill.cp_metadata.kv_with_q_head_nomask_idx
+        kv_with_q_head_mask_idx = attn_metadata.prefill.cp_metadata.kv_with_q_head_mask_idx
+        kv_with_q_tail_nomask_idx = attn_metadata.prefill.cp_metadata.kv_with_q_tail_nomask_idx
+        kv_with_q_tail_mask_idx = attn_metadata.prefill.cp_metadata.kv_with_q_tail_mask_idx
+        attn_mask_seqlens = attn_metadata.prefill.cp_metadata.attn_mask_seqlens
+        head_attn_nomask_seqlens = attn_metadata.prefill.cp_metadata.head_attn_nomask_seqlens
+        tail_attn_nomask_seqlens = attn_metadata.prefill.cp_metadata.tail_attn_nomask_seqlens
+        mask = attn_metadata.prefill.cp_metadata.cp_prefill_mask
+
+        # 1. 负载均衡中，Q前半段的Attention计算
+        # cp_rank0: Q0*KV0
+        # cp_rank1: Q1*KV0 + Q1*KV1
+        output_head = self._attention_with_mask_and_nomask(
+            q_nope=torch.index_select(q_nope, 0, q_head_idx),
+            q_pe=torch.index_select(q_pe, 0, q_head_idx),
+            k_nope=k_nope,
+            k_pe=k_pe,
+            value=value,
+            kv_mask_idx=kv_with_q_head_mask_idx,
+            kv_nomask_idx=kv_with_q_head_nomask_idx,
+            attn_mask_seqlens=attn_mask_seqlens,
+            attn_nomask_seqlens=head_attn_nomask_seqlens,
+            mask=mask
+        )
+
+        # 2. 负载均衡中，Q后半段的Attention计算
+        # cp_rank0: Q3*KV0~KV2 + Q3*KV3
+        # cp_rank1: Q2*KV0~KV1 + Q2*KV2
+        output_tail = self._attention_with_mask_and_nomask(
+            q_nope=torch.index_select(q_nope, 0, q_tail_idx),
+            q_pe=torch.index_select(q_pe, 0, q_tail_idx),
+            k_nope=k_nope,
+            k_pe=k_pe,
+            value=value,
+            kv_mask_idx=kv_with_q_tail_mask_idx,
+            kv_nomask_idx=kv_with_q_tail_nomask_idx,
+            attn_mask_seqlens=attn_mask_seqlens,
+            attn_nomask_seqlens=tail_attn_nomask_seqlens,
+            mask=mask
+        )
+
+        # 3. 合并前半段和后半段的输出
+        q_full_idx = attn_metadata.prefill.cp_metadata.q_full_idx
+        output = torch.index_select(torch.cat([output_head, output_tail], dim=0), 0, q_full_idx)
+
+        # 后处理过程
+        output = output.reshape(
+            [num_tokens, self.num_heads * self.v_head_dim])
+
+        return output
+
+    def _attention_with_mask_and_nomask(
+            self,
+            q_nope: torch.Tensor,
+            q_pe: torch.Tensor,
+            k_nope: torch.Tensor,
+            k_pe: torch.Tensor,
+            value: torch.Tensor,
+            kv_mask_idx: torch.Tensor,
+            kv_nomask_idx: torch.Tensor,
+            attn_mask_seqlens: torch.Tensor,
+            attn_nomask_seqlens: torch.Tensor,
+            mask: torch.Tensor
+    ):
+        attn_output = torch.empty(q_nope.shape[0],  # 长度现在是每个req的cp_block求和
+                                  self.num_heads,
+                                  self.v_head_dim,
+                                  dtype=k_pe.dtype,
+                                  device=k_pe.device)
+        attn_lse = torch.empty(self.num_heads,
+                               q_pe.shape[0],
+                               dtype=torch.float32,
+                               device=k_pe.device)
+        # mask
+        k_nope_mask = torch.index_select(k_nope, 0, kv_mask_idx)
+        value_mask = torch.index_select(value, 0, kv_mask_idx)
+        k_pe_mask = torch.index_select(k_pe, 0, kv_mask_idx)
+        torch_npu.atb.npu_ring_mla(
+            q_nope=q_nope,
+            q_rope=q_pe,
+            k_nope=k_nope_mask,
+            k_rope=k_pe_mask,
+            value=value_mask,
+            mask=mask,
+            seqlen=attn_mask_seqlens,
+            head_num=self.num_heads,
+            kv_head_num=self.num_heads,
+            pre_out=None,
+            prev_lse=None,
+            qk_scale=self.scale,
+            kernel_type="kernel_type_high_precision",
+            mask_type="mask_type_triu",
+            input_layout="type_bsnd",
+            calc_type="calc_type_first_ring",
+            output=attn_output,
+            softmax_lse=attn_lse
+        )
+
+        # nomask
+        if kv_nomask_idx.shape[0] == 0:
+            return attn_output
+
+        k_nope_nomask = torch.index_select(k_nope, 0, kv_nomask_idx)
+        value_nomask = torch.index_select(value, 0, kv_nomask_idx)
+        k_pe_nomask = torch.index_select(k_pe, 0, kv_nomask_idx)
+        torch_npu.atb.npu_ring_mla(
+            q_nope=q_nope,
+            q_rope=q_pe,
+            k_nope=k_nope_nomask,
+            k_rope=k_pe_nomask,
+            value=value_nomask,
+            mask=mask,
+            seqlen=attn_nomask_seqlens,
+            head_num=self.num_heads,
+            kv_head_num=self.num_heads,
+            pre_out=attn_output,
+            prev_lse=attn_lse,
+            qk_scale=self.scale,
+            kernel_type="kernel_type_high_precision",
+            mask_type="no_mask",
+            input_layout="type_bsnd",
+            calc_type="calc_type_default",
+            output=attn_output,
+            softmax_lse=attn_lse
+        )
+        return attn_output
+
+    def _forward_decode_sp(
+        self,
+        # q_nope: torch.Tensor,
+        # q_pe: torch.Tensor,
+        # k_nope: torch.Tensor,
+        # k_pe: torch.Tensor,
+        q_wo_k_up: torch.Tensor,
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
+        attn_metadata: AscendMLAMetadata,
+        # enable_multistream_mla: bool = False,
+    ) -> torch.Tensor:
+        """
+        Since new page_attn op with softmax_lse return is not ready yet,
+        use npu_ring_mla instead, temporarily.
+        Get kv_cache manually by npu_paged_cache_load, other process is same to prefill.
+        TODO After new op is ready we should abandon this and use the same process as _forward_decode
+        TODO Delete redundant comments before pr
+        """
+        decode_meta = attn_metadata.decode
+        assert decode_meta is not None
+        num_tokens = q_wo_k_up.size(0)
+
+        q_pe = q_wo_k_up[..., self.qk_nope_head_dim:]
+        q_nope = q_wo_k_up[..., :self.qk_nope_head_dim]
+        decode_metadata = attn_metadata.decode
+
+        # use cp & sp splited computed token nums from scheduler to compute actual seq_len and seq_mask
+        num_computed_tokens_of_cp_sp = np.array(decode_metadata.num_computed_tokens_of_cp_sp) # [bs, cp_size, sp_size]
+        seq_mask_cp = torch.where(torch.tensor(num_computed_tokens_of_cp_sp.sum(2)) == 0, 0, 1).to(torch.uint8).to(q_pe.device)
+        seq_mask_sp = torch.where(torch.tensor(num_computed_tokens_of_cp_sp[:, self.cp_rank, :]) == 0, 0, 1).to(torch.uint8).to(q_pe.device)
+        seq_len = num_computed_tokens_of_cp_sp[:, self.cp_rank, self.sp_rank]
+
+        seq_len = torch.tensor(seq_len, dtype=torch.int32)
+        batch_size = seq_len.size(0)
+
+        if torch.sum(seq_len).item() == 0:
+            # Case that no kv_cache has been stored on this rank, no need to do following computation.
+            attn_output = torch.zeros([batch_size, self.num_heads * self.sp_size, self.v_head_dim], dtype=q_pe.dtype, device=q_pe.device)
+            softmax_lse = torch.zeros([self.num_heads * self.sp_size, batch_size], dtype=torch.float32, device=q_pe.device)
+        else:
+            # Normal case.
+            cache_kv_c = kv_c_and_k_pe_cache[0]
+            cache_k_pe = kv_c_and_k_pe_cache[1]
+
+            kv_c_normed, k_pe = torch_npu.atb.npu_paged_cache_load(
+                cache_kv_c,
+                cache_k_pe,
+                decode_metadata.block_table,
+                seq_len.to(q_nope.device),
+                seq_starts=torch.zeros([batch_size], dtype=torch.int32).to(q_nope.device),
+            )
+            # kv_c_normed: [seq, 1, kv_lora_rank(512)], k_pe: [seq, 1, qk_rope_head_dim(64)]
+
+            kv_c_normed = kv_c_normed.squeeze() # [seq, kv_lora_rank(512)]
+            if self.sp_size > 1:
+                # sp > 1, kv splited in sequence dimension, should not do tp here
+                kv_nope = self.kv_b_proj_full(kv_c_normed)[0].view( \
+                    -1, self.num_heads * self.sp_size, self.qk_nope_head_dim + self.v_head_dim)
+                # [seq, kv_lora_rank(512)] -> [seq, num_heads_full * (qk_nope_head_dim + v_head_dim)] -> view to [seq, num_heads_full(16), qk_nope_head_dim + v_head_dim (256)]
+            else:
+                # sp = 1, kv full in sequence dimension, use original tp kv_b_proj
+                kv_nope = self.kv_b_proj(kv_c_normed)[0].view( \
+                    -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+                # [seq, kv_lora_rank(512)] -> [seq, num_heads * (qk_nope_head_dim + v_head_dim)] -> view to [seq, num_heads(16/tp), qk_nope_head_dim + v_head_dim (256)]
+
+            k_nope, v = kv_nope\
+                .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            # k_nope: [seq, num_heads_full(16), qk_nope_head_dim(128)], v: [seq, num_heads_full(16), v_head_dim(128)]
+            k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
+            mask = torch.triu(
+                torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype),
+                1)
+            seq_len_q = torch.ones([batch_size], dtype=torch.int32)
+            seq_len_kv = seq_len
+            seq_len_all = torch.stack([seq_len_q, seq_len_kv])
+
+            attn_output, softmax_lse = torch_npu.atb.npu_ring_mla(
+                q_nope=q_nope,          # [batch_size, num_heads_full(16), qk_nope_head_dim(128)]
+                q_rope=q_pe,            # [batch_size, num_heads_full(16), qk_rope_head_dim(64)]
+                k_nope=k_nope,          # [kv_seq_len, num_heads_full(16), qk_nope_head_dim(128)]
+                k_rope=k_pe,            # [kv_seq_len, num_heads_full(16), qk_rope_head_dim(64)]
+                value=v,                # [kv_seq_len, num_heads_full(16), v_head_dim(128)]
+                mask=mask,
+                seqlen=seq_len_all,     # seq_q + seq_kv, for example: [[1, 1, 1, 1], [9, 7, 7, 7]]
+                head_num=self.num_heads * self.sp_size,
+                kv_head_num=self.num_heads * self.sp_size,
+                qk_scale=self.scale,
+                kernel_type="kernel_type_high_precision",
+                mask_type="no_mask",
+                input_layout="type_bsnd",
+                calc_type="calc_type_first_ring",
+            )
+        # attn_output: [bs, num_heads_full(16), v_head_dim(128)], softmax_lse: [num_heads_full(16), bs]
+
+        # TODO use update op to replace this
+        def _update_out_and_lse(
+            out: torch.Tensor,
+            lse: torch.Tensor,
+            block_out: torch.Tensor,
+            block_lse: torch.Tensor,
+            mask: torch.Tensor=None,
+        ):
+            if out is None:
+                out = block_out.to(torch.float32)
+                lse = block_lse
+            else:
+                if mask is None:
+                    mask = torch.ones([block_out.size(0)], dtype=torch.uint8, device=block_out.device)
+                out_mask = mask[:, None, None].expand_as(block_out)
+                lse_mask = mask[:, None, None].expand_as(block_lse)
+                block_out = block_out.to(torch.float32)
+                out_without_update = out.clone()
+                lse_without_update = lse.clone()
+
+                # new_lse = lse + torch.log(1 + torch.exp(block_lse - lse))
+                # out = torch.exp(lse - new_lse) * out + torch.exp(block_lse - new_lse) * block_out
+                # lse = new_lse
+
+                # is equal to above
+                out = out - F.sigmoid(block_lse - lse) * (out - block_out)
+                lse = lse - F.logsigmoid(lse - block_lse)
+
+                # mask
+                out = torch.where(out_mask, out, out_without_update)
+                lse = torch.where(lse_mask, lse, lse_without_update)
+            return out, lse
+
+        # lse: [num_heads,bs] -> [bs,num_heads] -> [bs,num_heads,1]
+        softmax_lse = softmax_lse.permute([1, 0]).unsqueeze(dim=-1)
+
+        if self.sp_size > 1:
+            # Concat out&lse: [bs,num_heads,v_head_dim] + [bs,num_heads,1] -> [bs,num_heads,v_head_dim+1]
+            attn_out_lse = torch.cat([attn_output, softmax_lse], dim=-1)
+            # permute: [bs, num_heads, v_head_dim+1] -> [num_heads, v_head_dim+1, bs]
+            attn_out_lse = attn_out_lse.permute([1, 2, 0]).contiguous()
+            attn_out_lse_all2all = torch.empty_like(attn_out_lse)
+            dist.all_to_all_single(attn_out_lse_all2all, attn_out_lse, group=self.sp_group)
+            # permute: [num_heads, v_head_dim+1, bs] -> [bs, num_heads, v_head_dim+1]
+            attn_out_lse_all2all = attn_out_lse_all2all.permute([2, 0, 1])
+            attn_out_lse_split_on_seq = list(torch.chunk(attn_out_lse_all2all, self.sp_size, dim=1))
+            # Update out&lse
+            attn_out_g = None
+            attn_lse_g = None
+            for i, attn_out_lse_l in enumerate(attn_out_lse_split_on_seq):
+                attn_out_l, attn_lse_l = torch.split(attn_out_lse_l, [self.v_head_dim, 1], dim=-1)
+                attn_out_g, attn_lse_g = _update_out_and_lse(attn_out_g, attn_lse_g, attn_out_l, attn_lse_l, seq_mask_sp[:, i])
+            attn_output = attn_out_g
+            softmax_lse = attn_lse_g
+
+        if self.cp_size > 1:
+            # Concat out&lse: [bs,num_heads,v_head_dim] + [bs,num_heads,1] -> [bs,num_heads,v_head_dim+1]
+            attn_out_lse = torch.cat([attn_output, softmax_lse], dim=-1)
+            # AllGather out&lse within CP group
+            attn_out_lse_list = [torch.empty_like(attn_out_lse) for _ in range(self.cp_size)]
+            dist.all_gather(attn_out_lse_list, attn_out_lse, group=self.cp_group)
+            # Update out&lse
+            attn_out_g = None
+            attn_lse_g = None
+            for i, attn_out_lse_l in enumerate(attn_out_lse_list):
+                attn_out_l, attn_lse_l = torch.split(attn_out_lse_l, [self.v_head_dim, 1], dim=-1)
+                attn_out_g, attn_lse_g = _update_out_and_lse(attn_out_g, attn_lse_g, attn_out_l, attn_lse_l, seq_mask_cp[:, i])
+            attn_output = attn_out_g
+
+        attn_output = attn_output.reshape([num_tokens, self.num_heads * self.v_head_dim]).to(torch.bfloat16)
+        # out = self.o_proj(attn_output, is_prefill=False)[0]
+        out = attn_output
+        return out
