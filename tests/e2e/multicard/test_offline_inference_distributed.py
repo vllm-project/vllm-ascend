@@ -108,15 +108,13 @@ def test_models_distributed_pangu():
     ]
     max_tokens = 5
 
-    with VllmRunner(
-            snapshot_download("vllm-ascend/pangu-pro-moe-pruing"),
-            max_model_len=8192,
-            enforce_eager=True,
-            dtype="auto",
-            tensor_parallel_size=2,
-            distributed_executor_backend="mp",
-            enable_expert_parallel=True
-    ) as vllm_model:
+    with VllmRunner(snapshot_download("vllm-ascend/pangu-pro-moe-pruing"),
+                    max_model_len=8192,
+                    enforce_eager=True,
+                    dtype="auto",
+                    tensor_parallel_size=2,
+                    distributed_executor_backend="mp",
+                    enable_expert_parallel=True) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
