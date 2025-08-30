@@ -230,7 +230,6 @@ def fused_experts_moge(
         0, sorted_topk_ids).unsqueeze(-1)
     group_list = num_tokens_per_expert.cumsum(dim=0).to(torch.int64)
 
-    w1 = w1.transpose(1, 2)
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[sorted_hidden_states],
         weight=[w1],
@@ -247,7 +246,6 @@ def fused_experts_moge(
         gate_up_out = torch_npu.npu_swiglu(gate_up_out)
     gate_up_out *= topk_scales
 
-    w2 = w2.transpose(1, 2)
     down_out_list = torch_npu.npu_grouped_matmul(
         x=[gate_up_out],
         weight=[w2],
