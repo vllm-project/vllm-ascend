@@ -70,7 +70,7 @@ class TestTorchairUtils(TestBase):
              ),
             ("Qwen2ForCausalLM",
              "vllm_ascend.torchair.models.qwen2:CustomQwen2ForCausalLM"),
-            ("Qwen3ForCausalLM",
+            ("Qwen3MoeForCausalLM",
              "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
         ]
 
