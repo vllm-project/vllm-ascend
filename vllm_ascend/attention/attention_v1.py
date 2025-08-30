@@ -286,8 +286,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
-        num_tokens=0,
+        *args,
+        **kwargs,
     ) -> torch.Tensor:
+        if "num_tokens" in kwargs:
+            num_tokens = kwargs["num_tokens"]
+        else:
+            num_tokens = 0
+
         assert attn_metadata is not None
         assert attn_metadata.attn_mask is not None
 
@@ -340,6 +346,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
+        *args,
+        **kwargs,
     ) -> torch.Tensor:
         assert attn_metadata is not None
         assert attn_metadata.attn_mask is not None
@@ -367,6 +375,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
+        *args,
+        **kwargs,
     ) -> torch.Tensor:
         if is_310p():
             # seq_lens_tensor needs to be transferred to the device for 310P.
@@ -416,6 +426,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
+        *args,
+        **kwargs,
     ) -> torch.Tensor:
         # Use chunked prefill for head size 192 scenario, like deepseek
         # paged_attention_splitfuse maybe crash at such scenario.
@@ -462,6 +474,33 @@ class AscendAttentionBackendImpl(AttentionImpl):
             scale_value=self.scale,
             out=output)
         return output
+
+    def _dispatch_forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: Optional[torch.Tensor],
+        *args,
+        **kwargs,
+    ) -> torch.Tensor:
+        # V0-Style scheduler situation.
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            return self._forward_prefill_no_cache(query, key, value,
+                                                  attn_metadata, output, args,
+                                                  kwargs)
+        elif attn_metadata.attn_state == \
+            AscendAttentionState.PrefillCacheHit:
+            return self._forward_prefill_cache_hit(query, attn_metadata,
+                                                   output, args, kwargs)
+        elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            return self._forward_decode_only(query, attn_metadata, output,
+                                             args, kwargs)
+        # Normal V1 situation.
+        else:
+            return self._forward_v1_style(query, attn_metadata, output, args,
+                                          kwargs)
 
     def forward(
         self,
@@ -541,20 +580,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     value_cache=self.value_cache,
                     slot_indices=slots)
 
-            # V0-Style scheduler situation.
-            if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-                output = self._forward_prefill_no_cache(
-                    query, key, value, attn_metadata, output, num_tokens)
-            elif attn_metadata.attn_state == \
-                AscendAttentionState.PrefillCacheHit:
-                output = self._forward_prefill_cache_hit(
-                    query, attn_metadata, output)
-            elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                output = self._forward_decode_only(query, attn_metadata,
-                                                   output)
-            # Normal V1 situation.
-            else:
-                output = self._forward_v1_style(query, attn_metadata, output)
+            output = self._dispatch_forward(query,
+                                            key,
+                                            value,
+                                            attn_metadata,
+                                            output,
+                                            num_tokens=num_tokens)
 
         # to make in-place change to the output tensor
         if hasattr(layer, 'quant_method') and use_kv_cache_int8:
