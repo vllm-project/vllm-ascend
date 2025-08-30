@@ -185,6 +185,8 @@ class AscendMLAMetadataBuilder:
                            self.block_size - 1) // self.block_size
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
 
+        self.is_kv_producer = vllm_config.kv_transfer_config is not None and \
+            vllm_config.kv_transfer_config.is_kv_producer
         self.decode_threshold = 1
 
         if self.chunked_prefill_enabled:
@@ -227,7 +229,7 @@ class AscendMLAMetadataBuilder:
 
         for i, req_id in enumerate(input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if num_tokens <= self.decode_threshold:
+            if num_tokens <= self.decode_threshold and not self.is_kv_producer:
                 decodes.append(i)
             else:
                 prefills.append(i)
