@@ -2108,7 +2108,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
-
             if need_dummy_logits:
                 max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
                 dummy_indices = torch.zeros(max_num_reqs_across_dp,
