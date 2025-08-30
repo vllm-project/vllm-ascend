@@ -1308,8 +1308,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         ascend_config = get_ascend_config()
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
-        # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
-        elif np.all(num_scheduled_tokens == 1):
+        # NOTE: In prefill-decode aggregation mode, we assume this is the decode
+        # stage, where prefill occurs but only one token is not found in the
+        # cache. However, in prefill-decode disaggregation mode, to ensure
+        # correctness (since the decode code path may not be reliable), we
+        # continue to use the prefill code path.
+        elif np.all(num_scheduled_tokens == 1) and not self.is_kv_producer:
             attn_state = AscendAttentionState.DecodeOnly
             if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
                 # SpecDecoding now supports seq_len=1 and seq_len=2
