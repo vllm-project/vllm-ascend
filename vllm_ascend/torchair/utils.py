@@ -182,3 +182,18 @@ def torchair_quant_method_register():
         "W8A8_DYNAMIC"] = TorchairW8A8DYNAMICQuantizer
     SUPPORT_ASCEND_QUANTIZER_TYPE[
         "W4A8_DYNAMIC"] = TorchairW4A8DYNAMICQuantizer
+
+
+def torchair_ops_patch():
+    from vllm.model_executor.layers.rotary_embedding import (
+        DeepseekScalingRotaryEmbedding, RotaryEmbedding)
+
+    from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
+        deepseek_rope_init_func, native_rope_deepseek_forward,
+        qwen_rope_init_func, rope_forward)
+
+    RotaryEmbedding.__init__ = qwen_rope_init_func
+    RotaryEmbedding.forward_oot = rope_forward
+
+    DeepseekScalingRotaryEmbedding.__init__ = deepseek_rope_init_func
+    DeepseekScalingRotaryEmbedding.forward = native_rope_deepseek_forward
