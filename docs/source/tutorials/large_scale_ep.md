@@ -285,7 +285,7 @@ dp_size = 2 # total number of DP engines for decode/prefill
 dp_size_local = 2 # number of DP engines on the current node
 dp_rank_start = 0 # starting DP rank for the current node
 # dp_ip is different on prefiller nodes in this example
-dp_ip = 192.0.0.1 # master node ip for DP communication
+dp_ip = "192.0.0.1" # master node ip for DP communication
 dp_port = 13395 # port used for DP communication
 engine_port = 9000 # starting port for all DP groups on the current node
 template_path = "./run_dp_template.sh"
@@ -319,7 +319,7 @@ dp_size = 64 # total number of DP engines for decode/prefill
 dp_size_local = 16 # number of DP engines on the current node
 dp_rank_start = 0 # starting DP rank for the current node. e.g. 0/16/32/48
 # dp_ip is the same on decoder nodes in this example
-dp_ip = 192.0.0.5 # master node ip for DP communication.
+dp_ip = "192.0.0.5" # master node ip for DP communication.
 dp_port = 13395 # port used for DP communication
 engine_port = 9000 # starting port for all DP groups on the current node
 template_path = "./run_dp_template.sh"
