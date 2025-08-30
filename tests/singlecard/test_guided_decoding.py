@@ -34,7 +34,7 @@ GuidedDecodingBackendV0 = [
     "lm-format-enforcer",
     "xgrammar",
 ]
-GuidedDecodingBackendV1 = ["xgrammar", "guidance:disable-any-whitespace"]
+GuidedDecodingBackendV1 = ["xgrammar", "guidance"]
 GuidedDecodingBackend = list(
     set(GuidedDecodingBackendV0 + GuidedDecodingBackendV1))
 
@@ -94,6 +94,10 @@ def test_guided_json_completion(guided_decoding_backend: str,
         # xgrammar does not support json schema, will fall back to outlines, skip it
         pytest.skip(
             f"{guided_decoding_backend} will fall back to outlines, skip it")
+    if guided_decoding_backend == "outlines":
+        pytest.skip(
+            f"{guided_decoding_backend} will take up too much time for json "
+            "completion, skip it")
     if guided_decoding_backend not in GuidedDecodingBackendV0 and os.getenv(
             "VLLM_USE_V1") == "0":
         # guidance does not support on v0, skip it

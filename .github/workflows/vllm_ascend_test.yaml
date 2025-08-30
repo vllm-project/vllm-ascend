@@ -179,8 +179,7 @@ jobs:
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             VLLM_USE_MODELSCOPE=True pytest -sv tests/singlecard/test_offline_inference.py
-            # guided decoding doesn't work, fix it later
-            # pytest -sv tests/singlecard/test_guided_decoding.py.py
+            pytest -sv tests/singlecard/test_guided_decoding.py
             # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
             pytest -sv tests/singlecard/test_ascend_config.py
             pytest -sv tests/singlecard/test_camem.py
@@ -216,8 +215,7 @@ jobs:
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             VLLM_USE_MODELSCOPE=True  pytest -sv tests/singlecard/test_offline_inference.py
-            # guided decoding doesn't work, fix it later
-            # pytest -sv tests/singlecard/test_guided_decoding.py.py
+            pytest -sv tests/singlecard/test_guided_decoding.py
             pytest -sv tests/singlecard/test_camem.py
             # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
             pytest -sv tests/singlecard/test_ascend_config.py
