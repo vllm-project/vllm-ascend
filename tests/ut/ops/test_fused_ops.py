@@ -843,10 +843,9 @@ class TestUnifiedApplyMLP(TestBase):
                                    fusion=True)
 
         mock_get_forward_context.assert_called()
-        self.assertTrue(mock_forward_context.with_quant)
-
         mock_npu_grouped_matmul.assert_called_once()
         mock_npu_grouped_matmul_swiglu_quant.assert_called_once()
 
+        self.assertTrue(mock_forward_context.with_quant)
         self.assertEqual(result.shape, hidden_states.shape)
         self.assertEqual(result.dtype, torch.bfloat16)
