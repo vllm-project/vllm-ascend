@@ -19,8 +19,11 @@
 
 import copy
 import gc
+import itertools
 import math
 import time
+from collections import defaultdict
+from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
@@ -33,10 +36,12 @@ import torch.distributed as dist
 import torch.nn as nn
 from tqdm import tqdm  # type: ignore
 from vllm.attention import AttentionType, get_attn_backend
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
+from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -71,7 +76,8 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import (bind_kv_cache, gather_mm_placeholders,
+from vllm.v1.worker.utils import (AttentionGroup, bind_kv_cache,
+                                  gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
 
@@ -176,6 +182,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.block_size = vllm_config.cache_config.block_size
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
                                            self.block_size)
+        self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -194,6 +201,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Lazy initialization, these will be set after __init__
         self.kv_caches: List[torch.Tensor] = []
+        # indexes: [kv_cache_group_id][attn_group]
+        self.attn_groups: list[list[AttentionGroup]] = []
+
         # TODO: remove Dict[str, Dict[int, torch.Tensor]] type after 0.10.1.1
         self.encoder_cache: Union[Dict[str, Dict[int, torch.Tensor]],
                                   Dict[str, torch.Tensor]] = {}
@@ -2374,6 +2384,68 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self._dummy_run(num_tokens,
                             aclgraph_runtime_mode=aclgraph_runtime_mode,
                             uniform_decode=uniform_decode)
+
+    def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
+        return itertools.chain.from_iterable(self.attn_groups)
+
+    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+        """
+        Initialize the attention backends and attention metadata builders.
+        """
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
+            return
+
+        assert len(self.attn_groups) == 0, \
+            "Attention backends are already initialized"
+
+        def get_attn_backends_for_layers(
+                layer_names: list[str]
+        ) -> dict[type[AttentionBackend], list[str]]:
+
+            from vllm.model_executor.layers.attention_layer_base import \
+                AttentionLayerBase
+            layers = get_layers_from_vllm_config(self.vllm_config,
+                                                 AttentionLayerBase,
+                                                 layer_names)
+            attn_backends = {}
+            attn_backend_layers = defaultdict(list)
+            # Dedupe based on full class name; this is a bit safer than using
+            # using the class itself as the key because when we create dynamic
+            # attention backend subclasses (e.g. ChunkedLocalAttention) unless
+            # they are cached correctly, there will be different objects per
+            # layer.
+            for layer_name in layer_names:
+                attn_backend = layers[layer_name].get_attn_backend()
+                key = attn_backend.full_cls_name()
+                attn_backends[key] = attn_backend
+                attn_backend_layers[key].append(layer_name)
+            return {
+                attn_backends[k]: v
+                for k, v in attn_backend_layers.items()
+            }
+
+        def create_attn_groups(
+            attn_backends_map: dict[AttentionBackend, list[str]],
+            kv_cache_spec: KVCacheSpec,
+        ) -> list[AttentionGroup]:
+            attn_groups: list[AttentionGroup] = []
+            for attn_backend, layer_names in attn_backends_map.items():
+                attn_metadata_builder_i = attn_backend.get_builder_cls()(
+                    self.vllm_config,
+                    self.device,
+                )
+                attn_group = AttentionGroup(attn_backend,
+                                            attn_metadata_builder_i,
+                                            layer_names)
+                attn_groups.append(attn_group)
+            return attn_groups
+
+        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            attn_backends = get_attn_backends_for_layers(
+                kv_cache_group_spec.layer_names)
+            self.attn_groups.append(
+                create_attn_groups(attn_backends, kv_cache_spec))
 
     def _capture_model(self):
         if not self.use_aclgraph:
