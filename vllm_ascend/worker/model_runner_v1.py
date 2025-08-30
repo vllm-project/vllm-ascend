@@ -1516,7 +1516,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 sampled_token_ids=valid_sampled_token_ids,
                 spec_token_ids=spec_token_ids,
                 logprobs=logprobs_lists,
-                prompt_logprobs_dict={},
+                prompt_logprobs_dict=prompt_logprobs_dict,
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
             )
