@@ -1,5 +1,42 @@
 # Release note
 
+## v0.10.1rc1 - 2025.08.29
+
+This is the 1st release candidate of v0.10.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started.
+
+### Core
+- Add MLP tensor parallel to improve performance, but note that this will increase memory usage. [#2120](https://github.com/vllm-project/vllm-ascend/pull/2120)
+- Add custom lmhead tensor parallel to achieve reduced memory consumption and improved TPOT performance. [#2309](https://github.com/vllm-project/vllm-ascend/pull/2309)
+- Support capture custom ops into aclgraph now. [#2113](https://github.com/vllm-project/vllm-ascend/pull/2113)
+- Qwen3 MoE/Qwen2.5 support torchair graph now. [#2403](https://github.com/vllm-project/vllm-ascend/pull/2403)
+- Support Sliding Window Attention with AscendSceduler, thus fixing Gemma3 accuracy issue. [#2528](https://github.com/vllm-project/vllm-ascend/pull/2528)
+
+### Other
+
+- Bug fixes:
+    * Update the graph capture size calculation, somehow alleviated the problem that npu stream not enough in some scenarios [#2511](https://github.com/vllm-project/vllm-ascend/pull/2511)
+    * Fix bugs and refactor cached mask generation logic. [#2442](https://github.com/vllm-project/vllm-ascend/pull/2442)
+    * Fix the nz format does not work in quantization scenarios. [#2549](https://github.com/vllm-project/vllm-ascend/pull/2549)
+    * Fix accuracy issue on Qwen series caused by enabling `enable_shared_pert_dp` by default. [#2457](https://github.com/vllm-project/vllm-ascend/pull/2457)
+- Performance improved through a lot of prs:
+    * Add Custom Kernels For LoRA Performance. [#2325](https://github.com/vllm-project/vllm-ascend/pull/2325)
+    * remove torch.cat and replace it by List[0]. [#2153](https://github.com/vllm-project/vllm-ascend/pull/2153)
+    * convert the format of gmm to nz. [#2474](https://github.com/vllm-project/vllm-ascend/pull/2474)
+    * Optimize parallel strategies to reduce communication overhead [#2198](https://github.com/vllm-project/vllm-ascend/pull/2198)
+    * Optimize reject sampler in greedy situation [#2137](https://github.com/vllm-project/vllm-ascend/pull/2137)
+- A batch of refactoring prs to enhance the code architecture:
+    * Refactor on MLA. [#2465](https://github.com/vllm-project/vllm-ascend/pull/2465)
+    * Refactor on torchair fused_moe. [#2438](https://github.com/vllm-project/vllm-ascend/pull/2438)
+    * Refactor on allgather/mc2-related fused_experts. [#2369](https://github.com/vllm-project/vllm-ascend/pull/2369)
+    * Refactor on torchair model runner. [#2208](https://github.com/vllm-project/vllm-ascend/pull/2208)
+- Parameters changes:
+    * Add `lmhead_tensor_parallel_size` in `additional_config`, set it to enable lmhead tensor parallel. [#2309](https://github.com/vllm-project/vllm-ascend/pull/2309)
+    * Some unused environ variables `HCCN_PATH`, `PROMPT_DEVICE_ID`, `DECODE_DEVICE_ID`, `LLMDATADIST_COMM_PORT` and `LLMDATADIST_SYNC_CACHE_WAIT_TIME`  are removed.
+    * Environ variable `VLLM_LLMDD_RPC_PORT` is renamed to `VLLM_ASCEND_LLMDD_RPC_PORT` now.
+    * Add `VLLM_ASCEND_ENABLE_MLP_OPTIMIZE` in environ variables, Whether to enable mlp optimize when tensor parallel is enabled, this feature in eager mode will get better performance.
+    * Add `enable_prefetch` in `additional_config`, whether to enable weight prefetch. [#2465](https://github.com/vllm-project/vllm-ascend/pull/2465)
+    * `enable_shared_expert_dp` in `additional_config` is disabled by default now, and it is recommended to enable when inferencing with deepseek. [#2457](https://github.com/vllm-project/vllm-ascend/pull/2457)
+
 ## v0.9.1rc3 - 2025.08.22
 
 This is the 3rd release candidate of v0.9.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/) to get started.
