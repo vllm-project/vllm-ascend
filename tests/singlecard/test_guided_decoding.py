@@ -34,7 +34,7 @@ GuidedDecodingBackendV0 = [
     "lm-format-enforcer",
     "xgrammar",
 ]
-GuidedDecodingBackendV1 = ["xgrammar", "guidance:disable-any-whitespace"]
+GuidedDecodingBackendV1 = ["xgrammar", "guidance"]
 GuidedDecodingBackend = list(
     set(GuidedDecodingBackendV0 + GuidedDecodingBackendV1))
 
