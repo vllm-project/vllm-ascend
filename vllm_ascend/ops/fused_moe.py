@@ -158,7 +158,8 @@ def apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
-
+    s_cmo = get_forward_context().vector_stream
+    torch.npu.current_stream().wait_stream(s_cmo)
     hidden_states = torch_npu.npu_swiglu(hidden_states)
 
     w2 = w2.transpose(1, 2)
@@ -385,6 +386,8 @@ def unquant_apply_mlp(
         group_type=0,
         group_list=group_list,
     )[0]
+    s_cmo = get_forward_context().vector_stream
+    torch.npu.current_stream().wait_stream(s_cmo)
     if is_310p():
         gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
             torch.float16)
