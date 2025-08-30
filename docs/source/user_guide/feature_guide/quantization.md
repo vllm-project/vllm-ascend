@@ -65,6 +65,9 @@ Now, you can run the quantized models with vLLM Ascend. Here is the example for 
 ### Offline inference
 
 ```python
+import os
+os.environ["VLLM_USE_V1"] = "1"
+
 import torch
 
 from vllm import LLM, SamplingParams
