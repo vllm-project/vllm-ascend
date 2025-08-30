@@ -1,0 +1,386 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:1
+msgid "Distributed DP Server With Large EP (DeepSeek)"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:3
+msgid "Getting Start"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:5
+msgid ""
+"vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large "
+"**Expert  Parallelism (EP)** scenario. To achieve better performance，the "
+"distributed DP server is applied in vLLM-Ascend. In the PD separation "
+"scenario, different optimization strategies can be implemented based on "
+"the distinct characteristics of PD nodes, thereby enabling more flexible "
+"model deployment."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:7
+msgid "Verify Multi-Node Communication Environment"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:9
+msgid "Physical Layer Requirements:"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:11
+msgid ""
+"The physical machines must be located on the same WLAN, with network "
+"connectivity."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:12
+msgid ""
+"All NPUs are connected with optical modules, and the connection status "
+"must be normal."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:14
+msgid "Verification Process:"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:16
+msgid ""
+"Execute the following commands on each node in sequence. The results must"
+" all be `success` and the status must be `UP`:"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:33
+msgid "NPU Interconnect Verification:"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:35
+msgid "1. Get NPU IP Addresses"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:41
+msgid "2. Get superpodid and SDID"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:47
+msgid "3. Cross-Node PING Test"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:54
+msgid "Generate Ranktable"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:56
+msgid ""
+"You need to generate a ranktable to make  mulit nodes to communicate with"
+" each other. For more details please refer to the [vllm-ascend "
+"examples](https://github.com/vllm-project/vllm-"
+"ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/README.md). "
+"Execute the following commands for reference."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "Parameter"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "meaning"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "--ips"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "Each node's local ip (prefiller nodes should be front of decoder nodes)"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "--npus-per-node"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "Each node's npu clips"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "--network-card-name"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "The physical machines' NIC"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "--prefill-device-cnt"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "Npu clips used for prefill"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "--decode-device-cnt"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md
+msgid "Npu clips used for decode"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:72
+msgid "Use the Distributed DP Server"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:74
+msgid ""
+"Execute the following commands to use the distributed DP server. (We "
+"recommend using this feature on the v0.9.1-dev branch)"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:105
+msgid ""
+"Note that the prefiller nodes and the decoder nodes may have differenet "
+"configurations. You can use the following shell script for configuring "
+"the prefiller and decoder nodes respectively."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:171
+msgid ""
+"In the PD separation scenario, we provide a recommended optimized "
+"configuration."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:173
+msgid "**prefiller node**"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:175
+msgid "set HCCL_BUFFSIZE=256"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:176
+msgid "add '--enforce-eager' command to 'vllm serve'"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:177
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:186
+msgid "Take '--additional-config' as follow"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:183
+msgid "**decoder node**"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:185
+msgid "set HCCL_BUFFSIZE=1024"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:194
+msgid "'--additional-config'  Parameter Introduction:"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:196
+msgid "**\"torchair_graph_config\"：** The config options for torchair graph mode."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:197
+msgid "**\"ascend_scheduler_config\"：** The config options for ascend scheduler."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:198
+msgid ""
+"**\"enable_weight_nz_layout\"：** Whether to convert quantized weights to "
+"NZ format to accelerate matrix multiplication."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:199
+msgid ""
+"**\"enable_prefill_optimizations\"：** Whether to enable DeepSeek models' "
+"prefill optimizations. <br>"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:202
+msgid "\"torchair_graph_config\" Parameter Introduction:"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:204
+msgid ""
+"**\"enable_multistream_mla\"：** Whether to put vector ops of MLA to "
+"another stream. This option only takes effects on models using MLA."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:205
+msgid ""
+"**\"enable_multistream_moe\"：** Whether to enable multistream shared "
+"expert. This option only takes effects on DeepSeek moe models."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:206
+msgid "**\"graph_batch_sizes\"：**  The batch size for torchair graph cache."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:207
+msgid "**\"enable_super_kernel\"：** Whether to enable super kernel."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:208
+msgid "**\"use_cached_graph\"：** Whether to use cached graph"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:210
+msgid "Toy proxy for Distributed DP Server"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:212
+msgid ""
+"In the PD separation scenario, we need a proxy to distribute requests. "
+"Execute the following commands to enable the toy proxy:"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:234
+msgid ""
+"Each node local ip should repeat the same times as its "
+"'**dp_size_local**', at the same time, each node has the same number of "
+"ports as '**dp_size_local**', and their ports increase sequentially "
+"starting from '**engine_port**'."
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:237
+msgid ""
+"You can get the proxy program in the repository's examples, "
+"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:239
+msgid "Recommended Configuration"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:241
+msgid ""
+"For example，if the average input length is 3.5k, and the output length is"
+" 1.1k, the context length is 16k, the max length of the input dataset is "
+"7K. In this scenario, we give a recommended configuration for distributed"
+" DP server with high EP. Here we use 4 nodes for prefill and 4 nodes for "
+"decode. <br>"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "node"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "DP"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "TP"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "EP"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "max-model-len"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "max-num-batched-tokens"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "max-num-seqs"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "gpu-memory-utilization"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "prefill"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "2"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "8"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "16"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "17000"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "16384"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "4"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "0.9"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "decode"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "64"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "1"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "256"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:233
+msgid "28"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:249
+msgid "FAQ"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:251
+msgid "1. Prefiller nodes need to warmup"
+msgstr ""
+
+#: ../../source/developer_guide/performance/distributed_dp_server_with_large_ep.md:253
+msgid ""
+"Since the computation of some NPU operators requires several rounds of "
+"warm-up to achieve best performance, we recommend preheating the service "
+"with some requests before conducting performance tests to achieve the "
+"best end-to-end throughput."
+msgstr ""
+

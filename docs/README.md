@@ -12,6 +12,11 @@ pip install -r requirements-docs.txt
 make clean
 make html
 
+# Extract po files
+make po
+
+# Do translations
+
 # Build the docs with translation
 make intl
 
