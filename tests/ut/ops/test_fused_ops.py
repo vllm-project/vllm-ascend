@@ -808,11 +808,9 @@ class TestUnifiedApplyMLP(TestBase):
         mock_npu_grouped_matmul.side_effect = [[
             torch.randn(10, 20, dtype=torch.bfloat16)
         ]]
-
         mock_npu_swiglu.return_value = torch.randn(10,
                                                    40,
                                                    dtype=torch.bfloat16)
-
         mock_npu_dynamic_quant.return_value = (torch.randint(-128,
                                                              127, (10, 40),
                                                              dtype=torch.int8),
