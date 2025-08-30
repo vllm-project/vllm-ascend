@@ -89,7 +89,8 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.torchair.torchair_attention import AscendTorchairMetadata
 from vllm_ascend.torchair.torchair_mla import AscendMLATorchairMetadata
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               ProfileExecuteDuration, is_310p,
+                               AscendSocVersion, ProfileExecuteDuration,
+                               get_ascend_soc_version, is_310p,
                                lmhead_tp_enable, vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
@@ -1620,8 +1621,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )
 
     def _select_moe_comm_method(self, num_tokens: int) -> str:
-        return ("mc2"
-                if num_tokens <= self.mc2_tokens_capacity else "allgather")
+        soc_version = get_ascend_soc_version()
+
+        if num_tokens <= self.mc2_tokens_capacity:
+            moe_comm_method = "mc2"
+        elif soc_version in {AscendSocVersion.A2}:
+            moe_comm_method = "allgather"
+        elif soc_version in {AscendSocVersion.A3}:
+            moe_comm_method = "alltoall"
+        else:
+            raise ValueError(f"Unsupported soc_version: {soc_version}")
+
+        if is_global_first_rank():
+            logger.debug(f"num_tokens: {num_tokens}, "
+                         f"moe_comm_method: {moe_comm_method}")
+
+        return moe_comm_method
 
     @torch.inference_mode()
     def execute_model(
