@@ -54,6 +54,10 @@ class TestAscendConfig(TestBase):
         self.assertTrue(torchair_graph_config.enable_view_optimize)
         self.assertFalse(torchair_graph_config.enable_kv_nz)
 
+        ascend_compilation_config = ascend_config.ascend_compilation_config
+        self.assertTrue(ascend_compilation_config.enable_graph_rewriter)
+        self.assertTrue(ascend_compilation_config.enable_quantization_fusion)
+
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
         self.assertFalse(ascend_scheduler_config.enabled)
 
@@ -70,6 +74,10 @@ class TestAscendConfig(TestBase):
                 "enable_multistream_moe": True,
                 "enable_view_optimize": True,
                 "enable_kv_nz": True
+            },
+            "ascend_compilation_config": {
+                "enable_graph_rewriter": False,
+                "enable_quantization_fusion": False,
             },
             "ascend_scheduler_config": {
                 "enabled": True
@@ -89,6 +97,10 @@ class TestAscendConfig(TestBase):
         self.assertTrue(torchair_graph_config.enable_multistream_moe)
         self.assertTrue(torchair_graph_config.enable_view_optimize)
         self.assertTrue(torchair_graph_config.enable_kv_nz)
+        ascend_compilation_config = ascend_config.ascend_compilation_config
+        self.assertFalse(ascend_compilation_config.enable_graph_rewriter)
+        self.assertFalse(ascend_compilation_config.enable_quantization_fusion)
+        
 
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
         self.assertTrue(ascend_scheduler_config.enabled)
