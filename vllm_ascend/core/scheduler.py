@@ -92,9 +92,9 @@ class AscendScheduler(Scheduler):
         # if max_num_decode_running_reqs configed, pop request that finished prefill to finished_prefill_reqs
         if self.max_num_decode_running_reqs != self.max_num_running_reqs:
             req_idx = 0
-            while self.phase == "prefill" and req_idx < len(len.running):
+            while self.phase == "prefill" and req_idx < len(self.running):
                 request = self.running[req_idx]
-                if not request in self.finished_prefill_reqs:
+                if request not in self.finished_prefill_reqs:
                     if request.num_tokens - request.num_prompt_tokens >= 1:
                         self.finished_prefill_reqs.append(request)
                         self.running.remove(request)
@@ -106,7 +106,9 @@ class AscendScheduler(Scheduler):
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
-            if len(self.running) == (self.max_num_running_reqs if self.phase == "prefill" else self.max_num_decode_running_reqs):
+            if len(self.running) == (self.max_num_running_reqs 
+                                     if self.phase == "prefill" else
+                                     self.max_num_decode_running_reqs):
                 break
 
             request = self.waiting[0]
@@ -375,7 +377,9 @@ class AscendScheduler(Scheduler):
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs if self.phase == "prefill" else self.max_num_decode_running_reqs
+        assert len(
+            self.running
+        ) <= self.max_num_running_reqs if self.phase == "prefill" else self.max_num_decode_running_reqs
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
             scheduled_running_reqs) <= len(self.running)
 
