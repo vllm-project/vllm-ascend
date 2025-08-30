@@ -166,11 +166,13 @@ class TestAscendSchedulerConfig(TestBase):
         self.assertIn("max_num_batched_tokens (2048)", str(context.exception))
         self.assertIn("max_model_len (4096)", str(context.exception))
 
-    def test_initialize_from_config_with_decode_bs(self):
+    def test_initialize_from_config_with_pd_transfer(self):
         ascend_config = AscendSchedulerConfig.initialize_from_config(
             self.basic_scheduler_config,
             AscendSchedulerConfig(
-                decode_batch_size=128,
+                enable_pd_transfer=True,
+                max_num_batched_tokens=4096,
+                max_model_len=4096,
             ),
         )
-        self.assertEqual(ascend_config.decode_batch_size, 128)
+        self.assertEqual(ascend_config.enable_pd_transfer, True)

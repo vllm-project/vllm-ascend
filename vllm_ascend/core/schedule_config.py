@@ -28,7 +28,7 @@ class AscendSchedulerConfig(SchedulerConfig):
     num_scheduler_steps: int = 1
     scheduler_cls: Union[str, Type[object]] = (
         "vllm_ascend.core.scheduler.AscendScheduler")
-    decode_batch_size = 0
+    enable_pd_transfer: bool = False
 
     @classmethod
     def initialize_from_config(
@@ -46,7 +46,7 @@ class AscendSchedulerConfig(SchedulerConfig):
         scheduler_config["num_scheduler_steps"] = 1
         scheduler_config["scheduler_cls"] = (
             "vllm_ascend.core.scheduler.AscendScheduler")
-        scheduler_config["decode_batch_size"] = 0
+        scheduler_config["enable_pd_transfer"] = False
         # Override params in original SchedulerConfig with params in ascend_scheduler_config
         for k, _ in scheduler_config.items():
             if hasattr(ascend_scheduler_config, k):
