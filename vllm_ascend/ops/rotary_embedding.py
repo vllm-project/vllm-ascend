@@ -21,6 +21,7 @@ from typing import Optional, Tuple
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
@@ -76,17 +77,29 @@ def rope_forward_oot(
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
-        # TODO: Remove the contiguous in the future.
-        query = query.contiguous().view(query.shape[0], -1)
-        key = key.contiguous().view(key.shape[0], -1)
-        torch_npu._npu_rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            self.cos_sin_cache,
-            neox_style,
-        )
+        if self.cos is not None and \
+            self.sin is not None and \
+            neox_style and \
+            self.head_size == 128 and \
+            self.head_size == self.rotary_dim:
+            # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
+            # This method requires head_size and rotary_dim equal 128 and neox_style is True
+            query = query.contiguous().view(1, query.shape[0], -1,
+                                            self.head_size)
+            key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
+            torch_npu.npu_apply_rotary_pos_emb(query, key, self.cos, self.sin)
+        else:
+            # TODO: Remove the contiguous in the future.
+            query = query.contiguous().view(query.shape[0], -1)
+            key = key.contiguous().view(key.shape[0], -1)
+            torch_npu._npu_rotary_embedding(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.cos_sin_cache,
+                neox_style,
+            )
     return query.view(query_shape), key.view(key_shape)
 
 
@@ -120,6 +133,8 @@ class AscendRotaryEmbedding(RotaryEmbedding):
     ) -> None:
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
+        self.sin = None
+        self.cos = None
         if get_ascend_config().torchair_graph_config.enabled:
             set_cos_sin_cache(self,
                               seq_len=max_position_embeddings,
@@ -169,10 +184,25 @@ class AscendRotaryEmbedding(RotaryEmbedding):
             q_embed, k_embed = torch_npu.npu_apply_rotary_pos_emb(
                 query, key, cos, sin)
             return q_embed.flatten(-2), k_embed.flatten(-2)
-        else:
-            return rope_forward_oot(self, positions, query, key, offsets,
-                                    is_neox_style_override,
-                                    is_qwen_torchair)  # type: ignore
+
+        forward_context = get_forward_context()
+        is_first_layer = forward_context.is_first_layer
+        # Generate cos and sin outside layers to avoid repeated calculation.
+        if is_first_layer:
+            cos_sin = self.cos_sin_cache.index_select(0, positions)
+            last_dim = cos_sin.size()[-1]
+            cos, sin = cos_sin.reshape(-1, 2,
+                                       last_dim // 2).repeat(1, 1,
+                                                             2).chunk(2,
+                                                                      dim=-2)
+            # BSNH
+            self.cos, self.sin = cos.view(1, -1, 1,
+                                          last_dim).contiguous(), sin.view(
+                                              1, -1, 1, last_dim).contiguous()
+            forward_context.is_first_layer = False
+        return rope_forward_oot(self, positions, query, key, offsets,
+                                is_neox_style_override,
+                                is_qwen_torchair)  # type: ignore
 
 
 class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
