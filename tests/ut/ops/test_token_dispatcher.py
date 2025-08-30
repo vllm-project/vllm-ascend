@@ -17,57 +17,13 @@
 
 from unittest.mock import MagicMock, PropertyMock, patch
 
-import pytest
 import torch
-from pytest_mock import MockerFixture
 
-from tests.ut.base import PytestBase, TestBase
+from tests.ut.base import TestBase
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
-    AscendSocVersion, MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig,
-    TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
-    TokenDispatcherWithMC2, _Dispatchers, _register_token_dispatcher,
-    get_token_dispatcher, setup_token_dispatchers)
-
-
-class TestMoEAlltoAllSeqOverLapDispatcher(PytestBase):
-
-    @pytest.fixture
-    def config(self):
-        config = MoEDispatcherConfig()
-        config.set_num_local_experts(2)
-        config.set_num_moe_experts(4)
-        config.set_moe_pad_expert_input_to_capacity(False)
-        config.set_moe_expert_capacity_factor(None)
-        config.set_moe_router_topk(2)
-        config.set_moe_grouped_gemm(False)
-        config.set_group_topk(0)
-        config.set_num_groups(1)
-        config.set_is_fused(False)
-        return config.build()
-
-    def mock_ep_group(self, mocker):
-        mock_group = mocker.MagicMock()
-        mock_group.rank_in_group = 0
-        mock_group.world_size = 2
-        mock_group.device_group = "mock_group"
-        return mock_group
-
-    @pytest.fixture
-    def dispatcher(self, config, mocker: MockerFixture):
-        mocker.patch(
-            "vllm_ascend.ops.moe_dispatcher.token_dispatcher.get_ep_group",
-            return_value=self.mock_ep_group(mocker))
-        mocker.patch("torch.npu.current_device", return_value="cpu")
-        mocker.patch("torch.npu.Stream", return_value=mocker.MagicMock)
-        return MoEAlltoAllSeqOverLapDispatcher(config)
-
-    def test_initialization(self, dispatcher, config):
-        assert dispatcher.num_local_experts == config.num_local_experts
-        assert dispatcher.num_experts == config.num_moe_experts
-        assert dispatcher.local_expert_indices == [0, 1]
-        assert dispatcher.ep_rank == 0
-        assert dispatcher.ep_size == 2
-        assert dispatcher.overlap_stream is not None
+    AscendSocVersion, TokenDispatcherWithAll2AllV,
+    TokenDispatcherWithAllGather, TokenDispatcherWithMC2, _Dispatchers,
+    _register_token_dispatcher, get_token_dispatcher, setup_token_dispatchers)
 
 
 class TestTokenDispatcherWithMC2(TestBase):
