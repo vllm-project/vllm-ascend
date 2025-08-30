@@ -1,0 +1,10 @@
+model_name: "LLM-Research/Phi-4-mini-instruct"
+runner: "linux-aarch64-a2-1"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.81
+  - name: "exact_match,flexible-extract"
+    value: 0.81
+num_fewshot: 5
