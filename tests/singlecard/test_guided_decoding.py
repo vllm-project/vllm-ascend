@@ -97,7 +97,7 @@ def test_guided_json_completion(guided_decoding_backend: str,
     if guided_decoding_backend == "outlines":
         pytest.skip(
             f"{guided_decoding_backend} will take up too much time for json "
-             "completion, skip it")
+            "completion, skip it")
     if guided_decoding_backend not in GuidedDecodingBackendV0 and os.getenv(
             "VLLM_USE_V1") == "0":
         # guidance does not support on v0, skip it
