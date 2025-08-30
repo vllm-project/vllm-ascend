@@ -46,6 +46,7 @@ Get the newest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | InternVL2 | ✅ | |
 | InternVL2.5 | ✅ | |
 | Qwen2-Audio | ✅ |  |
+| Qwen2.5-Omni | ✅ | |
 | LLaVA-Next |  | Need test |
 | LLaVA-Next-Video | | Need test |
 | Phi-3-Vison/Phi-3.5-Vison | | Need test |
