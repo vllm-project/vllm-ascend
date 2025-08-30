@@ -127,6 +127,34 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
+        decoding_config = vllm_config.decoding_config
+        scheduler_config = vllm_config.scheduler_config
+        ascend_scheduler_config = ascend_config.ascend_scheduler_config
+
+        if model_config is not None and not model_config.use_mla:
+            logger.info(
+                "Non-MLA LLMs forcibly disable the chunked prefill feature,"
+                "as the performance of operators supporting this feature "
+                "functionality is currently suboptimal.")
+            if not envs.VLLM_USE_V1:
+                scheduler_config.enable_chunked_prefill = False
+                scheduler_config.chunked_prefill_enabled = False
+            if envs.VLLM_USE_V1 and \
+                not model_config.is_multimodal_model and \
+                decoding_config.backend == "auto" and \
+                not scheduler_config.delay_factor > 0 and \
+                not scheduler_config.send_delta_data and \
+                scheduler_config.policy == "fcfs" and \
+                scheduler_config.num_scheduler_steps == 1:
+                scheduler_config.enable_chunked_prefill = False
+                scheduler_config.chunked_prefill_enabled = False
+                ascend_scheduler_config.enabled = True
+                if hasattr(ascend_scheduler_config, "enable_chunked_prefill"):
+                    ascend_scheduler_config.enable_chunked_prefill = False
+            if (scheduler_config.max_num_batched_tokens <
+                    scheduler_config.max_model_len
+                    and not scheduler_config.chunked_prefill_enabled):
+                scheduler_config.max_num_batched_tokens = scheduler_config.max_model_len
 
         if parallel_config:
             if parallel_config.enable_expert_parallel:

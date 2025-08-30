@@ -41,7 +41,9 @@ def test_run_without_ascend_config():
         assert not ascend_config.torchair_graph_config.use_cached_graph
         assert ascend_config.torchair_graph_config.graph_batch_sizes == []
         assert not ascend_config.torchair_graph_config.graph_batch_sizes_init
-        assert not ascend_config.ascend_scheduler_config.enabled
+        # Non-MLA LLMs forcibly disable the chunked prefill feature
+        # and use AscendScheduler
+        assert ascend_config.ascend_scheduler_config.enabled
 
 
 @_clean_up_ascend_config
@@ -81,7 +83,8 @@ def test_run_with_ascend_config():
         assert not ascend_config.torchair_graph_config.enable_multistream_moe
         assert not ascend_config.torchair_graph_config.enable_view_optimize
         assert ascend_config.ascend_scheduler_config.enabled
-        assert ascend_config.ascend_scheduler_config.enable_chunked_prefill
+        # Non-MLA LLMs forcibly disable the chunked prefill feature
+        assert not ascend_config.ascend_scheduler_config.enable_chunked_prefill
 
 
 @_clean_up_ascend_config

@@ -345,7 +345,7 @@ for process in processes:
 
 :::::
 
-Note that the prefiller nodes and the decoder nodes may have differenet configurations. In this example, each prefiller node deployed as master node independently, but all decoder nodes take the first node as the master node. So it leads to differents in 'dp_size_local' and 'dp_rank_start'
+Note that the prefiller nodes and the decoder nodes may have different configurations. In this example, each prefiller node deployed as master node independently, but all decoder nodes take the first node as the master node. So it leads to difference in 'dp_size_local' and 'dp_rank_start'
 
 ## Example proxy for Distributed DP Server
 
@@ -395,7 +395,7 @@ python load_balance_proxy_server_example.py \
 
 You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)
 
-## Benckmark
+## Benchmark
 
 We recommend use aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark) Execute the following commands to install aisbench
 

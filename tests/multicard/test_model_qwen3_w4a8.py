@@ -25,6 +25,8 @@ import pytest
 from modelscope import snapshot_download  # type: ignore
 from vllm import LLM, SamplingParams
 
+from vllm_ascend.ascend_config import clear_ascend_config
+
 MODELS = ["vllm-ascend/Qwen3-8B-W4A8"]
 PROMPTS = [
     "Hello, my name is",
@@ -38,6 +40,7 @@ PROMPTS = [
 @pytest.mark.parametrize("max_tokens", [16])
 def test_qwen3_model_with_w4a8_linear_method(model: str,
                                              max_tokens: int) -> None:
+    clear_ascend_config()
     messages = [[{"role": "user", "content": prompt}] for prompt in PROMPTS]
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
@@ -63,3 +66,4 @@ def test_qwen3_model_with_w4a8_linear_method(model: str,
     for vllm_output, golden_output in zip(vllm_outputs, golden_outputs):
         assert vllm_output.outputs[0].text == golden_output
         print(f"Generated text: {vllm_output.outputs[0].text!r}")
+    clear_ascend_config()
