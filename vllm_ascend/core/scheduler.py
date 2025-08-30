@@ -465,7 +465,7 @@ class AscendScheduler(Scheduler):
                                    self.block_size)
         req_blocks = self.kv_cache_manager.coordinator.get_blocks(
             request.request_id)
-        num_new_blocks = (num_required_blocks - len(req_blocks) -
+        num_new_blocks = (num_required_blocks - len(req_blocks[0]) -
                           len(computed_blocks))
         num_evictable_computed_blocks = sum(1 for blk in computed_blocks
                                             if blk.ref_cnt == 0)
