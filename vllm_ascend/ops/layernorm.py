@@ -18,7 +18,7 @@
 from typing import Optional, Tuple, Union
 
 import torch
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
 class AddRMSNormW8A8Quant(RMSNorm):
@@ -81,5 +81,32 @@ class AscendRMSNorm(RMSNorm):
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
+                                             self.variance_epsilon)
+        return x
+
+
+class AscendGemmaRMSNorm(GemmaRMSNorm):
+
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        import torch_npu
+
+        from vllm_ascend.utils import is_310p
+        if residual is not None:
+            if is_310p():
+                orig_dtype = residual.dtype
+                x = x + residual.to(x.dtype)
+                residual = x.to(orig_dtype)
+                x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
+                                              self.variance_epsilon)
+            else:
+                x, _, residual = torch_npu.npu_add_rms_norm(
+                    x, residual, 1.0 + self.weight, self.variance_epsilon)
+            return x, residual
+
+        x, residual = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
                                              self.variance_epsilon)
         return x
