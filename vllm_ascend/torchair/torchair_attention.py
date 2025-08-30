@@ -304,6 +304,7 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+        self.scale_tensor = torch.zeros((), device='npu', dtype=torch.int32)
 
     def forward(
         self,
@@ -366,7 +367,7 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             key_cache, value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
 
-            block_size = key_cache.shape[1]
+            block_size = self.scale_tensor + key_cache.shape[1]
             slots_indices = slots.reshape(-1, 1)
             block_indices = slots_indices // block_size
             slots_indices = slots_indices % block_size
