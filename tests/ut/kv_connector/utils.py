@@ -160,19 +160,27 @@ def create_request(
     else:
         prompt_token_ids = [i * request_id for i in range(num_tokens)]
 
-    req = Request(
-        request_id=f"id-{request_id}",
-        prompt_token_ids=prompt_token_ids,
-        sampling_params=sampling_params,
-        multi_modal_kwargs=None,
-        multi_modal_placeholders=None,
-        multi_modal_hashes=None,
-        **({
-            "pooling_params": []
-        } if not vllm_version_is("0.9.1") else {}),
-        eos_token_id=EOS_TOKEN_ID,
-        block_hasher=block_hasher,
-    )
+    if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
+        req = Request(
+            request_id=f"id-{request_id}",
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+            multi_modal_kwargs=None,
+            multi_modal_placeholders=None,
+            multi_modal_hashes=None,
+            pooling_params=[],
+            eos_token_id=EOS_TOKEN_ID,
+            block_hasher=block_hasher,
+        )
+    else:
+        req = Request(
+            request_id=f"id-{request_id}",
+            prompt_token_ids=prompt_token_ids,
+            sampling_params=sampling_params,
+            pooling_params=[],
+            eos_token_id=EOS_TOKEN_ID,
+            block_hasher=block_hasher,
+        )
     req.kv_transfer_params = kv_transfer_params
     return req
 
