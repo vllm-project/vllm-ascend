@@ -24,17 +24,18 @@ Run `pytest tests/test_offline_inference.py`.
 from tests.conftest import VllmRunner
 
 
-def test_models_distributed_Qwen3_MOE_TP2():
+def test_models_distributed_Qwen3_MOE_Aclgraph_TP2():
     example_prompts = [
         "Hello, my name is",
     ]
-    dtype = "half"
+    dtype = "bfloat16"
     max_tokens = 5
     with VllmRunner(
             "Qwen/Qwen3-30B-A3B",
             dtype=dtype,
             tensor_parallel_size=4,
             distributed_executor_backend="mp",
+            enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
