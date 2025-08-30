@@ -847,7 +847,7 @@ class TestUnifiedApplyMLP(TestBase):
         mock_get_forward_context.assert_called()
         self.assertTrue(mock_forward_context.with_quant)
 
-        self.assertEqual(mock_npu_grouped_matmul.call_count, 1)
+        mock_npu_grouped_matmul.assert_called_once()
         mock_npu_grouped_matmul_swiglu_quant.assert_called_once()
 
         self.assertEqual(result.shape, hidden_states.shape)
