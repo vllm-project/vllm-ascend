@@ -168,7 +168,7 @@ def register_torchair_model():
         "vllm_ascend.torchair.models.qwen2:CustomQwen2ForCausalLM")
 
     ModelRegistry.register_model(
-        "Qwen3ForCausalLM",
+        "Qwen3MoeForCausalLM",
         "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
 
 
