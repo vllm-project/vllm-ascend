@@ -698,16 +698,11 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
 
             if self.enable_sp and is_prefill:
-                chunk_kv_no_split = [torch.empty_like(kv_no_split) for _ in range(self.sp_size)]
-                dist.all_gather(list(chunk_kv_no_split), kv_no_split, self.sp_group)
-                kv_no_split = torch.cat(chunk_kv_no_split, dim=0)
+                kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
                 kv_no_split = kv_no_split[:original_len]
 
-                chunk_hidden_states_or_q_c = [torch.empty_like(hidden_states_or_q_c) for _ in range(self.sp_size)]
-                dist.all_gather(list(chunk_hidden_states_or_q_c), hidden_states_or_q_c, self.sp_group)
-                hidden_states_or_q_c = torch.cat(chunk_hidden_states_or_q_c, dim=0)
+                hidden_states_or_q_c = get_tp_group().all_gather(hidden_states_or_q_c, 0)
                 hidden_states_or_q_c = hidden_states_or_q_c[:original_len]
-            # kv_c, k_pe = kv_c_k_pe.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
             kv_c, k_pe = kv_no_split.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -987,14 +982,10 @@ class CustomDeepseekV2Model(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
         if self.enable_sp and is_prefill:
-            chunk_hidden_states = [torch.empty_like(hidden_states) for _ in range(self.sp_size)]
-            dist.all_gather(list(chunk_hidden_states), hidden_states, self.sp_group)
-            hidden_states = torch.cat(chunk_hidden_states, dim=0)
+            hidden_states = get_tp_group().all_gather(hidden_states, 0)
             hidden_states = hidden_states[:original_len]
         if self.cp_size > 1 and is_prefill:
-            chunk_hidden_states = [torch.empty_like(hidden_states) for _ in range(self.cp_size)]
-            dist.all_gather(list(chunk_hidden_states), hidden_states, self.cp_group)
-            hidden_states = torch.cat(chunk_hidden_states, dim=0)
+            hidden_states = get_cp_group().all_gather(hidden_states, 0)
             hidden_states = torch.index_select(hidden_states, 0, attn_metadata.prefill.cp_metadata.cp_kv_recover_idx)
         return hidden_states
 
