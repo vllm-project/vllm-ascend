@@ -25,13 +25,6 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
-                                               ColumnParallelLinear,
-                                               LinearBase,
-                                               MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear,
-                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
@@ -40,6 +33,12 @@ from vllm_ascend.distributed.parallel_state import (
     get_mlp_tensor_model_parallel_rank,
     get_mlp_tensor_model_parallel_world_size, get_mlp_tp_group)
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+
+# iosrt and yapf have conflict, skip one
+from vllm.model_executor.layers.linear import (  # isort: skip
+    WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear, LinearBase,
+    MergedColumnParallelLinear, QKVParallelLinear, RowParallelLinear,
+    UnquantizedLinearMethod)
 
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
