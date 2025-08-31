@@ -1441,10 +1441,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             spec_decode_metadata = None
             if self.cp_size > 1 and is_prefill:
                 # logits_indices = cu_num_tokens - num_cp_pads[:num_reqs] - 1 # if without all-gather and onlly sample on cp0
-                logits_indices = cu_num_tokens * self.cp_size - num_cp_pads[:num_reqs] - 1
+                sample_indices = cu_num_tokens * self.cp_size - num_cp_pads[:num_reqs] - 1
             else:
-                logits_indices = cu_num_tokens - 1
-            logits_indices = torch.from_numpy(logits_indices).to(
+                sample_indices = cu_num_tokens - 1
+            sample_indices = torch.from_numpy(sample_indices).to(
                 self.device, non_blocking=True)
         else:
             # Get the number of draft tokens for each request.
