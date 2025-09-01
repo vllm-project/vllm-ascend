@@ -96,8 +96,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                get_ascend_soc_version, is_310p,
                                lmhead_tp_enable, vllm_version_is)
-from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
-from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if not (vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1")):
@@ -1950,8 +1948,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if need_dummy_logits:
                     dummy_compute_logits(hidden_states)
 
-            if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
-                assert isinstance(self.drafter, MtpProposer)
+            if self.drafter:
                 self.drafter.dummy_run(
                     num_tokens=num_tokens,
                     with_prefill=with_prefill,
