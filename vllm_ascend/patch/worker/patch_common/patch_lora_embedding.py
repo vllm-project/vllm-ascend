@@ -6,6 +6,7 @@ from transformers import PretrainedConfig
 from vllm.config import LoRAConfig
 from vllm.lora.layers import VocabParallelEmbeddingWithLoRA
 from vllm.lora.utils import _all_lora_classes
+
 from vllm_ascend.ops.vocab_parallel_embedding import \
     AscendVocabParallelEmbedding
 
