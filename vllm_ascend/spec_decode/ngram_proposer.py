@@ -46,18 +46,17 @@ class NgramProposer(VllmNgramProposer, Proposer):
                 continue
 
             # Skip requests that require top-p, top-k, etc.
-            req_id = self.input_batch.req_ids[i]
-            if req_id in self.input_batch.spec_decode_unsupported_reqs:
+            req_id = self.runner.input_batch.req_ids[i]
+            if req_id in self.runner.input_batch.spec_decode_unsupported_reqs:
                 draft_token_ids.append([])
                 continue
 
             # Add sampled_token_ids to token_ids_cpu.
-            start_idx = self.input_batch.num_tokens_no_spec[i]
+            start_idx = self.runner.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
-            self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
-            assert isinstance(self.drafter, NgramProposer)
-            drafter_output = self.drafter.propose(
-                self.input_batch.token_ids_cpu[i, :end_idx])
+            self.runner.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
+            drafter_output = self.propose(
+                self.runner.input_batch.token_ids_cpu[i, :end_idx])
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:
