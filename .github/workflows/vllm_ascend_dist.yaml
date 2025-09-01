@@ -18,8 +18,7 @@
 name: 'e2e test / a3-test'
 
 on:
-  workflow_dispatch:
-    # Allow manual triggering of the workflow
+  workflow_call:
 
   pull_request:
     types: [ labeled ]
