@@ -81,10 +81,7 @@ class ExternealDPEngineCoreProc(DPEngineCoreProc):
                 self.execute_dummy_batch()
 
 
-def run_engine_core(*args,
-                    dp_rank: int = 0,
-                    local_dp_rank: int = 0,
-                    **kwargs):
+def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
     """Launch EngineCore busy loop in background process."""
 
     # Signal handler used for graceful termination.
