@@ -41,7 +41,7 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, *args, **kwargs):
-        super().__init__(self, *args, **kwargs)
+        super().__init__(*args, **kwargs)
         # NOTE: Currently, this self.use_aclgraph is only used in
         # UnquantizedFusedMoEMethod.forward_oot to decide whether to use in
         # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
