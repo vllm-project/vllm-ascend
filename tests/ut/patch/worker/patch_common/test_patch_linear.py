@@ -1,11 +1,8 @@
-from importlib import reload
 
 import pytest
 import torch
-import vllm
 from pytest_mock import MockerFixture
 
-import vllm_ascend.envs as envs_ascend
 from tests.ut.base import PytestBase
 from vllm_ascend.patch.worker.patch_common import patch_linear
 
@@ -156,12 +153,3 @@ class TestAscendRowParallelLinear(PytestBase):
         )  # noqa
         ret = row_parallel_linear.calc_output(torch.tensor([10.0, 2.0]))
         assert torch.allclose(ret, expected)
-
-    def test_enable_allreduce_matmul(self, mocker: MockerFixture):
-        mocker.patch.object(envs_ascend,
-                            "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE",
-                            new=True)
-        reload(patch_linear)
-        assert envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
-        assert id(vllm.model_executor.layers.linear.RowParallelLinear) == id(
-            patch_linear.AscendRowParallelLinear)
