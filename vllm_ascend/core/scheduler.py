@@ -271,9 +271,8 @@ class AscendScheduler(Scheduler):
             ) < self.max_num_decode_running_reqs and self.finished_prefill_reqs:
                 request = self.finished_prefill_reqs.popleft()
                 self.running.append(request)
-        
-        # If no prefill requests are scheduled,
-        # Schedule decode requests next.
+
+        # If no prefill requests are scheduled, schedule decode requests next.
         if len(self.scheduled_req_ids) == 0:
             req_index = 0
             while req_index < len(self.running) and token_budget > 0:
