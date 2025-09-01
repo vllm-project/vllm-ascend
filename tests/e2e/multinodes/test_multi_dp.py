@@ -1,13 +1,25 @@
 import socket
 import subprocess
 from typing import Optional, Tuple
+from dataclasses import dataclass
+import json
 
 import psutil
 import pytest
 from modelscope import snapshot_download
 
 from tests.e2e.conftest import RemoteOpenAIServer
+from tests.e2e.models.conftest import tp_size
 
+
+@dataclass
+class ModelMetadata:
+    model_name: str = None
+    is_quant: bool = False
+    dp_size: int = 1
+    tp_size: int = 1
+    enable_ep: bool = True
+    additional_config: Optional[dict] = None
 
 def get_net_interface(ip: Optional[str] = None) -> Optional[Tuple[str, str]]:
     """
@@ -48,35 +60,59 @@ def get_default_envs() -> dict[str, str]:
     }
 
 
-MODELS = ['vllm-ascend/DeepSeek-V3-W8A8']
+deepseek_model = ModelMetadata(
+    model_name="vllm-ascend/DeepSeek-V3-W8A8",
+    is_quant=True,
+    dp_size=4,
+    tp_size=4,
+    enable_ep=True,
+    additional_config={
+        "ascend_scheduler_config": {"enabled": False},
+        "torchair_graph_config": {"enabled": True},
+    },
+)
+
+MODELS = [deepseek_model]
 
 
 @pytest.mark.parametrize("model", MODELS)
-def test_multi_dp(model: str) -> None:
+def test_multi_dp(model: ModelMetadata) -> None:
     env_dict = get_default_envs()
+
+    model_name = model.model_name
+    tp_size = model.tp_size
+    dp_size = model.dp_size
+    enable_ep = model.enable_ep
+    is_quant = model.is_quant
+    assert model_name is not None, "Model name must be specified"
 
     default_args = [
         "--host",
         "0.0.0.0",
         "--data-parallel-size",
-        "4",
+        str(dp_size),
         "--tensor-parallel-size",
-        "4",
-        "--enable-expert-parallel",
+        str(tp_size),
         "--max-model-len",
         "8192",
         "--max-num-seqs",
         "16",
-        "--quantization",
-        "ascend",
         "--trust-remote-code",
         "--gpu-memory-utilization",
         "0.9",
-        "--additional-config",
-        '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true}}',
     ]
 
-    model_path = snapshot_download(repo_id=model)
+    if enable_ep:
+        default_args += ["--enable-expert-parallel"]
+    if is_quant:
+        default_args += ["--quantization", "ascend"]
+    if model.additional_config is not None:
+        default_args += [
+            "--additional-config",
+            json.dumps(model.additional_config),
+        ]
+
+    model_path = snapshot_download(repo_id=model_name)
 
     with RemoteOpenAIServer(
             model_path,
