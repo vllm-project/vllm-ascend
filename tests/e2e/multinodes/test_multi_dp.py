@@ -6,17 +6,17 @@ from typing import Optional, Tuple
 
 import psutil
 import pytest
-from modelscope import snapshot_download
+from modelscope import snapshot_download  # type: ignore
 
 from tests.e2e.conftest import RemoteOpenAIServer
 
 
 @dataclass
 class ModelMetadata:
-    model_name: str = None
-    is_quant: bool = False
-    dp_size: int = 1
-    tp_size: int = 1
+    model_name: str
+    is_quant: bool = True
+    dp_size: int = 4
+    tp_size: int = 4
     enable_ep: bool = True
     additional_config: Optional[dict] = None
 
