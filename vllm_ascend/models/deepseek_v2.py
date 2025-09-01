@@ -61,7 +61,7 @@ from vllm.model_executor.models.deepseek_v2 import \
     yarn_get_mscale  # noqa: E501
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2MLAAttention,
-    get_spec_layer_idx_from_weight_name)
+    DeepseekV2MLP, DeepseekV2MoE, get_spec_layer_idx_from_weight_name)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
@@ -644,13 +644,17 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
-            self.mlp = CustomDeepseekV2MoE(
+            self.mlp = DeepseekV2MoE(
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
+            if self.mlp.gate.e_score_correction_bias is not None:
+                self.mlp.gate.e_score_correction_bias.data = (
+                    self.mlp.gate.e_score_correction_bias.data.to(
+                        dtype=torch.get_default_dtype()))
         else:
-            self.mlp = CustomDeepseekV2MLP(
+            self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,

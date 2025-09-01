@@ -20,7 +20,8 @@ from typing import Any, Callable, Optional
 import torch
 import torch_npu
 from vllm.config import CompilationLevel, get_current_vllm_config
-from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
+from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
+                              tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEParallelConfig  # isort: skip
@@ -381,84 +382,10 @@ class AscendFusedMoE(FusedMoE):
 
     def __init__(
         self,
-        num_experts,
-        top_k,
-        hidden_size,
-        intermediate_size,
-        params_dtype=None,
-        reduce_results=False,
-        renormalize=True,
-        use_grouped_topk=False,
-        num_expert_group=None,
-        topk_group=None,
-        quant_config=None,
-        tp_size=None,
-        ep_size=None,
-        dp_size=None,
-        prefix="",
-        custom_routing_function=None,
-        scoring_func="softmax",
-        routed_scaling_fator: float = 1.0,
-        e_score_correction_bias=None,
-        apply_router_weight_on_input=False,
-        activation="silu",
-        enable_eplb=False,
-        num_redundant_experts=0,
-        has_bias=False,
+        *args,
+        **kwargs,
     ):
-        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-            super().__init__(
-                num_experts,
-                top_k,
-                hidden_size,
-                intermediate_size,
-                params_dtype,
-                reduce_results,
-                renormalize,
-                use_grouped_topk,
-                num_expert_group,
-                topk_group,
-                quant_config,
-                tp_size,
-                ep_size,
-                dp_size,
-                prefix,
-                custom_routing_function,
-                scoring_func,
-                e_score_correction_bias,
-                apply_router_weight_on_input,
-                activation,
-                enable_eplb,
-                num_redundant_experts,
-                has_bias,
-            )
-        else:
-            super().__init__(
-                num_experts,
-                top_k,
-                hidden_size,
-                intermediate_size,
-                params_dtype,
-                reduce_results,
-                renormalize,
-                use_grouped_topk,
-                num_expert_group,
-                topk_group,
-                quant_config,
-                tp_size,
-                ep_size,
-                dp_size,
-                prefix,
-                custom_routing_function,
-                scoring_func,
-                routed_scaling_fator,
-                e_score_correction_bias,
-                apply_router_weight_on_input,
-                activation,
-                enable_eplb,
-                num_redundant_experts,
-                has_bias,
-            )
+        super().__init__(*args, **kwargs)
 
         setup_token_dispatchers(self.moe_config.ep_size,
                                 top_k=self.top_k,
@@ -474,6 +401,32 @@ class AscendFusedMoE(FusedMoE):
             setattr(
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
+
+    def must_reduce_shared_expert_outputs(self) -> bool:
+        """NOTE(Yizhou): This is to override the parent class method. Note that this
+        method will be called in the __init__ function so we cannot switch this during
+        runtime. An known issue is that if we are using AllGatherCommImpl, actually
+        we do not need to reduce the outputs THIS EARLY since it will will be done
+        in the AllGatherCommImpl.finalize function. But this does not affect the
+        correctness, only introduces some redundant communication, so to quickly
+        support DeepSeek and other models, we keep it as is for now.
+        """
+        return True
+
+    def maybe_all_reduce_tensor_model_parallel(
+            self, final_hidden_states: torch.Tensor):
+        """NOTE(Yizhou): This is to override the parent class method. In `mc2commimpl`,
+        and `alltoallcommimpl`, we do not need to all-reduce the final outputs since
+        the outputs are already aggregated across tensor parallel ranks in the
+        `finalize` function. In `allgathercommimpl`, we still need to all-reduce the
+        outputs since each rank only has partial outputs.
+        """
+        forward_context = get_forward_context()
+        moe_comm_method_name = forward_context.moe_comm_method_name
+        if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
+            return final_hidden_states
+        else:
+            return tensor_model_parallel_all_reduce(final_hidden_states)
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
