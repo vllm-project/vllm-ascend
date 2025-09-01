@@ -328,25 +328,22 @@ class AscendDenseMergedColumnParallelLinear(MergedColumnParallelLinear):
         # Matrix multiply.
         assert self.quant_method is not None
         forward_context = get_forward_context()
-        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
         ag_matmal_enabled = forward_context.ag_matmal_enabled
-        pad_size = forward_context.pad_size
-        if not flashcomm_v1_enabled:
-            output_parallel = self.quant_method.apply(self, input_, bias)
+
         # fp or bf
-        elif ag_matmal_enabled and isinstance(self.quant_method,
+        if ag_matmal_enabled and isinstance(self.quant_method,
                                               UnquantizedLinearMethod):
             raise NotImplementedError(
                 "Unquantized AllGather+MatMul fusion is not implemented yet.")
         # w8a8 quant
-        elif ag_matmal_enabled and isinstance(self.quant_method.quant_method,
+        if ag_matmal_enabled and isinstance(self.quant_method.quant_method,
                                               AscendW8A8LinearMethod):
             raise NotImplementedError(
                 "W8A8 quantized AllGather+MatMul fusion is not implemented yet."
             )
-        else:
-            input_ = all_gather_and_maybe_unpad(input_, pad_size, 0)
-            output_parallel = self.quant_method.apply(self, input_, bias)
+            
+        input_ = torch.ops.vllm.flashcomm_all_gather(input_)
+        output_parallel = self.quant_method.apply(self, input_, bias)
 
         if self.gather_output:
             # All-gather across the partitions.
@@ -375,28 +372,22 @@ class AscendDenseQKVParallelLinear(QKVParallelLinear):
         assert self.quant_method is not None
         forward_context = get_forward_context()
         layer_num = self.prefix.split('.')[2]
-        if layer_num == '0':
-            flashcomm_v1_enabled = False
-        else:
-            flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
+
         ag_matmal_enabled = forward_context.ag_matmal_enabled
-        pad_size = forward_context.pad_size
-        if not flashcomm_v1_enabled:
-            output_parallel = self.quant_method.apply(self, input_, bias)
-        # fp or bf
-        elif ag_matmal_enabled and isinstance(self.quant_method,
+        if ag_matmal_enabled and isinstance(self.quant_method,
                                               UnquantizedLinearMethod):
             raise NotImplementedError(
                 "Unquantized AllGather+MatMul fusion is not implemented yet.")
         # w8a8 quant
-        elif ag_matmal_enabled and isinstance(self.quant_method.quant_method,
+        if ag_matmal_enabled and isinstance(self.quant_method.quant_method,
                                               AscendW8A8LinearMethod):
             raise NotImplementedError(
                 "W8A8 quantized AllGather+MatMul fusion is not implemented yet."
             )
-        else:
-            input_ = all_gather_and_maybe_unpad(input_, pad_size, 0)
-            output_parallel = self.quant_method.apply(self, input_, bias)
+
+        input_ = torch.ops.vllm.flashcomm_all_gather_with_condition(
+            input_, layer_num != '0')
+        output_parallel = self.quant_method.apply(self, input_, bias)
 
         if self.gather_output:
             # All-gather across the partitions.
@@ -421,9 +412,7 @@ class AscendDenseRowParallelLinear(RowParallelLinear):
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         tp_rank = get_tensor_model_parallel_rank()
         forward_context = get_forward_context()
-        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
         matmul_rs_enabled = forward_context.matmul_rs_enabled
-        pad_size = forward_context.pad_size
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -434,33 +423,33 @@ class AscendDenseRowParallelLinear(RowParallelLinear):
 
         # Matrix multiply.
         assert self.quant_method is not None
-        # Only fuse bias add into GEMM for rank 0 (this ensures that
-        # bias will not get added more than once in TP>1 case)
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        if self.tp_size == 1 or not self.reduce_results:
-            output = self.quant_method.apply(self, input_parallel, bias=bias_)
-        elif not flashcomm_v1_enabled:
-            output_parallel = self.quant_method.apply(self,
-                                                      input_parallel,
-                                                      bias=bias_)
-            output = tensor_model_parallel_all_reduce(output_parallel)
+
         # fp or bf
-        elif matmul_rs_enabled and isinstance(self.quant_method,
+        if matmul_rs_enabled and isinstance(self.quant_method,
                                               UnquantizedLinearMethod):
             raise NotImplementedError(
                 "Unquantized MatMul+ReduceScatter fusion is not implemented yet."
             )
         # w8a8 quant
-        elif matmul_rs_enabled and isinstance(self.quant_method.quant_method,
+        if matmul_rs_enabled and isinstance(self.quant_method.quant_method,
                                               AscendW8A8LinearMethod):
             raise NotImplementedError(
                 "W8A8 quantized MatMul+ReduceScatter fusion is not implemented yet."
             )
+
+        
+        # Only fuse bias add into GEMM for rank 0 (this ensures that
+        # bias will not get added more than once in TP>1 case)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        
+        if self.tp_size == 1 or not self.reduce_results:
+            output = self.quant_method.apply(self, input_parallel, bias=bias_)
+
         else:
             output_parallel = self.quant_method.apply(self,
                                                       input_parallel,
                                                       bias=bias_)
-            output = maybe_pad_and_reduce_scatter(output_parallel, pad_size, 0)
+            output = torch.ops.vllm.flashcomm_reduce(output_parallel)
 
         output_bias = self.bias if self.skip_bias_add else None
 

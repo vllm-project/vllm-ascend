@@ -37,6 +37,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -1072,7 +1073,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 total_num_scheduled_tokens)
         else:
             # Eager mode.
-            num_input_tokens = total_num_scheduled_tokens
+            tp_size = get_tensor_model_parallel_world_size()
+            num_input_tokens = (tp_size - (total_num_scheduled_tokens %
+                                tp_size)) % tp_size + total_num_scheduled_tokens
 
         # Get the attention state.
         attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens,

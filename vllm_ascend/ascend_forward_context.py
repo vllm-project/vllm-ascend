@@ -112,24 +112,18 @@ def set_ascend_forward_context(
         flashcomm_v1_enabled = False
         matmul_rs_enabled = False
         ag_matmal_enabled = False
-        pad_size = 0
-        from vllm_ascend.attention.attention_v1 import AscendAttentionState
-        if envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM == 1 and \
-            attn_metadata is not None and \
-            attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
-            flashcomm_v1_enabled = True
-        if flashcomm_v1_enabled and \
-            envs_ascend.VLLM_ASCEND_ENABLE_LCOC_MATMUL_RS == 1:
-            matmul_rs_enabled = True
-        if flashcomm_v1_enabled and \
-            envs_ascend.VLLM_ASCEND_ENABLE_LCOC_AG_MATMUL == 1:
-            ag_matmal_enabled = True
+
+        flashcomm_v1_enabled = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM and \
+            num_tokens is not None and num_tokens > 1000
+        
         if flashcomm_v1_enabled:
-            # num_tokens = hidden_states.size(0)
+            matmul_rs_enabled = envs_ascend.VLLM_ASCEND_ENABLE_LCOC_MATMUL_RS == 1
+            ag_matmal_enabled = envs_ascend.VLLM_ASCEND_ENABLE_LCOC_AG_MATMUL == 1
             tp_world_size = get_tensor_model_parallel_world_size()
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
-        forward_context.pad_size = pad_size
+            forward_context.pad_size = pad_size
+
         forward_context.flashcomm_v1_enabled = flashcomm_v1_enabled
         forward_context.matmul_rs_enabled = matmul_rs_enabled
         forward_context.ag_matmal_enabled = ag_matmal_enabled
