@@ -81,10 +81,10 @@ class ExternealDPEngineCoreProc(DPEngineCoreProc):
                 self.execute_dummy_batch()
 
 
-def run_engine_core_dplb(*args,
-                         dp_rank: int = 0,
-                         local_dp_rank: int = 0,
-                         **kwargs):
+def run_engine_core(*args,
+                    dp_rank: int = 0,
+                    local_dp_rank: int = 0,
+                    **kwargs):
     """Launch EngineCore busy loop in background process."""
 
     # Signal handler used for graceful termination.
@@ -188,62 +188,7 @@ def _update_from_kv_xfer_finished(self,
                          req_id)
 
 
-def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
-    """Launch EngineCore busy loop in background process."""
-
-    # Signal handler used for graceful termination.
-    # SystemExit exception is only raised once to allow this and worker
-    # processes to terminate without error
-    shutdown_requested = False
-
-    # Ensure we can serialize transformer config after spawning
-    maybe_register_config_serialize_by_value()
-
-    def signal_handler(signum, frame):
-        nonlocal shutdown_requested
-        if not shutdown_requested:
-            shutdown_requested = True
-            raise SystemExit()
-
-    # Either SIGTERM or SIGINT will terminate the engine_core
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
-    engine_core: Optional[EngineCoreProc] = None
-    try:
-        parallel_config: ParallelConfig = kwargs["vllm_config"].parallel_config
-        if parallel_config.data_parallel_size > 1 or dp_rank > 0:
-            # Set data parallel rank for this engine process.
-            parallel_config.data_parallel_rank = dp_rank
-            parallel_config.data_parallel_rank_local = local_dp_rank
-            engine_core = DPEngineCoreProc(*args, **kwargs)
-        else:
-            engine_core = EngineCoreProc(*args, **kwargs)
-
-        engine_core.scheduler.finish_requests = types.MethodType(
-            finish_requests, engine_core.scheduler)
-        engine_core.scheduler._update_from_kv_xfer_finished = types.MethodType(
-            _update_from_kv_xfer_finished, engine_core.scheduler)
-        engine_core.run_busy_loop()
-
-    except SystemExit:
-        logger.debug("EngineCore exiting.")
-        raise
-    except Exception as e:
-        if engine_core is None:
-            logger.exception("EngineCore failed to start.")
-        else:
-            logger.exception("EngineCore encountered a fatal error.")
-            engine_core._send_engine_dead()
-        raise e
-    finally:
-        if engine_core is not None:
-            engine_core.shutdown()
-
-
 # Apply this patch only if the external data parallelism is enabled
 if vllm_ascend_envs.VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED:
     # Patch the EngineCoreClient to use the custom make_async_mp_client
-    EngineCoreProc.run_engine_core = run_engine_core_dplb  # type: ignore[attr-defined]
-else:
     EngineCoreProc.run_engine_core = run_engine_core  # type: ignore[attr-defined]
