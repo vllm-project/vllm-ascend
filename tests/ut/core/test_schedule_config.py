@@ -169,8 +169,6 @@ class TestAscendSchedulerConfig(TestBase):
     def test_initialize_from_config_with_decode_bs(self):
         ascend_config = AscendSchedulerConfig.initialize_from_config(
             self.basic_scheduler_config,
-            AscendSchedulerConfig(
-                decode_batch_size=128,
-            ),
+            AscendSchedulerConfig(decode_batch_size=128),
         )
         self.assertEqual(ascend_config.decode_batch_size, 128)
