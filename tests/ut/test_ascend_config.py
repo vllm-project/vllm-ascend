@@ -46,6 +46,7 @@ class TestAscendConfig(TestBase):
 
         torchair_graph_config = ascend_config.torchair_graph_config
         self.assertFalse(torchair_graph_config.enabled)
+        self.assertEqual(torchair_graph_config.mode, '')
         self.assertFalse(torchair_graph_config.use_cached_graph)
         self.assertEqual(torchair_graph_config.graph_batch_sizes, [])
         self.assertFalse(torchair_graph_config.graph_batch_sizes_init)
@@ -289,6 +290,17 @@ class TestAscendConfig(TestBase):
                 "torchair_graph_config": {
                     "enabled": False,
                     "enable_multistream_moe": True,
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
+        # mode should not be configured without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "mode": 'max-autotune',
                 },
                 "refresh": True
             }
