@@ -9,6 +9,8 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               MLAAttentionImpl)
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.attention.layer import (wait_for_kv_layer_from_connector,
+                                  maybe_save_kv_layer_to_connector)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
@@ -886,7 +888,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 current_ms_metadata.before_comm_event.wait()
                 return self._v_up_proj(attn_output)
 
-    def _mla_preprocess(self, hidden_states, kv_cache, attn_metadata,
+    def _mla_preprocess(self, layer_name, hidden_states, kv_cache, attn_metadata,
                         need_gather_q_kv):
         # MLA Preprocess:
         # 1. Perform q_a_proj and q_a_layernorm to obtain q_c
@@ -916,6 +918,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
         decode_preprocess_res = None
         prefill_preprocess_res = None
+        if has_prefill:
+            wait_for_kv_layer_from_connector(layer_name)
         # Preprocess for decode tokens
         if has_decode:
             decode_q_c = q_c[:num_decode_tokens]
@@ -962,6 +966,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def forward(
         self,
+        layer_name,
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: Tuple[torch.Tensor],
         attn_metadata: M,
@@ -988,7 +993,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # MLA Preprocess
         decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
-            hidden_states, kv_cache, attn_metadata, need_gather_q_kv)
+            layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv)
 
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding
@@ -1046,4 +1051,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                     is_force_scatter=self.enable_shared_expert_dp)[0]
                 current_ms_metadata.after_comm_event.record()
         del o_proj_input
+        
+        has_prefill = attn_metadata.num_prefills > 0
+        if has_prefill:
+            maybe_save_kv_layer_to_connector(layer_name, kv_cache)
         return output_padded
