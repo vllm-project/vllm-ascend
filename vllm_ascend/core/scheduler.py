@@ -266,9 +266,9 @@ class AscendScheduler(Scheduler):
             logger.info("change scheduler phase to pure decode")
             self.phase = "decode"
         if self.phase == "decode":
-            while self.finished_prefill_reqs:
+            while len(self.running) <  self.max_num_decode_running_reqs and self.finished_prefill_reqs:
                 request = self.finished_prefill_reqs.popleft()
-                self.waiting.append(request)
+                self.running.append(request)
         
         # If no prefill requests are scheduled,
         # Schedule decode requests next.
