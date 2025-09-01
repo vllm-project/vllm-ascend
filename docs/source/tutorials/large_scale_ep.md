@@ -349,9 +349,7 @@ Note that the prefiller nodes and the decoder nodes may have differenet configur
 
 ## Example proxy for Distributed DP Server
 
-In the PD separation scenario, we need a proxy to distribute requests. Execute the following commands to enable the toy proxy:
-
-option 1 (recommend)
+In the PD separation scenario, we need a proxy to distribute requests. Execute the following commands to enable the example proxy:
 
 ```shell
 python load_balance_proxy_server_example.py \
@@ -394,32 +392,6 @@ python load_balance_proxy_server_example.py \
 | --decoder-ports | Ports of decoder nodes |
 | --decoder-ports-inc | Number of increments for decoder node ports |
 
-option 2
-
-This approach is more redundant. Take 2 prefiller nodes wiht 1 DP and 2 decoder nodes with 2 DP for example.
-
-```shell
-python load_balance_proxy_server_example.py \
-  --port "proxy port" \
-  --host 0.0.0.0 \
-  --prefiller-hosts \
-    prefiller 192.0.0.1 \ 
-    prefiller 192.0.0.2 \ 
-  --prefiller-ports  \
-    engine_port engine_port \
-  --decoder-hosts \
-    decoder 192.0.0.5  \ 
-    decoder 192.0.0.5  \ 
-    decoder 192.0.0.6  \ 
-    decoder 192.0.0.6  \ 
-  --decoder-ports  \
-    engine_port ...  \ # Increase by dp_size_local e.g. 9000 9001
-    engine_port ...  \ # Increase by dp_size_local e.g. 9000 9001
-```
-
-:::{note}
-In the option2 each node local ip should repeat the same times as its '**dp_size_local**', at the same time, each node has the same number of ports as '**dp_size_local**', and their ports increase sequentially starting from '**engine_port**'.
-:::
 
 You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)
 
