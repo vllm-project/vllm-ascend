@@ -20,7 +20,7 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 from vllm.config import CompilationLevel, get_current_vllm_config
-from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
+from vllm.distributed import ((get_dp_group, get_ep_group, get_tp_group,
                               tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import \
@@ -242,6 +242,17 @@ class AscendFusedMoE(FusedMoE):
             setattr(
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
+
+    def must_reduce_shared_expert_outputs(self) -> bool:
+        """NOTE(Yizhou): This is to override the parent class method. Note that this
+        method will be called in the __init__ function so we cannot switch this during
+        runtime. An known issue is that if we are using AllGatherCommImpl, actually
+        we do not need to reduce the outputs THIS EARLY since it will will be done
+        in the AllGatherCommImpl.finalize function. But this does not affect the
+        correctness, only introduces some redundant communication, so to quickly
+        support DeepSeek and other models, we keep it as is for now.
+        """
+        return True
 
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
