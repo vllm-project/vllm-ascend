@@ -287,3 +287,6 @@ jobs:
             --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
             --ignore=tests/e2e/multicard/test_data_parallel.py \
             --ignore=tests/e2e/multicard/test_offline_inference_310p.py
+
+  e2e-8-cards:
+    uses: ./.github/workflows/vllm_ascend_dist.yaml
