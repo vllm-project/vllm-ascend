@@ -17,6 +17,7 @@
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
+import os
 import torch
 import torch.distributed as dist
 import torch_npu
@@ -201,7 +202,6 @@ def apply_mlp(hidden_states: torch.Tensor,
     return hidden_states
 
 if COMM_QUANT_MODE == 1:
-    import os
     os.environ["HCCL_INTRA_PCIE_ENABLE"] = "1"
     os.environ["HCCL_INTRA_ROCE_ENABLE"] = "0"
     comm_quant_mode = 2
