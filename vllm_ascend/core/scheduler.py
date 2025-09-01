@@ -268,7 +268,7 @@ class AscendScheduler(Scheduler):
         if self.phase == "decode":
             while len(
                     self.running
-            ) <  self.max_num_decode_running_reqs and self.finished_prefill_reqs:
+            ) < self.max_num_decode_running_reqs and self.finished_prefill_reqs:
                 request = self.finished_prefill_reqs.popleft()
                 self.running.append(request)
         
