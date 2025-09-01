@@ -91,7 +91,7 @@ def test_multi_dp(model: str) -> None:
             seed=1024,
             max_wait_seconds=1000,
     ) as remote_server:
-        base_url = remote_server.url_root()
+        base_url = remote_server.url_root
         cmd = [
             "vllm",
             "bench",
