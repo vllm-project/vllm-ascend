@@ -33,6 +33,7 @@ from vllm_ascend.distributed.moe_comm_method import (  # isort: skip
 @pytest.mark.parametrize("top_k_num", [2, 4])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("ep_rank", [0, 1])
+@pytest.mark.parametrize("apply_a8_quantization", [False])
 def test_all_gather_comm_impl(
     num_tokens,
     hidden_size,
@@ -41,6 +42,7 @@ def test_all_gather_comm_impl(
     top_k_num,
     dtype,
     ep_rank,
+    apply_a8_quantization,
     mocker,
 ):
     """
@@ -118,8 +120,9 @@ def test_all_gather_comm_impl(
         native_permuted_hidden,
         native_expert_tokens,
         _,
+        _,
     ) = native_impl.permute(hidden_states, topk_ids, topk_weights, expert_map,
-                            num_experts)
+                            num_experts, apply_a8_quantization)
     # Simulate MLP output
     native_mlp_output = torch.randn_like(native_permuted_hidden)
     native_impl.unpermute(native_mlp_output, native_hidden_states_out)
@@ -130,8 +133,9 @@ def test_all_gather_comm_impl(
         all_gather_permuted_hidden,
         all_gather_expert_tokens,
         _,
+        _,
     ) = all_gather_impl.permute(hidden_states, topk_ids, topk_weights,
-                                expert_map, num_experts)
+                                expert_map, num_experts, apply_a8_quantization)
 
     # Use the same simulated MLP output for a fair comparison
     all_gather_mlp_output = native_mlp_output.clone()

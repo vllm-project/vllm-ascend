@@ -35,10 +35,6 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
             return FusedMoEState.NaiveMulticast
         else:
             return FusedMoEState.AllGather
-    elif envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
-        # MC2 Dispatch/Combine performs better than alltoall_seq in decoding stage.
-        return (FusedMoEState.All2AllSeq if
-                (ep_size < 16 or with_prefill) else FusedMoEState.MC2)
     # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
     elif ep_size < 16 or with_prefill:
         return FusedMoEState.All2All
@@ -99,8 +95,6 @@ def set_ascend_forward_context(
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
 
-        with_quant = vllm_config.quant_config is not None
-        forward_context.with_quant = with_quant
         from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
             get_token_dispatcher
         dispatcher_name = get_dispatcher_name(ep_size, with_prefill)
