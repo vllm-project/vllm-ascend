@@ -1,15 +1,14 @@
+import json
 import socket
 import subprocess
-from typing import Optional, Tuple
 from dataclasses import dataclass
-import json
+from typing import Optional, Tuple
 
 import psutil
 import pytest
 from modelscope import snapshot_download
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from tests.e2e.models.conftest import tp_size
 
 
 @dataclass
@@ -20,6 +19,7 @@ class ModelMetadata:
     tp_size: int = 1
     enable_ep: bool = True
     additional_config: Optional[dict] = None
+
 
 def get_net_interface(ip: Optional[str] = None) -> Optional[Tuple[str, str]]:
     """
@@ -67,8 +67,12 @@ deepseek_model = ModelMetadata(
     tp_size=4,
     enable_ep=True,
     additional_config={
-        "ascend_scheduler_config": {"enabled": False},
-        "torchair_graph_config": {"enabled": True},
+        "ascend_scheduler_config": {
+            "enabled": False
+        },
+        "torchair_graph_config": {
+            "enabled": True
+        },
     },
 )
 
