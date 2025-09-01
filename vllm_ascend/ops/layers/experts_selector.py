@@ -40,6 +40,7 @@ def select_experts(hidden_states: torch.Tensor,
                    num_expert_group: Optional[int] = None,
                    custom_routing_function: Optional[Callable] = None,
                    scoring_func: str = "softmax",
+                   routed_scaling_factor=1.0,
                    e_score_correction_bias: Optional[torch.Tensor] = None,
                    indices_type: Optional[torch.dtype] = None,
                    is_unquantized: bool = False,
@@ -78,6 +79,7 @@ def select_experts(hidden_states: torch.Tensor,
         num_expert_group=num_expert_group,
         custom_routing_function=custom_routing_function,
         scoring_func=scoring_func,
+        routed_scaling_factor=routed_scaling_factor,
         global_num_experts=global_num_experts,
         is_unquantized=is_unquantized)
 
@@ -180,6 +182,7 @@ def _select_experts_with_fusion_ops(
         num_expert_group: Optional[int],
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor=1.0,
         global_num_experts: int = -1,
         is_unquantized: bool = False):
 
