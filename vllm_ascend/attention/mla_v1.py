@@ -7,10 +7,10 @@ from torch import nn
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
+from vllm.attention.layer import (maybe_save_kv_layer_to_connector,
+                                  wait_for_kv_layer_from_connector)
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
-from vllm.attention.layer import (wait_for_kv_layer_from_connector,
-                                  maybe_save_kv_layer_to_connector)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
@@ -888,7 +888,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 current_ms_metadata.before_comm_event.wait()
                 return self._v_up_proj(attn_output)
 
-    def _mla_preprocess(self, layer_name, hidden_states, kv_cache, 
+    def _mla_preprocess(self, layer_name, hidden_states, kv_cache,
                         attn_metadata, need_gather_q_kv):
         # MLA Preprocess:
         # 1. Perform q_a_proj and q_a_layernorm to obtain q_c
@@ -993,7 +993,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # MLA Preprocess
         decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
-            layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv)
+            layer_name, hidden_states, kv_cache, attn_metadata,
+            need_gather_q_kv)
 
         if decode_preprocess_res is not None:
             # MLA Preprocess for decoding

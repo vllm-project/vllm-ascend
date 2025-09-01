@@ -1,30 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
+import queue
+import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import chain
-from typing import TYPE_CHECKING, Any, Sequence, Optional
-import queue
-import threading
-import copy
-import time
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import torch
-
 from vllm.attention import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.parallel_state import (get_pp_group, get_tp_group)
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec)
 from vllm.utils import get_mp_context, logger
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
-from vllm_ascend.worker.metadata import MLAConfig, MetadataServer
-from vllm_ascend.worker.metadata import MetadataServerProc
+from vllm_ascend.worker.metadata import (MetadataServer, MetadataServerProc,
+                                         MLAConfig)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -192,16 +191,14 @@ class CPUOffloadingConnectorScheduler:
             req_id = req.req_id
             num_tokens[req_id] = (
                 req.num_computed_tokens +
-                scheduler_output.num_scheduled_tokens[req_id]
-            )
-        
+                scheduler_output.num_scheduled_tokens[req_id])
+
         # process scheduled_cached_reqs
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, req_id in enumerate(cached_reqs.req_ids):
             num_tokens[req_id] = (
                 cached_reqs.num_computed_tokens[idx] +
-                scheduler_output.num_scheduled_tokens[req_id]
-            )
+                scheduler_output.num_scheduled_tokens[req_id])
 
         unallocated_req_ids = set(self.num_gpu_computed_tokens.keys() -
                                   self.allocated_req_ids -
@@ -246,7 +243,8 @@ class CPUOffloadingConnectorScheduler:
         request.get_hash_new_full_blocks = None
         self.finished_req_ids.append(request.request_id)
         # inform metadata server to record request, and free it after finish sending
-        self.zmq_rpc_client.call("record_request_cache_and_free_slots", request)
+        self.zmq_rpc_client.call("record_request_cache_and_free_slots",
+                                 request)
 
 
 class CPUOffloadingConnectorWorker:
@@ -271,7 +269,7 @@ class CPUOffloadingConnectorWorker:
         self.save_thread = threading.Thread(target=self._save_listener)
         self.save_thread.start()
         self.done_sending_count: defaultdict[str, int] = defaultdict(int)
-        
+
         # start matadata server to init cpu_kv_cache_manager and handle rpc requests
         # all dp shared the same metadata server, only start the process on data_rank 0
         if vllm_config.parallel_config.data_parallel_rank == 0 and self.tp_rank == 0:
@@ -281,8 +279,7 @@ class CPUOffloadingConnectorWorker:
             config.kv_transfer_config = vllm_config.kv_transfer_config
             self.init_metadata_server(config)
         self._wait_for_metadata_process_start()
-    
-        
+
     def init_metadata_server(self, vllm_config: VllmConfig):
         self.metadata_thread = threading.Thread(
             target=MetadataServerProc.run_metadata_server,
@@ -290,7 +287,7 @@ class CPUOffloadingConnectorWorker:
         )
         self.metadata_thread.daemon = True
         self.metadata_thread.start()
-    
+
     def _wait_for_metadata_process_start(self):
         # TODO: wait for metadata server to start, add a rpc to check if ready
         while True:
@@ -300,7 +297,6 @@ class CPUOffloadingConnectorWorker:
             except Exception as e:
                 logger.info(f"wait for metadata server to start, error: {e}")
                 time.sleep(1)
-
 
     def bind_connector_metadata(
             self, connector_metadata: CPUOffloadingConnectorMetadata) -> None:
@@ -388,15 +384,16 @@ class CPUOffloadingConnectorWorker:
                     all_done_sending.add(req_id)
             # release cpu_kv_cache after request sending finished
             # to avoid rpc blocking, use thread to call rpc asynchronously
-            sending_finished_thread = threading.Thread(target=self._sending_finished, args=(all_done_sending,))
+            sending_finished_thread = threading.Thread(
+                target=self._sending_finished, args=(all_done_sending, ))
             sending_finished_thread.daemon = True
             sending_finished_thread.start()
-            
+
             return all_done_sending
         else:
             self.tp_group.send_object(done_sending, dst=0)
             return done_sending
-    
+
     def _sending_finished(self, all_done_sending):
         for req_id in all_done_sending:
             logger.debug(f"call cache_and_free_slots for req_id: {req_id}")

@@ -25,9 +25,9 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.attention.layer import (maybe_save_kv_layer_to_connector,
+                                  wait_for_kv_layer_from_connector)
 from vllm.config import VllmConfig
-from vllm.attention.layer import (wait_for_kv_layer_from_connector,
-                                  maybe_save_kv_layer_to_connector)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
