@@ -49,12 +49,6 @@ def get_default_envs() -> dict[str, str]:
 
 
 MODELS = ['vllm-ascend/DeepSeek-V3-W8A8']
-PORMPTS = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-] * 40
 
 
 @pytest.mark.parametrize("model", MODELS)
