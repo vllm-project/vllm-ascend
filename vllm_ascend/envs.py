@@ -135,6 +135,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature in eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLP_OPTIMIZE", '0'))),
+    "COMM_QUANT_MODE":
+    lambda: bool(int(os.getenv("COMM_QUANT_MODE", '1'))),
 }
 
 # end-env-vars-definition
