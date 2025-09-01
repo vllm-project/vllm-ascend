@@ -19,12 +19,16 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch_npu
+from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.ops.common_fused_moe import \
+    fused_experts as unified_fused_experts
 from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
 from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor
@@ -283,6 +287,13 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         self.ep_group = get_ep_group()
 
+        vllm_config = get_current_vllm_config()
+        ascend_config = get_ascend_config()
+        self.use_aclgraph = (
+            vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
+            and not vllm_config.model_config.enforce_eager
+            and not ascend_config.torchair_graph_config.enabled)
+
         try:
             device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
@@ -374,6 +385,19 @@ class AscendW8A8DynamicFusedMoEMethod:
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts)
+
+        if self.use_aclgraph:
+            return unified_fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                use_int8_w8a8=True,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                expert_map=expert_map,
+            )
 
         fused_moe_state = get_forward_context().fused_moe_state
         shared_gate_up, shared_dequant_scale = None, None
