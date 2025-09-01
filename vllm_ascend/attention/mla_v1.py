@@ -1052,6 +1052,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 current_ms_metadata.after_comm_event.record()
         del o_proj_input
 
+        has_prefill = attn_metadata.num_prefills > 0
         if has_prefill:
-            maybe_save_kv_layer_to_connector(layer.layer_name, kv_cache)
+            maybe_save_kv_layer_to_connector(layer_name, kv_cache)
         return output_padded
