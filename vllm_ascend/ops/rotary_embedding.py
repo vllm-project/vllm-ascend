@@ -67,7 +67,6 @@ def rope_forward_oot(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
         if self.rotary_dim < self.head_size:
-            print("-" * 50)
             num_tokens = query.shape[0]
             query = query.view(num_tokens, -1, self.head_size)
             key = key.view(num_tokens, -1, self.head_size)
