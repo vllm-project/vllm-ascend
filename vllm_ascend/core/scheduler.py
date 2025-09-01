@@ -92,13 +92,13 @@ class AscendScheduler(Scheduler):
         # if max_num_decode_running_reqs configured, pop request that finished prefill to finished_prefill_reqs
         if self.max_num_decode_running_reqs != self.max_num_running_reqs:
             remaining_running_reqs = []
-                for request in self.running:
-                    # move request has finished prefill to finished_prefill_reqs
-                    if request.num_tokens > request.num_prompt_tokens:
-                        self.finished_prefill_reqs.append(request)
-                    else:
-                        remaining_running_reqs.append(request)
-                self.running = remaining_running_reqs
+            for request in self.running:
+                # move request has finished prefill to finished_prefill_reqs
+                if request.num_tokens > request.num_prompt_tokens:
+                    self.finished_prefill_reqs.append(request)
+                else:
+                    remaining_running_reqs.append(request)
+            self.running = remaining_running_reqs
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
