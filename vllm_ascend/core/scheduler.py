@@ -60,7 +60,9 @@ class AscendScheduler(Scheduler):
 
         self.finished_prefill_reqs: deque[Request] = deque()
         self.phase = "" if vllm_config.scheduler_config.decode_batch_size == 0 else "prefill"
-        self.max_num_decode_running_reqs = self.max_num_running_reqs if vllm_config.scheduler_config.decode_batch_size == 0 else vllm_config.scheduler_config.decode_batch_size
+        decode_batch_size = getattr(self.scheduler_config, 'decode_batch_size',
+                                    None)
+        self.max_num_decode_running_reqs = self.max_num_running_reqs if decode_batch_size is None or decode_batch_size == 0 else vllm_config.scheduler_config.decode_batch_size
 
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:
