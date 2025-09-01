@@ -1,5 +1,6 @@
 -r requirements-lint.txt
 -r requirements.txt
+-r benchmarks/requirements-bench.txt
 modelscope
 openai
 pytest >= 6.0
