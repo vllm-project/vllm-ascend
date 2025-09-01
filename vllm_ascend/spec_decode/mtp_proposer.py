@@ -97,8 +97,8 @@ class MtpProposer(Proposer):
         if not self.torchair_graph_enabled:
             # TODO: adapt enable_dbo later
             (num_tokens, num_tokens_across_dp, with_prefill,
-             _) = self.runner._sync_metadata_across_dp(
-                 num_tokens, with_prefill, False)
+             _) = self.runner._sync_metadata_across_dp(num_tokens,
+                                                       with_prefill, False)
         is_running_torchair = self.torchair_graph_enabled and \
             not with_prefill
 

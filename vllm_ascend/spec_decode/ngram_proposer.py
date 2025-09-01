@@ -54,7 +54,8 @@ class NgramProposer(VllmNgramProposer, Proposer):
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.runner.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
-            self.runner.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
+            self.runner.input_batch.token_ids_cpu[
+                i, start_idx:end_idx] = sampled_ids
             drafter_output = self.propose(
                 self.runner.input_batch.token_ids_cpu[i, :end_idx])
             if drafter_output is None or len(drafter_output) == 0:

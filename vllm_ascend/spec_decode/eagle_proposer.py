@@ -77,12 +77,11 @@ class EagleProposer(Proposer):
             attn_mask_len, self.vllm_config.model_config.dtype)
 
     def load_model(self, model: nn.Module) -> None:
+        target_attn_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
         self.model = get_model(vllm_config=self.vllm_config,
                                model_config=self.vllm_config.
                                speculative_config.draft_model_config)
-
-        target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
             target_attn_layer_names)
