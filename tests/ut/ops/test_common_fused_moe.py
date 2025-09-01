@@ -12,9 +12,24 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from unittest.mock import patch
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.common_fused_moe import AscendFusedMoE, fused_experts_moge
@@ -54,7 +69,10 @@ class TestFusedExpertsMoGE(TestBase):
                     'use_ep': True
                 })()
 
-            output = fused_experts_moge(
+            mock_moe = MagicMock(spec=FusedMoEConfig)
+            unquantized_moe_method = AscendUnquantizedFusedMoEMethod(
+                moe=mock_moe)
+            output = unquantized_moe_method.fused_experts_moge(
                 hidden_states=hidden_states,
                 w1=w1,
                 w2=w2,
