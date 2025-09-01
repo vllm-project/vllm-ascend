@@ -544,7 +544,7 @@ class EagleProposer(Proposer):
             self.hidden_states[:batch_size] = hidden_states
             positions = positions_cpu.to(device)
             attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
-                attn_metadata.seq_lens, attn_metadata.max_query_len, positions,
+                attn_metadata.seq_lens, positions,
                 self.vllm_config.model_config.dtype, self.device)
 
             attn_metadata.attn_mask = attn_mask
