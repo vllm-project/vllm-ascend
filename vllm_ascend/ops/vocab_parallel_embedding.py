@@ -20,8 +20,11 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
+from transformers import PretrainedConfig
+from vllm.config import LoRAConfig
 from vllm.distributed import divide, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.lora.layers import VocabParallelEmbeddingWithLoRA
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
@@ -164,6 +167,18 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         # Reduce across all the model parallel GPUs.
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
+
+
+class AscendVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
+    @classmethod
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: Optional[PretrainedConfig],
+    ) -> bool:
+        return type(source_layer) is AscendVocabParallelEmbedding
 
 
 class AscendParallelLMHead(ParallelLMHead):

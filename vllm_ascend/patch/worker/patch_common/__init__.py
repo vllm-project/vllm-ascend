@@ -15,7 +15,16 @@
 # limitations under the License.
 #
 
+import vllm
+from vllm.lora.utils import _all_lora_classes
+
 import vllm_ascend.patch.worker.patch_common.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_linear  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_logits  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_minicpm  # noqa
+from vllm_ascend.ops.vocab_parallel_embedding import \
+    AscendVocabParallelEmbeddingWithLoRA
+
+# Patch for lora register_model issue after overriding VocabParallelEmbedding class (#2515)
+_all_lora_classes.add(AscendVocabParallelEmbeddingWithLoRA)
+vllm.lora.utils._all_lora_classes = _all_lora_classes
