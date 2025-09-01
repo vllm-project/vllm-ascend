@@ -525,8 +525,11 @@ def register_ascend_customop():
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
 
-    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+    from vllm_ascend.ops.common_fused_moe import (
+        AscendFusedMoE, AscendUnquantizedFusedMoEMethod)
     CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
+    CustomOp.register_oot(_decorated_op_cls=AscendUnquantizedFusedMoEMethod,
+                          name="UnquantizedFusedMoEMethod")
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
