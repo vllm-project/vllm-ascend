@@ -12,6 +12,7 @@ from vllm_ascend.ops.vocab_parallel_embedding import \
 
 
 class AscendVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
+
     @classmethod
     def can_replace_layer(
         cls,
@@ -21,6 +22,7 @@ class AscendVocabParallelEmbeddingWithLoRA(VocabParallelEmbeddingWithLoRA):
         model_config: Optional[PretrainedConfig],
     ) -> bool:
         return type(source_layer) is AscendVocabParallelEmbedding
+
 
 # Patch for lora register_model issue after overriding VocabParallelEmbedding class (#2515)
 _all_lora_classes.add(AscendVocabParallelEmbeddingWithLoRA)
