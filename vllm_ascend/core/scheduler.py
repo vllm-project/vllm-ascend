@@ -59,7 +59,7 @@ class AscendScheduler(Scheduler):
         self.running: list[Request] = []
 
         self.finished_prefill_reqs: deque[Request] = deque()
-        self.phase = "prefill"
+        self.phase = "" if vllm_config.scheduler_config.decode_batch_size == 0 else "prefill"
         self.max_num_decode_running_reqs = self.max_num_running_reqs if vllm_config.scheduler_config.decode_batch_size == 0 else vllm_config.scheduler_config.decode_batch_size
 
     def schedule(self) -> SchedulerOutput:
@@ -102,9 +102,9 @@ class AscendScheduler(Scheduler):
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
-            if len(self.running) == (self.max_num_running_reqs 
-                                     if self.phase == "prefill" else
-                                     self.max_num_decode_running_reqs):
+            if len(self.running) == (self.max_num_decode_running_reqs
+                                     if self.phase == "decode" else
+                                     self.max_num_running_reqs):
                 break
 
             request = self.waiting[0]
@@ -375,7 +375,7 @@ class AscendScheduler(Scheduler):
         assert token_budget >= 0
         assert len(
             self.running
-        ) <= self.max_num_running_reqs if self.phase == "prefill" else self.max_num_decode_running_reqs
+        ) <= self.max_num_decode_running_reqs if self.phase == "decode" else self.max_num_running_reqs
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
             scheduled_running_reqs) <= len(self.running)
 
