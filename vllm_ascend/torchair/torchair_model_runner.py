@@ -15,7 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
-#
+# isort: skip_file
 
 import types
 from typing import Optional
@@ -34,12 +34,10 @@ from vllm.logger import logger
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata,
-                                        check_torchair_cache_exist,
-                                        converting_weight_acl_format,
-                                        register_torchair_model,
-                                        torchair_quant_method_register,
-                                        write_kv_cache_bytes_to_file)
+from vllm_ascend.torchair.utils import (
+    TorchairCommonAttentionMetadata, check_torchair_cache_exist,
+    converting_weight_acl_format, register_torchair_model, torchair_ops_patch,
+    torchair_quant_method_register, write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_310p)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -68,6 +66,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         self._check_batch_sizes_consistency()
         register_torchair_model()
+        torchair_ops_patch()
         torchair_quant_method_register()
 
     def _sync_metadata_across_dp(
