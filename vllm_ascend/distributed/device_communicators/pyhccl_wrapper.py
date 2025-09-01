@@ -31,8 +31,10 @@ from vllm_ascend.utils import find_hccl_library
 # https://github.com/EternalLied/cann-hccl-new/blob/64ec6ce2923319caa5df8c3c531e06bdc148ce9c/inc/hccl/hccl.h#L90
 # https://github.com/EternalLied/cann-hccl-new/blob/64ec6ce2923319caa5df8c3c531e06bdc148ce9c/inc/hccl/hccl_types.h#L48
 
+aclrtContext_t = ctypes.c_void_p
 hcclResult_t = ctypes.c_int
 hcclComm_t = ctypes.c_void_p
+hcclRootInfo_t = ctypes.c_void_p
 
 
 class hcclUniqueId(ctypes.Structure):
@@ -158,6 +160,28 @@ class HCCLLibrary:
 
         # HcclResult HcclCommDestroy(HcclComm comm);
         Function("HcclCommDestroy", hcclResult_t, [hcclComm_t]),
+
+        # hcclResult_t  hcclSend(
+        #   const void* sendbuff, size_t count, hcclDataType_t datatype,
+        #   int dest, hcclComm_t comm, aclrtStream_t stream);
+        Function("HcclSend", hcclResult_t, [
+            buffer_type, ctypes.c_size_t, hcclDataType_t, ctypes.c_int,
+            hcclComm_t, aclrtStream_t
+        ]),
+
+        # hcclResult_t  hcclRecv(
+        #   void* recvbuff, size_t count, ncclDataType_t datatype,
+        #   int src, ncclComm_t comm, cudaStream_t stream);
+        Function("HcclRecv", hcclResult_t, [
+            buffer_type, ctypes.c_size_t, hcclDataType_t, ctypes.c_int,
+            hcclComm_t, aclrtStream_t
+        ]),
+    ]
+
+    acl_exported_functions = [
+        Function("aclrtGetCurrentContext", None,
+                 [ctypes.POINTER(aclrtContext_t)]),
+        Function("aclrtSetCurrentContext", None, [aclrtContext_t]),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -199,6 +223,24 @@ class HCCLLibrary:
             HCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = HCCLLibrary.path_to_dict_mapping[so_file]
 
+        try:
+            aclLib = ctypes.CDLL("libgert.so")
+        except Exception as e:
+            logger.error("Failed to load libgert.so")
+            raise e
+        for func in HCCLLibrary.acl_exported_functions:
+            f = getattr(aclLib, func.name)
+            f.argtypes = func.argtypes
+            self._funcs[func.name] = f
+
+    def aclrtGetCurrentContext(self) -> aclrtContext_t:
+        context = aclrtContext_t()
+        self._funcs["aclrtGetCurrentContext"](ctypes.byref(context))
+        return context
+
+    def aclrtSetCurrentContext(self, context: aclrtContext_t) -> None:
+        self._funcs["aclrtSetCurrentContext"](context)
+
     def hcclGetErrorString(self, result: hcclResult_t) -> str:
         return self._funcs["HcclGetErrorString"](result).decode("utf-8")
 
@@ -212,6 +254,19 @@ class HCCLLibrary:
         self.HCCL_CHECK(self._funcs["HcclGetRootInfo"](
             ctypes.byref(unique_id)))
         return unique_id
+
+    def unique_id_from_bytes(self, data: bytes) -> hcclUniqueId:
+        if len(data) != 4108:
+            raise ValueError(
+                f"Expected 128 bytes for hcclUniqueId, got {len(data)} bytes")
+        unique_id = hcclUniqueId()
+        ctypes.memmove(ctypes.addressof(unique_id.internal), data, 4108)
+        return unique_id
+
+    def hcclGetRootInfo(self) -> hcclUniqueId:
+        rootInfo = hcclUniqueId()
+        self.HCCL_CHECK(self._funcs["HcclGetRootInfo"](ctypes.byref(rootInfo)))
+        return rootInfo
 
     def hcclCommInitRank(self, world_size: int, unique_id: hcclUniqueId,
                          rank: int) -> hcclComm_t:
@@ -240,6 +295,16 @@ class HCCLLibrary:
 
     def hcclCommDestroy(self, comm: hcclComm_t) -> None:
         self.HCCL_CHECK(self._funcs["HcclCommDestroy"](comm))
+
+    def hcclSend(self, sendbuff: buffer_type, count: int, datatype: int,
+                 dest: int, comm: hcclComm_t, stream: aclrtStream_t) -> None:
+        self.HCCL_CHECK(self._funcs["HcclSend"](sendbuff, count, datatype,
+                                                dest, comm, stream))
+
+    def hcclRecv(self, recvbuff: buffer_type, count: int, datatype: int,
+                 src: int, comm: hcclComm_t, stream: aclrtStream_t) -> None:
+        self.HCCL_CHECK(self._funcs["HcclRecv"](recvbuff, count, datatype, src,
+                                                comm, stream))
 
 
 __all__ = [

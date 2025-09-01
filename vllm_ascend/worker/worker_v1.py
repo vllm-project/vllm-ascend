@@ -18,6 +18,7 @@
 #
 
 import copy
+import math
 from typing import Optional
 
 import torch
@@ -100,6 +101,12 @@ class NPUWorker(WorkerBase):
 
         self.profiler = self._init_profiler()
 
+        self.kv_rank = 0
+        self.kv_parallel_size = 1
+        if vllm_config.kv_transfer_config is not None:
+            self.kv_rank = vllm_config.kv_transfer_config.kv_rank
+            self.kv_parallel_size = vllm_config.kv_transfer_config.kv_parallel_size
+
     def sleep(self, level: int = 1) -> None:
         if not sleep_mode_enabled():
             raise ValueError(
@@ -131,7 +138,8 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _init_device(self):
-        device = torch.device(f"npu:{self.local_rank}")
+        device = torch.device(
+            f"npu:{self.local_rank * self.kv_parallel_size+self.kv_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
@@ -179,6 +187,17 @@ class NPUWorker(WorkerBase):
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
+
+        # In disaggregate prefill scenario, when memory not aligned in prefill
+        # and decode instance, the send/recv buffer shape is not identical.
+        # That will cause error in kvcache recv.
+        # Temporary solution: rounding peak memory for p/d memory alignment
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and \
+            kv_transfer_config.kv_connector == 'P2pHcclConnector':
+            gb = 1024**3
+            peak_memory = math.ceil(peak_memory / gb) * gb
+
         available_kv_cache_memory = int(
             total_npu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
