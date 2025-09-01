@@ -24,8 +24,7 @@ import os
 import subprocess
 import sys
 import time
-from multiprocessing import Process
-from typing import Any, Callable, List, Optional, Tuple, TypeVar, Union
+from typing import Any, List, Optional, Tuple, TypeVar, Union
 
 import httpx
 import numpy as np
@@ -236,48 +235,6 @@ class RemoteOpenAIServer:
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
                                   **kwargs)
-
-
-class RemoteOpenAIServerCustom(RemoteOpenAIServer):
-    """Launch test server with custom child process"""
-
-    def _start_server(self, model: str, vllm_serve_args: list[str],
-                      env_dict: Optional[dict[str, str]]) -> None:
-        self.proc: Process = Process(
-            target=self.child_process_fxn,
-            args=(env_dict, model,
-                  vllm_serve_args))  # type: ignore[assignment]
-        self.proc.start()
-
-    def __init__(self,
-                 model: str,
-                 vllm_serve_args: list[str],
-                 child_process_fxn: Callable[
-                     [Optional[dict[str, str]], str, list[str]], None],
-                 *,
-                 env_dict: Optional[dict[str, str]] = None,
-                 seed: Optional[int] = 0,
-                 auto_port: bool = True,
-                 max_wait_seconds: Optional[float] = None) -> None:
-        """Store custom child process function then invoke superclass
-        constructor which will indirectly launch it."""
-        self.child_process_fxn = child_process_fxn
-        super().__init__(model=model,
-                         vllm_serve_args=vllm_serve_args,
-                         env_dict=env_dict,
-                         seed=seed,
-                         auto_port=auto_port,
-                         max_wait_seconds=max_wait_seconds)
-
-    def _poll(self) -> Optional[int]:
-        return self.proc.exitcode
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
-        self.proc.join(8)
-        if self.proc.is_alive():
-            # force kill if needed
-            self.proc.kill()
 
 
 class VllmRunner:
