@@ -169,6 +169,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED: used for external distributed data parallelism in vllm-ascend, 0.9.1 specific.
     "VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED":
     lambda: bool(int(os.getenv("VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED", '0'))),
+    "COMM_QUANT_MODE":
+    lambda: bool(int(os.getenv("COMM_QUANT_MODE", '1'))),
 }
 
 # end-env-vars-definition
