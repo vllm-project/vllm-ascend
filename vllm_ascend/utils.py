@@ -522,6 +522,13 @@ def register_ascend_customop():
     from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
     CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
 
+    from vllm_ascend.patch.worker.patch_common.patch_linear import \
+        AscendRowParallelLinear
+
+    if envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE:
+        CustomOp.register_oot(_decorated_op_cls=AscendRowParallelLinear,
+                              name="RowParallelLinear")
+
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 

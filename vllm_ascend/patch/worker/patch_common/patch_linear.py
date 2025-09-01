@@ -19,16 +19,12 @@ from typing import Optional, Union
 
 import torch
 import torch_npu
-import vllm
 from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               split_tensor_along_last_dim)
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.logger import logger
 from vllm.model_executor.layers.linear import RowParallelLinear
-
-import vllm_ascend.envs as envs_ascend
 
 _HCOMM_INFO = None
 
@@ -140,8 +136,3 @@ class AscendRowParallelLinear(RowParallelLinear):
         else:
             output = self.quant_method.apply(self, input_parallel, bias=bias_)
         return output
-
-
-if envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE:
-    logger.info("AscendRowParallelLinear: Matmul all-reduce is enabled. ")
-    vllm.model_executor.layers.linear.RowParallelLinear = AscendRowParallelLinear
