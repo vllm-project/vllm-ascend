@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/vllm-project/vllm/blob/main/vllm/tests/kernels/test_rotary_embedding.py
 
+import gc
 from typing import Optional, Tuple, Union
 
 import pytest
@@ -199,6 +200,9 @@ def test_rotary_embedding_quant_with_leading_dim(
                                ref_key,
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 class ModelwithRotaryEmbedding(nn.Module):
@@ -342,3 +346,6 @@ def test_capture_rotary_embedding_in_aclgraph(
                                output_reference,
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

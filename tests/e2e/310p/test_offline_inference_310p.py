@@ -21,7 +21,7 @@ from vllm import SamplingParams
 import vllm_ascend  # noqa: F401
 from tests.e2e.conftest import VllmRunner
 
-MODELS = ["Qwen/Qwen3-0.6B-Base", "Qwen/Qwen2.5-7B-Instruct"]
+MODELS = ["Qwen/Qwen3-0.6B", "Qwen/Qwen2.5-7B-Instruct"]
 
 
 @pytest.mark.parametrize("model", MODELS)

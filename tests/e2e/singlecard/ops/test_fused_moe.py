@@ -20,6 +20,7 @@
 Run `pytest tests/ops/test_fused_moe.py`.
 """
 
+import gc
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -173,7 +174,9 @@ def test_token_dispatcher_with_all_gather(
                                torch_output,
                                atol=4e-2,
                                rtol=1)
+    gc.collect()
     torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 @pytest.mark.parametrize("m", [1, 33, 64])
@@ -247,6 +250,10 @@ def test_select_experts(
     assert topk_ids.dtype == torch.int32
     assert row_idx.shape == (m, topk)
 
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
 
 @pytest.mark.parametrize("device", DEVICE)
 def test_select_experts_invalid_scoring_func(device: str):
@@ -258,6 +265,9 @@ def test_select_experts_invalid_scoring_func(device: str):
                        use_grouped_topk=False,
                        renormalize=False,
                        scoring_func="invalid")
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 @pytest.mark.parametrize("device", DEVICE)
@@ -269,3 +279,6 @@ def test_select_experts_missing_group_params(device: str):
                        use_grouped_topk=True,
                        renormalize=False,
                        scoring_func="softmax")
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

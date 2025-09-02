@@ -47,7 +47,6 @@ def test_generate_with_allgather():
 
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
                     tensor_parallel_size=2,
-                    enforce_eager=True,
                     max_model_len=1024,
                     dtype="auto",
                     enable_expert_parallel=True,
@@ -75,7 +74,6 @@ def test_generate_with_alltoall():
 
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
                     tensor_parallel_size=2,
-                    enforce_eager=True,
                     max_model_len=1024,
                     dtype="auto",
                     enable_expert_parallel=True,
