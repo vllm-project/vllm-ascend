@@ -1813,7 +1813,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return None, None
 
     def _build_attention_metadata(self, with_prefill, num_reqs, skip_attn):
-        attn_metadata: dict[str, Any] = {}
+        attn_metadata: Optional[dict[str, Any]] = {}
         if skip_attn:
             attn_metadata = None
         else:
