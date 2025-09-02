@@ -290,7 +290,7 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
                          logits_soft_cap, attn_type,
-                         kv_sharing_target_layer_name, kwargs)
+                         kv_sharing_target_layer_name, **kwargs)
         self.scale_tensor = torch.zeros((), device='npu', dtype=torch.int32)
 
     def _additional_process_before_forward(
@@ -303,6 +303,7 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
         attn_metadata: AscendTorchairMetadata,
         output: Optional[torch.Tensor],
         trace_flag: bool,
+        num_tokens: int,
     ) -> "ForwardAdditionalProcessResult":
         output = output.view(-1, self.num_heads, self.head_size)
 
