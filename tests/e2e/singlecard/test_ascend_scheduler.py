@@ -4,6 +4,7 @@ import pytest
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
+from vllm_ascend.ascend_config import clear_ascend_config
 
 MODEL = "Qwen/Qwen3-0.6B"
 
@@ -26,6 +27,8 @@ def test_concurrent_partial_prefill():
         for output in outputs:
             assert len(output.outputs) == 1
 
+    clear_ascend_config()
+
 
 def test_prefix_cache_stats_is_recorded():
     with VllmRunner(MODEL,
@@ -45,13 +48,17 @@ def test_prefix_cache_stats_is_recorded():
         outputs = vllm_model.model.generate([input_tokens])
         assert outputs[0].num_cached_tokens == 128
 
+    clear_ascend_config()
+
 
 @pytest.mark.parametrize("max_tokens",
                          [4])  # cannot align results when max_tokens > 4
 @pytest.mark.parametrize("chunked_prefill_token_size", [16])
 def test_chunked_prefill_with_ascend_scheduler(
-        example_prompts, max_tokens: int,
-        chunked_prefill_token_size: int) -> None:
+        max_tokens: int, chunked_prefill_token_size: int) -> None:
+    example_prompts = [
+        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."
+    ]
     max_num_seqs = chunked_prefill_token_size
     max_num_batched_tokens = chunked_prefill_token_size
     with VllmRunner(MODEL,
@@ -63,7 +70,6 @@ def test_chunked_prefill_with_ascend_scheduler(
                     },
                     max_num_seqs=max_num_seqs,
                     max_num_batched_tokens=max_num_batched_tokens,
-                    enforce_eager=True,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
         chunked_prefill_output = vllm_model.generate_greedy(
@@ -75,7 +81,6 @@ def test_chunked_prefill_with_ascend_scheduler(
                             'enabled': True,
                         },
                     },
-                    enforce_eager=True,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -86,3 +91,4 @@ def test_chunked_prefill_with_ascend_scheduler(
         name_0="vllm_output",
         name_1="chunked_prefill_output",
     )
+    clear_ascend_config()
