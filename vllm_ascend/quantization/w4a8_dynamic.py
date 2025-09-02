@@ -27,7 +27,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
-from vllm_ascend.ops.layers.experts_selector import select_experts
+from vllm_ascend.ops.moe.experts_selector import select_experts
 
 
 class AscendW4A8DynamicLinearMethod:
