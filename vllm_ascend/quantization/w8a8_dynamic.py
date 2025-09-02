@@ -17,10 +17,10 @@
 
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import os
 import torch
 import torch.distributed as dist
 import torch_npu
+import os
 from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
 
