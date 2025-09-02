@@ -39,8 +39,8 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionRotaryEmbedding, Qwen2_5_VisionTransformer,
     Qwen2_5_VLDummyInputsBuilder, Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLMultiModalProcessor, Qwen2_5_VLProcessingInfo)
-from vllm.model_executor.models.utils import (maybe_prefix,
-                                              run_dp_sharded_mrope_vision_model)
+from vllm.model_executor.models.utils import maybe_prefix
+from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
