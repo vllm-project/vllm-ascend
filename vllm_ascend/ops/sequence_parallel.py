@@ -15,7 +15,8 @@ class MetadataForPadding:
                  lengths_sum_padding=0,
                  lengths_sum_unpadding=0,
                  pad_size=0,
-                 not_dummy_and_is_prefill=False):
+                 not_dummy_and_is_prefill=False,
+                 flashcomm_enabled_version=0):
         self.padding_flag = padding_flag
         self.not_dummy_and_is_prefill = not_dummy_and_is_prefill
 
@@ -35,6 +36,8 @@ class MetadataForPadding:
             device=NPUPlatform.device_type,
         )
         self.mc2_mask[:lengths_sum_unpadding] = True
+
+        self.flashcomm_enabled_version = flashcomm_enabled_version
 
     def padding_aligned_reduce_scatter(self,
                                        data: torch.Tensor) -> torch.Tensor:
@@ -118,3 +121,25 @@ def init_metadata_for_sp(input_ids, enable_sequence_parallelism):
 
     return MetadataForPadding(padding_flag=False,
                               not_dummy_and_is_prefill=False)
+
+
+def init_metadata_for_flashcomm(input_ids, flashcomm_enabled_version):
+    tp_size = get_tensor_model_parallel_world_size()
+    lengths_sum_unpadding = input_ids.shape[0]
+    lengths_sum_padding = (
+        (lengths_sum_unpadding + tp_size - 1) // tp_size) * tp_size
+    if lengths_sum_unpadding == lengths_sum_padding:
+        padding_flag = False
+    else:
+        padding_flag = True
+    pad_size = lengths_sum_padding - lengths_sum_unpadding
+    _metadata_for_padding = MetadataForPadding(
+        lengths_sum_unpadding=lengths_sum_unpadding,
+        lengths_sum_padding=lengths_sum_padding,
+        padding_flag=padding_flag,
+        pad_size=pad_size,
+        not_dummy_and_is_prefill=False,
+        flashcomm_enabled_version=flashcomm_enabled_version
+    )
+
+    return _metadata_for_padding
