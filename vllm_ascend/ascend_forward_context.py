@@ -94,8 +94,7 @@ def set_ascend_forward_context(
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
 
-        from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
-            get_token_dispatcher
+        from vllm_ascend.ops.moe.token_dispatcher import get_token_dispatcher
         dispatcher_name = get_dispatcher_name(ep_size, with_prefill)
         dispatcher = get_token_dispatcher(dispatcher_name)
         forward_context.token_dispatcher = dispatcher

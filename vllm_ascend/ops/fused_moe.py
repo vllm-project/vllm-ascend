@@ -42,8 +42,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
-from vllm_ascend.ops.layers.experts_selector import select_experts
-from vllm_ascend.ops.layers.moe_mlp import unified_apply_mlp
+from vllm_ascend.ops.moe.experts_selector import select_experts
+from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, dispose_tensor,
                                get_all_reduce_merge_state,
@@ -358,7 +358,7 @@ class AscendFusedMoE(FusedMoE):
 
         ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
-        from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
+        from vllm_ascend.ops.moe.token_dispatcher import \
             setup_token_dispatchers
         setup_token_dispatchers(
             ep_size,
