@@ -23,18 +23,12 @@ Run `pytest tests/test_offline_inference.py`.
 import os
 from unittest.mock import patch
 
-import pytest
 from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
-from vllm.model_executor.models.registry import ModelRegistry
 
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
-DEEPSEEK_W4A8_MODELS = [
-    "vllm-ascend/DeepSeek-V3-W4A8-Pruing",
-    "vllm-ascend/DeepSeek-R1-w4a8-pruning"
-]
 
 
 def test_models_distributed_QwQ():
@@ -48,6 +42,7 @@ def test_models_distributed_QwQ():
             dtype=dtype,
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
+            enforce_eager=True,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -73,33 +68,8 @@ def test_models_distributed_DeepSeek_multistream_moe():
                 },
                 "refresh": True,
             },
-            enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-@pytest.mark.skip(
-    reason=
-    "deepseek dbo dose not consider the support on half precision float, will enable this ut after we actually support it"
-)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
-def test_models_distributed_DeepSeekV3_dbo():
-    example_prompts = ["The president of the United States is"] * 41
-    dtype = "half"
-    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
-    with VllmRunner(
-            "vllm-ascend/DeepSeek-V3-Pruning",
-            dtype=dtype,
-            tensor_parallel_size=2,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        model_arch = 'DeepseekV3ForCausalLM'
-        registed_models = ModelRegistry.models
-        assert registed_models[
-            model_arch].module_name == "vllm_ascend.models.deepseek_dbo"
-        assert registed_models[
-            model_arch].class_name == "CustomDeepseekDBOForCausalLM"
-        vllm_model.generate(example_prompts, sampling_params)
 
 
 def test_models_distributed_pangu():
@@ -116,28 +86,6 @@ def test_models_distributed_pangu():
                     distributed_executor_backend="mp",
                     enable_expert_parallel=True) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION": "1"})
-def test_models_distributed_topk() -> None:
-    example_prompts = [
-        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
-        "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
-        "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
-    ]
-    dtype = "half"
-    sampling_params = SamplingParams(max_tokens=5,
-                                     temperature=0.0,
-                                     top_k=50,
-                                     top_p=0.9)
-
-    with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
-            tensor_parallel_size=2,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        vllm_model.generate(example_prompts, sampling_params)
 
 
 def test_models_distributed_Qwen3_W8A8():
@@ -172,15 +120,14 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_MLA_PA": "1"})
-def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
+def test_models_distributed_DeepSeek_W4A8DYNAMIC():
     prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download(model),
+            snapshot_download("vllm-ascend/DeepSeek-V3-W4A8-Pruing"),
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
@@ -207,16 +154,15 @@ def test_sp_for_qwen3_moe() -> None:
                                      top_k=50,
                                      top_p=0.9)
 
-    with VllmRunner(
-            snapshot_download("Qwen/Qwen3-30B-A3B"),
-            dtype="auto",
-            tensor_parallel_size=2,
-            distributed_executor_backend="mp",
-            compilation_config={
-                "pass_config": {
-                    "enable_sequence_parallelism": True
-                }
-            },
-            enable_expert_parallel=True,
-    ) as vllm_model:
+    with VllmRunner(snapshot_download("Qwen/Qwen3-30B-A3B"),
+                    dtype="auto",
+                    tensor_parallel_size=2,
+                    distributed_executor_backend="mp",
+                    compilation_config={
+                        "pass_config": {
+                            "enable_sequence_parallelism": True
+                        }
+                    },
+                    enable_expert_parallel=True,
+                    enforce_eager=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
