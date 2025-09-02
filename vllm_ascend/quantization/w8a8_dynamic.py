@@ -35,7 +35,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                super_kernel)
 
 CHUNK_SIZE: int = ascend_envs.VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE
-COMM_QUANT_MODE: int = envs_ascend.COMM_QUANT_MODE
+COMM_QUANT_MODE: int = ascend_envs.COMM_QUANT_MODE
 
 
 def apply_mlp_decode(hidden_states_wrapper: List[torch.Tensor],
