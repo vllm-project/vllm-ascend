@@ -329,10 +329,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value=value,
                 output=output,
                 layer_name=layer.layer_name)
+            output = output.view(num_tokens, self.hidden_size)
             return ForwardAdditionalProcessResult(is_return=True,
-                                                  output=output.view(
-                                                      num_tokens,
-                                                      self.hidden_size),
+                                                  output=output,
                                                   additional_info=None)
 
         # View q k v to BSH.
@@ -352,6 +351,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                              key_cache=self.key_cache,
                                              value_cache=self.value_cache,
                                              slot_indices=slots)
+
+        return ForwardAdditionalProcessResult(is_return=False,
+                                              output=None,
+                                              additional_info=None)
 
     def _forward_prefill_no_cache(
         self,
@@ -581,9 +584,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         result = self._additional_process_before_forward(
             layer, query, key, value, kv_cache, attn_metadata, output,
             trace_flag, num_tokens)
-        if result.is_return:
-            return result.output
-        additional_info = result.additional_info
+        if result is not None:
+            if result.is_return and result.output is not None:
+                return result.output
+            additional_info = result.additional_info or {}
 
         # V0-Style scheduler situation.
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
