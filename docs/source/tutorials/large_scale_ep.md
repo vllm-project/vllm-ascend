@@ -345,7 +345,7 @@ for process in processes:
 
 :::::
 
-Note that the prefiller nodes and the decoder nodes may have differenet configurations. In this example, each prefiller node deployed as master node independently, but all decoder nodes take the first node as the master node. So it leads to differents in 'dp_size_local' and 'dp_rank_start'
+Note that the prefiller nodes and the decoder nodes may have differenet configurations. In this example, each prefiller node deployed as master node independently, but all decoder nodes take the first node as the master node. So it leads to difference in 'dp_size_local' and 'dp_rank_start'
 
 ## Example proxy for Distributed DP Server
 
@@ -395,7 +395,7 @@ python load_balance_proxy_server_example.py \
 
 You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)
 
-## Benckmark
+## Benchmark
 
 We recommend use aisbench tool to assess performance. [aisbench](https://gitee.com/aisbench/benchmark) Execute the following commands to install aisbench
 
@@ -547,3 +547,4 @@ Note that these configurations are not related to optimization. You need to adju
 ### 1. Prefiller nodes need to warmup
 
 Since the computation of some NPU operators requires several rounds of warm-up to achieve best performance, we recommend preheating the service with some requests before conducting performance tests to achieve the best end-to-end throughput.
+
