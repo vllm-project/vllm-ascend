@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+import gc
 from types import SimpleNamespace
 
 import pytest
@@ -169,3 +170,6 @@ def test_all_gather_comm_impl(
                           all_gather_hidden_states_out,
                           atol=atol,
                           rtol=rtol), "Final hidden states do not match."
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
