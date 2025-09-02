@@ -17,7 +17,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -192,6 +192,17 @@ class AscendMetadata:
     is_only_prefill: bool = False
 
 
+@dataclass
+class ForwardAdditionalProcessResult:
+
+    # Whether directly return output in attention forward.
+    is_return: bool = False
+    output: torch.Tensor = None
+
+    # The necessary info needed in forward()
+    additional_info: Optional[Dict] = None
+
+
 class AscendAttentionMetadataBuilder:
 
     def __init__(
@@ -299,6 +310,49 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
 
+    def _additional_process_before_forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: Optional[torch.Tensor],
+        trace_flag: bool,
+        num_tokens: int,
+    ) -> "ForwardAdditionalProcessResult":
+        if trace_flag:
+            torch.ops.vllm.unified_ascend_attention_with_output(
+                query=query,
+                key=key,
+                value=value,
+                output=output,
+                layer_name=layer.layer_name)
+            return ForwardAdditionalProcessResult(is_return=True,
+                                                  output=output.view(
+                                                      num_tokens,
+                                                      self.hidden_size),
+                                                  additional_info=None)
+
+        # View q k v to BSH.
+        query = query.view(-1, self.num_heads, self.head_size)
+        key = key.view(-1, self.num_kv_heads, self.head_size)
+        value = value.view(-1, self.num_kv_heads, self.head_size)
+        # TODO: Remove this contiguous in the future.
+        value = value.contiguous()
+
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        if len(kv_cache) > 1:
+            if self.key_cache is None:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            slots = attn_metadata.slot_mapping
+            torch_npu._npu_reshape_and_cache(key=key[:num_actual_tokens],
+                                             value=value[:num_actual_tokens],
+                                             key_cache=self.key_cache,
+                                             value_cache=self.value_cache,
+                                             slot_indices=slots)
+
     def _forward_prefill_no_cache(
         self,
         query: torch.Tensor,
@@ -307,6 +361,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
         num_tokens=0,
+        **kwargs,
     ) -> torch.Tensor:
         assert attn_metadata is not None
         assert attn_metadata.attn_mask is not None
@@ -341,6 +396,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> torch.Tensor:
         assert attn_metadata is not None
         assert attn_metadata.attn_mask is not None
@@ -368,6 +424,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> torch.Tensor:
         if is_310p():
             # seq_lens_tensor needs to be transferred to the device for 310P.
@@ -417,6 +474,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> torch.Tensor:
         # Use chunked prefill for head size 192 scenario, like deepseek
         # paged_attention_splitfuse maybe crash at such scenario.
@@ -490,8 +548,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [batch_size * seq_len, num_heads, head_size]
         """
         num_tokens = query.shape[0]
-        use_kv_cache_int8 = len(
-            kv_cache) > 0 and kv_cache[0].dtype == torch.int8
+        use_kv_cache_int8 = (kv_cache is not None and len(kv_cache) > 0
+                             and kv_cache[0].numel() > 0
+                             and kv_cache[0].dtype == torch.int8)
+
         if output is None:
             output = torch.empty(num_tokens,
                                  self.num_heads,
@@ -499,67 +559,50 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                  dtype=query.dtype,
                                  device=query.device)
         ori_output = output
-        if trace_flag:
-            torch.ops.vllm.unified_ascend_attention_with_output(
-                query=query,
-                key=key,
-                value=value,
-                output=output,
-                layer_name=layer.layer_name)
 
-        elif hasattr(layer, 'quant_method') and use_kv_cache_int8:
+        if hasattr(layer, 'quant_method') and use_kv_cache_int8:
             output = layer.quant_method.apply(layer, query, key, value,
                                               kv_cache, attn_metadata,
                                               self.attn_type, self.scale,
                                               output)
+            return output.view(num_tokens, self.hidden_size)
 
+        if attn_metadata is None:
+            return output.view(num_tokens, self.hidden_size)
+
+        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
+        attn_type = self.attn_type
+        if attn_type != AttentionType.DECODER:
+            raise NotImplementedError("Encoder self-attention and "
+                                      "encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "AscendAttentionBackendImpl.")
+
+        result = self._additional_process_before_forward(
+            layer, query, key, value, kv_cache, attn_metadata, output,
+            trace_flag, num_tokens)
+        if result.is_return:
+            return result.output
+        additional_info = result.additional_info
+
+        # V0-Style scheduler situation.
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            output = self._forward_prefill_no_cache(query, key, value,
+                                                    attn_metadata, output,
+                                                    **additional_info)
+        elif attn_metadata.attn_state == \
+            AscendAttentionState.PrefillCacheHit:
+            output = self._forward_prefill_cache_hit(query, attn_metadata,
+                                                     output, **additional_info)
+        elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            output = self._forward_decode_only(query, attn_metadata, output,
+                                               **additional_info)
+        # Normal V1 situation.
         else:
-            if attn_metadata is None:
-                return output.view(num_tokens, self.hidden_size)
-            num_actual_tokens = attn_metadata.num_actual_tokens
-            assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
-            attn_type = self.attn_type
-            if attn_type != AttentionType.DECODER:
-                raise NotImplementedError("Encoder self-attention and "
-                                          "encoder/decoder cross-attention "
-                                          "are not implemented for "
-                                          "PallasAttentionBackendImpl")
-            # View q k v to BSH.
-            query = query.view(-1, self.num_heads, self.head_size)
-            key = key.view(-1, self.num_kv_heads, self.head_size)
-            value = value.view(-1, self.num_kv_heads, self.head_size)
-            # TODO: Remove this contiguous in the future.
-            value = value.contiguous()
-
-            if len(kv_cache) > 1:
-                if self.key_cache is None:
-                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-                slots = attn_metadata.slot_mapping
-                torch_npu._npu_reshape_and_cache(
-                    key=key[:num_actual_tokens],
-                    value=value[:num_actual_tokens],
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_indices=slots)
-
-            # V0-Style scheduler situation.
-            if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-                output = self._forward_prefill_no_cache(
-                    query, key, value, attn_metadata, output, num_tokens)
-            elif attn_metadata.attn_state == \
-                AscendAttentionState.PrefillCacheHit:
-                output = self._forward_prefill_cache_hit(
-                    query, attn_metadata, output)
-            elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                output = self._forward_decode_only(query, attn_metadata,
-                                                   output)
-            # Normal V1 situation.
-            else:
-                output = self._forward_v1_style(query, attn_metadata, output)
+            output = self._forward_v1_style(query, attn_metadata, output,
+                                            **additional_info)
 
         # to make in-place change to the output tensor
-        if hasattr(layer, 'quant_method') and use_kv_cache_int8:
-            output = output.view(num_tokens, self.num_heads, self.head_size)
         ori_output[:, :, :] = output[:num_tokens, :, :]
         return output.view(num_tokens, self.hidden_size)
 
