@@ -18,6 +18,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
+from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
+    TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
 from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
@@ -266,8 +268,12 @@ class MtpProposer:
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            self.model = CustomDeepSeekMTP(
-                vllm_config=self.vllm_config).to(target_device)
+            if self.torchair_graph_enabled:
+                self.model = TorchairDeepSeekMTP(
+                    vllm_config=self.vllm_config).to(target_device)
+            else:
+                self.model = CustomDeepSeekMTP(
+                    vllm_config=self.vllm_config).to(target_device)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
