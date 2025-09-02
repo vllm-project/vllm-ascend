@@ -675,8 +675,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         residual: Optional[torch.Tensor],
         kv_cache: Optional[torch.Tensor] = None,
         attn_metadata: Optional[Union["AttentionMetadata",
-                                           dict[str,
-                                                "AttentionMetadata"]]] = None,
+                                      dict[str, "AttentionMetadata"]]] = None,
         replace_allreduce: bool = False,
     ) -> torch.Tensor:
         # Self Attention
@@ -816,8 +815,7 @@ class CustomDeepseekV2Model(nn.Module):
         positions: torch.Tensor,
         kv_caches: Optional[List[torch.Tensor]] = None,
         attn_metadata: Optional[Union["AttentionMetadata",
-                                        dict[str,
-                                            "AttentionMetadata"]]] = None,
+                                      dict[str, "AttentionMetadata"]]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -992,8 +990,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         positions: torch.Tensor,
         kv_caches: Optional[List[torch.Tensor]] = None,
         attn_metadata: Optional[Union["AttentionMetadata",
-                                        dict[str,
-                                            "AttentionMetadata"]]] = None,
+                                      dict[str, "AttentionMetadata"]]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
