@@ -395,11 +395,20 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         window_index = torch.cat(window_index, dim=0)
         return window_index, cu_window_seqlens
 
+    def _normalize_grid_thw(self, grid_thw: Union[torch.Tensor, list[list[int]]]) -> torch.Tensor:
+        if isinstance(grid_thw, list):
+            grid_thw = torch.tensor(grid_thw, device=self.device)
+        elif not isinstance(grid_thw, torch.Tensor):
+            raise TypeError(f"Expected input type is torch.Tensor or list of lists, got {type(grid_thw)}")
+        return grid_thw
+
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: torch.Tensor,
+        grid_thw: Union[torch.Tensor, list[list[int]]],
     ) -> torch.Tensor:
+        # normalize grid_thw to aviod type conflict
+        grid_thw = self._normalize_grid_thw(grid_thw)
         # compute cu_seqlens
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
                                              grid_thw[:,
