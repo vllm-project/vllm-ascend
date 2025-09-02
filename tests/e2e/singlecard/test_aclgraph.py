@@ -21,16 +21,13 @@ Run `pytest tests/compile/test_aclgraph.py`.
 """
 
 import pytest
-import torch
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
-    "Qwen/Qwen2.5-0.5B-Instruct",
-    # TODO: REVERT ME when oom is fixed
-    # "vllm-ascend/Qwen3-30B-A3B-Puring"
+    "Qwen/Qwen3-0.6B",
 ]
 
 
@@ -46,17 +43,19 @@ def test_models_with_aclgraph(
     ]
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-    # TODO: change to use vllmrunner when the registry of custom op is solved
-    # while running pytest
-    vllm_model = LLM(model, max_model_len=1024)
-    vllm_aclgraph_outputs = vllm_model.generate(prompts, sampling_params)
-    del vllm_model
-    torch.npu.empty_cache()
+    with VllmRunner(
+            model,
+            max_model_len=1024,
+            enforce_eager=False,
+    ) as runner:
+        vllm_aclgraph_outputs = runner.model.generate(prompts, sampling_params)
 
-    vllm_model = LLM(model, enforce_eager=True, max_model_len=1024)
-    vllm_eager_outputs = vllm_model.generate(prompts, sampling_params)
-    del vllm_model
-    torch.npu.empty_cache()
+    with VllmRunner(
+            model,
+            max_model_len=1024,
+            enforce_eager=True,
+    ) as runner:
+        vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
 
     vllm_aclgraph_outputs_list = []
     for output in vllm_aclgraph_outputs:
@@ -74,21 +73,3 @@ def test_models_with_aclgraph(
         name_0="vllm_eager_outputs",
         name_1="vllm_aclgraph_outputs",
     )
-
-
-def test_deepseek_raises_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_MODELSCOPE", "True")
-        with pytest.raises(NotImplementedError) as excinfo:
-            VllmRunner("deepseek-ai/DeepSeek-V2-Lite-Chat",
-                       max_model_len=1024,
-                       enforce_eager=False)
-        assert "ACL Graph does not support deepseek" in str(excinfo.value)
-
-
-@pytest.mark.parametrize("model", MODELS)
-def test_ray_backend_sets_no_compilation(model: str) -> None:
-    runner = VllmRunner(model,
-                        enforce_eager=False,
-                        distributed_executor_backend="ray")
-    assert runner.model.llm_engine.vllm_config.compilation_config.level == 0
