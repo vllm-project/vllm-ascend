@@ -39,7 +39,8 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionRotaryEmbedding, Qwen2_5_VisionTransformer,
     Qwen2_5_VLDummyInputsBuilder, Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLMultiModalProcessor, Qwen2_5_VLProcessingInfo)
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import (maybe_prefix,
+                                              run_dp_sharded_mrope_vision_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
@@ -55,6 +56,7 @@ class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
         projection_size: int,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__(
             embed_dim,
@@ -62,6 +64,7 @@ class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             projection_size,
             quant_config,
             prefix,
+            use_data_parallel,
         )
         self.embed_dim = embed_dim
         self.hidden_size_per_attention_head = dist_utils.divide(
@@ -139,14 +142,16 @@ class AscendQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
         norm_layer: Optional[Callable[[int], nn.Module]] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__(dim, num_heads, mlp_hidden_dim, act_fn, norm_layer,
-                         quant_config, prefix)
+                         quant_config, prefix, use_data_parallel)
         self.attn = AscendQwen2_5_VisionAttention(embed_dim=dim,
                                                   num_heads=num_heads,
                                                   projection_size=dim,
                                                   quant_config=quant_config,
-                                                  prefix=f"{prefix}.attn")
+                                                  prefix=f"{prefix}.attn",
+                                                  use_data_parallel=use_data_parallel)
 
     def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
                 cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -183,8 +188,10 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         interleaved=False,
+        use_data_parallel: bool = False,
     ) -> None:
-        super().__init__(vision_config, norm_eps, quant_config, prefix)
+        super().__init__(vision_config, norm_eps, quant_config, prefix,
+                         use_data_parallel)
         norm_layer = partial(RMSNorm, eps=norm_eps)
         self.interleaved = interleaved
         self.enable_pad = False
@@ -207,7 +214,8 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
                 act_fn=act_fn,
                 norm_layer=norm_layer,
                 quant_config=quant_config,
-                prefix=f"{prefix}.blocks.{layer_idx}")
+                prefix=f"{prefix}.blocks.{layer_idx}",
+                use_data_parallel=use_data_parallel)
             for layer_idx in range(vision_config.depth)
         ])
         self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
@@ -455,6 +463,7 @@ class AscendQwen2_5_VLForConditionalGeneration(
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=self._maybe_ignore_quant_config(quant_config),
             prefix=maybe_prefix(prefix, "visual"),
+            use_data_parallel=self.use_data_parallel,
         )
 
     def _process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
@@ -466,7 +475,14 @@ class AscendQwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-            image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+            if self.use_data_parallel:
+                # Ascend 中 visual的传参需要是tensor，但是vllm中的visual是list
+                # 需要改写run_dp_sharded_mrope_vision_model中vision_model的入参
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values,
+                                                         grid_thw.tolist())
+            else:
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
