@@ -1,26 +1,21 @@
 import math
-import os
 import pickle
-import signal
+import torch
+import os
+import zmq
 from dataclasses import dataclass
 from multiprocessing.shared_memory import SharedMemory
 from typing import Any, Callable, Optional
-
-import torch
 import vllm.envs as envs
-import zmq
-from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
-from vllm.utils import get_dtype_size, logger, make_zmq_socket
-from vllm.v1.kv_cache_interface import AttentionSpec
-
+from vllm.config import KVTransferConfig, VllmConfig
+from vllm.utils import make_zmq_socket, get_dtype_size, logger
 from vllm_ascend.worker.cpu_kv_cache_manager import CPUKVCacheManager
-
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 @dataclass
 class MLAConfig:
     nope_dim: int
     rope_dim: int
-
 
 def get_cpu_offload_connector(
         vllm_config: VllmConfig) -> KVTransferConfig | None:
@@ -37,15 +32,12 @@ def get_cpu_offload_connector(
                     return kv_transfer_config
     return None
 
-
 class MetadataServer:
     METADATA_SERVER_ADDRESS = f"ipc://{envs.VLLM_RPC_BASE_PATH}/metadata.ipc"
     DEFAULT_CPU_SWAP_SPACE_GB = 800
-
     class ZMQRPCClient:
-
         def __init__(self, identity=f"worker-{os.getpid()}"):
-            logger.info(f"metadata client for scheduler {identity} started")
+            logger.info(f"metadata client for worker {identity} started")
             self.ctx = zmq.Context()
             self.socket = make_zmq_socket(
                 self.ctx,
@@ -54,7 +46,7 @@ class MetadataServer:
                 bind=False,
                 identity=identity.encode(),
                 linger=0)
-
+                
         def call(self, func_name: str, *args, **kwargs) -> Any:
             request = (func_name, args, kwargs)
             self.socket.send(b"", zmq.SNDMORE)
@@ -119,7 +111,7 @@ class MetadataServer:
         except FileNotFoundError:
             pass
         return SharedMemory(name=name, create=True, size=size)
-
+    
     def ready(self):
         return True
 
@@ -232,9 +224,7 @@ class MetadataServer:
                 shm.close()
                 shm.unlink()
 
-
 class MetadataServerProc:
-
     @staticmethod
     def run_metadata_server(vllm_config: VllmConfig):
         if (not vllm_config.cache_config.enable_prefix_caching
@@ -242,7 +232,6 @@ class MetadataServerProc:
             return
 
         shutdown_requested = False
-
         def _signal_handler(signum, frame):
             nonlocal shutdown_requested
             if not shutdown_requested:

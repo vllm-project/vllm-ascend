@@ -6,7 +6,6 @@ import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from itertools import chain
 from typing import TYPE_CHECKING, Any, Optional, Sequence
 
 import torch
@@ -16,9 +15,8 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.utils import get_mp_context, logger
+from vllm.utils import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
@@ -148,7 +146,7 @@ class CPUOffloadingConnector(KVConnectorBase_V1):
 class CPUOffloadingConnectorScheduler:
 
     def __init__(self, vllm_config: VllmConfig):
-        logger.info(f"init CPUOffloadingConnectorScheduler")
+        logger.info("init CPUOffloadingConnectorScheduler")
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.use_mla = vllm_config.model_config.use_mla
@@ -250,7 +248,7 @@ class CPUOffloadingConnectorScheduler:
 class CPUOffloadingConnectorWorker:
 
     def __init__(self, vllm_config: VllmConfig):
-        logger.info(f"init CPUOffloadingConnectorWorker")
+        logger.info("init CPUOffloadingConnectorWorker")
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.pp_rank = get_pp_group().rank_in_group
