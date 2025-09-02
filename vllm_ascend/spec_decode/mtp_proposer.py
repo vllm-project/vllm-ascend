@@ -25,6 +25,8 @@ from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
+from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
+    TorchairDeepSeekMTP
 from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 
@@ -70,8 +72,12 @@ class MtpProposer(Proposer):
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            self.model = CustomDeepSeekMTP(
-                vllm_config=self.vllm_config).to(target_device)
+            if self.torchair_graph_enabled:
+                self.model = TorchairDeepSeekMTP(
+                    vllm_config=self.vllm_config).to(target_device)
+            else:
+                self.model = CustomDeepSeekMTP(
+                    vllm_config=self.vllm_config).to(target_device)
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
