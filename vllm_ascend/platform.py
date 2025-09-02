@@ -227,8 +227,9 @@ class NPUPlatform(Platform):
                 "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
             compilation_config.set_splitting_ops_for_v1()
             compilation_config.use_inductor = False
-            compilation_config.splitting_ops.extend(
-                ["vllm.unified_ascend_attention_with_output"])
+            compilation_config.splitting_ops.extend([
+                "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
+            ])
             update_aclgraph_sizes(vllm_config)
         else:
             logger.info(
