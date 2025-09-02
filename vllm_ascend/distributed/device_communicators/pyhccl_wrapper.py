@@ -258,7 +258,7 @@ class HCCLLibrary:
     def unique_id_from_bytes(self, data: bytes) -> hcclUniqueId:
         if len(data) != 4108:
             raise ValueError(
-                f"Expected 128 bytes for hcclUniqueId, got {len(data)} bytes")
+                f"Expected 4108 bytes for hcclUniqueId, got {len(data)} bytes")
         unique_id = hcclUniqueId()
         ctypes.memmove(ctypes.addressof(unique_id.internal), data, 4108)
         return unique_id

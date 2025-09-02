@@ -171,9 +171,11 @@ class PyHcclCommunicator:
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
+        if stream is None:
+            stream = self.stream
         self.hccl.hcclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
                            hcclDataTypeEnum.from_torch(tensor.dtype), dst,
-                           self.comm, aclrtStream_t(self.stream))
+                           self.comm, aclrtStream_t(stream.npu_stream))
 
     def recv(self, tensor: torch.Tensor, src: int, stream=None):
         if self.disabled:
@@ -181,6 +183,8 @@ class PyHcclCommunicator:
         assert tensor.device == self.device, (
             f"this nccl communicator is created to work on {self.device}, "
             f"but the input tensor is on {tensor.device}")
+        if stream is None:
+            stream = self.stream
         self.hccl.hcclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
                            hcclDataTypeEnum.from_torch(tensor.dtype), src,
-                           self.comm, aclrtStream_t(self.stream))
+                           self.comm, aclrtStream_t(stream.npu_stream))

@@ -42,7 +42,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
             if role == KVConnectorRole.WORKER else 0
         self._local_rank = self.config.kv_rank
 
-        self.p2p_nccl_engine = P2pHcclEngine(
+        self.p2p_hccl_engine = P2pHcclEngine(
             local_rank=self._local_rank,
             config=self.config,
             hostname="",
@@ -71,7 +71,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
         if self.is_producer:
             return
 
-        assert self.p2p_nccl_engine is not None
+        assert self.p2p_hccl_engine is not None
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
@@ -160,9 +160,9 @@ class P2pHcclConnector(KVConnectorBase_V1):
                     forward_context.virtual_engine]
 
                 kv_cache = (
-                    self.p2p_nccl_engine.recv_tensor(request.request_id + "#" +
+                    self.p2p_hccl_engine.recv_tensor(request.request_id + "#" +
                                                      layer_name + "_idx_0"),
-                    self.p2p_nccl_engine.recv_tensor(request.request_id + "#" +
+                    self.p2p_hccl_engine.recv_tensor(request.request_id + "#" +
                                                      layer_name + "_idx_1"))
 
                 if kv_cache is None:
@@ -205,7 +205,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
             logger.info("not self.is_producer")
             return
 
-        assert self.p2p_nccl_engine is not None
+        assert self.p2p_hccl_engine is not None
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
@@ -214,15 +214,15 @@ class P2pHcclConnector(KVConnectorBase_V1):
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, True)
             remote_address = ip + ":" + str(port + self._rank)
-            self.p2p_nccl_engine.send_tensor(
+            self.p2p_hccl_engine.send_tensor(
                 request_id + "#" + layer_name, kv_layer, remote_address,
                 request.slot_mapping,
                 isinstance(attn_metadata, MLACommonMetadata))
 
     def wait_for_save(self):
         if self.is_producer:
-            assert self.p2p_nccl_engine is not None
-            self.p2p_nccl_engine.wait_for_sent()
+            assert self.p2p_hccl_engine is not None
+            self.p2p_hccl_engine.wait_for_sent()
 
     def get_finished(
             self, finished_req_ids: set[str],
@@ -238,11 +238,11 @@ class P2pHcclConnector(KVConnectorBase_V1):
             call to this method (this call or a prior one).
         """
 
-        assert self.p2p_nccl_engine is not None
+        assert self.p2p_hccl_engine is not None
 
         no_compile_layers = (
             self._vllm_config.compilation_config.static_forward_context)
-        return self.p2p_nccl_engine.get_finished(finished_req_ids,
+        return self.p2p_hccl_engine.get_finished(finished_req_ids,
                                                  no_compile_layers)
 
     # ==============================
