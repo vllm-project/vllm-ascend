@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import gc
 import os
 import time
 from unittest.mock import patch
@@ -50,6 +51,10 @@ def test_execue_duration_enabled_discrepancy():
     assert diff <= 0.5, (
         f"CPU={cpu_duration:.2f}ms, NPU={npu_durations['forward']:.2f}ms")
 
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
 
 def test_execue_duration_disabled():
     a = torch.randn(100, 100).npu()
@@ -60,3 +65,7 @@ def test_execue_duration_disabled():
         torch.npu.synchronize()
     npu_durations = ProfileExecuteDuration().pop_captured_sync()
     assert not npu_durations
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

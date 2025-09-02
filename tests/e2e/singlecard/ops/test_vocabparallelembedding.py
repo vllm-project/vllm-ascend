@@ -1,3 +1,4 @@
+import gc
 from typing import Tuple
 
 import pytest
@@ -92,3 +93,6 @@ def test_get_masked_input_and_mask(
                                rtol=1e-5,
                                atol=1e-5,
                                msg=f"Mask mismatch for case: {test_case}")
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
