@@ -57,8 +57,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
-        get_ascend_config()
-
+        ascend_config = get_ascend_config()
+        if ascend_config.torchair_graph_config.enabled:
+            self.use_aclgraph = False
+        else:
+            self.use_aclgraph = (vllm_config.compilation_config.level
+                                 == CompilationLevel.PIECEWISE and
+                                 not vllm_config.model_config.enforce_eager)
         try:
             device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
