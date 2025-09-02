@@ -200,7 +200,6 @@ class P2pHcclConnector(KVConnectorBase_V1):
         """
 
         # Only producer/prefill saves KV Cache
-        logger.info("p2p_nccl_connector: save_kv_layer")
         if not self.is_producer:
             logger.info("not self.is_producer")
             return
