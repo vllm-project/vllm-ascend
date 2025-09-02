@@ -1,68 +1,74 @@
 import torch
+import torch.nn.functional as F
 from vllm.utils import direct_register_custom_op
-from vllm.distributed import tensor_model_parallel_all_gather, tensor_model_parallel_reduce_scatter, tensor_model_parallel_all_reduce
+from vllm.distributed import (tensor_model_parallel_all_gather,
+                              tensor_model_parallel_reduce_scatter,
+                              tensor_model_parallel_all_reduce,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
 
 
-def _flashcomm_residual_chunk_impl(residual: torch.Tensor, tp_size: int, tp_rank: int) -> torch.Tensor:
-    flashcomm_v1_enabled = get_forward_context().flashcomm_v1_enabled
-    if flashcomm_v1_enabled:
+def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+    if x.size(0) != residual.size(0):
+        flashcomm_v1_enabled = get_forward_context().flashcomm_v1_enabled
+        assert flashcomm_v1_enabled is True, (
+            "Currently, this situation only occurs "
+            "when flashcomm_v1 is enabled"
+        )
+        pad_size = get_forward_context().pad_size
+        if pad_size > 0:
+            residual = F.pad(residual, (0, 0, 0, pad_size))
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
+
     return residual
 
 
-def _flashcomm_all_gather_impl(hidden_states: torch.Tensor) -> torch.Tensor:
-    flashcomm_v1_enabled = get_forward_context().flashcomm_v1_enabled
-    if flashcomm_v1_enabled:
-        return tensor_model_parallel_all_gather(hidden_states, 0)
-    else:
-        return hidden_states
-
-
-def _flashcomm_all_gather_with_condition_impl(hidden_states: torch.Tensor, label: bool) -> torch.Tensor:
+def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor, label: bool) -> torch.Tensor:
     flashcomm_v1_enabled = get_forward_context().flashcomm_v1_enabled
     if flashcomm_v1_enabled and label:
-        return tensor_model_parallel_all_gather(hidden_states, 0)
-    else:
-        return hidden_states
+        x = tensor_model_parallel_all_gather(x, 0)
+        pad_size = get_forward_context().pad_size
+        if pad_size > 0:
+            x = x[:-pad_size, :]
+    return x
 
 
-def _flashcomm_reduce_impl(hidden_states: torch.Tensor) -> torch.Tensor:
+def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
     flashcomm_v1_enabled = get_forward_context().flashcomm_v1_enabled
     if flashcomm_v1_enabled:
-        return tensor_model_parallel_reduce_scatter(hidden_states, 0)
+        pad_size = get_forward_context().pad_size
+        if pad_size > 0:
+            x = F.pad(x, (0, 0, 0, pad_size))
+        return tensor_model_parallel_reduce_scatter(x, 0)
     else:
-        return tensor_model_parallel_all_reduce(hidden_states)
+        return tensor_model_parallel_all_reduce(x)
 
 
 direct_register_custom_op(
-    op_name="flashcomm_residual_chunk",
-    op_func=_flashcomm_residual_chunk_impl,
-    fake_impl=lambda residual, tp_size, tp_rank: residual,
+    op_name="maybe_chunk_residual",
+    op_func=_maybe_chunk_residual_impl,
+    fake_impl=lambda x, residual: residual,
     mutates_args=[],
     dispatch_key="PrivateUse1"
 )
 
+
 direct_register_custom_op(
-    op_name="flashcomm_all_gather",
-    op_func=_flashcomm_all_gather_impl,
-    fake_impl=lambda hidden_states: hidden_states,
+    op_name="maybe_all_gather_and_maybe_unpad",
+    op_func=_maybe_all_gather_and_maybe_unpad_impl,
+    fake_impl=lambda x, label: x,
     mutates_args=[],
     dispatch_key="PrivateUse1"
 )
 
-direct_register_custom_op(
-    op_name="flashcomm_all_gather_with_condition",
-    op_func=_flashcomm_all_gather_with_condition_impl,
-    fake_impl=lambda hidden_states, label: hidden_states,
-    mutates_args=[],
-    dispatch_key="PrivateUse1"
-)
 
 direct_register_custom_op(
-    op_name="flashcomm_reduce",
-    op_func=_flashcomm_reduce_impl,
-    fake_impl=lambda hidden_states: hidden_states,
+    op_name="maybe_pad_and_reduce",
+    op_func=_maybe_pad_and_reduce_impl,
+    fake_impl=lambda x: x,
     mutates_args=[],
     dispatch_key="PrivateUse1"
 )

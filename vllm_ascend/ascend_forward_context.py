@@ -105,28 +105,17 @@ def set_ascend_forward_context(
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
 
-        # set this for rope forward_oot using
-        forward_context.is_first_layer = True
-
         # set for flashcomm_v1
-        flashcomm_v1_enabled = False
-        matmul_rs_enabled = False
-        ag_matmal_enabled = False
-
         flashcomm_v1_enabled = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM and \
             num_tokens is not None and num_tokens > 1000
         
         if flashcomm_v1_enabled:
-            matmul_rs_enabled = envs_ascend.VLLM_ASCEND_ENABLE_LCOC_MATMUL_RS == 1
-            ag_matmal_enabled = envs_ascend.VLLM_ASCEND_ENABLE_LCOC_AG_MATMUL == 1
             tp_world_size = get_tensor_model_parallel_world_size()
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
 
         forward_context.flashcomm_v1_enabled = flashcomm_v1_enabled
-        forward_context.matmul_rs_enabled = matmul_rs_enabled
-        forward_context.ag_matmal_enabled = ag_matmal_enabled
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
