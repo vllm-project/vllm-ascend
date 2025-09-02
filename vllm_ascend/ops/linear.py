@@ -381,6 +381,33 @@ class AscendDenseRowParallelLinear(RowParallelLinear):
     communication-computation fusion.
     """
 
+    def prefetch_gate_up_proj(self,
+                              dependency: torch.Tensor):
+        # get prefetch model
+        forward_context = get_forward_context()
+        layer_num = int(self.prefix.split('.')[2])
+        prefetch_model = forward_context.prefetch_model
+        prefetch_stream = forward_context.prefetch_stream
+
+        # start point of weight prefetch
+        forward_context.prefetch_mlp_up = True if self.prefix.split('.')[-2] == 'self_attn' else False
+        if forward_context.prefetch_mlp_up:
+            prefetch_stream.wait_stream(torch.npu.current_stream())
+
+            with torch.npu.stream(prefetch_stream):
+                # For Qwen3-32B
+                MLP_GATE_UP_PREFETCH_SIZE = 50 * 1024 * 1024
+                torch_npu.npu_prefetch(prefetch_model.model.layers[layer_num].mlp.gate_up_proj.weight, \
+                                    dependency, MLP_GATE_UP_PREFETCH_SIZE)
+
+
+    def wait_prefetch_done(self):
+        forward_context = get_forward_context()
+        if forward_context.prefetch_mlp_up:
+            prefetch_stream = forward_context.prefetch_stream
+            # wait until reduce-scatter is done
+            torch.npu.current_stream().wait_stream(prefetch_stream)
+
     def forward(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
@@ -404,6 +431,10 @@ class AscendDenseRowParallelLinear(RowParallelLinear):
             output_parallel = self.quant_method.apply(self,
                                                       input_parallel,
                                                       bias=bias_)
+            dependency = output_parallel
+
+            self.prefetch_gate_up_proj(dependency)
+
             output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
 
         output_bias = self.bias if self.skip_bias_add else None
