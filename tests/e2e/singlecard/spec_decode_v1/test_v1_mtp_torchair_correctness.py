@@ -6,7 +6,6 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
-from vllm_ascend.ascend_config import clear_ascend_config
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -35,7 +34,6 @@ def test_mtp_torchair_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using mtp speculative decoding.
     '''
-    clear_ascend_config()
     with VllmRunner(model_name,
                     tensor_parallel_size=1,
                     gpu_memory_utilization=0.7,
@@ -49,7 +47,6 @@ def test_mtp_torchair_correctness(
                         },
                     }) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
-    clear_ascend_config()
     with VllmRunner(model_name,
                     tensor_parallel_size=1,
                     max_num_seqs=256,
@@ -86,5 +83,3 @@ def test_mtp_torchair_correctness(
     # Heuristic: expect at least 66% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
-    del spec_llm
-    clear_ascend_config()
