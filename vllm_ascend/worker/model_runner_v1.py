@@ -1813,10 +1813,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return None, None
 
     def _build_attention_metadata(self, with_prefill, num_reqs, skip_attn):
-        attn_metadata: Optional[dict[str, Any]] = {}
-        if skip_attn:
-            attn_metadata = None
-        else:
+        attn_metadata: Optional[dict[str, Any]] = None
+        if not skip_attn:
             # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
             # Prepare the attention metadata for each KV cache group and make layers
             # in the same group share the same metadata.
