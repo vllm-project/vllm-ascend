@@ -22,7 +22,7 @@ class MLAConfig:
 
 
 def get_cpu_offload_connector(
-        vllm_config: VllmConfig) -> KVTransferConfig | None:
+        vllm_config: VllmConfig) -> KVTransferConfig:
     if vllm_config.kv_transfer_config is not None:
         kv_transfer_config = vllm_config.kv_transfer_config
         if kv_transfer_config.kv_connector == "CPUOffloadingConnector":
@@ -45,18 +45,18 @@ class MetadataServer:
 
         def __init__(self, identity=f"worker-{os.getpid()}"):
             logger.info(f"metadata client for worker {identity} started")
-            self.ctx = zmq.Context()
+            self.ctx = zmq.Context() # type: ignore
             self.socket = make_zmq_socket(
                 self.ctx,
                 MetadataServer.METADATA_SERVER_ADDRESS,
-                zmq.DEALER,
+                zmq.DEALER, # type: ignore
                 bind=False,
                 identity=identity.encode(),
                 linger=0)
 
         def call(self, func_name: str, *args, **kwargs) -> Any:
             request = (func_name, args, kwargs)
-            self.socket.send(b"", zmq.SNDMORE)
+            self.socket.send(b"", zmq.SNDMORE) # type: ignore
             self.socket.send(pickle.dumps(request))
             _ = self.socket.recv()
             response = pickle.loads(self.socket.recv())
@@ -95,10 +95,10 @@ class MetadataServer:
             "cpu_swap_space_gb", MetadataServer.DEFAULT_CPU_SWAP_SPACE_GB)
         self.available_memory = available_memory_gb * 1024 * 1024 * 1024
         logger.info(f"cpu swap space: {self.available_memory} bytes")
-        self.ctx = zmq.Context()
+        self.ctx = zmq.Context() # type: ignore
         self.socket = make_zmq_socket(self.ctx,
                                       MetadataServer.METADATA_SERVER_ADDRESS,
-                                      zmq.ROUTER,
+                                      zmq.ROUTER, # type: ignore
                                       bind=True,
                                       linger=0)
         self.functions: dict[str, Callable] = {
@@ -106,7 +106,7 @@ class MetadataServer:
             "post_init": self.post_init,
             "ready": self.ready,
         }
-        self.shared_memory = {}
+        self.shared_memory = {} # type: ignore
         self.num_cpu_blocks = -1
 
     @staticmethod
@@ -127,9 +127,8 @@ class MetadataServer:
         pp_rank: int,
         tp_rank: int,
         kv_cache_specs: dict[str, AttentionSpec],
-        mla_config: MLAConfig | None,
-    ) -> tuple[dict[str, SharedMemory], tuple[int, ...], torch.dtype, MLAConfig
-               | None]:
+        mla_config: MLAConfig,
+    ) -> tuple[dict[str, SharedMemory], tuple[int, ...], torch.dtype, MLAConfig]:
         logger.info(f"receive pp rank: {pp_rank}, tp rank: {tp_rank}")
         # follow the assumption that each layer has the same spec
         layer = next(iter(kv_cache_specs.values()))
@@ -149,13 +148,13 @@ class MetadataServer:
             available_memory //= len(kv_cache_specs)
             num_blocks = available_memory // layer.page_size_bytes
             layer_size = (num_blocks, layer.block_size, layer.num_kv_heads,
-                          layer.head_size)
+                          layer.head_size) # type: ignore
         else:
             available_memory //= self.world_size
             available_memory //= len(kv_cache_specs)
             num_blocks = available_memory // layer.page_size_bytes
             layer_size = (2, num_blocks, layer.block_size, layer.num_kv_heads,
-                          layer.head_size)
+                          layer.head_size) # type: ignore
         nbytes = math.prod(layer_size) * get_dtype_size(layer.dtype)
         for layer_name in kv_cache_specs.keys():
             # only this format can share during ZeroMQ+pickle
@@ -209,14 +208,14 @@ class MetadataServer:
             if func_name in self.functions:
                 try:
                     result = self.functions[func_name](*args, **kwargs)
-                    response = (result, None)
+                    response = (result, None) # type: ignore
                 except Exception as e:
                     logger.exception(f"metadata execute error: {e}")
-                    response = (None, e)
+                    response = (None, e) # type: ignore
             else:
                 response = (None, NameError(f"Function {func_name} not found"))
-        self.socket.send(client_id, zmq.SNDMORE)
-        self.socket.send(b"", zmq.SNDMORE)
+        self.socket.send(client_id, zmq.SNDMORE) # type: ignore
+        self.socket.send(b"", zmq.SNDMORE) # type: ignore
         self.socket.send(pickle.dumps(response))
 
     def shutdown(self):

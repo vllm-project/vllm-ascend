@@ -261,7 +261,7 @@ class CPUOffloadingConnectorWorker:
         self.load_stream = torch.npu.Stream()
         self.save_stream = torch.npu.Stream()
         self.zmq_rpc_client = MetadataServer.ZMQRPCClient()
-        self.load_block_mapping = []
+        self.load_block_mapping : list[tuple[int, int]]= []
         self.save_input_queue: queue.Queue[tuple[str, ReqMeta]] = queue.Queue()
         self.save_output_queue: queue.Queue[str] = queue.Queue()
         self.save_thread = threading.Thread(target=self._save_listener)
