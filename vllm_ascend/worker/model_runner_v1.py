@@ -878,8 +878,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> tuple[Union[AscendMetadata, AscendMLAMetadata, AscendTorchairMetadata,
-                     AscendMLATorchairMetadata], torch.Tensor, np.ndarray, int,
+    ) -> tuple[dict[str, Union[AscendMetadata, AscendMLAMetadata, AscendTorchairMetadata,
+                     AscendMLATorchairMetadata]], torch.Tensor, np.ndarray, int,
                torch.Tensor, int, torch.Tensor, SpecDecodeMetadata,
                Optional[torch.Tensor], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -2586,7 +2586,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         accepted_token_indices = None
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
-        eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_names[0]]
+        eagle_attn_metadata = attn_metadata.values()[0]
 
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
