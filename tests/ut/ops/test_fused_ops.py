@@ -24,8 +24,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 import vllm_ascend.ops.moe_dispatcher.token_dispatcher as token_dispatcher_module
 from tests.ut.base import TestBase
-from vllm_ascend.ascend_forward_context import (FusedMoEState,
-                                                _get_fused_moe_state)
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod)
 from vllm_ascend.ops.layers.experts_selector import select_experts
@@ -410,9 +408,7 @@ class TestAscendUnquantizedFusedMoEMethod:
             selected_token_dispatcher = mock_dist_env[
                 'mock_token_dispatcher_with_mc2']
 
-        forward_context = MagicMock(fused_moe_state=_get_fused_moe_state(
-            ep_size, is_prefill, is_deepseek_v3_r1),
-                                    with_quant=False,
+        forward_context = MagicMock(with_quant=False,
                                     token_dispatcher=selected_token_dispatcher)
 
         with patch("vllm_ascend.ops.fused_moe.get_forward_context",
@@ -460,9 +456,7 @@ class TestAscendUnquantizedFusedMoEMethod:
             selected_token_dispatcher = mock_dist_env[
                 'mock_token_dispatcher_with_mc2']
 
-        forward_context = MagicMock(fused_moe_state=_get_fused_moe_state(
-            ep_size, is_prefill, True),
-                                    with_quant=False,
+        forward_context = MagicMock(with_quant=False,
                                     token_dispatcher=selected_token_dispatcher)
 
         with patch("vllm_ascend.ops.fused_moe.get_forward_context", return_value=forward_context), \

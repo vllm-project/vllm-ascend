@@ -22,7 +22,6 @@ import torch_npu
 from pytest_mock import MockerFixture
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
-from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
     TorchairAscendFusedMoE, TorchairAscendUnquantizedFusedMoEMethod)
 from vllm_ascend.utils import AscendSocVersion, adapt_patch  # noqa E402
@@ -329,8 +328,7 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
         global_num_experts, ep_size = others_param
         is_prefill = False
         is_deepseek_v3_r1 = global_num_experts == 256
-        forward_context = MagicMock(fused_moe_state=_get_fused_moe_state(
-            ep_size, is_prefill, is_deepseek_v3_r1))
+        forward_context = MagicMock()
         with patch(
                 "vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context",
                 return_value=forward_context):
@@ -364,8 +362,7 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
         """
         ep_size = others_param
         is_prefill = False
-        forward_context = MagicMock(
-            fused_moe_state=_get_fused_moe_state(ep_size, is_prefill, True))
+        forward_context = MagicMock()
         with patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context", return_value=forward_context), \
              patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_soc_version", return_value=AscendSocVersion.A3):
             expert_map = torch.tensor([0, 1, 2, -1, -1, -1, -1, -1])

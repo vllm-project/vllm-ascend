@@ -47,8 +47,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     bias1, bias2 = None, None
     _output_dtype = w2_scale.dtype
 
-    is_mc2 = get_forward_context().fused_moe_state == FusedMoEState.MC2
-    if w1_scale_bias is None and is_mc2:
+    is_decode = ~forward_context.with_prefill
+    if w1_scale_bias is None and is_decode:
         w1_scale = w1_scale.to(torch.float32)
 
         # gmm1: gate_up_proj
