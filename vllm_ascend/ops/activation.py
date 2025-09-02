@@ -21,6 +21,9 @@ from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
 
 class AscendQuickGELU(QuickGELU):
 
+    def __init__(self):
+        super().__init__()
+
     def forward_oot(self, x: torch.tensor) -> torch.Tensor:
         import torch_npu
 
@@ -29,6 +32,9 @@ class AscendQuickGELU(QuickGELU):
 
 
 class AscendSiluAndMul(SiluAndMul):
+
+    def __init__(self):
+        super().__init__()
 
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         import torch_npu
