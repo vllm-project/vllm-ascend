@@ -39,6 +39,7 @@ from vllm.transformers_utils.utils import maybe_model_redirect
 
 from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
+from vllm_ascend.ascend_config import clear_ascend_config
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
@@ -281,6 +282,7 @@ class VllmRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         del self.model
+        clear_ascend_config()
         cleanup_dist_env_and_memory()
 
 
