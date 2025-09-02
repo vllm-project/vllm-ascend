@@ -12,11 +12,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import torch
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.common_fused_moe import AscendFusedMoE, fused_experts_moge
@@ -56,10 +54,7 @@ class TestFusedExpertsMoGE(TestBase):
                     'use_ep': True
                 })()
 
-            mock_moe = MagicMock(spec=FusedMoEConfig)
-            unquantized_moe_method = AscendUnquantizedFusedMoEMethod(
-                moe=mock_moe)
-            output = unquantized_moe_method.fused_experts_moge(
+            output = fused_experts_moge(
                 hidden_states=hidden_states,
                 w1=w1,
                 w2=w2,

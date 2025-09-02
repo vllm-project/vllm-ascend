@@ -112,64 +112,65 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             assert w1_scale is not None and w2_scale is not None, \
                 "INT8 quantization requires weight scales."
 
-            w1_scale = w1_scale.to(torch.float32)
-            down_scale = [w2_scale]
-            down_output_dtype = w2_scale.dtype
-        else:
-            down_scale = None
-            down_output_dtype = None
+        w1_scale = w1_scale.to(torch.float32)
+        down_scale = [w2_scale]
+        down_output_dtype = w2_scale.dtype
+    else:
+        down_scale = None
+        down_output_dtype = None
 
-        moe_comm_method = get_forward_context().moe_comm_method
-        assert moe_comm_method is not None, "Missing communication context"
+    moe_comm_method = get_forward_context().moe_comm_method
+    assert moe_comm_method is not None, "Missing communication context"
 
-        num_experts = w1.shape[0]
+    num_experts = w1.shape[0]
 
-        permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type = moe_comm_method.permute(
-            hidden_states, topk_ids, topk_weights, expert_map, num_experts,
-            use_int8_w8a8 or use_int4_w4a8)
+    permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type = moe_comm_method.permute(
+        hidden_states, topk_ids, topk_weights, expert_map, num_experts,
+        use_int8_w8a8 or use_int4_w4a8)
 
-        gate_up_output = torch_npu.npu_grouped_matmul(
-            x=[permuted_hidden_states],
-            weight=[w1],
-            split_item=2,
-            group_list_type=group_list_type,
-            group_type=0,
-            group_list=expert_tokens,
-            output_dtype=torch.int32 if use_int8_w8a8 else None,
-        )[0]
+    gate_up_output = torch_npu.npu_grouped_matmul(
+        x=[permuted_hidden_states],
+        weight=[w1],
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=expert_tokens,
+        output_dtype=torch.int32 if use_int8_w8a8 else None,
+    )[0]
 
-        if (use_int8_w8a8 or use_int4_w4a8):
-            activated_output, activated_output_scale = torch_npu.npu_dequant_swiglu_quant(
-                x=gate_up_output,
-                weight_scale=w1_scale,
-                activation_scale=dynamic_scale,
-                bias=None,
-                quant_scale=None,
-                quant_offset=None,
-                group_index=expert_tokens,
-                activate_left=True,
-                quant_mode=1,
-            )
-            activated_output_scale = [activated_output_scale]
-        else:
-            activated_output = torch_npu.npu_swiglu(gate_up_output)
-            activated_output_scale = None
+    if (use_int8_w8a8 or use_int4_w4a8):
+        activated_output, activated_output_scale = torch_npu.npu_dequant_swiglu_quant(
+            x=gate_up_output,
+            weight_scale=w1_scale,
+            activation_scale=dynamic_scale,
+            bias=None,
+            quant_scale=None,
+            quant_offset=None,
+            group_index=expert_tokens,
+            activate_left=True,
+            quant_mode=1,
+        )
+        activated_output_scale = [activated_output_scale]
+    else:
+        activated_output = torch_npu.npu_swiglu(gate_up_output)
+        activated_output_scale = None
 
-        down_output = torch_npu.npu_grouped_matmul(
-            x=[activated_output],
-            weight=[w2],
-            scale=down_scale,
-            per_token_scale=activated_output_scale,
-            split_item=2,
-            group_list_type=group_list_type,
-            group_type=0,
-            group_list=expert_tokens,
-            output_dtype=down_output_dtype,
-        )[0]
+    down_output = torch_npu.npu_grouped_matmul(
+        x=[activated_output],
+        weight=[w2],
+        scale=down_scale,
+        per_token_scale=activated_output_scale,
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=expert_tokens,
+        output_dtype=down_output_dtype,
+    )[0]
 
-        moe_comm_method.unpermute(down_output, hidden_states)
+    moe_comm_method.unpermute(down_output, hidden_states)
 
-        return hidden_states
+    return hidden_states
+
 
 def fused_experts_moge(
     hidden_states: torch.Tensor,
@@ -193,6 +194,14 @@ def fused_experts_moge(
         topk_ids: Selected expert IDs of shape (num_tokens, top_k).
         top_k: Number of experts to select.
         expert_map: Expert mapping of shape (num_experts,).
+    Args:
+        hidden_states: Hidden states of shape (num_tokens, hidden_size).
+        w1: Expert weights1 of shape (num_experts, intermediate_size * 2, hidden_size).
+        w2: Expert weights2 of shape (num_experts, hidden_size, intermediate_size).
+        topk_weights: Routing weights of shape (num_tokens, top_k).
+        topk_ids: Selected expert IDs of shape (num_tokens, top_k).
+        top_k: Number of experts to select.
+        expert_map: Expert mapping of shape (num_experts,).
 
     Returns:
         hidden_states: Hidden states after routing.
@@ -200,6 +209,21 @@ def fused_experts_moge(
     ep_size = moe_parallel_config.ep_size
     local_num_experts = global_num_experts // ep_size
     local_num_group = top_k // ep_size
+    Returns:
+        hidden_states: Hidden states after routing.
+    """
+    ep_size = moe_parallel_config.ep_size
+    local_num_experts = global_num_experts // ep_size
+    local_num_group = top_k // ep_size
+
+    if apply_router_weight_on_input:
+        assert (topk_weights.dim() == 2
+                ), "`topk_weights` should be in shape (num_tokens, topk)"
+        _, topk = topk_weights.shape
+        assert (
+            topk == 1
+        ), "Only support topk=1 when `apply_router_weight_on_input` is True"
+        hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
 
     bsz, _ = hidden_states.shape
     flatten_topk_ids = topk_ids.view(-1)
@@ -208,6 +232,15 @@ def fused_experts_moge(
     sorted_hidden_states = hidden_states.index_select(
         0, sorted_topk_ids // local_num_group)
 
+    experts_id = torch.arange(0,
+                              local_num_experts,
+                              dtype=topk_ids.dtype,
+                              device=topk_ids.device)
+    num_tokens_per_expert = (flatten_topk_ids.unsqueeze(-1) == experts_id).to(
+        torch.float32).sum(0)
+    topk_scales = topk_weights.view(-1).index_select(
+        0, sorted_topk_ids).unsqueeze(-1)
+    group_list = num_tokens_per_expert.cumsum(dim=0).to(torch.int64)
     experts_id = torch.arange(0,
                               local_num_experts,
                               dtype=topk_ids.dtype,
@@ -226,7 +259,21 @@ def fused_experts_moge(
         group_type=0,
         group_list=group_list,
     )[0]
+    gate_up_out = torch_npu.npu_grouped_matmul(
+        x=[sorted_hidden_states],
+        weight=[w1],
+        split_item=2,
+        group_list_type=0,
+        group_type=0,
+        group_list=group_list,
+    )[0]
 
+    if is_310p():
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
+            torch.float16)
+    else:
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+    gate_up_out *= topk_scales
     if is_310p():
         gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
             torch.float16)
@@ -242,13 +289,60 @@ def fused_experts_moge(
         group_type=0,
         group_list=group_list,
     )[0]
+    down_out_list = torch_npu.npu_grouped_matmul(
+        x=[gate_up_out],
+        weight=[w2],
+        split_item=2,
+        group_list_type=0,
+        group_type=0,
+        group_list=group_list,
+    )[0]
 
+    unsorted_topk_ids = torch.argsort(sorted_topk_ids.float()).to(torch.int32)
+    unsorted_hidden_states = down_out_list.index_select(0, unsorted_topk_ids)
+    final_hidden_states = unsorted_hidden_states.reshape(
+        bsz, top_k // ep_size, -1).sum(1)
     unsorted_topk_ids = torch.argsort(sorted_topk_ids.float()).to(torch.int32)
     unsorted_hidden_states = down_out_list.index_select(0, unsorted_topk_ids)
     final_hidden_states = unsorted_hidden_states.reshape(
         bsz, top_k // ep_size, -1).sum(1)
 
     return final_hidden_states
+    return final_hidden_states
+
+
+class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # NOTE: Currently, this self.use_aclgraph is only used in
+        # UnquantizedFusedMoEMethod.forward_oot to decide whether to use in
+        # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
+        # Once torch.randint_like is supported or removed, this flag can be removed.
+        vllm_config = get_current_vllm_config()
+        ascend_config = get_ascend_config()
+        if ascend_config.torchair_graph_config.enabled:
+            self.use_aclgraph = False
+        else:
+            self.use_aclgraph = (vllm_config.compilation_config.level
+                                 == CompilationLevel.PIECEWISE and
+                                 not vllm_config.model_config.enforce_eager)
+
+    def process_weights_after_loading(self, layer):
+        super().process_weights_after_loading(layer)
+        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(
+            1, 2).contiguous()
+        layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
+
+        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(
+            1, 2).contiguous()
+        layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+
+        if not is_310p():
+            layer.w13_weight.data = torch_npu.npu_format_cast(
+                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(
+                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
