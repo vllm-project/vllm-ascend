@@ -878,11 +878,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> tuple[dict[str, Union[AscendMetadata, AscendMLAMetadata, AscendTorchairMetadata,
-                     AscendMLATorchairMetadata]], torch.Tensor, np.ndarray, int,
-               torch.Tensor, int, torch.Tensor, SpecDecodeMetadata,
-               Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> tuple[dict[str,
+                    Union[AscendMetadata, AscendMLAMetadata,
+                          AscendTorchairMetadata, AscendMLATorchairMetadata]],
+               torch.Tensor, np.ndarray, int, torch.Tensor, int, torch.Tensor,
+               SpecDecodeMetadata, Optional[torch.Tensor],
+               Optional[torch.Tensor], Optional[torch.Tensor]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -1812,11 +1813,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return None, None
 
     def _build_attention_metadata(self, with_prefill, num_reqs, skip_attn):
+        attn_metadata: dict[str, Any] = {}
         if skip_attn:
             attn_metadata = None
         else:
             # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
-            attn_metadata: dict[str, Any] = {}
             # Prepare the attention metadata for each KV cache group and make layers
             # in the same group share the same metadata.
             for kv_cache_group_spec in self.kv_cache_config.kv_cache_groups:
@@ -2586,7 +2587,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         accepted_token_indices = None
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
-        eagle_attn_metadata = attn_metadata.values()[0]
+        eagle_attn_metadata = list(attn_metadata.values())[0]
 
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
