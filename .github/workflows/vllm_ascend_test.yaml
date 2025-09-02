@@ -285,13 +285,12 @@ jobs:
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
-          #pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_pangu
-          #pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W8A8
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W8A8
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_sp_for_qwen3_moe
 
           #pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
           #pytest -sv tests/e2e/multicard/test_prefix_caching.py
-          #pytest -sv tests/e2e/multicard/test_qwen3_moe.py
-          #pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
+          pytest -sv tests/e2e/multicard/test_qwen3_moe.py
+          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
