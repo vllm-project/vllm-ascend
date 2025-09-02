@@ -54,7 +54,7 @@ public:
     __aicore__ inline BGMVExpand(AscendC::TPipe* pipe) : pipe_(pipe) {}
 
     __aicore__ inline void Init(__gm__ void* x, __gm__ void* weight, __gm__ void* indices,
-                                __gm__ void* yIn, __gm__ void* yOut,
+                                uint32_t indicesSize, __gm__ void* yIn, __gm__ void* yOut,
                                 uint32_t batchSize, uint32_t numTokensPerCore, uint32_t maxLoRARank,
                                 uint32_t outputHiddenDim, uint32_t sliceOffset, uint32_t outputFullDim)
     {
@@ -70,7 +70,7 @@ public:
         wGm_.SetGlobalBuffer((__gm__ W_T *)weight);
         yInGm_.SetGlobalBuffer((__gm__ Y_T *)yIn);
         yOutGm_.SetGlobalBuffer((__gm__ Y_T *)yOut);
-        indicesGm_.SetGlobalBuffer((__gm__ int64_t *)indices);
+        indicesGm_.SetGlobalBuffer((__gm__ int64_t *)indices, indicesSize);
 
         pipe_->InitBuffer(inQueueX_, 1, NUM_ELEMENTS_PER_REPEAT * sizeof(X_T));
         pipe_->InitBuffer(inQueueW_, BUFFER_NUM, W_IN_TILE_NUM_ELEMENTS * sizeof(W_T));
@@ -328,14 +328,14 @@ private:
 
 #define BGMV_EXPAND_TYPE_DECLARE(TYPE)                                                                                 \
     extern "C" __global__ __aicore__ void bgmv_expand_##TYPE(__gm__ void* x, __gm__ void* weight, __gm__ void* indices,\
-                                                             __gm__ void* yIn,  __gm__ void* yOut,                     \
+                                                             uint32_t indicesSize, __gm__ void* yIn, __gm__ void* yOut,\
                                                              uint32_t batchSize, uint32_t numTokensPerCore,            \
                                                              uint32_t maxLoRARank, uint32_t outputHiddenDim,           \
                                                              uint32_t sliceOffset, uint32_t outputFullDim)             \
     {                                                                                                                  \
         AscendC::TPipe pipe;                                                                                           \
         BGMVExpand<TYPE> op(&pipe);                                                                                    \
-        op.Init(x, weight, indices, yIn, yOut, batchSize, numTokensPerCore, maxLoRARank,                               \
+        op.Init(x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore, maxLoRARank,                  \
                 outputHiddenDim, sliceOffset, outputFullDim);                                                          \
         op.Process();                                                                                                  \
     }
@@ -347,17 +347,17 @@ BGMV_EXPAND_TYPE_DECLARE(half)
 #endif
 
 namespace vllm_ascend {
-extern void bgmv_expand_impl(AscendType type, void* stream, void* x, void* weight, void* indices,
+extern void bgmv_expand_impl(AscendType type, void* stream, void* x, void* weight, void* indices, uint32_t indicesSize,
                              void* yIn, void* yOut, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t maxLoRARank,
                              uint32_t outputHiddenDim, uint32_t sliceOffset, uint32_t outputFullDim)
 {
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
     if (type == AscendType::FP16) {
-        bgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, indices, yIn, yOut, batchSize, numTokensPerCore,
+        bgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize, numTokensPerCore,
                                                         maxLoRARank, outputHiddenDim, sliceOffset, outputFullDim);
     } else if (type == AscendType::BF16) {
         #if (__CCE_AICORE__ >= 220)
-            bgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, yIn, yOut, batchSize,
+            bgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, indicesSize, yIn, yOut, batchSize,
                                                                   numTokensPerCore, maxLoRARank, outputHiddenDim,
                                                                   sliceOffset, outputFullDim);
         #endif

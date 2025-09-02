@@ -29,7 +29,8 @@ public:
 
 public:
     __aicore__ inline SGMVShrink(AscendC::TPipe *pipe) : pipe_(pipe) {}
-    __aicore__ inline void Init(__gm__ void *x, __gm__ void *weight, __gm__ void *loraIndices, __gm__ void *seqLen,
+    __aicore__ inline void Init(__gm__ void *x, __gm__ void *weight, __gm__ void *loraIndices, uint32_t loraIndicesSize,
+                                __gm__ void *seqLen, uint32_t seqLenSize,
                                 __gm__ void *y, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t inputHiddenDim,
                                 uint32_t maxLoRARank, float scale)
     {
@@ -44,8 +45,8 @@ public:
         xGm_.SetGlobalBuffer((__gm__ X_T *)x);
         yOutGm_.SetGlobalBuffer((__gm__ Y_T *)y);
         wGm_.SetGlobalBuffer((__gm__ W_T *)weight);
-        loraIndicesGm_.SetGlobalBuffer((__gm__ int64_t *)loraIndices);
-        seqLenGm_.SetGlobalBuffer((__gm__ int64_t *)seqLen);
+        loraIndicesGm_.SetGlobalBuffer((__gm__ int64_t *)loraIndices, loraIndicesSize);
+        seqLenGm_.SetGlobalBuffer((__gm__ int64_t *)seqLen, seqLenSize);
 
         pipe_->InitBuffer(inQueueX_, BUFFER_NUM, TILE_LENGTH * sizeof(X_T));
         pipe_->InitBuffer(inQueueW_, BUFFER_NUM, TILE_LENGTH * sizeof(W_T));
@@ -226,14 +227,16 @@ private:
 
 #define SGMV_SHRINK_TYPE_DECLARE(TYPE)                                                                                 \
     extern "C" __global__ __aicore__ void sgmv_shrink_##TYPE(__gm__ void* x, __gm__ void* weight,                      \
-                                                             __gm__ void* loraIndices, __gm__ void* seqLen,            \
+                                                             __gm__ void* loraIndices, uint32_t loraIndicesSize,       \
+                                                             __gm__ void* seqLen, uint32_t seqLenSize,                 \
                                                              __gm__ void* y, uint32_t batchSize,                       \
                                                              uint32_t numTokensPerCore, uint32_t inputHiddenDim,       \
                                                              uint32_t maxLoRARank, float scale)                        \
     {                                                                                                                  \
         AscendC::TPipe pipe;                                                                                           \
         SGMVShrink<TYPE> op(&pipe);                                                                                    \
-        op.Init(x, weight, loraIndices, seqLen,y, batchSize, numTokensPerCore, inputHiddenDim, maxLoRARank, scale);    \
+        op.Init(x, weight, loraIndices, loraIndicesSize, seqLen, seqLenSize,                                           \
+            y, batchSize, numTokensPerCore, inputHiddenDim, maxLoRARank, scale);                                       \
         op.Process();                                                                                                  \
     }
 
@@ -244,18 +247,23 @@ SGMV_SHRINK_TYPE_DECLARE(half)
 #endif
 
 namespace vllm_ascend {
-extern void sgmv_shrink_impl(AscendType type, void* stream, void* x, void* weight, void* loraIndices, void* seqLen,
+extern void sgmv_shrink_impl(AscendType type, void* stream, void* x, void* weight, 
+                             void* loraIndices, uint32_t loraIndicesSize,
+                             void* seqLen, uint32_t seqLenSize,
                              void* y, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t inputHiddenDim,
                              uint32_t maxLoRARank, float scale)
 {
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
     if (type == AscendType::FP16) {
-        sgmv_shrink_half<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, seqLen, y, batchSize, 
+        sgmv_shrink_half<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, seqLen, seqLenSize, 
+                                                        y, batchSize, 
                                                         numTokensPerCore, inputHiddenDim, maxLoRARank,
                                                         scale);
     } else if (type == AscendType::BF16) {
         #if (__CCE_AICORE__ >= 220)
-            sgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, seqLen, y, batchSize,
+            sgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, 
+                                                                  seqLen, seqLenSize, 
+                                                                  y, batchSize,
                                                                   numTokensPerCore, inputHiddenDim, maxLoRARank,
                                                                   scale);
         #endif
