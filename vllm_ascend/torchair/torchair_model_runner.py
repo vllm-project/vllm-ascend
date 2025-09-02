@@ -15,7 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
-#
+# isort: skip_file
 
 import types
 from typing import Optional
@@ -34,12 +34,10 @@ from vllm.logger import logger
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata,
-                                        check_torchair_cache_exist,
-                                        converting_weight_acl_format,
-                                        register_torchair_model,
-                                        torchair_quant_method_register,
-                                        write_kv_cache_bytes_to_file)
+from vllm_ascend.torchair.utils import (
+    TorchairCommonAttentionMetadata, check_torchair_cache_exist,
+    converting_weight_acl_format, register_torchair_model, torchair_ops_patch,
+    torchair_quant_method_register, write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_310p)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -68,9 +66,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         self._check_batch_sizes_consistency()
         register_torchair_model()
+        torchair_ops_patch()
         torchair_quant_method_register()
 
-    def _get_forward_metadata_across_dp_and_pad(
+    def _sync_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         """Override from NPUModelRunner to pad num_tokens"""
@@ -81,8 +80,17 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 return maybe_padded_num_tokens, None, with_prefill, enable_dbo
             return num_tokens, None, with_prefill, enable_dbo
 
-        num_tokens_across_dp, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
-            num_tokens, with_prefill, enable_dbo)
+        num_tokens_across_dp = torch.zeros(self.dp_size + 2,
+                                           dtype=torch.int32,
+                                           device="npu")
+        num_tokens_across_dp[self.dp_rank] = num_tokens
+        num_tokens_across_dp[-2] = int(with_prefill)
+        num_tokens_across_dp[-1] = int(not enable_dbo)
+        dist.all_reduce(num_tokens_across_dp,
+                        group=get_dp_group().device_group)
+        with_prefill = bool(num_tokens_across_dp[-2])
+        enable_dbo = not bool(num_tokens_across_dp[-1])
+        num_tokens_across_dp = num_tokens_across_dp[:-2]
 
         if not with_prefill:
             max_num_token = num_tokens_across_dp.max().item()
@@ -91,7 +99,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             num_tokens_across_dp = torch.full((self.dp_size, ),
                                               maybe_padded_num_tokens,
                                               dtype=torch.int32,
-                                              device="cpu")
+                                              device="npu")
         else:
             maybe_padded_num_tokens = num_tokens
 
@@ -316,6 +324,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
             communication_adaptation_310p()
 
         config = torchair.CompilerConfig()
+        if get_ascend_config().torchair_graph_config.mode:
+            config.mode = get_ascend_config().torchair_graph_config.mode
         config.experimental_config.frozen_parameter = True
         # enabling tiling_schedule_optimize on 300I Duo has some bugs, so we have to
         # disable it on 300I Duo platform now.

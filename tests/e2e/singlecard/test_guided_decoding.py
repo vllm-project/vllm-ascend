@@ -28,7 +28,7 @@ from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
 
@@ -92,7 +92,6 @@ def test_guided_json_completion(guided_decoding_backend: str,
     with VllmRunner(
             MODEL_NAME,
             seed=0,
-            dtype="auto",
             guided_decoding_backend=guided_decoding_backend,
     ) as vllm_model:
         prompts = [
@@ -131,7 +130,6 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
     with VllmRunner(
             MODEL_NAME,
             seed=0,
-            dtype="auto",
             guided_decoding_backend=guided_decoding_backend,
     ) as vllm_model:
         prompts = [
