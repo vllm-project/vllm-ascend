@@ -419,12 +419,11 @@ class P2pHcclEngine:
             self.create_connect(item.remote_address)
 
         with self.send_stream:
-            [
+            for tensor in item.tensor:
                 self.extract_kv_from_layer(item.is_mla, tensor,
                                            item.slot_mapping)
-                for tensor in item.tensor
-            ]
 
+        # todo: send two tensors at once
         for tensorIdx in range(len(item.tensor)):
             tensor = item.tensor[tensorIdx]
             sock = self.socks[item.remote_address]
@@ -474,17 +473,18 @@ class P2pHcclEngine:
         # Clear the buffer upon request completion.
         for request_id in finished_req_ids:
             for layer_name in no_compile_layers:
-                tensor_id = request_id + "#" + layer_name
-                if tensor_id in self.recv_store:
-                    with self.recv_store_cv:
-                        tensor = self.recv_store.pop(tensor_id, None)
-                        self.send_request_id_to_tensor_ids.pop(
-                            request_id, None)
-                        self.recv_request_id_to_tensor_ids.pop(
-                            request_id, None)
-                    if isinstance(tensor, tuple):
-                        addr, _, _ = tensor
-                        self.pool.free(addr)
+                for idx in range(0, 2):
+                    tensor_id = request_id + "#" + layer_name + "_idx_" + str(idx)
+                    if tensor_id in self.recv_store:
+                        with self.recv_store_cv:
+                            tensor = self.recv_store.pop(tensor_id, None)
+                            self.send_request_id_to_tensor_ids.pop(
+                                request_id, None)
+                            self.recv_request_id_to_tensor_ids.pop(
+                                request_id, None)
+                        if isinstance(tensor, tuple):
+                            addr, _, _ = tensor
+                            self.pool.free(addr)
 
         # TODO:Retrieve requests that have already sent the KV cache.
         finished_sending: set[str] = set()
