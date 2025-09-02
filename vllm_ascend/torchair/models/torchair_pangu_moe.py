@@ -971,8 +971,6 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.num_experts)
 
-        # expert_params_mapping = []
-
         params_dict = dict(self.named_parameters())  # from model
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
