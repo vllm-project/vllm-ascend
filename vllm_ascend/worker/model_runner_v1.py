@@ -1818,6 +1818,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
             # Prepare the attention metadata for each KV cache group and make layers
             # in the same group share the same metadata.
+            attn_metadata = {}
             for kv_cache_group_spec in self.kv_cache_config.kv_cache_groups:
                 attn_metadata_i = self.attn_metadata_builder.build_dummy(
                     num_reqs=num_reqs, num_actual_tokens=1)
