@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
+import os
 from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
 
@@ -34,6 +35,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                super_kernel)
 
 CHUNK_SIZE: int = ascend_envs.VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE
+COMM_QUANT_MODE: int = ascend_envs.COMM_QUANT_MODE
 
 
 def apply_mlp_decode(hidden_states_wrapper: List[torch.Tensor],
@@ -199,6 +201,12 @@ def apply_mlp(hidden_states: torch.Tensor,
 
     return hidden_states
 
+if COMM_QUANT_MODE == 1:
+    os.environ["HCCL_INTRA_PCIE_ENABLE"] = "1"
+    os.environ["HCCL_INTRA_ROCE_ENABLE"] = "0"
+    comm_quant_mode = 2
+else:
+    comm_quant_mode = 0
 
 def fused_experts_with_mc2(
     hidden_states: torch.Tensor,
@@ -319,6 +327,7 @@ def fused_experts_with_mc2(
         "shared_expert_rank_num": 0,
         "moe_expert_num": moe_expert_num,
         "global_bs": global_bs,
+        "comm_quant_mode": comm_quant_mode,
     }
     tp_recv_counts = torch.empty(1,
                                  dtype=torch.int32,
