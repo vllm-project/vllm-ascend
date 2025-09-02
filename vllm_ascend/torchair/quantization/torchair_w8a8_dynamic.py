@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
+import os
 from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
 
@@ -32,6 +33,7 @@ from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version)
 
+COMM_QUANT_MODE: int = envs_ascend.COMM_QUANT_MODE
 
 def torchair_apply_mlp_decode(hidden_states: torch.Tensor,
                               w1: torch.Tensor,
@@ -198,7 +200,13 @@ def torchair_apply_mlp(hidden_states: torch.Tensor,
 
     return hidden_states
 
-
+if COMM_QUANT_MODE == 1:
+    os.environ["HCCL_INTRA_PCIE_ENABLE"] = "1"
+    os.environ["HCCL_INTRA_ROCE_ENABLE"] = "0"
+    comm_quant_mode = 2
+else:
+    comm_quant_mode = 0
+  
 def torchair_fused_experts_with_mc2(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -318,6 +326,7 @@ def torchair_fused_experts_with_mc2(
         "shared_expert_rank_num": 0,
         "moe_expert_num": moe_expert_num,
         "global_bs": 0,
+        "comm_quant_mode": comm_quant_mode,
     }
     tp_recv_counts = torch.empty(1,
                                  dtype=torch.int32,
@@ -1033,4 +1042,5 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
+
 
