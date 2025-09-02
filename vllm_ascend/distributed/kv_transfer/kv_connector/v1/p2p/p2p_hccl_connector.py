@@ -8,6 +8,8 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_connector import \
+    P2pNcclConnectorMetadata
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
@@ -23,9 +25,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-
-from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_connector import \
-    P2pNcclConnectorMetadata
 
 
 class P2pHcclConnector(KVConnectorBase_V1):

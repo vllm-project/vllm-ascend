@@ -123,7 +123,6 @@ class P2pHcclEngine:
         self.buffer_size = 0
         self.buffer_size_threshold = float(self.config.kv_buffer_size)
 
-
         self._listener_thread = threading.Thread(
             target=self.listen_for_requests, daemon=True)
         self._listener_thread.start()
@@ -136,10 +135,9 @@ class P2pHcclEngine:
         logger.info(
             "💯P2pHcclEngine init, rank:%d, local_rank:%d, http_address:%s, "
             "zmq_address:%s, proxy_address:%s, send_type:%s, buffer_size_"
-            "threshold:%.2f", self.rank, self.local_rank,
-            self.http_address, self.zmq_address, self.proxy_address,
-            self.send_type,
-            self.buffer_size_threshold) 
+            "threshold:%.2f", self.rank, self.local_rank, self.http_address,
+            self.zmq_address, self.proxy_address, self.send_type,
+            self.buffer_size_threshold)
 
     def create_connect(self, remote_address: typing.Optional[str] = None):
         assert remote_address is not None
@@ -336,7 +334,11 @@ class P2pHcclEngine:
                     else:
                         self.buffer_size += tensor_size
 
-                except torch.cuda.OutOfMemoryError:
+                except RuntimeError as e:
+                    # When oom occurs on ascend, it will raise RuntimeError instead of OutOfMemoryError, so we need to check if the npu is out of memory
+                    if not str(e).__contains__("NPU out of memory"):
+                        raise e
+
                     self.router_socket.send_multipart([remote_address, b"1"])
                     tensor = None
                     logger.warning(
