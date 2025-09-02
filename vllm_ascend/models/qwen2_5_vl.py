@@ -485,8 +485,6 @@ class AscendQwen2_5_VLForConditionalGeneration(
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
-                # Ascend 中 visual的传参需要是tensor，但是vllm中的visual是list
-                # 需要改写run_dp_sharded_mrope_vision_model中vision_model的入参
                 return run_dp_sharded_mrope_vision_model(self.visual,
                                                          pixel_values,
                                                          grid_thw.tolist())
@@ -508,7 +506,13 @@ class AscendQwen2_5_VLForConditionalGeneration(
         else:
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
-            video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+            if self.use_data_parallel:
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values_videos,
+                                                         grid_thw.tolist())
+            else:
+                video_embeds = self.visual(pixel_values_videos,
+                                           grid_thw=grid_thw)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
