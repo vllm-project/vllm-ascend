@@ -1043,4 +1043,3 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
 
-
