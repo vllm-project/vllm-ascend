@@ -23,7 +23,7 @@ import math
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Any, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -1033,12 +1033,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             graph_pad_size=self.graph_pad_size,
             decode_token_per_req=self.decode_token_per_req,
         )
-        
+
         attn_metadata: dict[str, Any] = {}
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
-            self.kv_cache_config.kv_cache_groups):
+                self.kv_cache_config.kv_cache_groups):
             attn_metadata_i = self.attn_metadata_builder.build(
                 common_attn_metadata, self.model)
             if self.vllm_config.model_config.use_mla:
@@ -1338,8 +1338,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens: int,
         hidden_states: torch.Tensor,
         attn_metadata: dict[str, Union[AscendMetadata, AscendMLAMetadata,
-                             AscendTorchairMetadata,
-                             AscendMLATorchairMetadata]],
+                                       AscendTorchairMetadata,
+                                       AscendMLATorchairMetadata]],
         aux_hidden_states: torch.Tensor = None,
     ) -> Optional[list[list[int]]]:
         if not self.drafter:
@@ -2562,8 +2562,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens: int,
         hidden_states: torch.Tensor,
         attn_metadata: dict[str, Union[AscendMetadata, AscendMLAMetadata,
-                             AscendTorchairMetadata,
-                             AscendMLATorchairMetadata]],
+                                       AscendTorchairMetadata,
+                                       AscendMLATorchairMetadata]],
     ):
         assert isinstance(self.drafter, MtpProposer)
         next_token_ids: list[int] = []
