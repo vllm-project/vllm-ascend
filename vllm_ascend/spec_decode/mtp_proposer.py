@@ -25,8 +25,6 @@ from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
-from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
-    TorchairDeepSeekMTP
 from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 
