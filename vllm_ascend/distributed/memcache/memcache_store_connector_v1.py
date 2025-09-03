@@ -1,4 +1,3 @@
-
 import threading
 from enum import Enum
 from collections import defaultdict
@@ -140,6 +139,7 @@ class MemcacheConnectorV1(KVConnectorBase_V1):
             return
         
         self.connector_worker.wait_for_save(self._get_connector_metadata())
+        # time.sleep(1)
 
     def get_finished(self,
                         finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -198,9 +198,11 @@ class MemcacheConnectorV1Scheduler:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
-
-        token_ids = torch.tensor(request.prompt_token_ids)
-
+        if self._discard_partial_chunks:
+            token_block_end = len(request.prompt_token_ids) // self._block_size * self._block_size
+            token_ids = torch.tensor(request.prompt_token_ids[:token_block_end])
+        else:
+            token_ids = torch.tensor(request.prompt_token_ids)
         num_external_hit_tokens = self.client.lookup(token_ids)
 
         if num_external_hit_tokens == request.num_tokens:
@@ -338,6 +340,8 @@ class MemcacheConnectorV1Scheduler:
                         f"but it is scheduled to be cached"
                     )
                 new_block_ids = cached_reqs.new_block_ids[i]
+                if not new_block_ids:
+                    continue
                 request_tracker.update(new_token_ids, new_block_ids)
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
