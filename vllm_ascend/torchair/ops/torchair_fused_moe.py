@@ -45,6 +45,7 @@ from vllm_ascend.distributed.communication_op import \
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
+from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
@@ -1055,7 +1056,13 @@ class TorchairAscendFusedMoE(FusedMoE):
             self.quant_method = TorchairAscendUnquantizedFusedMoEMethod(
                 self.moe)
         else:
-            self.quant_method = quant_config.get_quant_method(self, prefix)
+            if quant_config.is_layer_skipped_ascend(
+                    prefix, quant_config.packed_modules_mapping):
+                self.quant_method = TorchairAscendUnquantizedFusedMoEMethod(
+                    self.moe)
+            else:
+                self.quant_method = AscendFusedMoEMethod(
+                    quant_config, prefix, quant_config.packed_modules_mapping)
 
         assert self.quant_method is not None
 

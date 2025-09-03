@@ -334,8 +334,9 @@ class NPUWorker(WorkerBase):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU,
                 ],
-                with_stack=False,
-                profile_memory=False,
+                with_stack=envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK,
+                profile_memory=envs_vllm.\
+                    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
                 with_modules=False,
                 experimental_config=experimental_config,
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(

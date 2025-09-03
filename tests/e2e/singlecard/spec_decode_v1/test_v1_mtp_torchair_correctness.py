@@ -20,7 +20,7 @@ def model_name():
     return "wemaster/deepseek_mtp_main_random_bf16"
 
 
-def test_mtp_correctness(
+def test_mtp_torchair_correctness(
     sampling_config: SamplingParams,
     model_name: str,
 ):
@@ -38,25 +38,34 @@ def test_mtp_correctness(
                     tensor_parallel_size=1,
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
-                    enforce_eager=True) as ref_llm:
+                    enforce_eager=False,
+                    additional_config={
+                        "torchair_graph_config": {
+                            "enabled": True,
+                            "use_cached_graph": False,
+                            "graph_batch_sizes": [1, 2, 4],
+                        },
+                    }) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
-
-    with VllmRunner(
-            model_name,
-            tensor_parallel_size=1,
-            max_num_seqs=256,
-            gpu_memory_utilization=0.7,
-            distributed_executor_backend="mp",
-            enable_expert_parallel=True,
-            speculative_config={
-                "method": "deepseek_mtp",
-                "num_speculative_tokens": 1,
-            },
-            enforce_eager=True,
-            max_model_len=2000,
-            additional_config={"ascend_scheduler_config": {
-                "enabled": False
-            }}) as spec_llm:
+    with VllmRunner(model_name,
+                    tensor_parallel_size=1,
+                    max_num_seqs=256,
+                    gpu_memory_utilization=0.7,
+                    distributed_executor_backend="mp",
+                    enable_expert_parallel=True,
+                    speculative_config={
+                        "method": "deepseek_mtp",
+                        "num_speculative_tokens": 1,
+                    },
+                    enforce_eager=False,
+                    max_model_len=2000,
+                    additional_config={
+                        "torchair_graph_config": {
+                            "enabled": True,
+                            "use_cached_graph": False,
+                            "graph_batch_sizes": [1, 2, 4],
+                        }
+                    }) as spec_llm:
         spec_outputs = spec_llm.generate(example_prompts, sampling_config)
 
     matches = 0

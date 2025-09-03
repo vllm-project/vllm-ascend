@@ -173,8 +173,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
-            is_unquantized=True)
+            global_num_experts=global_num_experts)
 
         topk_weights = topk_weights.to(x.dtype)
         # this is a naive implementation for experts load balance so as
