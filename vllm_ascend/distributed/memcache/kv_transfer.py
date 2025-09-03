@@ -11,10 +11,6 @@ from vllm_ascend.distributed.memcache.config_data import MemcacheEngineKey, Memc
 from vllm_ascend.distributed.memcache.memcache_store import Memcachestore
 import os
 
-def cylog(msg):
-    with open(f"/home/f30058701/store_{os.getpid()}.log", "a") as f:
-        f.write(f"{msg}\n")
-
 
 class KVTransferThread(threading.Thread):
     def __init__(self, tp_rank: int, tp_size: int, m_store: Memcachestore,
@@ -94,8 +90,6 @@ class KVTransferThread(threading.Thread):
         with self.done_task_lock:
             finished_requests = self.finished_requests.copy()
             self.finished_requests.clear()
-            print(f"dfq finished request:{finished_requests}, tp_rank:{self.tp_rank}")
-            cylog(f"dfq finished request:{finished_requests}, tp_rank:{self.tp_rank}")
         return finished_requests
     
     def set_finished_request(self, req_id):
@@ -105,7 +99,6 @@ class KVTransferThread(threading.Thread):
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
         device = torch.device(f"npu:{self.tp_rank}")
-        print(f"dfq run local_rank:{self.tp_rank}")
         torch.npu.set_device(device)
         self.ready_event.set()
         while True:
@@ -136,9 +129,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         mask=req_meta["mask"]
         block_ids=req_meta["block_ids"]
         req_id=req_meta["req_id"]
+        torch.npu.current_stream().synchronize()
         for start, end, key in self.token_database.process_tokens(tokens, mask):
-            print(f"sending start:{start},end:{end},key:{key}")
-            cylog(f"sending start:{start},end:{end},key:{key}")
             addr, size, block_id=self.prepare_value(start, end, block_ids)      
             self.m_store.put(key, addr, size, block_id)
         self.set_finished_request(req_id)
@@ -159,13 +151,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         block_ids=req_meta["block_ids"]
         req_id=req_meta["req_id"]
         for start, end, key in self.token_database.process_tokens(tokens, mask):
-            print(f"recving start:{start},end:{end},key:{key}")
-            cylog(f"recving start:{start},end:{end},key:{key}")
             addr, size, block_id=self.prepare_value(start, end, block_ids)      
             self.m_store.get(key, addr, size, block_id)
         self.set_finished_request(req_id)
-        print(f"dfq finish req_id:{req_id}, tp_rank:{self.tp_rank}")
-        cylog(f"dfq finish req_id:{req_id}, tp_rank:{self.tp_rank}")
         self.request_queue.task_done()
 
 
@@ -189,7 +177,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
             addr, size=self.prepare_value_layer(req_meta.starts[index], req_meta.ends[index], req_meta.block_ids, req_meta.layer_id)
             self.m_store.put(key, addr, size)
         if req_meta.layer_id==self.final_layer_id:
-            self.set_finished_request(req_id)
+            self.set_finished_request(req_meta.req_id)
         self.request_queue.task_done()
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
