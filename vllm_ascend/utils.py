@@ -568,3 +568,7 @@ def oproj_tp_enable() -> bool:
 
 def mlp_tp_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE
+
+
+def matmul_allreduce_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE

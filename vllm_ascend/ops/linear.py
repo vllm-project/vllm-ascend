@@ -19,6 +19,8 @@ from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
+import torch_npu
+from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
 from vllm.distributed import divide, split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
@@ -33,7 +35,10 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
-from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
+from vllm_ascend.utils import (matmul_allreduce_enable, mlp_tp_enable,
+                               oproj_tp_enable)
+
+_HCOMM_INFO = None
 
 
 class AscendColumnParallelLinear(ColumnParallelLinear):
@@ -138,6 +143,10 @@ class AscendRowParallelLinear(RowParallelLinear):
         elif prefix.find("o_proj") != -1 and oproj_tp_enable():
             comm_group = get_otp_group()
             self.forward_type = "oproj_tp"
+        elif matmul_allreduce_enable():
+            comm_group = get_tp_group()
+            self.forward_type = "matmul_allreduce"
+            self.hcomm_info = self.get_hcomm_info(comm_group.device_group)
         else:
             comm_group = get_tp_group()
             self.forward_type = "normal"
@@ -188,6 +197,25 @@ class AscendRowParallelLinear(RowParallelLinear):
         else:
             self.register_parameter("bias", None)
 
+        if matmul_allreduce_enable():
+            self.weight_t = self.weight.t()
+
+    @staticmethod
+    def get_hcomm_info(group: ProcessGroup) -> str:
+        """Get the HCCL communication information for the given group."""
+        global _HCOMM_INFO
+        if _HCOMM_INFO is not None:
+            return _HCOMM_INFO
+
+        rank = torch.distributed.get_rank(group)
+        if torch.__version__ > "2.0":
+            global_rank = torch.distributed.get_global_rank(group, rank)
+            _HCOMM_INFO = group._get_backend(
+                torch.device("npu")).get_hccl_comm_name(global_rank)
+        else:
+            _HCOMM_INFO = group.get_hccl_comm_name(rank)
+        return _HCOMM_INFO
+
     def forward(
         self,
         input_,
@@ -198,6 +226,8 @@ class AscendRowParallelLinear(RowParallelLinear):
             return self._forward_oproj_tp(input_)
         elif self.forward_type == "mlp_tp":
             return self._forward_mlp_tp(input_)
+        elif self.forward_type == "matmul_allreduce":
+            return self._forward_matmul_allreduce(input_)
         else:
             return super().forward(input_)
 
@@ -269,6 +299,31 @@ class AscendRowParallelLinear(RowParallelLinear):
         output = self.comm_group.reduce_scatter(output_parallel, dim=0)
 
         # Handle bias return based on configuration
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+    def _forward_matmul_allreduce(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+        """Calculate the output tensor of forward by considering
+        fusing communication and computation."""
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        if self.reduce_results and self.tp_size > 1:
+            output = torch_npu.npu_mm_all_reduce_base(input_parallel,
+                                                      self.weight_t,
+                                                      self.hcomm_info,
+                                                      bias=bias_)
+        else:
+            output = self.quant_method.apply(self, input_parallel, bias=bias_)
+
         output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:
             return output
