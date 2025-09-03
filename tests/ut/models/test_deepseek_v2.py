@@ -230,9 +230,10 @@ def test_custom_deepseek_v2_moe(mock_distributed, base_config,
         assert output.shape == (2, 4, 128)
 
 
+@patch("torch.ops.vllm.mla_forward")
 @patch("torch_npu.npu_rms_norm")
-def test_custom_deepseek_v2_mla_attention(mock_rms_norm, mock_distributed,
-                                          base_config):
+def test_custom_deepseek_v2_mla_attention(mock_rms_norm, mock_mla_forward,
+                                          mock_distributed, base_config):
     mock_rms_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128))
 
     attn = CustomDeepseekV2MLAAttention(config=base_config,
@@ -253,8 +254,8 @@ def test_custom_deepseek_v2_mla_attention(mock_rms_norm, mock_distributed,
     with patch.object(attn.mla_attn,
                       "__call__",
                       return_value=torch.randn(2, 4, 128)):
-        with pytest.raises(AssertionError):
-            attn(positions, x)
+        attn(positions, x)
+        mock_mla_forward.assert_called_once()
 
     attn = CustomDeepseekV2MLAAttention(config=base_config,
                                         hidden_size=128,
