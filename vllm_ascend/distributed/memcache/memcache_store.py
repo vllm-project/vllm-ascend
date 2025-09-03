@@ -30,9 +30,6 @@ from vllm_ascend.distributed.memcache.config_data import MemcacheEngineKey
 METADATA_BYTES_LEN = 24
 BASE_PORT = int(os.getenv("VLLM_BASE_PORT", "8790"))
 
-def cylog(msg):
-    with open(f"/home/f30058701/store_{os.getpid()}.log", "a") as f:
-        f.write(f"{msg}\n")
 
 class MmcDirect(Enum):
     COPY_L2G = 0
@@ -46,7 +43,8 @@ class Memcachestore():
         self, parallel_config: ParallelConfig
     ):
         try:
-            from pymmc import DistributedObjectStore
+            # from pymmc import DistributedObjectStore
+            from memcache import DistributedObjectStore
         except ImportError as e:
             raise ImportError(
                 "Please install memcache by following the instructions at "
@@ -80,12 +78,9 @@ class Memcachestore():
     def get(self, key: MemcacheEngineKey, addr: list[int], size: list[int], block_id: int):
         try:
             res = self.store.get_into_layers(key.to_string(), addr, size, MmcDirect.COPY_G2L.value)
-            cylog(f"key:{key.to_string()} block_id:{block_id}")
-            cylog(f"get kv:{self.kvcache[0][1][block_id]}")
-            # torch.save(self.kvcache[0][1][block_id], f"get_tensor35_tp{self.rank}.pt")
             if res != 0:
                 logger.error(
-                    f"Failed to get key {key.to_string()},error:{e}"
+                    f"Failed to get key {key.to_string()},res:{res}"
                 )  
         except Exception as e:
             logger.error(f"Failed to get key {key.to_string()}. {e}")
@@ -93,12 +88,9 @@ class Memcachestore():
     def put(self, key: MemcacheEngineKey, addr: list[int], size: list[int], block_id: int):
         try:
             res = self.store.put_from_layers(key.to_string(), addr, size, MmcDirect.COPY_L2G.value)
-            cylog(f"key:{key.to_string()} block_id:{block_id}")
-            cylog(f"put kv:{self.kvcache[0][1][block_id]}")
-            # torch.save(self.kvcache[35][1][block_id], f"put_tensor35_tp{self.rank}.pt")
             if res != 0:
                 logger.error(
-                    f"Failed to put key {key.to_string()},error:{e}"
+                    f"Failed to put key {key.to_string()},res:{res}"
                 )  
         except Exception as e:
             logger.error(
