@@ -452,11 +452,13 @@ class TestNPUWorker(TestBase):
         mock_logger,
         mock_envs_vllm,
     ):
-        """Test _init_profiler method - profiler enabled case"""
+        """Test _init_profiler method - profiler enabled case with stack and memory profiling enabled"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
 
         # Set environment variables to enable profiler
         mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = "/path/to/traces"
+        mock_envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK = True
+        mock_envs_vllm.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY = True
 
         # Set enum mocks
         mock_export_type.Text = "Text"
@@ -516,8 +518,8 @@ class TestNPUWorker(TestBase):
             # Verify profiler parameters
             expected_activities = ["CPU", "NPU"]
             self.assertEqual(profile_kwargs["activities"], expected_activities)
-            self.assertFalse(profile_kwargs["with_stack"])
-            self.assertFalse(profile_kwargs["profile_memory"])
+            self.assertTrue(profile_kwargs["with_stack"])
+            self.assertTrue(profile_kwargs["profile_memory"])
             self.assertFalse(profile_kwargs["with_modules"])
             self.assertEqual(profile_kwargs["experimental_config"],
                              mock_experimental_config_instance)
