@@ -324,7 +324,7 @@ class AscendScheduler(Scheduler):
                 self.scheduled_req_ids.add(request.request_id)
                 if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
                     req_to_new_block_ids[request.request_id] = (
-                        new_blocks.get_block_ids(request.request_id))
+                        new_blocks.get_block_ids())
                 else:
                     req_to_new_blocks[request.request_id] = new_blocks
                 num_scheduled_tokens[request.request_id] = num_new_tokens
