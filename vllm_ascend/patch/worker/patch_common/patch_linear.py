@@ -4,13 +4,14 @@ import vllm
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.config import LoRAConfig
-from vllm.lora.layers import BaseLayerWithLoRA
+from vllm.lora.layers import RowParallelLinearWithLoRA
 from vllm.lora.utils import _all_lora_classes
+
 
 from vllm_ascend.ops.linear import AscendRowParallelLinear
 
 
-class AscendRowParallelLinearWithLoRA(BaseLayerWithLoRA):
+class AscendRowParallelLinearWithLoRA(RowParallelLinearWithLoRA):
 
     @classmethod
     def can_replace_layer(
