@@ -157,7 +157,6 @@ class MemcacheEngine:
             load_spec = request.load_spec
             if load_spec is None or not load_spec.can_load:   #load =0
                 continue
-            print(f"BBBBBBBBBBBBBBBBBBBBBBBBBBBstart_load_kv")
             tokens = request.token_ids
             req_id = request.req_id
             if (load_spec.memcache_cached_tokens % self.block_size != 0) and (load_spec.memcache_cached_tokens == tokens.shape[0] - 1):
