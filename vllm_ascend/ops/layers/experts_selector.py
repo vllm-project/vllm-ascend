@@ -43,7 +43,6 @@ def select_experts(hidden_states: torch.Tensor,
                    routed_scaling_factor=1.0,
                    e_score_correction_bias: Optional[torch.Tensor] = None,
                    indices_type: Optional[torch.dtype] = None,
-                   is_unquantized: bool = False,
                    global_num_experts: int = -1):
     """
     Fused experts with select experts.
@@ -60,7 +59,6 @@ def select_experts(hidden_states: torch.Tensor,
         scoring_func: Scoring function to use.
         e_score_correction_bias: Correction bias to apply to expert scores.
         indices_type: dtype of indices
-        is_unquantized: Whether the data are unquantized.
         global_num_experts: Global number of experts.
 
     Returns:
@@ -80,8 +78,7 @@ def select_experts(hidden_states: torch.Tensor,
         custom_routing_function=custom_routing_function,
         scoring_func=scoring_func,
         routed_scaling_factor=routed_scaling_factor,
-        global_num_experts=global_num_experts,
-        is_unquantized=is_unquantized)
+        global_num_experts=global_num_experts)
 
     if topk_weights is None:
         topk_weights, topk_ids = _native_select_experts(
@@ -183,8 +180,7 @@ def _select_experts_with_fusion_ops(
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         routed_scaling_factor=1.0,
-        global_num_experts: int = -1,
-        is_unquantized: bool = False):
+        global_num_experts: int = -1):
 
     topk_weights, topk_ids, row_idx = None, None, None
     # NOTE: now npu_moe_gating_top_k can only support 'group_count=256' pattern
@@ -205,7 +201,7 @@ def _select_experts_with_fusion_ops(
             routed_scaling_factor=1,
             eps=float(1e-20))
         row_idx = return_row_idx(hidden_states, top_k)
-    if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax" and is_unquantized:
+    if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax":
         topk_weights, topk_ids, row_idx = torch_npu.npu_moe_gating_top_k_softmax(
             x=router_logits, finished=None, k=top_k)
         topk_ids = topk_ids.to(torch.int32)
