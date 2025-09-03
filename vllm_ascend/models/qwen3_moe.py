@@ -24,7 +24,9 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, CompilationLevel, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_pp_group,
+                              get_tensor_model_parallel_world_size)
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group)
 from vllm.forward_context import get_forward_context
@@ -49,8 +51,10 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
-                                               init_metadata_for_sp)
+                                               init_metadata_for_sp,
+                                               init_metadata_for_flashcomm)
 from vllm_ascend.utils import vllm_version_is
+import vllm_ascend.envs as ascend_envs
 
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
@@ -121,6 +125,8 @@ class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=None,
             _metadata_for_padding=_metadata_for_padding,
+            # disable moe flashcomm-v1, because of outer has been used.
+            replace_allreduce= _metadata_for_padding.flashcomm_enabled_version == 1,
         )
 
         return hidden_states
@@ -202,15 +208,19 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
     ) -> torch.Tensor:
 
         # To prevent precision issues during the decoder phase when only prefilling enables SP
-        if not self.enable_sequence_parallelism:
-            self.self_attn.o_proj.reduce_results = True
+        if _metadata_for_padding.flashcomm_enabled_version == 1:
+            self.self_attn.o_proj.reduce_results = False
         else:
-            self.self_attn.o_proj.reduce_results = not _metadata_for_padding.not_dummy_and_is_prefill if _metadata_for_padding is not None else True
+            if not self.enable_sequence_parallelism:
+                self.self_attn.o_proj.reduce_results = True
+            else:
+                self.self_attn.o_proj.reduce_results = not _metadata_for_padding.not_dummy_and_is_prefill if _metadata_for_padding is not None else True
 
         # Self Attention
         if residual is None:
             residual = hidden_states
-            if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
+            if (_metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill
+                    or _metadata_for_padding.flashcomm_enabled_version == 1):
                 residual = _metadata_for_padding.padding_slice(residual)
 
             hidden_states = self.input_layernorm(hidden_states)
@@ -218,7 +228,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-            if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
+            if (_metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill
+                    or _metadata_for_padding.flashcomm_enabled_version == 1):
                 hidden_states = _metadata_for_padding.allgather_unpadding_aligned(
                     hidden_states)
 
@@ -227,7 +238,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
             hidden_states=hidden_states,
         )
 
-        if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
+        if (_metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill
+                or _metadata_for_padding.flashcomm_enabled_version == 1):
             hidden_states = _metadata_for_padding.padding_aligned_reduce_scatter(
                 hidden_states)
 
@@ -299,6 +311,7 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(
@@ -314,7 +327,8 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
+        if (_metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill
+                or _metadata_for_padding.flashcomm_enabled_version == 1):
             hidden_states = _metadata_for_padding.allgather_unpadding_aligned(
                 hidden_states)
 
@@ -386,8 +400,14 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        _metadata_for_padding = init_metadata_for_sp(
-            input_ids, self.enable_sequence_parallelism)
+        flashcomm_enabled_version = ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM
+        if flashcomm_enabled_version > 0:
+            if self.enable_sequence_parallelism:
+                raise ValueError(f"Sequence parallelism and FlashComm cannot be enabled simultaneously.")
+            _metadata_for_padding = init_metadata_for_flashcomm(input_ids, flashcomm_enabled_version)
+        else:
+            _metadata_for_padding = init_metadata_for_sp(
+                input_ids, self.enable_sequence_parallelism)
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds, _metadata_for_padding)
         return hidden_states
