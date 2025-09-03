@@ -428,8 +428,8 @@ class AscendMLATorchairMetadataBuilder:
         if num_prefills > 0:
             reqs_start = num_decodes  # prefill_start
             tokens_start = num_decode_tokens
-            max_query_len = query_lens[tokens_start:].max().item()
-            max_seq_lens = seq_lens[tokens_start:].max().item()
+            max_query_len = query_lens[reqs_start:].max().item()
+            max_seq_lens = seq_lens[reqs_start:].max().item()
             prefill_query_start_loc = query_start_loc[
                 reqs_start:] - query_start_loc[reqs_start]
 
@@ -475,9 +475,9 @@ class AscendMLATorchairMetadataBuilder:
                     1).unsqueeze(2)
             prefill_metadata = AscendMLATorchairPrefillMetadata(
                 attn_mask=common_attn_metadata.attn_mask,
-                query_lens=query_lens[tokens_start:],
+                query_lens=query_lens[reqs_start:],
                 seq_lens=seq_lens,
-                context_lens=seq_lens[tokens_start:],
+                context_lens=seq_lens[reqs_start:],
                 input_positions=prefill_input_positions,
                 block_table=block_table[reqs_start:, ...],
                 max_query_len=max_query_len,
@@ -494,9 +494,9 @@ class AscendMLATorchairMetadataBuilder:
         if num_decodes > 0:
             actual_seq_lengths_q = query_start_loc[1:num_decodes + 1].tolist()
             max_seq_lens = seq_lens[:num_decodes].max().item()
-            seq_lens = seq_lens[:num_decode_tokens]
+            seq_lens = seq_lens[:num_decodes]
             input_positions = input_positions[:num_decode_tokens]
-            block_table = block_table[:num_decode_tokens, ...]
+            block_table = block_table[:num_decodes, ...]
             num_token_pad_size = 0
             if use_torchair_graph and common_attn_metadata.attn_state in [
                     AscendAttentionState.DecodeOnly,
@@ -629,11 +629,13 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
+        self.is_deepseek_mtp = False
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
         if speculative_config is not None:
             self.spec_token_num = speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
+            self.is_deepseek_mtp = speculative_config.method == 'deepseek_mtp'
 
     def _v_up_proj_and_o_proj(self, x, enable_multistream_mla: bool = False):
         # Convert from (B, N, L) to (N, B, L)
@@ -1018,7 +1020,8 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                                  self.qk_rope_head_dim)
                 input_layout = "BNSD"
 
-            if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
+            if attn_metadata.attn_state == AscendAttentionState.SpecDecoding \
+                or (attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill and self.is_deepseek_mtp):
                 assert num_tokens % self.spec_token_num == 0
                 input_layout = "TND"
                 # [bs * q_seq_len, num_heads_per_rank, dim]
