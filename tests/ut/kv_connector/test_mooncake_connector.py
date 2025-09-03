@@ -449,9 +449,11 @@ class TestMainThreadLoop(unittest.TestCase):
 class MockVllmConfig:
 
     def __init__(self):
+        self.model_config = MagicMock()
         self.parallel_config = MagicMock()
         self.cache_config = MagicMock()
         self.kv_transfer_config = MagicMock()
+        self.model_config.use_mla = True
         self.parallel_config.tensor_parallel_size = 2
         self.parallel_config.data_parallel_rank_local = 0
         self.parallel_config.data_parallel_size_local = 1
@@ -590,6 +592,10 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(meta.requests["req1"].local_block_ids, [4, 5, 6])
         self.assertEqual(meta.requests["req1"].remote_block_ids, [1, 2, 3])
         self.assertEqual(len(self.scheduler._reqs_need_recv), 0)
+
+    def test_get_finished_count(self):
+        count = self.scheduler.get_finished_count()
+        self.assertEqual(count, 2)
 
 
 class TestHelperFunctions(unittest.TestCase):
