@@ -24,8 +24,7 @@ def determine_default_expert_map(global_expert_num, world_size, rank_id,
                                  global_redundant_expert_num):
     if world_size == 1:
         local_ids = torch.arange(global_expert_num, dtype=torch.int32)
-        expert_map = local_ids.unsqueeze(0).expand(world_size, -1)
-        return (global_expert_num, expert_map)
+        return (global_expert_num, local_ids)
 
     local_num_experts = global_expert_num // world_size
 
