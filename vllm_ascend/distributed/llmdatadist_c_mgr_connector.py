@@ -375,40 +375,17 @@ class LLMDataDistCMgrConnectorWorker():
                         )
                 elif event_msg == LLMDataDistCMgrEvent.ReqForFinished:
                     finished_req_id = decode_msg[0]
-                    decode_tp_rank = decode_msg[1]
-                    decode_tp_size = decode_msg[2]
                     with self.thread_lock:
-                        if self._increment_task_count(finished_req_id,
-                                                      decode_tp_rank,
-                                                      decode_tp_size):
-                            logger.debug(
-                                f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
-                            )
-                            self.finished_reqs.add(finished_req_id)
+                        logger.debug(
+                            f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
+                        )
+                        self.finished_reqs.add(finished_req_id)
                     sock.send_multipart(
                         (identity, b"", b"receiving decode finished"))
                 else:
                     raise RuntimeError(
                         f"LLMDataDistCMgrConnectorWorker: Receiving unexpected request event {event_msg} from remote !"
                     )
-
-    def _increment_task_count(self, request_id: str, tp_rank: int,
-                              decode_tp_size: int):
-        if request_id not in self.done_receiving_counts:
-            self.done_receiving_counts[request_id] = set()
-        if tp_rank in self.done_receiving_counts[request_id]:
-            logger.warning(
-                f"Received duplicate done signal for request {request_id} "
-                f"from tp rank {tp_rank}. Ignoring.")
-            return False
-        self.done_receiving_counts[request_id].add(tp_rank)
-        if len(self.done_receiving_counts[request_id]) == decode_tp_size:
-            self.done_receiving_counts.pop(request_id)
-            logger.info("All transfers completed for request: "
-                        f"{request_id}. Total ranks: "
-                        f"{decode_tp_size}.")
-            return True
-        return False
 
     def init_llm_datadist(self):
         assert self.local_agent_metadata is not None
@@ -767,24 +744,24 @@ class LLMDataDistCMgrConnectorWorker():
             cluster_id = self.add_remote_agent(metadata)
         return cluster_id
 
-    def send_finish_to_remote(self, host: str, port: int, request_id):
-        url = f"tcp://{host}:{port}"
-        logger.debug(f"Sending finished to remote: {url}")
-        msg_encoder = msgspec.msgpack.Encoder()
-        msg_send = msg_encoder.encode([
-            LLMDataDistCMgrEvent.ReqForFinished,
-            [request_id, self.tp_rank, self.tp_size]
-        ])
-        with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
-            try:
-                sock.send(msg_send)
-                logger.debug(
-                    f"Request id {request_id} finished message send to remote {url}"
-                )
-                _ = sock.recv()
-            except Exception as e:
-                logger.error(
-                    f"Failed to send reqest_id {request_id} to prefill: {e}")
+    def send_finish_to_remote(self, host: str, ports: list[int], request_id):
+        for port in ports:
+            url = f"tcp://{host}:{port}"
+            logger.debug(f"Sending finished to remote: {url}")
+            msg_encoder = msgspec.msgpack.Encoder()
+            msg_send = msg_encoder.encode(
+                [LLMDataDistCMgrEvent.ReqForFinished, [request_id]])
+            with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
+                try:
+                    sock.send(msg_send)
+                    logger.debug(
+                        f"Request id {request_id} finished message send to remote {url}"
+                    )
+                    _ = sock.recv()
+                except Exception as e:
+                    logger.error(
+                        f"Failed to send reqest_id {request_id} to prefill: {e}"
+                    )
 
     def _read_blocks(
         self,
@@ -851,7 +828,10 @@ class LLMDataDistCMgrConnectorWorker():
                 raise RuntimeError(
                     "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
                 )
-        self.send_finish_to_remote(remote_ip, remote_port, request_id)
+        remote_ports = list(
+            range(remote_port + self.tp_rank,
+                  remote_port + int(remote_tp_size), self.tp_size))
+        self.send_finish_to_remote(remote_ip, remote_ports, request_id)
         with self.thread_lock:
             self.finished_reqs.add(request_id)
 
