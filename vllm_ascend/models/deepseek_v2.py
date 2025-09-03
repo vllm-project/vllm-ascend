@@ -614,8 +614,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        is_mtp_block: bool = False,
     ) -> None:
         nn.Module.__init__(self)
+        self.is_mtp_block = is_mtp_block
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -686,8 +688,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         attn_metadata: Optional[AttentionMetadata] = None,
         replace_allreduce: bool = False,
     ) -> torch.Tensor:
+        dispose_residual = False
         # Self Attention
         if residual is None:
+            dispose_residual = self.is_mtp_block
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
@@ -716,6 +720,9 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 # first layer.
                 residual *= 1. / self.routed_scaling_factor
 
+        if dispose_residual:
+            ori_residual = residual
+
         tp_size = get_tensor_model_parallel_world_size()
         if self.enable_shared_expert_dp and (
                 self.layer_idx == self.first_k_dense_replace
@@ -731,6 +738,9 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
+
+        if dispose_residual:
+            dispose_tensor(ori_residual)
 
         if isinstance(self.mlp, CustomDeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, attn_metadata)
@@ -799,6 +809,7 @@ class CustomDeepseekV2Model(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                is_mtp_block=False,
             ),
             prefix=f"{prefix}.layers")
 
