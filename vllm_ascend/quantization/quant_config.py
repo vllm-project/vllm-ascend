@@ -38,13 +38,10 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
-
-from .utils import get_quant_method
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, mlp_tp_enable,
                                oproj_tp_enable)
 
-from .quantizer import AscendQuantizer
+from .utils import get_quant_method
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
