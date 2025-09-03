@@ -262,6 +262,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             if num_tokens % self.tp_size:
                 rows += 1
             output_shape = (rows, hidden_states.shape[1])
+        # FIXME: This does not seem right, should make sure the buffer is fixed
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
