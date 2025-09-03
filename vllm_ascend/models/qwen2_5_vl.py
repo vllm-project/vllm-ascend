@@ -40,8 +40,8 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLDummyInputsBuilder, Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLMultiModalProcessor, Qwen2_5_VLProcessingInfo)
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
@@ -146,12 +146,13 @@ class AscendQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
     ) -> None:
         super().__init__(dim, num_heads, mlp_hidden_dim, act_fn, norm_layer,
                          quant_config, prefix, use_data_parallel)
-        self.attn = AscendQwen2_5_VisionAttention(embed_dim=dim,
-                                                  num_heads=num_heads,
-                                                  projection_size=dim,
-                                                  quant_config=quant_config,
-                                                  prefix=f"{prefix}.attn",
-                                                  use_data_parallel=use_data_parallel)
+        self.attn = AscendQwen2_5_VisionAttention(
+            embed_dim=dim,
+            num_heads=num_heads,
+            projection_size=dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            use_data_parallel=use_data_parallel)
 
     def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
                 cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -395,11 +396,15 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         window_index = torch.cat(window_index, dim=0)
         return window_index, cu_window_seqlens
 
-    def _normalize_grid_thw(self, grid_thw: Union[torch.Tensor, list[list[int]]]) -> torch.Tensor:
+    def _normalize_grid_thw(
+            self, grid_thw: Union[torch.Tensor,
+                                  list[list[int]]]) -> torch.Tensor:
         if isinstance(grid_thw, list):
             grid_thw = torch.tensor(grid_thw, device=self.device)
         elif not isinstance(grid_thw, torch.Tensor):
-            raise TypeError(f"Expected input type is torch.Tensor or list of lists, got {type(grid_thw)}")
+            raise TypeError(
+                f"Expected input type is torch.Tensor or list of lists, got {type(grid_thw)}"
+            )
         return grid_thw
 
     def forward(
@@ -407,7 +412,7 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         x: torch.Tensor,
         grid_thw: Union[torch.Tensor, list[list[int]]],
     ) -> torch.Tensor:
-        # normalize grid_thw to aviod type conflict
+        # normalize grid_thw to avoid type conflict
         grid_thw = self._normalize_grid_thw(grid_thw)
         # compute cu_seqlens
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
@@ -485,9 +490,8 @@ class AscendQwen2_5_VLForConditionalGeneration(
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(self.visual,
-                                                         pixel_values,
-                                                         grid_thw.tolist())
+                return run_dp_sharded_mrope_vision_model(
+                    self.visual, pixel_values, grid_thw.tolist())
             else:
                 image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
@@ -507,9 +511,8 @@ class AscendQwen2_5_VLForConditionalGeneration(
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
             if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(self.visual,
-                                                         pixel_values_videos,
-                                                         grid_thw.tolist())
+                return run_dp_sharded_mrope_vision_model(
+                    self.visual, pixel_values_videos, grid_thw.tolist())
             else:
                 video_embeds = self.visual(pixel_values_videos,
                                            grid_thw=grid_thw)
