@@ -407,7 +407,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             logical_replica_count: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
 
-        if vllm_version_is(">=", "0.10.11"):
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
             return self.forward_oot_v01011(
                 layer=layer,
                 x=x,
