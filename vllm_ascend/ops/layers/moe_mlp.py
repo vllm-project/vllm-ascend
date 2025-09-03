@@ -79,6 +79,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
 
     is_mc2 = get_forward_context().fused_moe_state == FusedMoEState.MC2
     if w1_scale_bias is None and is_mc2:
+        if w1_scale.dtype != torch.float32:
+            w1_scale = w1_scale.to(torch.float32)
         if fusion:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
