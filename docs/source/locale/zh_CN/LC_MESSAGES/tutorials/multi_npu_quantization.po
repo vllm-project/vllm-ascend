@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"POT-Creation-Date: 2025-09-03 17:45+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -28,15 +28,11 @@ msgstr "多NPU（QwQ 32B W8A8）"
 msgid "Run docker container"
 msgstr "运行 docker 容器"
 
-#: ../../source/tutorials/multi_npu_quantization.md:5
-msgid "w8a8 quantization feature is supported by v0.8.4rc2 or higher"
-msgstr "w8a8 量化功能由 v0.8.4rc2 或更高版本支持"
-
-#: ../../source/tutorials/multi_npu_quantization.md:31
+#: ../../source/tutorials/multi_npu_quantization.md:28
 msgid "Install modelslim and convert model"
 msgstr "安装 modelslim 并转换模型"
 
-#: ../../source/tutorials/multi_npu_quantization.md:33
+#: ../../source/tutorials/multi_npu_quantization.md:30
 #, fuzzy
 msgid ""
 "You can choose to convert the model yourself or use the quantized model "
@@ -46,39 +42,44 @@ msgstr ""
 "你可以选择自己转换模型，或者使用我们上传的量化模型，详见 https://www.modelscope.cn/models/vllm-ascend"
 "/QwQ-32B-W8A8"
 
-#: ../../source/tutorials/multi_npu_quantization.md:56
+#: ../../source/tutorials/multi_npu_quantization.md:53
 msgid "Verify the quantized model"
 msgstr "验证量化模型"
 
-#: ../../source/tutorials/multi_npu_quantization.md:57
+#: ../../source/tutorials/multi_npu_quantization.md:54
 msgid "The converted model files looks like:"
 msgstr "转换后的模型文件如下所示："
 
-#: ../../source/tutorials/multi_npu_quantization.md:71
+#: ../../source/tutorials/multi_npu_quantization.md:68
 msgid "Run the following script to start the vLLM server with quantized model:"
 msgstr "运行以下脚本以启动带有量化模型的 vLLM 服务器："
 
 #: ../../source/tutorials/multi_npu_quantization.md:74
-msgid ""
-"The value \"ascend\" for \"--quantization\" argument will be supported "
-"after [a specific PR](https://github.com/vllm-project/vllm-"
-"ascend/pull/877) is merged and released, you can cherry-pick this commit "
-"for now."
-msgstr ""
-"在 [特定的PR](https://github.com/vllm-project/vllm-ascend/pull/877) 合并并发布后， "
-"\"--quantization\" 参数将支持值 \"ascend\"，你也可以现在手动挑选该提交。"
-
-#: ../../source/tutorials/multi_npu_quantization.md:81
 msgid "Once your server is started, you can query the model with input prompts"
 msgstr "一旦服务器启动，就可以通过输入提示词来查询模型。"
 
-#: ../../source/tutorials/multi_npu_quantization.md:96
+#: ../../source/tutorials/multi_npu_quantization.md:89
 msgid ""
 "Run the following script to execute offline inference on multi-NPU with "
 "quantized model:"
 msgstr "运行以下脚本，在多NPU上使用量化模型执行离线推理："
 
-#: ../../source/tutorials/multi_npu_quantization.md:99
+#: ../../source/tutorials/multi_npu_quantization.md:92
 msgid "To enable quantization for ascend, quantization method must be \"ascend\""
 msgstr "要在ascend上启用量化，量化方法必须为“ascend”。"
+
+#~ msgid "w8a8 quantization feature is supported by v0.8.4rc2 or higher"
+#~ msgstr "w8a8 量化功能由 v0.8.4rc2 或更高版本支持"
+
+#~ msgid ""
+#~ "The value \"ascend\" for \"--"
+#~ "quantization\" argument will be supported "
+#~ "after [a specific PR](https://github.com/vllm-"
+#~ "project/vllm-ascend/pull/877) is merged and"
+#~ " released, you can cherry-pick this"
+#~ " commit for now."
+#~ msgstr ""
+#~ "在 [特定的PR](https://github.com/vllm-project/vllm-"
+#~ "ascend/pull/877) 合并并发布后， \"--quantization\" "
+#~ "参数将支持值 \"ascend\"，你也可以现在手动挑选该提交。"
 

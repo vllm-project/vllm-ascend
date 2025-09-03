@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"POT-Creation-Date: 2025-09-03 17:45+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -146,11 +146,21 @@ msgid ""
 "set, currently only int8 is supported."
 msgstr "当使用kv缓存量化方法时，需要设置kv缓存的数据类型，目前仅支持int8。"
 
-#: ../../source/user_guide/configuration/additional_config.md:35
+#: ../../source/user_guide/configuration/additional_config.md
+#, fuzzy
+msgid "`enable_prefill_optimizations`"
+msgstr "`enable_prefill_optimizations` "
+
+#: ../../source/user_guide/configuration/additional_config.md
+#, fuzzy
+msgid "Whether to enable  prefill optimizations."
+msgstr "是否启用预填充优化"
+
+#: ../../source/user_guide/configuration/additional_config.md:36
 msgid "The details of each config option are as follows:"
 msgstr "每个配置选项的详细信息如下："
 
-#: ../../source/user_guide/configuration/additional_config.md:37
+#: ../../source/user_guide/configuration/additional_config.md:38
 msgid "**torchair_graph_config**"
 msgstr "**torchair_graph_config**"
 
@@ -242,7 +252,17 @@ msgid ""
 "models using MLA (e.g., DeepSeek)."
 msgstr "是否启用 kvcache NZ 布局。此选项仅对使用 MLA 的模型（例如 DeepSeek）生效。"
 
-#: ../../source/user_guide/configuration/additional_config.md:50
+#: ../../source/user_guide/configuration/additional_config.md
+#, fuzzy
+msgid "`enable_super_kernel`"
+msgstr "`enable_super_kernel`"
+
+#: ../../source/user_guide/configuration/additional_config.md
+#, fuzzy
+msgid "Whether to enable super kernel"
+msgstr "是否启用超级内核"
+
+#: ../../source/user_guide/configuration/additional_config.md:52
 msgid "**ascend_scheduler_config**"
 msgstr "**ascend_scheduler_config**"
 
@@ -250,7 +270,7 @@ msgstr "**ascend_scheduler_config**"
 msgid "Whether to enable ascend scheduler for V1 engine"
 msgstr "是否为 V1 引擎启用 ascend 调度器"
 
-#: ../../source/user_guide/configuration/additional_config.md:56
+#: ../../source/user_guide/configuration/additional_config.md:58
 msgid ""
 "ascend_scheduler_config also support the options from [vllm scheduler "
 "config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig)."
@@ -261,11 +281,11 @@ msgstr ""
 "config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig)"
 " 的选项。例如，你也可以在 ascend_scheduler_config 中添加 `enable_chunked_prefill: True`。"
 
-#: ../../source/user_guide/configuration/additional_config.md:58
+#: ../../source/user_guide/configuration/additional_config.md:60
 msgid "Example"
 msgstr "示例"
 
-#: ../../source/user_guide/configuration/additional_config.md:60
+#: ../../source/user_guide/configuration/additional_config.md:62
 msgid "An example of additional configuration is as follows:"
 msgstr "以下是额外配置的一个示例："
 

@@ -7,52 +7,54 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend\n"
+"Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"POT-Creation-Date: 2025-09-03 17:45+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../user_guide/feature_guide/lora.md:1
+#: ../../source/user_guide/feature_guide/lora.md:1
 msgid "LoRA Adapters Guide"
 msgstr "LoRA 适配器指南"
 
-#: ../../user_guide/feature_guide/lora.md:3
+#: ../../source/user_guide/feature_guide/lora.md:3
 msgid ""
-"Like vLLM, vllm-ascend supports LoRA as well. The usage and more details can"
-" be found in [vLLM official "
+"Like vLLM, vllm-ascend supports LoRA as well. The usage and more details "
+"can be found in [vLLM official "
 "document](https://docs.vllm.ai/en/latest/features/lora.html)."
 msgstr ""
 "与 vLLM 类似，vllm-ascend 也支持 LoRA。用法及更多详情可参见 [vLLM "
 "官方文档](https://docs.vllm.ai/en/latest/features/lora.html)。"
 
-#: ../../user_guide/feature_guide/lora.md:5
+#: ../../source/user_guide/feature_guide/lora.md:5
 msgid ""
 "You can also refer to "
-"[this](https://docs.vllm.ai/en/latest/models/supported_models.html#list-of-"
-"text-only-language-models) to find which models support LoRA in vLLM."
+"[this](https://docs.vllm.ai/en/latest/models/supported_models.html#list-"
+"of-text-only-language-models) to find which models support LoRA in vLLM."
 msgstr ""
-"你也可以参考[这个链接](https://docs.vllm.ai/en/latest/models/supported_models.html#list-"
-"of-text-only-language-models)来查找哪些模型在 vLLM 中支持 LoRA。"
+"你也可以参考[这个链接](https://docs.vllm.ai/en/latest/models/supported_models.html"
+"#list-of-text-only-language-models)来查找哪些模型在 vLLM 中支持 LoRA。"
 
-#: ../../user_guide/feature_guide/lora.md:7
+#: ../../source/user_guide/feature_guide/lora.md:7
 msgid "Tips"
 msgstr "提示"
 
-#: ../../user_guide/feature_guide/lora.md:8
+#: ../../source/user_guide/feature_guide/lora.md:8
+#, fuzzy
 msgid ""
 "If you fail to run vllm-ascend with LoRA, you may follow [this "
 "instruction](https://vllm-"
-"ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html#fallback-"
-"to-eager-mode) to disable graph mode and try again."
+"ascend.readthedocs.io/en/v0.9.1-dev/user_guide/feature_guide/graph_mode.html"
+"#fallback-to-eager-mode) to disable graph mode and try again."
 msgstr ""
 "如果你在使用 LoRA 运行 vllm-ascend 时失败，可以按照[此说明](https://vllm-"
-"ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html#fallback-"
-"to-eager-mode)禁用图模式后再重试。"
+"ascend.readthedocs.io/en/v0.9.1-dev/user_guide/feature_guide/graph_mode.html"
+"#fallback-to-eager-mode)禁用图模式后再重试。"
+

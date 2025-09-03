@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"POT-Creation-Date: 2025-09-03 17:45+0800\n"
 "PO-Revision-Date: 2025-07-18 10:09+0800\n"
 "Last-Translator: \n"
 "Language: zh_CN\n"
@@ -251,15 +251,16 @@ msgid "or build IMAGE from **source code**:"
 msgstr "或从**源代码**构建 IMAGE："
 
 #: ../../source/installation.md:218
+#, fuzzy
 msgid ""
 "The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed"
 " in `/vllm-workspace` and installed in [development "
-"mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)(`pip"
+"mode](https://setuptools.pypa.io/en/v0.9.1-dev/userguide/development_mode.html)(`pip"
 " install -e`) to help developer immediately take place changes without "
 "requiring a new installation."
 msgstr ""
 "默认的工作目录是 `/workspace`，vLLM 和 vLLM Ascend 代码被放置在 `/vllm-"
-"workspace`，并以[开发模式](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)（`pip"
+"workspace`，并以[开发模式](https://setuptools.pypa.io/en/v0.9.1-dev/userguide/development_mode.html)（`pip"
 " install -e`）安装，以便开发者能够即时生效更改，而无需重新安装。"
 
 #: ../../source/installation.md:222
@@ -274,11 +275,11 @@ msgstr "验证安装"
 msgid "Create and run a simple inference test. The `example.py` can be like:"
 msgstr "创建并运行一个简单的推理测试。`example.py` 可以如下："
 
-#: ../../source/installation.md:251
+#: ../../source/installation.md:254
 msgid "Then run:"
 msgstr "然后运行："
 
-#: ../../source/installation.md:259
+#: ../../source/installation.md:262
 msgid "The output will be like:"
 msgstr "输出将会像这样："
 

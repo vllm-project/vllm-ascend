@@ -7,150 +7,152 @@
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend\n"
+"Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"POT-Creation-Date: 2025-09-03 17:45+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: zh_CN <LL@li.org>\n"
 "Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
 "Generated-By: Babel 2.17.0\n"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:1
+#: ../../source/user_guide/feature_guide/sleep_mode.md:1
 msgid "Sleep Mode Guide"
 msgstr "睡眠模式指南"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:3
+#: ../../source/user_guide/feature_guide/sleep_mode.md:3
 msgid "Overview"
 msgstr "概述"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:5
+#: ../../source/user_guide/feature_guide/sleep_mode.md:5
 msgid ""
-"Sleep Mode is an API designed to offload model weights and discard KV cache "
-"from NPU memory. This functionality is essential for reinforcement learning "
-"(RL) post-training workloads, particularly in online algorithms such as PPO,"
-" GRPO, or DPO. During training, the policy model typically performs auto-"
-"regressive generation using inference engines like vLLM, followed by forward"
-" and backward passes for optimization."
+"Sleep Mode is an API designed to offload model weights and discard KV "
+"cache from NPU memory. This functionality is essential for reinforcement "
+"learning (RL) post-training workloads, particularly in online algorithms "
+"such as PPO, GRPO, or DPO. During training, the policy model typically "
+"performs auto-regressive generation using inference engines like vLLM, "
+"followed by forward and backward passes for optimization."
 msgstr ""
 "Sleep Mode 是一个用于卸载模型权重并清除 NPU 内存中 KV 缓存的 API。此功能对于强化学习（RL）后训练任务尤其重要，特别是在 "
 "PPO、GRPO 或 DPO 等在线算法中。在训练过程中，策略模型通常会使用像 vLLM "
 "这样的推理引擎进行自回归生成，然后进行前向和反向传播以进行优化。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:7
+#: ../../source/user_guide/feature_guide/sleep_mode.md:7
 msgid ""
 "Since the generation and training phases may employ different model "
-"parallelism strategies, it becomes crucial to free KV cache and even offload"
-" model parameters stored within vLLM during training. This ensures efficient"
-" memory utilization and avoids resource contention on the NPU."
+"parallelism strategies, it becomes crucial to free KV cache and even "
+"offload model parameters stored within vLLM during training. This ensures"
+" efficient memory utilization and avoids resource contention on the NPU."
 msgstr ""
 "由于生成和训练阶段可能采用不同的模型并行策略，因此在训练过程中及时释放 KV 缓存，甚至卸载存储在 vLLM "
 "内的模型参数变得至关重要。这可以确保内存的高效利用，并避免 NPU 上的资源争用。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:10
+#: ../../source/user_guide/feature_guide/sleep_mode.md:9
 msgid "Getting started"
 msgstr "快速上手"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:12
+#: ../../source/user_guide/feature_guide/sleep_mode.md:11
 #, python-brace-format
 msgid ""
 "With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in "
-"vllm will under a specific memory pool, during loading model and initialize "
-"kv_caches, we tag the memory as a map: `{\"weight\": data, \"kv_cache\": "
-"data}`."
+"vllm will under a specific memory pool, during loading model and "
+"initialize kv_caches, we tag the memory as a map: `{\"weight\": data, "
+"\"kv_cache\": data}`."
 msgstr ""
 "当 `enable_sleep_mode=True` 时，我们在 vllm 中管理内存（malloc, "
 "free）的方式会在一个特定的内存池下进行，在加载模型和初始化 kv_caches "
 "期间，我们会将内存打上标签，组织成一个映射：`{\"weight\": data, \"kv_cache\": data}`。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:14
+#: ../../source/user_guide/feature_guide/sleep_mode.md:13
 msgid ""
 "The engine(v0/v1) supports two sleep levels to manage memory during idle "
 "periods:"
 msgstr "该引擎（v0/v1）支持两种睡眠等级，以在空闲期间管理内存："
 
-#: ../../user_guide/feature_guide/sleep_mode.md:16
+#: ../../source/user_guide/feature_guide/sleep_mode.md:15
 msgid "Level 1 Sleep"
 msgstr "一级睡眠"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:17
+#: ../../source/user_guide/feature_guide/sleep_mode.md:16
 msgid "Action: Offloads model weights and discards the KV cache."
 msgstr "操作：卸载模型权重并清除KV缓存。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:18
+#: ../../source/user_guide/feature_guide/sleep_mode.md:17
 msgid "Memory: Model weights are moved to CPU memory; KV cache is forgotten."
 msgstr "内存：模型权重被移动到CPU内存；KV缓存被清除。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:19
+#: ../../source/user_guide/feature_guide/sleep_mode.md:18
 msgid "Use Case: Suitable when reusing the same model later."
 msgstr "用例：适用于之后需要重复使用同一个模型的情况。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:20
-msgid ""
-"Note: Ensure sufficient CPU memory is available to hold the model weights."
+#: ../../source/user_guide/feature_guide/sleep_mode.md:19
+msgid "Note: Ensure sufficient CPU memory is available to hold the model weights."
 msgstr "注意：请确保有足够的CPU内存来存储模型权重。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:22
+#: ../../source/user_guide/feature_guide/sleep_mode.md:21
 msgid "Level 2 Sleep"
 msgstr "二级睡眠"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:23
+#: ../../source/user_guide/feature_guide/sleep_mode.md:22
 msgid "Action: Discards both model weights and KV cache."
 msgstr "操作：同时丢弃模型权重和KV缓存。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:24
-msgid ""
-"Memory: The content of both the model weights and kv cache is forgotten."
+#: ../../source/user_guide/feature_guide/sleep_mode.md:23
+msgid "Memory: The content of both the model weights and kv cache is forgotten."
 msgstr "内存：模型权重和kv缓存的内容都会被遗忘。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:25
+#: ../../source/user_guide/feature_guide/sleep_mode.md:24
 msgid ""
-"Use Case: Ideal when switching to a different model or updating the current "
-"one."
+"Use Case: Ideal when switching to a different model or updating the "
+"current one."
 msgstr "用例：当切换到不同的模型或更新当前模型时非常理想。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:27
+#: ../../source/user_guide/feature_guide/sleep_mode.md:26
+#, fuzzy
 msgid ""
 "Since this feature uses the low-level API "
 "[AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html),"
 " in order to use sleep mode, you should follow the [installation "
-"guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) and "
-"building from source, if you are using v0.7.3, remember to set `export "
-"COMPILE_CUSTOM_KERNELS=1`, for the latest version(v0.9.x+), the environment "
-"variable `COMPILE_CUSTOM_KERNELS` will be set 1 by default while building "
-"from source."
+"guide](https://vllm-"
+"ascend.readthedocs.io/en/v0.9.1-dev/installation.html) and building from "
+"source, if you are using v0.7.3, remember to set `export "
+"COMPILE_CUSTOM_KERNELS=1`, for the latest version(v0.9.x+), the "
+"environment variable `COMPILE_CUSTOM_KERNELS` will be set 1 by default "
+"while building from source."
 msgstr ""
 "由于此功能使用了底层 API "
-"[AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html)，为了使用休眠模式，你应按照[安装指南](https://vllm-"
-"ascend.readthedocs.io/en/latest/installation.html)进行操作，并从源码编译。如果你使用的是 "
-"v0.7.3，请记得设置 `export COMPILE_CUSTOM_KERNELS=1` ；对于最新版本（v0.9.x+），在从源码编译时环境变量 "
-"`COMPILE_CUSTOM_KERNELS` 默认会被设置为 1。"
+"[AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html)，为了使用休眠模式，你应按照[安装指南](https"
+"://vllm-"
+"ascend.readthedocs.io/en/v0.9.1-dev/installation.html)进行操作，并从源码编译。如果你使用的是 "
+"v0.7.3，请记得设置 `export COMPILE_CUSTOM_KERNELS=1` "
+"；对于最新版本（v0.9.x+），在从源码编译时环境变量 `COMPILE_CUSTOM_KERNELS` 默认会被设置为 1。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:29
+#: ../../source/user_guide/feature_guide/sleep_mode.md:28
 msgid "Usage"
 msgstr "用法"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:31
+#: ../../source/user_guide/feature_guide/sleep_mode.md:30
 msgid "The following is a simple example of how to use sleep mode."
 msgstr "以下是如何使用睡眠模式的一个简单示例。"
 
-#: ../../user_guide/feature_guide/sleep_mode.md:33
+#: ../../source/user_guide/feature_guide/sleep_mode.md:32
 msgid "offline inference:"
 msgstr "离线推理："
 
-#: ../../user_guide/feature_guide/sleep_mode.md:72
+#: ../../source/user_guide/feature_guide/sleep_mode.md:72
 msgid "online serving:"
 msgstr "在线服务："
 
-#: ../../user_guide/feature_guide/sleep_mode.md:74
+#: ../../source/user_guide/feature_guide/sleep_mode.md:74
 msgid ""
-"Considering there may be a risk of malicious access, please make sure you "
-"are under a dev-mode, and explicit specify the develop env: "
+"Considering there may be a risk of malicious access, please make sure you"
+" are under a dev-mode, and explicit specify the develop env: "
 "`VLLM_SERVER_DEV_MODE` to expose these endpoints(sleep/wake up)."
 msgstr ""
 "鉴于可能存在恶意访问的风险，请确保您处于开发模式，并明确指定开发环境：`VLLM_SERVER_DEV_MODE`，以便开放这些端点（sleep/wake"
 " up）。"
+

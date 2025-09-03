@@ -1,0 +1,572 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend \n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-03 17:45+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/tutorials/large_scale_ep.md:1
+msgid "Distributed DP Server With Large Scale Expert Parallelism(Deepseek)"
+msgstr "DP分离大EP服务（Deepseek）"
+
+#: ../../source/tutorials/large_scale_ep.md:3
+msgid "Getting Start"
+msgstr "入门指南"
+
+#: ../../source/tutorials/large_scale_ep.md:5
+msgid ""
+"vLLM-Ascend now supports prefill-decode (PD) disaggregation in the large "
+"scale **Expert  Parallelism (EP)** scenario. To achieve better "
+"performance，the distributed DP server is applied in vLLM-Ascend. In the "
+"PD separation scenario, different optimization strategies can be "
+"implemented based on the distinct characteristics of PD nodes, thereby "
+"enabling more flexible model deployment. \\ Take the deepseek model as an"
+" example, use 8 Atlas 800T A3 servers to deploy the model. Assume the ip "
+"of the servers start from 192.0.0.1, and end by 192.0.0.8. Use the first "
+"4 servers as prefiller nodes and the last 4 servers as decoder nodes. And"
+" the prefiller nodes deployed as master node independently, the decoder "
+"nodes set 192.0.0.5 node to be the master node."
+msgstr "vLLM-Ascend 现在在大规模专家并行性（EP）场景中支持 prefill-decode（PD）解耦。为了实现更好的性能，vLLM-Ascend 采用了分布式 DP 服务器。在 PD 分离场景中，可以根据 PD 节点的不同特性实施不同的优化策略，从而实现更灵活的模型部署。 以 deepseek 模型为例，使用 8 台 Atlas 800T A3 服务器部署模型。假设服务器的 IP 地址从 192.0.0.1 开始，到 192.0.0.8 结束。将前 4 台服务器作为 prefiller 节点，后 4 台服务器作为 decoder 节点。prefiller 节点独立部署为 master 节点，decoder 节点将 192.0.0.5 节点设置为 master 节点。"
+
+#: ../../source/tutorials/large_scale_ep.md:9
+msgid "Verify Multi-Node Communication Environment"
+msgstr "验证多节点通信环境"
+
+#: ../../source/tutorials/large_scale_ep.md:11
+msgid "Physical Layer Requirements:"
+msgstr "物理层要求:"
+
+#: ../../source/tutorials/large_scale_ep.md:13
+msgid ""
+"The physical machines must be located on the same WLAN, with network "
+"connectivity."
+msgstr "物理机必须位于同一 WLAN 内，且具有网络连通性。"
+
+#: ../../source/tutorials/large_scale_ep.md:14
+msgid ""
+"All NPUs must be interconnected. For the Atlas A2 generation, intra-node "
+"connectivity is via HCCS, and inter-node connectivity is via RDMA. For "
+"the Atlas A3 generation, both intra-node and inter-node connectivity are "
+"via HCCS."
+msgstr "所有 NPU 必须相互连接。对于 Atlas A2 系列，节点内连接通过 HCCS 实现，节点间连接通过 RDMA 实现。对于 Atlas A3 系列，节点内和节点间连接均通过 HCCS 实现。"
+
+#: ../../source/tutorials/large_scale_ep.md:16
+msgid "Verification Process:"
+msgstr "验证过程:"
+
+#: ../../source/tutorials/large_scale_ep.md
+msgid "A3"
+msgstr "A3"
+
+#: ../../source/tutorials/large_scale_ep.md:23
+#: ../../source/tutorials/large_scale_ep.md:65
+msgid "Single Node Verification:"
+msgstr "单节点验证:"
+
+#: ../../source/tutorials/large_scale_ep.md:25
+#: ../../source/tutorials/large_scale_ep.md:67
+msgid ""
+"Execute the following commands on each node in sequence. The results must"
+" all be `success` and the status must be `UP`:"
+msgstr "在每个节点上按顺序执行以下命令。结果必须全部是 `success` ，状态必须为 `UP` :"
+
+#: ../../source/tutorials/large_scale_ep.md:42
+#: ../../source/tutorials/large_scale_ep.md:84
+msgid "Get NPU IP Addresses"
+msgstr "获取 NPU IP 地址"
+
+#: ../../source/tutorials/large_scale_ep.md:48
+msgid "Get superpodid and SDID"
+msgstr "获取 superpodid 和 SDID"
+
+#: ../../source/tutorials/large_scale_ep.md:54
+#: ../../source/tutorials/large_scale_ep.md:90
+msgid "Cross-Node PING Test"
+msgstr "跨节点 PING 测试"
+
+#: ../../source/tutorials/large_scale_ep.md
+msgid "A2"
+msgstr "A2"
+
+#: ../../source/tutorials/large_scale_ep.md:99
+msgid "Generate Ranktable"
+msgstr "生成 Ranktable:"
+
+#: ../../source/tutorials/large_scale_ep.md:101
+msgid ""
+"You need to generate a ranktable to make  mulit nodes to communicate with"
+" each other. For more details please refer to the [vllm-ascend "
+"examples](https://github.com/vllm-project/vllm-"
+"ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/README.md). "
+"Execute the following commands for reference."
+msgstr "您需要生成一个 ranktable 以便多个节点之间相互通信。更多详情请参考 [vllm-ascend 示例](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/README.md)。以下命令可供参考。"
+
+#: ../../source/tutorials/large_scale_ep.md:109
+msgid "Take Atlas A3 for example："
+msgstr "以 Atlas A3 为例："
+
+#: ../../source/tutorials/large_scale_ep.md:63
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Parameter"
+msgstr "参数"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "meaning"
+msgstr "含义"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+msgid "--ips"
+msgstr "--ips"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+msgid "Each node's local ip (prefiller nodes should be front of decoder nodes)"
+msgstr "每个节点的本地 IP 地址（prefiller节点应在decoder节点之前）"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+msgid "--npus-per-node"
+msgstr "--npus-per-node"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+msgid "Each node's npu clips"
+msgstr "每个节点的 npu 卡数"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+msgid "--network-card-name"
+msgstr "--network-card-name"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+msgid "The physical machines' NIC"
+msgstr "物理机器的网卡"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+msgid "--prefill-device-cnt"
+msgstr "--prefill-device-cnt"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+msgid "Npu clips used for prefill"
+msgstr "用于 prefill 的 NPU 卡数"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+msgid "--decode-device-cnt"
+msgstr "--decode-device-cnt"
+
+#: ../../source/tutorials/large_scale_ep.md:63
+msgid "Npu clips used for decode"
+msgstr "用于 decode 的 NPU 卡数"
+
+#: ../../source/tutorials/large_scale_ep.md:125
+msgid "Large Scale EP model deployment"
+msgstr "大规模 EP 模型部署"
+
+#: ../../source/tutorials/large_scale_ep.md:127
+msgid "Generate script with configurations"
+msgstr "生成带配置的脚本"
+
+#: ../../source/tutorials/large_scale_ep.md:129
+msgid ""
+"In the PD separation scenario, we provide a optimized configuration. You "
+"can use the following shell script for configuring the prefiller and "
+"decoder nodes respectively."
+msgstr "在 PD 分离场景中，我们提供了一个优化的配置。您可以使用以下 shell 脚本来分别配置 prefiller 和 decoder 节点。"
+
+#: ../../source/tutorials/large_scale_ep.md
+msgid "Prefiller node"
+msgstr "Prefiller 节点"
+
+#: ../../source/tutorials/large_scale_ep.md
+msgid "Decoder node"
+msgstr "Decoder 节点"
+
+#: ../../source/tutorials/large_scale_ep.md:272
+msgid "Start Distributed DP Server for prefill-decode disaggregation"
+msgstr "启动prefill-decode分离的分布式 DP 服务"
+
+#: ../../source/tutorials/large_scale_ep.md:274
+msgid ""
+"Execute the following Python file on all nodes to use the distributed DP "
+"server. (We recommend using this feature on the v0.9.1 official release)"
+msgstr "在所有节点上执行以下 Python 文件以使用分布式 DP 服务器。（我们建议在 v0.9.1 正式版本上使用此功能）"
+
+#: ../../source/tutorials/large_scale_ep.md:348
+msgid ""
+"Note that the prefiller nodes and the decoder nodes may have different "
+"configurations. In this example, each prefiller node deployed as master "
+"node independently, but all decoder nodes take the first node as the "
+"master node. So it leads to difference in 'dp_size_local' and "
+"'dp_rank_start'"
+msgstr "需要注意的是，prefiller节点和decoder节点可能有不同的配置。在这个例子中，每个prefiller节点都作为主节点独立部署，但所有decoder节点都以第一个节点为主节点。因此导致 'dp_size_local' 和 'dp_rank_start' 出现差异"
+
+#: ../../source/tutorials/large_scale_ep.md:350
+msgid "Example proxy for Distributed DP Server"
+msgstr "分布式 DP 服务的代理示例"
+
+#: ../../source/tutorials/large_scale_ep.md:352
+msgid ""
+"In the PD separation scenario, we need a proxy to distribute requests. "
+"Execute the following commands to enable the example proxy:"
+msgstr "在 PD 分离场景中，我们需要一个代理来分发请求。执行以下命令以启用示例代理:"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "--port"
+msgstr "--port"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Proxy service Port"
+msgstr "代理服务端口"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "--host"
+msgstr "--host"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Proxy service Host IP"
+msgstr "代理服务主机 IP"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "--prefiller-hosts"
+msgstr "--prefiller-hosts"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Hosts of prefiller nodes"
+msgstr "prefiller节点 IP"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "--prefiller-hosts-num"
+msgstr "--prefiller-hosts-num"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Number of repetitions for prefiller node hosts"
+msgstr "prefiller节点主机的重复数"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "--prefiller-ports"
+msgstr "--prefiller-ports"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Ports of prefiller nodes"
+msgstr "prefiller节点的端口"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "--prefiller-ports-inc"
+msgstr "--prefiller-ports-inc"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Number of increments for prefiller node ports"
+msgstr "prefiller节点端口的增量数"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "--decoder-hosts"
+msgstr "--decoder-hosts"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Hosts of decoder nodes"
+msgstr "decoder节点 IP"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "--decoder-hosts-num"
+msgstr "--decoder-hosts-num"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Number of repetitions for decoder node hosts"
+msgstr "decoder节点主机的重复数"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "--decoder-ports"
+msgstr "--decoder-ports"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Ports of decoder nodes"
+msgstr "decoder节点的端口"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "--decoder-ports-inc"
+msgstr "--decoder-ports-inc"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "Number of increments for decoder node ports"
+msgstr "decoder节点端口的增量数"
+
+#: ../../source/tutorials/large_scale_ep.md:396
+msgid ""
+"You can get the proxy program in the repository's examples, "
+"[load\\_balance\\_proxy\\_server\\_example.py](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)"
+msgstr "您可以在仓库的示例中获取代理程序，[load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)"
+
+#: ../../source/tutorials/large_scale_ep.md:398
+msgid "Benchmark"
+msgstr "基准测试"
+
+#: ../../source/tutorials/large_scale_ep.md:400
+msgid ""
+"We recommend use aisbench tool to assess performance. "
+"[aisbench](https://gitee.com/aisbench/benchmark) Execute the following "
+"commands to install aisbench"
+msgstr "我们推荐使用 [aisbench](https://gitee.com/aisbench/benchmark) 工具来评估性能。使用以下命令安装 aisbench:"
+
+#: ../../source/tutorials/large_scale_ep.md:408
+msgid ""
+"You need to canncel the http proxy before assessing performance, as "
+"following"
+msgstr "在评估性能之前，您需要取消 http 代理，如下所示："
+
+#: ../../source/tutorials/large_scale_ep.md:416
+msgid "You can place your datasets in the dir: `benchmark/ais_bench/datasets`"
+msgstr "您可以将数据集放在目录: `benchmark/ais_bench/datasets`"
+
+#: ../../source/tutorials/large_scale_ep.md:417
+msgid ""
+"You can change the configurationin the dir "
+":`benchmark/ais_bench/benchmark/configs/models/vllm_api` Take the "
+"``vllm_api_stream_chat.py`` for examples"
+msgstr "您可以更改目录： `benchmark/ais_bench/benchmark/configs/models/vllm_api` 中的配置，以 `vllm_api_stream_chat.py` 为例。"
+
+#: ../../source/tutorials/large_scale_ep.md:443
+msgid ""
+"Take gsm8k dataset for example, execute the following commands  to assess"
+" performance."
+msgstr "以 gsm8k 数据集为例，执行以下命令来评估性能。"
+
+#: ../../source/tutorials/large_scale_ep.md:449
+msgid ""
+"For more details for commands and parameters for aisbench, refer to  "
+"[aisbench](https://gitee.com/aisbench/benchmark)"
+msgstr "有关 aisbench 的命令和参数的更多详细信息，请参考 [aisbench](https://gitee.com/aisbench/benchmark)"
+
+#: ../../source/tutorials/large_scale_ep.md:452
+msgid "Prefill & Decode Configuration Details"
+msgstr "Prefill和Decode配置详情"
+
+#: ../../source/tutorials/large_scale_ep.md:454
+msgid "In the PD separation scenario, we provide a optimized configuration."
+msgstr "在 PD 分离场景中，我们提供了一个优化的配置。"
+
+#: ../../source/tutorials/large_scale_ep.md:456
+msgid "**prefiller node**"
+msgstr "**prefiller 节点**"
+
+#: ../../source/tutorials/large_scale_ep.md:458
+msgid "set HCCL_BUFFSIZE=256"
+msgstr "设置 HCCL_BUFFSIZE=256"
+
+#: ../../source/tutorials/large_scale_ep.md:459
+msgid "add '--enforce-eager' command to 'vllm serve'"
+msgstr "在'vllm serve'中添加'--enforce-eager'命令"
+
+#: ../../source/tutorials/large_scale_ep.md:460
+#: ../../source/tutorials/large_scale_ep.md:483
+msgid "Take '--kv-transfer-config' as follow"
+msgstr "将'--kv-transfer-config'设置为如下"
+
+#: ../../source/tutorials/large_scale_ep.md:474
+#: ../../source/tutorials/large_scale_ep.md:497
+msgid "Take '--additional-config' as follow"
+msgstr "将 '--additional-config' 取如下方式"
+
+#: ../../source/tutorials/large_scale_ep.md:480
+msgid "**decoder node**"
+msgstr "**decoder 节点**"
+
+#: ../../source/tutorials/large_scale_ep.md:482
+msgid "set HCCL_BUFFSIZE=1024"
+msgstr "设置 HCCL_BUFFSIZE=1024"
+
+#: ../../source/tutorials/large_scale_ep.md:504
+msgid "Parameters Description"
+msgstr "参数描述"
+
+#: ../../source/tutorials/large_scale_ep.md:506
+msgid "1.'--additional-config'  Parameter Introduction:"
+msgstr "1.'--additional-config' 参数介绍："
+
+#: ../../source/tutorials/large_scale_ep.md:508
+msgid "**\"torchair_graph_config\"：** The config options for torchair graph mode."
+msgstr "**\"torchair_graph_config\"：** torchair 图模式下的配置选项。"
+
+#: ../../source/tutorials/large_scale_ep.md:509
+msgid "**\"ascend_scheduler_config\"：** The config options for ascend scheduler."
+msgstr "**\"ascend_scheduler_config\"：** ascend 调度器的配置选项。"
+
+#: ../../source/tutorials/large_scale_ep.md:510
+msgid ""
+"**\"enable_weight_nz_layout\"：** Whether to convert quantized weights to "
+"NZ format to accelerate matrix multiplication."
+msgstr "**\"enable_weight_nz_layout\"：** 是否将量化权重转换为 NZ 格式以加速矩阵乘法。"
+
+#: ../../source/tutorials/large_scale_ep.md:511
+msgid ""
+"**\"enable_prefill_optimizations\"：** Whether to enable DeepSeek models' "
+"prefill optimizations. <br>"
+msgstr ""**\"enable_prefill_optimizations\"：** 是否启用 DeepSeek 模型的prefill优化。<br>"
+
+#: ../../source/tutorials/large_scale_ep.md:514
+msgid "2.\"torchair_graph_config\" Parameter Introduction:"
+msgstr "2.\"torchair_graph_config\" 参数介绍:"
+
+#: ../../source/tutorials/large_scale_ep.md:516
+msgid ""
+"**\"enable_multistream_mla\"：** Whether to put vector ops of MLA to "
+"another stream. This option only takes effects on models using MLA."
+msgstr "**\"enable_multistream_mla\"：** 是否将 MLA 的向量运算放到另一个流中。此选项仅对使用 MLA 的模型有效。"
+
+#: ../../source/tutorials/large_scale_ep.md:517
+msgid ""
+"**\"enable_multistream_moe\"：** Whether to enable multistream shared "
+"expert. This option only takes effects on DeepSeek moe models."
+msgstr "**\"enable_multistream_moe\"：** 是否启用多流共享专家。此选项仅对 DeepSeek moe 模型有效。"
+
+#: ../../source/tutorials/large_scale_ep.md:518
+msgid ""
+"**\"graph_batch_sizes\"：**  The batch size for torchair graph cache. \\ "
+"Note that the graph_batch_sizes should be equal to '--max-num-seqs' to "
+"achieve better performacne"
+msgstr "**\"graph_batch_sizes\"：** torchair 图缓存的批处理大小。注意 graph_batch_sizes 应该等于 '--max-num-seqs' 以获得更好的性能"
+
+#: ../../source/tutorials/large_scale_ep.md:520
+msgid "**\"enable_super_kernel\"：** Whether to enable super kernel."
+msgstr "**\"enable_super_kernel\"：** 是否启用超级内核。"
+
+#: ../../source/tutorials/large_scale_ep.md:521
+msgid "**\"use_cached_graph\"：** Whether to use cached graph <br>"
+msgstr "**\"use_cached_graph\"：** 是否使用缓存图 <br>"
+
+#: ../../source/tutorials/large_scale_ep.md:524
+msgid "3.enable MTP Add the following command to your configurations."
+msgstr "3.启用 MTP 将以下命令添加到您的配置中。"
+
+#: ../../source/tutorials/large_scale_ep.md:531
+msgid "Recommended Configuration Example"
+msgstr "推荐配置示例"
+
+#: ../../source/tutorials/large_scale_ep.md:533
+msgid ""
+"For example，if the average input length is 3.5k, and the output length is"
+" 1.1k, the context length is 16k, the max length of the input dataset is "
+"7K. In this scenario, we give a recommended configuration for distributed"
+" DP server with high EP. Here we use 4 nodes for prefill and 4 nodes for "
+"decode."
+msgstr "例如，如果平均输入长度为 3.5k，输出长度为 1.1k，上下文长度为 16k，输入数据集的最大长度为 7K。在这种情况下，我们为具有高并行度的分布式 DP 服务器提供推荐配置。这里我们使用 4 个节点进行 prefill，4 个节点进行 decode。"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "node"
+msgstr "node"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "DP"
+msgstr "DP"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "TP"
+msgstr "TP"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "EP"
+msgstr "EP"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "max-model-len"
+msgstr "max-model-len"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "max-num-batched-tokens"
+msgstr "max-num-batched-tokens"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "max-num-seqs"
+msgstr "max-num-seqs"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "gpu-memory-utilization"
+msgstr "gpu-memory-utilization"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "prefill"
+msgstr "prefill"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "2"
+msgstr "2"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "8"
+msgstr "8"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "16"
+msgstr "16"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "17000"
+msgstr "17000"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "16384"
+msgstr "16384"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "4"
+msgstr "4"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "0.9"
+msgstr "0.9"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "decode"
+msgstr "decode"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "64"
+msgstr "64"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "1"
+msgstr "1"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "256"
+msgstr "256"
+
+#: ../../source/tutorials/large_scale_ep.md:313
+msgid "28"
+msgstr "28"
+
+#: ../../source/tutorials/large_scale_ep.md:541
+msgid ""
+"Note that these configurations are not related to optimization. You need "
+"to adjust these parameters based on actual scenarios."
+msgstr "请注意，这些配置与优化无关。您需要根据实际场景调整这些参数。"
+
+#: ../../source/tutorials/large_scale_ep.md:545
+msgid "FAQ"
+msgstr "常见问题解答"
+
+#: ../../source/tutorials/large_scale_ep.md:547
+msgid "1. Prefiller nodes need to warmup"
+msgstr "1. Prefiller 节点需要预热 "
+
+#: ../../source/tutorials/large_scale_ep.md:549
+msgid ""
+"Since the computation of some NPU operators requires several rounds of "
+"warm-up to achieve best performance, we recommend preheating the service "
+"with some requests before conducting performance tests to achieve the "
+"best end-to-end throughput."
+msgstr "由于某些 NPU 算子的计算需要多轮预热才能达到最佳性能，我们建议在执行性能测试前，用一些请求预热服务，以实现最佳端到端吞吐量。"
+

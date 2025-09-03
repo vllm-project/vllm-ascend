@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"POT-Creation-Date: 2025-09-03 23:18+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -129,24 +129,22 @@ msgid "MindIE Turbo"
 msgstr "MindIE Turbo"
 
 #: ../../source/community/versioning_policy.md
-msgid "v0.9.2rc1"
-msgstr "v0.9.2rc1"
-
-#: ../../source/community/versioning_policy.md
-msgid "v0.9.2"
-msgstr "v0.9.2"
+msgid "v0.9.1"
+msgstr "v0.9.1"
 
 #: ../../source/community/versioning_policy.md
 msgid ">= 3.9, < 3.12"
 msgstr ">= 3.9，< 3.12"
 
 #: ../../source/community/versioning_policy.md
-msgid "8.1.RC1"
+#, fuzzy
+msgid "8.2.RC1"
 msgstr "8.1.RC1"
 
 #: ../../source/community/versioning_policy.md
-msgid "2.5.1 / 2.5.1.post1.dev20250619"
-msgstr "2.5.1 / 2.5.1.post1.dev20250619"
+#, fuzzy
+msgid "2.5.1 / 2.5.1.post1"
+msgstr "2.5.1 / 2.5.1"
 
 #: ../../source/community/versioning_policy.md
 #, fuzzy
@@ -154,13 +152,8 @@ msgid "v0.9.1rc3"
 msgstr "v0.9.1rc1"
 
 #: ../../source/community/versioning_policy.md
-msgid "v0.9.1"
-msgstr "v0.9.1"
-
-#: ../../source/community/versioning_policy.md
-#, fuzzy
-msgid "2.5.1 / 2.5.1.post1"
-msgstr "2.5.1 / 2.5.1"
+msgid "8.1.RC1"
+msgstr "8.1.RC1"
 
 #: ../../source/community/versioning_policy.md
 #, fuzzy
@@ -176,42 +169,6 @@ msgid "2.5.1 / 2.5.1.post1.dev20250528"
 msgstr "2.5.1 / 2.5.1.post1.dev20250528"
 
 #: ../../source/community/versioning_policy.md
-msgid "v0.9.0rc2"
-msgstr "v0.9.0rc2"
-
-#: ../../source/community/versioning_policy.md
-msgid "v0.9.0"
-msgstr "v0.9.0"
-
-#: ../../source/community/versioning_policy.md
-msgid "2.5.1 / 2.5.1"
-msgstr "2.5.1 / 2.5.1"
-
-#: ../../source/community/versioning_policy.md
-msgid "v0.9.0rc1"
-msgstr "v0.9.0rc1"
-
-#: ../../source/community/versioning_policy.md
-msgid "v0.8.5rc1"
-msgstr "v0.8.5rc1"
-
-#: ../../source/community/versioning_policy.md
-msgid "v0.8.5.post1"
-msgstr "v0.8.5.post1"
-
-#: ../../source/community/versioning_policy.md
-msgid "v0.8.4rc2"
-msgstr "v0.8.4rc2"
-
-#: ../../source/community/versioning_policy.md
-msgid "v0.8.4"
-msgstr "v0.8.4"
-
-#: ../../source/community/versioning_policy.md
-msgid "8.0.0"
-msgstr "8.0.0"
-
-#: ../../source/community/versioning_policy.md
 msgid "v0.7.3.post1"
 msgstr "v0.7.3.post1"
 
@@ -220,14 +177,18 @@ msgid "v0.7.3"
 msgstr "v0.7.3"
 
 #: ../../source/community/versioning_policy.md
+msgid "2.5.1 / 2.5.1"
+msgstr "2.5.1 / 2.5.1"
+
+#: ../../source/community/versioning_policy.md
 msgid "2.0rc1"
 msgstr "2.0候选版本1"
 
-#: ../../source/community/versioning_policy.md:36
+#: ../../source/community/versioning_policy.md:32
 msgid "Release cadence"
 msgstr "发布节奏"
 
-#: ../../source/community/versioning_policy.md:38
+#: ../../source/community/versioning_policy.md:34
 msgid "release window"
 msgstr "发布窗口"
 
@@ -238,6 +199,16 @@ msgstr "日期"
 #: ../../source/community/versioning_policy.md
 msgid "Event"
 msgstr "事件"
+
+#: ../../source/community/versioning_policy.md
+#, fuzzy
+msgid "2025.09.03"
+msgstr "2025.05.06"
+
+#: ../../source/community/versioning_policy.md
+#, fuzzy
+msgid "v0.9.1 Final release"
+msgstr "v0.7.x 正式版，v0.7.3"
 
 #: ../../source/community/versioning_policy.md
 #, fuzzy
@@ -355,22 +326,22 @@ msgstr "2025.02.19"
 msgid "Release candidates, v0.7.1rc1"
 msgstr "候选发布版本，v0.7.1rc1"
 
-#: ../../source/community/versioning_policy.md:57
+#: ../../source/community/versioning_policy.md:54
 msgid "Branch policy"
 msgstr "分支策略"
 
-#: ../../source/community/versioning_policy.md:59
+#: ../../source/community/versioning_policy.md:56
 msgid "vLLM Ascend has main branch and dev branch."
 msgstr "vLLM Ascend 有主分支和开发分支。"
 
-#: ../../source/community/versioning_policy.md:61
+#: ../../source/community/versioning_policy.md:58
 msgid ""
 "**main**: main branch，corresponds to the vLLM main branch and latest 1 or"
 " 2 release version. It is continuously monitored for quality through "
 "Ascend CI."
 msgstr "**main**：main 分支，对应 vLLM 的主分支和最新的 1 或 2 个发布版本。该分支通过 Ascend CI 持续监控质量。"
 
-#: ../../source/community/versioning_policy.md:62
+#: ../../source/community/versioning_policy.md:59
 msgid ""
 "**vX.Y.Z-dev**: development branch, created with part of new releases of "
 "vLLM. For example, `v0.7.3-dev` is the dev branch for vLLM `v0.7.3` "
@@ -379,18 +350,18 @@ msgstr ""
 "**vX.Y.Z-dev**：开发分支，是随着 vLLM 新版本的一部分一起创建的。例如，`v0.7.3-dev` 是 vLLM `v0.7.3`"
 " 版本的开发分支。"
 
-#: ../../source/community/versioning_policy.md:64
+#: ../../source/community/versioning_policy.md:61
 msgid ""
 "Usually, a commit should be ONLY first merged in the main branch, and "
 "then backported to the dev branch to reduce maintenance costs as much as "
 "possible."
 msgstr "通常，提交应该只先合并到主分支，然后再回溯合并到开发分支，以尽可能降低维护成本。"
 
-#: ../../source/community/versioning_policy.md:66
+#: ../../source/community/versioning_policy.md:63
 msgid "Maintenance branch and EOL:"
 msgstr "维护分支与生命周期结束（EOL）："
 
-#: ../../source/community/versioning_policy.md:67
+#: ../../source/community/versioning_policy.md:64
 msgid "The branch status will be in one of the following states:"
 msgstr "分支状态将处于以下几种状态之一："
 
@@ -442,11 +413,11 @@ msgstr "不适用"
 msgid "Branch no longer accepting changes"
 msgstr "该分支不再接受更改"
 
-#: ../../source/community/versioning_policy.md:75
+#: ../../source/community/versioning_policy.md:72
 msgid "Branch state"
 msgstr "分支状态"
 
-#: ../../source/community/versioning_policy.md:77
+#: ../../source/community/versioning_policy.md:74
 msgid ""
 "Note that vLLM Ascend will only be released for a certain vLLM release "
 "version rather than all versions. Hence, You might see only part of "
@@ -456,7 +427,7 @@ msgstr ""
 "请注意，vLLM Ascend 只会针对某些 vLLM 发布版本发布，而不是所有版本。因此，您可能会看到只有部分版本拥有开发分支（例如只有 "
 "`0.7.1-dev` / `0.7.3-dev`，而没有 `0.7.2-dev`），这是正常现象。"
 
-#: ../../source/community/versioning_policy.md:79
+#: ../../source/community/versioning_policy.md:76
 msgid ""
 "Usually, each minor version of vLLM (such as 0.7) will correspond to a "
 "vLLM Ascend version branch and support its latest version (for example, "
@@ -505,24 +476,24 @@ msgstr "v0.7.1-dev"
 msgid "Replaced by v0.7.3-dev"
 msgstr "已被 v0.7.3-dev 替代"
 
-#: ../../source/community/versioning_policy.md:88
+#: ../../source/community/versioning_policy.md:85
 msgid "Backward compatibility"
 msgstr "向后兼容性"
 
-#: ../../source/community/versioning_policy.md:90
+#: ../../source/community/versioning_policy.md:87
 msgid ""
 "For main branch, vLLM Ascend should works with vLLM main branch and "
 "latest 1 or 2 release version. So to ensure the backward compatibility, "
 "we will do the following:"
 msgstr "对于主分支，vLLM Ascend 应该与 vLLM 主分支以及最新的 1 或 2 个发布版本兼容。因此，为了确保向后兼容性，我们将执行以下操作："
 
-#: ../../source/community/versioning_policy.md:91
+#: ../../source/community/versioning_policy.md:88
 msgid ""
 "Both main branch and target vLLM release is tested by Ascend E2E CI. For "
 "example, currently, vLLM main branch and vLLM 0.8.4 are tested now."
 msgstr "主分支和目标 vLLM 发行版都经过了 Ascend E2E CI 的测试。例如，目前正在测试 vLLM 主分支和 vLLM 0.8.4。"
 
-#: ../../source/community/versioning_policy.md:92
+#: ../../source/community/versioning_policy.md:89
 msgid ""
 "For code changes, we will make sure that the changes are compatible with "
 "the latest 1 or 2 vLLM release version as well. In this case, vLLM Ascend"
@@ -538,18 +509,18 @@ msgstr ""
 "错误，这有时意味着他们安装了 dev/可编辑版本的 vLLM 包。此时，我们提供了环境变量 `VLLM_VERSION`，让用户可以指定要使用的 "
 "vLLM 包版本。"
 
-#: ../../source/community/versioning_policy.md:93
+#: ../../source/community/versioning_policy.md:90
 msgid ""
 "For documentation changes, we will make sure that the changes are "
 "compatible with the latest 1 or 2 vLLM release version as well. Note "
 "should be added if there are any breaking changes."
 msgstr "对于文档更改，我们会确保这些更改也兼容于最新的1个或2个 vLLM 发布版本。如果有任何重大变更，应添加说明。"
 
-#: ../../source/community/versioning_policy.md:95
+#: ../../source/community/versioning_policy.md:92
 msgid "Document Branch Policy"
 msgstr "文档分支政策"
 
-#: ../../source/community/versioning_policy.md:96
+#: ../../source/community/versioning_policy.md:93
 msgid ""
 "To reduce maintenance costs, **all branch documentation content should "
 "remain consistent, and version differences can be controlled via "
@@ -609,24 +580,24 @@ msgstr "最新正式发布分支的文档"
 msgid "Will be `vX.Y.Z-dev` after the first official release"
 msgstr "首个正式发布后将会是 `vX.Y.Z-dev`"
 
-#: ../../source/community/versioning_policy.md:104
+#: ../../source/community/versioning_policy.md:101
 msgid "As shown above:"
 msgstr "如上所示："
 
-#: ../../source/community/versioning_policy.md:106
+#: ../../source/community/versioning_policy.md:103
 msgid ""
 "`latest` documentation: Matches the current maintenance branch "
 "`vX.Y.Z-dev` (Will be `main` after the first final release). Continuously"
 " updated to ensure usability for the latest release."
 msgstr "`latest` 文档：匹配当前维护分支 `vX.Y.Z-dev`（在首次正式发布后将为 `main`）。持续更新，以确保适用于最新发布版本。"
 
-#: ../../source/community/versioning_policy.md:107
+#: ../../source/community/versioning_policy.md:104
 msgid ""
 "`version` documentation: Corresponds to specific released versions (e.g.,"
 " `v0.7.3`, `v0.7.3rc1`). No further updates after release."
 msgstr "`version` 文档：对应特定的已发布版本（例如，`v0.7.3`、`v0.7.3rc1`）。发布后不再进行更新。"
 
-#: ../../source/community/versioning_policy.md:108
+#: ../../source/community/versioning_policy.md:105
 msgid ""
 "`stable` documentation (**not yet released**): Official release "
 "documentation. Updates are allowed in real-time after release, typically "
@@ -638,11 +609,11 @@ msgstr ""
 "`stable` 文档（**尚未发布**）：官方发布版文档。发布后允许实时更新，通常基于 "
 "vX.Y.Z-dev。一旦稳定版文档可用，非稳定版本应显示一个顶部警告：`您正在查看最新的开发预览文档。点击此处查看最新稳定版本文档。`"
 
-#: ../../source/community/versioning_policy.md:110
+#: ../../source/community/versioning_policy.md:107
 msgid "Software Dependency Management"
 msgstr "软件依赖管理"
 
-#: ../../source/community/versioning_policy.md:111
+#: ../../source/community/versioning_policy.md:108
 msgid ""
 "`torch-npu`: Ascend Extension for PyTorch (torch-npu) releases a stable "
 "version to [PyPi](https://pypi.org/project/torch-npu) every 3 months, a "
@@ -657,4 +628,37 @@ msgstr ""
 "版本），每天发布一个 nightly 版本。PyPi 上的稳定版本**可以**用于 vLLM Ascend "
 "的正式版本，月度开发版本**只能**用于 vLLM Ascend 的 RC（候选发布）版本以便快速迭代，nightly 版本**不能**用于 "
 "vLLM Ascend 的任何版本和分支。"
+
+#~ msgid "v0.9.2rc1"
+#~ msgstr "v0.9.2rc1"
+
+#~ msgid "v0.9.2"
+#~ msgstr "v0.9.2"
+
+#~ msgid "2.5.1 / 2.5.1.post1.dev20250619"
+#~ msgstr "2.5.1 / 2.5.1.post1.dev20250619"
+
+#~ msgid "v0.9.0rc2"
+#~ msgstr "v0.9.0rc2"
+
+#~ msgid "v0.9.0"
+#~ msgstr "v0.9.0"
+
+#~ msgid "v0.9.0rc1"
+#~ msgstr "v0.9.0rc1"
+
+#~ msgid "v0.8.5rc1"
+#~ msgstr "v0.8.5rc1"
+
+#~ msgid "v0.8.5.post1"
+#~ msgstr "v0.8.5.post1"
+
+#~ msgid "v0.8.4rc2"
+#~ msgstr "v0.8.4rc2"
+
+#~ msgid "v0.8.4"
+#~ msgstr "v0.8.4"
+
+#~ msgid "8.0.0"
+#~ msgstr "8.0.0"
 

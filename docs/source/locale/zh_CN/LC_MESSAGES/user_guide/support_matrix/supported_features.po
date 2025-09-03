@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"POT-Creation-Date: 2025-09-03 17:45+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -78,19 +78,6 @@ msgid "[vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]"
 msgstr "[vllm-ascend#396][multilora]，[vllm-ascend#893][v1 multilora]"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
-msgid "Prompt adapter"
-msgstr "提示适配器"
-
-#: ../../source/user_guide/support_matrix/supported_features.md
-msgid "🔴 No plan"
-msgstr "🔴 无计划"
-
-#: ../../source/user_guide/support_matrix/supported_features.md
-#, fuzzy
-msgid "This feature has been deprecated by vLLM."
-msgstr "此功能已被 vllm 弃用。"
-
-#: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Speculative decoding"
 msgstr "猜测式解码"
 
@@ -103,16 +90,16 @@ msgid "Pooling"
 msgstr "池化"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
-msgid "CI needed and adapting more models; V1 support rely on vLLM support."
-msgstr "需要持续集成（CI）并适配更多模型；V1 的支持依赖于 vLLM 的支持。"
+msgid "🟡 Planned"
+msgstr "🟡 计划中"
+
+#: ../../source/user_guide/support_matrix/supported_features.md
+msgid "v0.9.1 doesn't support pooling. Use higher version instead"
+msgstr "v0.9.1 版本不支持池化。请使用更高版本。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Enc-dec"
 msgstr "Enc-dec（编码-解码）"
-
-#: ../../source/user_guide/support_matrix/supported_features.md
-msgid "🟡 Planned"
-msgstr "🟡 计划中"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "vLLM should support this feature first."
@@ -141,27 +128,6 @@ msgstr "提示 logProbs"
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Async output"
 msgstr "异步输出"
-
-#: ../../source/user_guide/support_matrix/supported_features.md
-msgid "Multi step scheduler"
-msgstr "多步调度器"
-
-#: ../../source/user_guide/support_matrix/supported_features.md
-msgid "🔴 Deprecated"
-msgstr "🔴 已弃用"
-
-#: ../../source/user_guide/support_matrix/supported_features.md
-msgid "[vllm#8779][v1_rfc], replaced by [vLLM V1 Scheduler][v1_scheduler]"
-msgstr "[vllm#8779][v1_rfc]，已被 [vLLM V1 调度器][v1_scheduler] 替代"
-
-#: ../../source/user_guide/support_matrix/supported_features.md
-msgid "Best of"
-msgstr "精选"
-
-#: ../../source/user_guide/support_matrix/supported_features.md
-#, fuzzy
-msgid "[vllm#13361][best_of]"
-msgstr "[vllm#13361][best_of]，需要持续集成（CI）"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Beam search"
@@ -213,12 +179,8 @@ msgid "Prefill Decode Disaggregation"
 msgstr "预填充 解码 拆分"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
-msgid "🚧 WIP"
-msgstr ""
-
-#: ../../source/user_guide/support_matrix/supported_features.md
-msgid "working on [1P1D] and xPyD."
-msgstr ""
+msgid "xPyD works on v1 engine"
+msgstr "xPyD 在 v1 引擎上可用。"
 
 #: ../../source/user_guide/support_matrix/supported_features.md
 msgid "Quantization"
@@ -245,25 +207,25 @@ msgstr "实验性功能，详见说明：[vllm-ascend#767][graph_mode]"
 msgid "Sleep Mode"
 msgstr "睡眠模式"
 
-#: ../../source/user_guide/support_matrix/supported_features.md:33
+#: ../../source/user_guide/support_matrix/supported_features.md:30
 msgid "🟢 Functional: Fully operational, with ongoing optimizations."
 msgstr "🟢 功能性：完全可用，正在持续优化中。"
 
-#: ../../source/user_guide/support_matrix/supported_features.md:34
+#: ../../source/user_guide/support_matrix/supported_features.md:31
 msgid "🔵 Experimental: Experimental support, interfaces and functions may change."
 msgstr "🔵 实验性：实验性支持，接口和功能可能会发生变化。"
 
-#: ../../source/user_guide/support_matrix/supported_features.md:35
+#: ../../source/user_guide/support_matrix/supported_features.md:32
 msgid "🚧 WIP: Under active development, will be supported soon."
 msgstr "🚧 WIP：正在积极开发中，很快将会支持。"
 
-#: ../../source/user_guide/support_matrix/supported_features.md:36
+#: ../../source/user_guide/support_matrix/supported_features.md:33
 msgid ""
 "🟡 Planned: Scheduled for future implementation (some may have open "
 "PRs/RFCs)."
 msgstr "🟡 计划中：已安排将来实现（其中一些可能已有开放的PR/RFC）。"
 
-#: ../../source/user_guide/support_matrix/supported_features.md:37
+#: ../../source/user_guide/support_matrix/supported_features.md:34
 #, fuzzy
 msgid "🔴 NO plan / Deprecated: No plan or deprecated by vLLM."
 msgstr "🔴 没有计划 / 已弃用：V0 没有计划或已被 vLLM v1 弃用。"
@@ -291,4 +253,37 @@ msgstr "🔴 没有计划 / 已弃用：V0 没有计划或已被 vLLM v1 弃用�
 
 #~ msgid "level=1 available, CI needed, working on V1 support"
 #~ msgstr "level=1 可用，需要CI，正在开发 V1 支持"
+
+#~ msgid "Prompt adapter"
+#~ msgstr "提示适配器"
+
+#~ msgid "🔴 No plan"
+#~ msgstr "🔴 无计划"
+
+#~ msgid "This feature has been deprecated by vLLM."
+#~ msgstr "此功能已被 vllm 弃用。"
+
+#~ msgid "CI needed and adapting more models; V1 support rely on vLLM support."
+#~ msgstr "需要持续集成（CI）并适配更多模型；V1 的支持依赖于 vLLM 的支持。"
+
+#~ msgid "Multi step scheduler"
+#~ msgstr "多步调度器"
+
+#~ msgid "🔴 Deprecated"
+#~ msgstr "🔴 已弃用"
+
+#~ msgid "[vllm#8779][v1_rfc], replaced by [vLLM V1 Scheduler][v1_scheduler]"
+#~ msgstr "[vllm#8779][v1_rfc]，已被 [vLLM V1 调度器][v1_scheduler] 替代"
+
+#~ msgid "Best of"
+#~ msgstr "精选"
+
+#~ msgid "[vllm#13361][best_of]"
+#~ msgstr "[vllm#13361][best_of]，需要持续集成（CI）"
+
+#~ msgid "🚧 WIP"
+#~ msgstr ""
+
+#~ msgid "working on [1P1D] and xPyD."
+#~ msgstr ""
 
