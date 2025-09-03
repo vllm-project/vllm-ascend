@@ -14,13 +14,12 @@ import os
 
 class KVTransferThread(threading.Thread):
     def __init__(self, tp_rank: int, tp_size: int, m_store: Memcachestore,
-                 local_engine_id: str, local_kv_caches_base_addr: list[int], token_database: ChunkedTokenDatabase,
+                 local_kv_caches_base_addr: list[int], token_database: ChunkedTokenDatabase,
                  block_len: list[int], block_size:int, ready_event: threading.Event, name:str):
         super().__init__(daemon=True, name=name)
         self.tp_rank = tp_rank
         self.tp_size = tp_size
         self.m_store = m_store
-        self.engine_id = local_engine_id
         self.ready_event = ready_event
         self.kv_caches_base_addr = local_kv_caches_base_addr
         self.block_len = block_len
@@ -119,9 +118,9 @@ class KVTransferThread(threading.Thread):
 class KVCacheStoreSendingThread(KVTransferThread):
 
     def __init__(self, tp_rank: int, tp_size: int, m_store: Memcachestore,
-                 local_engine_id: str, local_kv_caches_base_addr: list[int], token_database: ChunkedTokenDatabase,
+                 local_kv_caches_base_addr: list[int], token_database: ChunkedTokenDatabase,
                  block_len: list[int], block_size:int, ready_event: threading.Event):
-        super().__init__(tp_rank, tp_size, m_store, local_engine_id, local_kv_caches_base_addr,
+        super().__init__(tp_rank, tp_size, m_store, local_kv_caches_base_addr,
                         token_database, block_len, block_size, ready_event, name="KVCacheSendingThread")
 
     def _handle_request(self, req_meta: dict[str, Any]):
@@ -140,9 +139,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
 class KVCacheStoreRecvingThread(KVTransferThread):
 
     def __init__(self, tp_rank: int, tp_size: int, m_store: Memcachestore,
-                 local_engine_id: str, local_kv_caches_base_addr: list[int], token_database: ChunkedTokenDatabase,
+                 local_kv_caches_base_addr: list[int], token_database: ChunkedTokenDatabase,
                  block_len: list[int], block_size:int, ready_event: threading.Event):
-        super().__init__(tp_rank, tp_size, m_store, local_engine_id, local_kv_caches_base_addr,
+        super().__init__(tp_rank, tp_size, m_store, local_kv_caches_base_addr,
                         token_database, block_len, block_size, ready_event, name="KVCacheStoreRecvingThread") 
 
     def _handle_request(self, req_meta: dict[str, Any]):
@@ -159,9 +158,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
 
 class KVCacheStoreLayerSendingThread(KVTransferThread):
     def __init__(self, tp_rank: int, tp_size: int, m_store: Memcachestore,
-                 local_engine_id: str, local_kv_caches_base_addr: list[int], token_database: ChunkedTokenDatabase,
+                 local_kv_caches_base_addr: list[int], token_database: ChunkedTokenDatabase,
                  block_len: list[int], block_size:int, ready_event: threading.Event, num_layers:int):
-        super().__init__(tp_rank, tp_size, m_store, local_engine_id, local_kv_caches_base_addr,
+        super().__init__(tp_rank, tp_size, m_store, local_kv_caches_base_addr,
                         token_database, block_len, block_size, ready_event, name="KVCacheStoreLayerSendingThread")
         self.final_layer_id = num_layers - 1
     
@@ -182,9 +181,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def __init__(self, tp_rank: int, tp_size: int, m_store: Memcachestore,
-                 local_engine_id: str, local_kv_caches_base_addr: list[int], token_database: ChunkedTokenDatabase,
+                 local_kv_caches_base_addr: list[int], token_database: ChunkedTokenDatabase,
                  block_len: list[int], block_size:int, ready_event: threading.Event, get_event: threading.Event):
-        super().__init__(tp_rank, tp_size, m_store, local_engine_id, local_kv_caches_base_addr,
+        super().__init__(tp_rank, tp_size, m_store, local_kv_caches_base_addr,
                         token_database, block_len, block_size, ready_event, name="KVCacheStoreLayerRecvingThread")
         self.get_event=get_event
     
