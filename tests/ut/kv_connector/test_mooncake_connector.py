@@ -1094,6 +1094,7 @@ class MockTransferEngine:
 
 class MockEnvsAscend:
     MOONCAKE_CONNECTOR_PROTOCOL = "mock_protocol"
+    PHYSICAL_DEVICES = "10,11"
 
 
 def mock_get_tensor_model_parallel_rank():
@@ -1122,7 +1123,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.mock_transfer_engine.register_memory.return_value = 0
 
         self.patches = [
-            patch('os.getenv', return_value="0,1"),
+            patch('os.getenv', return_value="10,11"),
             patch('torch.Tensor.size', return_value=(10, 16, 8, 16)),
             patch('torch.Tensor.element_size', return_value=4),
             patch('torch.Tensor.data_ptr', return_value=0x1000),
@@ -1190,6 +1191,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.register_kv_caches(mla_caches)
         self.assertTrue(worker.use_mla)
         self.assertEqual(len(worker.block_len), 2)
+
+    def test_device_id_selection_with_physical_devices(self):
+        # Test with physical devices set
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
+        # Default tp_rank is 0, so device_id should be 10
+        self.assertEqual(worker.device_id, 10)
 
 
 if __name__ == '__main__':

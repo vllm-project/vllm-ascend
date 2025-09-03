@@ -2,7 +2,6 @@
 import contextlib
 import hashlib
 import math
-import os
 import queue
 import random
 import struct
@@ -28,6 +27,8 @@ from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
 from vllm.utils import get_ip, logger, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
+
+import vllm_ascend.envs as envs_ascend
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -758,13 +759,21 @@ class MooncakeConnectorWorker:
         # get tp device id
         # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940
         # introducing some changes
-        device_ids_str = os.getenv("ASCEND_RT_VISIBLE_DEVICES", None)
+        device_ids_str = envs_ascend.PHYSICAL_DEVICES
         if device_ids_str is None:
             device_ids = list(
                 range(self.dp_rank * self.tp_size,
                       (self.dp_rank + 1) * self.tp_size))
         else:
             device_ids = list(map(int, device_ids_str.split(',')))
+            start_index = self.dp_rank * self.tp_size
+            end_index = start_index + self.tp_size
+            if len(device_ids) < end_index:
+                raise ValueError(
+                    f"Not enough physical devices available for DP rank {self.dp_rank}. "
+                    f"Expected at least {end_index} devices, but found {len(device_ids)} "
+                    "in PHYSICAL_DEVICES.")
+            device_ids = device_ids[start_index:end_index]
         assert len(device_ids) > self.tp_rank  # type: ignore
         self.device_id = device_ids[self.tp_rank]  # type: ignore
 
