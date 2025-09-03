@@ -320,6 +320,25 @@ class AscendQwen2_5_VisionTransformer_Without_Padding(Qwen2_5_VisionTransformer
         x = x[reverse_indices, :]
         return x
 
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Qwen2_5_VLMultiModalProcessor,
+    info=Qwen2_5_VLProcessingInfo,
+    dummy_inputs=Qwen2_5_VLDummyInputsBuilder)
+class AscendQwen2_5_VLForConditionalGeneration_Without_Padding(
+        Qwen2_5_VLForConditionalGeneration):
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.visual = AscendQwen2_5_VisionTransformer_Without_Padding(
+            vision_config=config.vision_config,
+            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+            quant_config=self._maybe_ignore_quant_config(quant_config),
+            prefix=maybe_prefix(prefix, "visual"),
+        )
+
     def _process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
 
         grid_thw = image_input["image_grid_thw"]
@@ -352,22 +371,3 @@ class AscendQwen2_5_VisionTransformer_Without_Padding(Qwen2_5_VisionTransformer
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
         return video_embeds.split(sizes.tolist())
-
-
-@MULTIMODAL_REGISTRY.register_processor(
-    Qwen2_5_VLMultiModalProcessor,
-    info=Qwen2_5_VLProcessingInfo,
-    dummy_inputs=Qwen2_5_VLDummyInputsBuilder)
-class AscendQwen2_5_VLForConditionalGeneration_Without_Padding(
-        Qwen2_5_VLForConditionalGeneration):
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-        config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.visual = AscendQwen2_5_VisionTransformer_Without_Padding(
-            vision_config=config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-        )
