@@ -93,6 +93,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
 
     init_ascend_mla_sp_model_parallel()
 
+
 def get_mlp_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
     return get_mlp_tp_group().world_size
@@ -102,18 +103,23 @@ def get_mlp_tensor_model_parallel_rank():
     """Return world size for the tensor model parallel group."""
     return get_mlp_tp_group().rank_in_group
 
+
 # vllm-ascend will maintain its own MLA SP world GroupCoordinator and o_proj sharding GroupCoordinator for
 # customize parallel solution
 _MLA_SP_WORLD: Optional[GroupCoordinator] = None
 _O_SHARD: Optional[GroupCoordinator] = None
 
+
 def get_mla_sp_world_group() -> GroupCoordinator:
-    assert _MLA_SP_WORLD is not None, ("MLA sequence parallel world group is not initialized")
+    assert _MLA_SP_WORLD is not None, (
+        "MLA sequence parallel world group is not initialized")
     return _MLA_SP_WORLD
+
 
 def get_o_shard_group() -> GroupCoordinator:
     assert _O_SHARD is not None, ("o_proj sharding group is not initialized")
     return _O_SHARD
+
 
 def init_ascend_mla_sp_model_parallel():
     from vllm_ascend.ascend_config import get_ascend_config
@@ -138,12 +144,15 @@ def init_ascend_mla_sp_model_parallel():
         num_o_shard_parallel_groups = world_size // o_shard_parallel_size
         group_ranks = []
         for i in range(num_o_shard_parallel_groups):
-            ranks = list(range(i * o_shard_parallel_size, (i + 1) * o_shard_parallel_size))
+            ranks = list(
+                range(i * o_shard_parallel_size,
+                      (i + 1) * o_shard_parallel_size))
             group_ranks.append(ranks)
         _O_SHARD = init_model_parallel_group(group_ranks,
                                              get_world_group().local_rank,
                                              backend,
                                              group_name="o_shard")
+
 
 def destroy_ascend_model_parallel():
     global _MC2

@@ -63,9 +63,12 @@ class AscendConfig:
                 )
 
         self.enable_mla_sp = additional_config.get("enable_mla_sp", False)
-        self.o_shard_parallel_size = int(additional_config.get("o_shard_parallel_size", -1))
+        self.o_shard_parallel_size = int(
+            additional_config.get("o_shard_parallel_size", -1))
         self.enable_o_shard = self.o_shard_parallel_size > 0
-        self.o_shard_full_layers = int(additional_config.get("o_shard_full_layers", 0))
+        self.o_shard_full_layers = int(
+            additional_config.get("o_shard_full_layers", 0))
+
 
 class TorchairGraphConfig:
     """

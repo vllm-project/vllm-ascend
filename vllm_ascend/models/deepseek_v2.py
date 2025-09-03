@@ -28,6 +28,7 @@
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
@@ -69,15 +70,14 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_o_shard_group
+from vllm_ascend.mla_sp_context import get_sp_context, set_sp_context
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.ops.shard import RowShardLinear
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
 
-import torch.distributed as dist
-from vllm_ascend.distributed.parallel_state import get_o_shard_group
-from vllm_ascend.mla_sp_context import (get_sp_context, set_sp_context)
-from vllm_ascend.ops.shard import RowShardLinear
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
 
@@ -519,9 +519,9 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                          quant_config=quant_config,
                                          prefix=f"{prefix}.o_proj")
         elif (config.n_routed_experts is not None
-                and self.debug_layer_idx >= config.first_k_dense_replace
-                and self.debug_layer_idx % config.moe_layer_freq == 0
-                and self.enable_shared_expert_dp):
+              and self.debug_layer_idx >= config.first_k_dense_replace
+              and self.debug_layer_idx % config.moe_layer_freq == 0
+              and self.enable_shared_expert_dp):
             self.o_proj = CustomDeepseekV2RowParallelLinearReplaceAllreduce(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
@@ -850,19 +850,28 @@ class CustomDeepseekV2Model(nn.Module):
         shard_rank = group_for_shard.rank_in_group
 
         sample = self.layers[self.start_layer].self_attn.o_proj.weight.data
-        self.o_proj_weight_window = [torch.empty((sample.shape[0] * world_size, sample.shape[1]), dtype=sample.dtype, device=sample.device) for _ in range(full_layers + 1)]
+        self.o_proj_weight_window = [
+            torch.empty((sample.shape[0] * world_size, sample.shape[1]),
+                        dtype=sample.dtype,
+                        device=sample.device) for _ in range(full_layers + 1)
+        ]
         full = torch.empty_like(self.o_proj_weight_window[0])
 
-        from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ)
+        from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND,
+                                       ACL_FORMAT_FRACTAL_NZ)
         for i in range(len(self.o_proj_weight_window)):
-            torch_npu.npu_format_cast_(self.o_proj_weight_window[i], ACL_FORMAT_FRACTAL_NZ)
+            torch_npu.npu_format_cast_(self.o_proj_weight_window[i],
+                                       ACL_FORMAT_FRACTAL_NZ)
 
         for i in range(self.start_layer, self.end_layer):
             o_proj = self.layers[i].self_attn.o_proj
 
-            o_proj.aclnn_input_scale.data = o_proj.aclnn_input_scale.data.repeat(world_size)
-            o_proj.aclnn_input_scale_reciprocal.data = o_proj.aclnn_input_scale_reciprocal.data.repeat(world_size)
-            o_proj.aclnn_input_offset.data = o_proj.aclnn_input_offset.data.repeat(world_size)
+            o_proj.aclnn_input_scale.data = o_proj.aclnn_input_scale.data.repeat(
+                world_size)
+            o_proj.aclnn_input_scale_reciprocal.data = o_proj.aclnn_input_scale_reciprocal.data.repeat(
+                world_size)
+            o_proj.aclnn_input_offset.data = o_proj.aclnn_input_offset.data.repeat(
+                world_size)
 
             torch_npu.npu_format_cast_(full, ACL_FORMAT_FRACTAL_ND)
             dist.all_gather_into_tensor(full,
@@ -873,8 +882,11 @@ class CustomDeepseekV2Model(nn.Module):
             if i < self.start_layer + full_layers or i % world_size == shard_rank:
                 o_proj.weight.data = full.clone().detach()
             else:
-                o_proj.weight.data = self.o_proj_weight_window[i % (full_layers + 1)]
-            assert torch_npu.get_npu_format(o_proj.weight.data) == ACL_FORMAT_FRACTAL_NZ
+                o_proj.weight.data = self.o_proj_weight_window[i %
+                                                               (full_layers +
+                                                                1)]
+            assert torch_npu.get_npu_format(
+                o_proj.weight.data) == ACL_FORMAT_FRACTAL_NZ
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -900,7 +912,9 @@ class CustomDeepseekV2Model(nn.Module):
             assert intermediate_tensors is None
             assert inputs_embeds is None
             my_dp = sp_context.my_dp
-            input_ids = sp_context.global_tokens[sp_context.dp_sp_start_token[my_dp]:sp_context.dp_sp_end_token[my_dp]]
+            input_ids = sp_context.global_tokens[
+                sp_context.dp_sp_start_token[my_dp]:sp_context.
+                dp_sp_end_token[my_dp]]
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -924,12 +938,15 @@ class CustomDeepseekV2Model(nn.Module):
                     o_proj.work = None
                 pre_load_layer_idx = i + ascend_config.o_shard_full_layers
                 if pre_load_layer_idx < self.end_layer:
-                    src = group_for_shard.ranks[pre_load_layer_idx % group_for_shard.world_size]
-                    next_o_proj = self.layers[pre_load_layer_idx].self_attn.o_proj
-                    next_o_proj.work = dist.broadcast(next_o_proj.weight.data,
-                                                      src=src,
-                                                      group=group_for_shard.device_group,
-                                                      async_op=True)
+                    src = group_for_shard.ranks[pre_load_layer_idx %
+                                                group_for_shard.world_size]
+                    next_o_proj = self.layers[
+                        pre_load_layer_idx].self_attn.o_proj
+                    next_o_proj.work = dist.broadcast(
+                        next_o_proj.weight.data,
+                        src=src,
+                        group=group_for_shard.device_group,
+                        async_op=True)
 
             hidden_states, residual = layer(
                 positions,
@@ -969,8 +986,7 @@ class CustomDeepseekV2Model(nn.Module):
             sp_output = torch.empty(
                 [my_dp_end_token - my_dp_start_token, hidden_states.shape[1]],
                 dtype=sp_send.dtype,
-                device=sp_send.device
-            )
+                device=sp_send.device)
             dist.all_to_all_single(
                 output=sp_output,
                 input=sp_send,

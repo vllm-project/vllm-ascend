@@ -1,13 +1,14 @@
+from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
 from torch import nn
-
-from dataclasses import dataclass
 from vllm.attention import AttentionMetadata
-from vllm.distributed.parallel_state import (get_dp_group, get_tp_group)
+from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.forward_context import get_forward_context
+
 from vllm_ascend.distributed.parallel_state import get_mla_sp_world_group
+
 
 @dataclass
 class SPContext:
@@ -29,14 +30,18 @@ class SPContext:
     input_split_sizes: list[int]
     output_split_sizes: list[int]
 
+
 _sp_context: Optional[SPContext] = None
+
 
 def get_sp_context() -> Optional[SPContext]:
     return _sp_context
 
+
 def set_sp_context(
     input_ids: torch.Tensor,
-    attn_metadata: Optional[Union["AttentionMetadata", dict[str, "AttentionMetadata"]]] = None,
+    attn_metadata: Optional[Union["AttentionMetadata",
+                                  dict[str, "AttentionMetadata"]]] = None,
 ):
     global _sp_context
     _sp_context = None
@@ -66,8 +71,11 @@ def set_sp_context(
         assert num_input_tokens == 1, "Length of dummy run must be 1."
 
     sp_metadata = torch.cat([
-        torch.tensor([sp_enabled, num_input_tokens], device=input_ids.device, dtype=torch.int32),
-        nn.functional.pad(input_ids, (0, max_num_tokens_across_dp - num_input_tokens)),
+        torch.tensor([sp_enabled, num_input_tokens],
+                     device=input_ids.device,
+                     dtype=torch.int32),
+        nn.functional.pad(input_ids,
+                          (0, max_num_tokens_across_dp - num_input_tokens)),
     ]).unsqueeze(0)
     sp_metadata_across_dp = dp_group.all_gather(sp_metadata, 0)
     for i in range(dp_group.world_size):
@@ -86,13 +94,17 @@ def set_sp_context(
         num_global_tokens += num_tokens
         end_token_of_dp.append(num_global_tokens)
 
-    num_tokens_per_rank = calc_div_ceil(num_global_tokens, sp_world_group.world_size)
+    num_tokens_per_rank = calc_div_ceil(num_global_tokens,
+                                        sp_world_group.world_size)
     num_tokens_per_dp = num_tokens_per_rank * tp_group.world_size
-    global_tokens = torch.empty(num_global_tokens, dtype=input_ids.dtype, device=input_ids.device)
+    global_tokens = torch.empty(num_global_tokens,
+                                dtype=input_ids.dtype,
+                                device=input_ids.device)
     for i in range(dp_group.world_size):
         row = sp_metadata_across_dp[i]
         num_tokens = row[1]
-        global_tokens[start_token_of_dp[i]:end_token_of_dp[i]] = row[2:num_tokens+2]
+        global_tokens[start_token_of_dp[i]:end_token_of_dp[i]] = row[
+            2:num_tokens + 2]
 
     dp_sp_start_token = []
     dp_sp_end_token = []
@@ -101,17 +113,22 @@ def set_sp_context(
     for i in range(dp_group.world_size):
         start_token = i * num_tokens_per_dp
         dp_sp_start_token.append(start_token)
-        dp_sp_end_token.append(min(start_token + num_tokens_per_dp, num_global_tokens))
+        dp_sp_end_token.append(
+            min(start_token + num_tokens_per_dp, num_global_tokens))
     for i in range(sp_world_group.world_size):
         start_token = i * num_tokens_per_rank
         rank_sp_start_token.append(start_token)
-        rank_sp_end_token.append(min(start_token + num_tokens_per_rank, num_global_tokens))
+        rank_sp_end_token.append(
+            min(start_token + num_tokens_per_rank, num_global_tokens))
 
     my_dp = dp_group.rank_in_group
     my_rank = sp_world_group.rank_in_group
     my_rank_sp_start_token_within_dp = tp_group.rank_in_group * num_tokens_per_rank
-    my_rank_sp_end_token_within_dp = min(my_rank_sp_start_token_within_dp + num_tokens_per_rank, max(0, dp_sp_end_token[my_dp] - dp_sp_start_token[my_dp]))
-    num_my_dp_sp_tokens = max(0, dp_sp_end_token[my_dp] - dp_sp_start_token[my_dp])
+    my_rank_sp_end_token_within_dp = min(
+        my_rank_sp_start_token_within_dp + num_tokens_per_rank,
+        max(0, dp_sp_end_token[my_dp] - dp_sp_start_token[my_dp]))
+    num_my_dp_sp_tokens = max(
+        0, dp_sp_end_token[my_dp] - dp_sp_start_token[my_dp])
 
     tp_size = tp_group.world_size
     input_split_sizes = []
@@ -138,7 +155,8 @@ def set_sp_context(
 
     forward_context.with_prefill = True
     forward_context.max_tokens_across_dp = num_tokens_per_dp
-    forward_context.padded_num_tokens = calc_div_ceil(num_tokens_per_dp, tp_size) * tp_size
+    forward_context.padded_num_tokens = calc_div_ceil(num_tokens_per_dp,
+                                                      tp_size) * tp_size
     from vllm_ascend.ascend_forward_context import FusedMoEState
     if forward_context.fused_moe_state == FusedMoEState.NaiveMulticast:
         forward_context.fused_moe_state = FusedMoEState.AllGather
@@ -169,6 +187,7 @@ def set_sp_context(
         input_split_sizes=input_split_sizes,
         output_split_sizes=output_split_sizes,
     )
+
 
 def calc_div_ceil(up: int, down: int) -> int:
     return (up + down - 1) // down

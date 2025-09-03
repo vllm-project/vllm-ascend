@@ -2,12 +2,14 @@ from typing import Optional, Union
 
 import torch
 from torch.nn.parameter import Parameter
-from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.distributed import divide
+from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.utils import set_weight_attrs
+
 from vllm_ascend.distributed.parallel_state import get_o_shard_group
+
 
 @CustomOp.register("row_shard_linear")
 class RowShardLinear(LinearBase):
