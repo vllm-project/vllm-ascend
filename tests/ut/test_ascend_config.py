@@ -262,6 +262,40 @@ class TestAscendConfig(TestBase):
             }
             init_ascend_config(test_vllm_config)
 
+        # use_cached_kv_cache_bytes should not be enabled without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "use_cached_kv_cache_bytes": True,
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
+        # graph_batch_sizes should not be set without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "graph_batch_sizes": [1, 2, 4],
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
+        # use_cached_kv_cache_bytes is valid only when torchair graph mode and use_cached_graph are enabled
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": True,
+                    "use_cached_graph": False,
+                    "use_cached_kv_cache_bytes": True,
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
         # graph_batch_sizes_init should not be enabled without torchair graph mode
         with self.assertRaises(RuntimeError):
             test_vllm_config.additional_config = {

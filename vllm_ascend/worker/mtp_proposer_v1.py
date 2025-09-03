@@ -20,7 +20,8 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
-from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
+from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
+                                        TorchairCommonAttentionMetadata)
 from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 
@@ -411,6 +412,7 @@ class MtpProposer:
                     self.model.__dict__[forward_proxy_name],
                     dynamic=True,
                     fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
                     ge_cache=False)
             return self.torchair_compiled_models[batch_size]
