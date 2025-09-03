@@ -484,15 +484,16 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.chunked_prefill_for_mla = ascend_config.chunked_prefill_for_mla
 
         vllm_config = get_current_vllm_config()
+        RING_MLA_MASK_SIZE = 512
         self.prefill_mask = torch.triu(
-            torch.ones(512,
-                       512,
+            torch.ones(RING_MLA_MASK_SIZE,
+                       RING_MLA_MASK_SIZE,
                        device="npu",
                        dtype=vllm_config.model_config.dtype),
-            1)  # 512: mask only support 512
+            1)
 
         # Adapt torch air graph mode with spec decoding.
-        speculative_config = get_current_vllm_config().speculative_config
+        speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
             self.spec_token_num = speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
