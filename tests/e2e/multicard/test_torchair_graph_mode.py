@@ -22,8 +22,6 @@ Run `pytest tests/multicard/test_torchair_graph_mode.py`.
 import os
 from typing import Dict
 
-import pytest
-
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
