@@ -50,7 +50,15 @@ There are many channels that you can communicate with our community developers /
 
 Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/user_guide/support_matrix/supported_features.html).
 
-### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
+### 6. How to get better performance in Non-MLA LLMs?
+
+`Non-MLA` LLMs forcibly disable the `chunked prefill` feature, as the performance of operators supporting this feature functionality is currently suboptimal. Therefore, in this scenario, we enforce the `Ascend scheduler` and forcibly disable `chunked prefill`. It is important to note that when you launch a non-MLA model with a simple script, the underlying behavior deviates from vLLM’s default of enabling chunked prefill: chunked prefill is effectively turned off, and prefill and decode are scheduled separately. Consequently, inference performance may drop significantly compared to expectations.
+
+Accordingly, we recommend the following serving configuration to achieve optimal performance on a single node:
+1. We recommend `--max-model-len` to a value just slightly larger than `max_input_len + max_output_len`; this reserves more KV-cache allocation headroom and reduces the risk of OOM. 
+2. We recommend aligning `--max-num-batched-tokens` with `–-max-model-len`, or setting it a few times larger than the average input length in your dataset; this helps maintain a good load balance between prefill and decode phases.
+
+### 7. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
 
 Basically, the reason is that the NPU environment is not configured correctly. You can:
 1. try `source /usr/local/Ascend/nnal/atb/set_env.sh` to enable NNAL package.
@@ -67,26 +75,26 @@ import vllm
 
 If all above steps are not working, feel free to submit a GitHub issue.
 
-### 7. How does vllm-ascend perform?
+### 8. How does vllm-ascend perform?
 
 Currently, only some models are improved. Such as `Qwen2.5 VL`, `Qwen3`, `Deepseek  V3`. Others are not good enough. From 0.9.0rc2, Qwen and Deepseek works with graph mode to play a good performance.
 
-### 8. How vllm-ascend work with vllm?
+### 9. How vllm-ascend work with vllm?
 vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.9.1, you should use vllm-ascend 0.9.1 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
 
-### 9. Does vllm-ascend support Prefill Disaggregation feature?
+### 10. Does vllm-ascend support Prefill Disaggregation feature?
 
 Yes, Prefill Disaggregation feature is supported on V1 Engine for NPND support.
 
-### 10. Does vllm-ascend support quantization method?
+### 11. Does vllm-ascend support quantization method?
 
 w8a8 and w4a8 quantization is already supported by vllm-ascend originally on v0.8.4rc2 or higher, 
 
-### 11. How to run w8a8 DeepSeek model?
+### 12. How to run w8a8 DeepSeek model?
 
 Please following the [inferencing tutorail](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/multi_node.html) and replace model to DeepSeek.
 
-### 12. How vllm-ascend is tested
+### 13. How vllm-ascend is tested
 
 vllm-ascend is tested by functional test, performance test and accuracy test.
 
@@ -98,10 +106,10 @@ vllm-ascend is tested by functional test, performance test and accuracy test.
 
 Final, for each release, we'll publish the performance test and accuracy test report in the future.
 
-### 13. How to fix the error "InvalidVersion" when using vllm-ascend?
+### 14. How to fix the error "InvalidVersion" when using vllm-ascend?
 It's usually because you have installed an dev/editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use. Please set the env variable `VLLM_VERSION` to the version of vLLM package you have installed. The format of `VLLM_VERSION` should be `X.Y.Z`.
 
-### 14. How to handle Out Of Memory?
+### 15. How to handle Out Of Memory?
 OOM errors typically occur when the model exceeds the memory capacity of a single NPU. For general guidance, you can refer to [vLLM's OOM troubleshooting documentation](https://docs.vllm.ai/en/latest/getting_started/troubleshooting.html#out-of-memory).
 
 In scenarios where NPUs have limited HBM (High Bandwidth Memory) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
@@ -110,7 +118,7 @@ In scenarios where NPUs have limited HBM (High Bandwidth Memory) capacity, dynam
 
 - **Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to optimize NPU memory management. For example, you can `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory feature to mitigate memory fragmentation caused by frequent dynamic memory size adjustments during runtime, see more note in: [PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html).
 
-### 15. Failed to enable NPU graph mode when running DeepSeek?
+### 16. Failed to enable NPU graph mode when running DeepSeek?
 You may encounter the following error if running DeepSeek with NPU graph mode enabled. The allowed number of queries per kv when enabling both MLA and Graph mode only support {32, 64, 128}, **Thus this is not supported for DeepSeek-V2-Lite**, as it only has 16 attention heads. The NPU graph mode support on DeepSeek-V2-Lite will be done in the future.
 
 And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, num_heads / num_kv_heads in {32, 64, 128}.
@@ -120,10 +128,10 @@ And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tenso
 [rank0]: EZ9999: [PID: 62938] 2025-05-27-06:52:12.455.807 numHeads / numKvHeads = 8, MLA only support {32, 64, 128}.[FUNC:CheckMlaAttrs][FILE:incre_flash_attention_tiling_check.cc][LINE:1218]
 ```
 
-### 16. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend?
+### 17. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend?
 You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source using pip. If the installation fails, it is recommended to use `python setup.py install` to install, or use `python setup.py clean` to clear the cache.
 
-### 17. How to generate determinitic results when using vllm-ascend?
+### 18. How to generate determinitic results when using vllm-ascend?
 There are several factors that affect output certainty:
 
 1. Sampler Method: using **Greedy sample** by setting `temperature=0` in `SamplingParams`, e.g.:
@@ -163,11 +171,11 @@ export ATB_MATMUL_SHUFFLE_K_ENABLE=0
 export ATB_LLM_LCOC_ENABLE=0
 ```
 
-### 18. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？
+### 19. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？
 The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met `pip install qwen-omni-utils`,
 this package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring audio processing functionality works correctly.
 
-### 19. Failed to run with `ray` distributed backend?
+### 20. Failed to run with `ray` distributed backend?
 You might facing the following errors when running with ray backend in distributed scenarios:
 
 ```
@@ -184,7 +192,7 @@ This has been solved in `ray>=2.47.1`, thus we could solve this as following:
 python3 -m pip install modelscope 'ray>=2.47.1' 'protobuf>3.20.0'
 ```
 
-### 20. Failed with inferencing Qwen3 MoE due to `Alloc sq cq fail` issue?
+### 21. Failed with inferencing Qwen3 MoE due to `Alloc sq cq fail` issue?
 
 When running Qwen3 MoE with tp/dp/ep, etc., you may encounter an error shown in [#2629](https://github.com/vllm-project/vllm-ascend/issues/2629).
 
