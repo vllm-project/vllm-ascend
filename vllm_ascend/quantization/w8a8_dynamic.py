@@ -120,7 +120,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         self.transpose_weight = True
 
         self.ep_group = get_ep_group()
-        self.fusion_mlp = not get_ascend_config().torchair_graph_config.enabled
 
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
@@ -267,7 +266,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             shared_dequant_scale=shared_dequant_scale,
             mc2_mask=kwargs.get("mc2_mask", None),
             with_quant=True,
-            fusion_mlp=self.fusion_mlp)
+            fusion_mlp=True)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
