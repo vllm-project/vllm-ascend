@@ -1198,5 +1198,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         # Default tp_rank is 0, so device_id should be 10
         self.assertEqual(worker.device_id, 10)
 
+
 if __name__ == '__main__':
     unittest.main()
