@@ -135,9 +135,11 @@ def init_ascend_mla_sp_model_parallel():
         assert o_shard_parallel_size >= 2, "o_shard_parallel_size must be >= 2"
         assert world_size % o_shard_parallel_size == 0, "o_shard_parallel_size must be a divisor of world_size"
         global _O_SHARD
-        all_ranks = torch.arange(world_size)
-        group_ranks = all_ranks.view(-1, o_shard_parallel_size).unbind(0)
-        group_ranks = [x.tolist() for x in group_ranks]
+        num_o_shard_parallel_groups = world_size // o_shard_parallel_size
+        group_ranks = []
+        for i in range(num_o_shard_parallel_groups):
+            ranks = list(range(i * o_shard_parallel_size, (i + 1) * o_shard_parallel_size))
+            group_ranks.append(ranks)
         _O_SHARD = init_model_parallel_group(group_ranks,
                                              get_world_group().local_rank,
                                              backend,

@@ -1017,6 +1017,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .view(-1, self.num_heads, self.qk_head_dim)
             prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
             prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
+            assert attn_metadata.prefill is not None
             cos = attn_metadata.prefill.cos
             sin = attn_metadata.prefill.sin
             prefill_slots = attn_metadata.slot_mapping

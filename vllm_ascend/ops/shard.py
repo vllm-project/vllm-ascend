@@ -35,6 +35,7 @@ class RowShardLinear(LinearBase):
                         (e.g. model.layers.0.self_attn.o_proj)
         return_bias: If true, return bias together with outputs in forward pass.
     """
+    work: Optional[torch.distributed.Work]
 
     def __init__(
         self,
@@ -85,7 +86,6 @@ class RowShardLinear(LinearBase):
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         group_for_shard = get_o_shard_group()
         tp_rank = group_for_shard.rank_in_group
-        tp_size = group_for_shard.world_size
         input_dim = getattr(param, "input_dim", None)
 
         assert not getattr(param, "use_bitsandbytes_4bit", False)
