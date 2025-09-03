@@ -7,7 +7,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.rotary_embedding import custom_rotary_embedding_enabled
+from vllm_ascend.ops.rotary_embedding import _custom_rotary_embedding_enabled
 
 
 class TestCustomRotaryEmbeddingEnabled(unittest.TestCase):
@@ -31,37 +31,37 @@ class TestCustomRotaryEmbeddingEnabled(unittest.TestCase):
         # Test when all conditions are True
         with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
                    return_value=True):
-            result = custom_rotary_embedding_enabled(self.query, True,
-                                                     self.head_size)
+            result = _custom_rotary_embedding_enabled(self.query, True,
+                                                      self.head_size)
             self.assertTrue(result)
 
         # Test when dtype is not float16
         with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
                    return_value=True):
             query = self.query.to(torch.float32)
-            result = custom_rotary_embedding_enabled(query, True,
-                                                     self.head_size)
+            result = _custom_rotary_embedding_enabled(query, True,
+                                                      self.head_size)
             self.assertFalse(result)
 
         # Test when neox_style is False
         with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
                    return_value=True):
-            result = custom_rotary_embedding_enabled(self.query, False,
-                                                     self.head_size)
+            result = _custom_rotary_embedding_enabled(self.query, False,
+                                                      self.head_size)
             self.assertFalse(result)
 
         # Test when head_size is not divisible by 32
         with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
                    return_value=True):
-            result = custom_rotary_embedding_enabled(self.query, True,
-                                                     self.head_size + 1)
+            result = _custom_rotary_embedding_enabled(self.query, True,
+                                                      self.head_size + 1)
             self.assertFalse(result)
 
         # Test when custom op is disabled
         with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
                    return_value=False):
-            result = custom_rotary_embedding_enabled(self.query, True,
-                                                     self.head_size)
+            result = _custom_rotary_embedding_enabled(self.query, True,
+                                                      self.head_size)
             self.assertFalse(result)
 
 
@@ -90,7 +90,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
 
     @patch('torch.ops._C')
     @patch('vllm_ascend.ops.rotary_embedding.is_310p', return_value=False)
-    @patch('vllm_ascend.ops.rotary_embedding.custom_rotary_embedding_enabled',
+    @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=True)
     @patch('torch.ops._npu_rotary_embedding')
     def test_rope_forward_oot_custom_kernel(self, mock_rotary_embedding,
@@ -110,7 +110,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         self.assertEqual(result_q.shape, self.query.shape)
         self.assertEqual(result_k.shape, self.key.shape)
 
-    @patch('vllm_ascend.ops.rotary_embedding.custom_rotary_embedding_enabled',
+    @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
     def test_rope_forward_oot_contiguous(self, mock_npu_rotary,
@@ -139,7 +139,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             self.layer.forward(self.positions, self.query, self.key, offsets)
 
-    @patch('vllm_ascend.ops.rotary_embedding.custom_rotary_embedding_enabled',
+    @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
     def test_rope_forward_oot_neox_style_override(self, mock_npu_rotary,
@@ -198,7 +198,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
     def test_native_rope_deepseek_forward_base(self, mock_npuplatform):
         mock_npuplatform.device_type = torch.device("cpu")
         self.layer = self._create_layer()
-        with patch("vllm_ascend.ops.rotary_embedding.rope_forward_oot",
+        with patch("vllm_ascend.ops.rotary_embedding._rope_forward_oot",
                    return_value=(self.query,
                                  self.key)) as mock_rope_forward_oot:
             q_pe, k_pe = self.layer.forward(self.positions, self.query,
@@ -207,7 +207,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
         assert q_pe.shape == self.query.shape
         assert k_pe.shape == self.key.shape
 
-    @patch('vllm_ascend.ops.rotary_embedding.rope_forward_oot')
+    @patch('vllm_ascend.ops.rotary_embedding._rope_forward_oot')
     @patch("vllm.platforms.current_platform.device_type",
            new=torch.device("cpu"))
     @patch("vllm_ascend.ops.rotary_embedding.NPUPlatform",
@@ -229,7 +229,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
         assert q_pe.shape == self.query.shape
         assert k_pe.shape == self.key.shape
 
-    @patch('vllm_ascend.ops.rotary_embedding.rope_forward_oot')
+    @patch('vllm_ascend.ops.rotary_embedding._rope_forward_oot')
     @patch("vllm.platforms.current_platform.device_type",
            new=torch.device("cpu"))
     @patch("vllm_ascend.ops.rotary_embedding.NPUPlatform",
@@ -248,7 +248,7 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
         assert q_pe.shape == self.query.shape
         assert k_pe.shape == key.shape
 
-    @patch('vllm_ascend.ops.rotary_embedding.rope_forward_oot')
+    @patch('vllm_ascend.ops.rotary_embedding._rope_forward_oot')
     @patch("vllm.platforms.current_platform.device_type",
            new=torch.device("cpu"))
     @patch("vllm_ascend.ops.rotary_embedding.NPUPlatform",

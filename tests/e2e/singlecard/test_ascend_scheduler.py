@@ -4,7 +4,6 @@ import pytest
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
-from vllm_ascend.ascend_config import clear_ascend_config
 
 MODEL = "Qwen/Qwen3-0.6B"
 
@@ -27,8 +26,6 @@ def test_concurrent_partial_prefill():
         for output in outputs:
             assert len(output.outputs) == 1
 
-    clear_ascend_config()
-
 
 def test_prefix_cache_stats_is_recorded():
     with VllmRunner(MODEL,
@@ -47,8 +44,6 @@ def test_prefix_cache_stats_is_recorded():
         _ = vllm_model.model.generate([input_tokens])
         outputs = vllm_model.model.generate([input_tokens])
         assert outputs[0].num_cached_tokens == 128
-
-    clear_ascend_config()
 
 
 @pytest.mark.parametrize("max_tokens",
@@ -91,4 +86,3 @@ def test_chunked_prefill_with_ascend_scheduler(
         name_0="vllm_output",
         name_1="chunked_prefill_output",
     )
-    clear_ascend_config()
