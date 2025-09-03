@@ -44,7 +44,6 @@ class MemcacheEngine:
         self.tp_rank = parallel_config.rank
         self.tp_size = parallel_config.tensor_parallel_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.engine_id = str(vllm_config.kv_transfer_config.engine_id)
         self.block_size = vllm_config.cache_config.block_size
         self.current_layer = 0
         # self.use_mla = first_kv_cache_tuple[0].size(
@@ -128,24 +127,24 @@ class MemcacheEngine:
             self.get_event = threading.Event()
             if self.kv_role == 'kv_producer':
                 ready_event_sending = threading.Event()
-                self.kv_send_thread = KVCacheStoreLayerSendingThread(self.tp_rank, self.tp_size, self.m_store, self.engine_id,
+                self.kv_send_thread = KVCacheStoreLayerSendingThread(self.tp_rank, self.tp_size, self.m_store,
                     self.kv_caches_base_addr, self.token_database, self.block_len, self.block_size, ready_event_sending, self.num_layers)
                 self.kv_send_thread.start()
             ready_event = threading.Event()
             self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
-                self.tp_rank, self.tp_size, self.m_store, self.engine_id,
+                self.tp_rank, self.tp_size, self.m_store,
                 self.kv_caches_base_addr, self.token_database, self.block_len,  self.block_size, ready_event, self.get_event)
             self.kv_recv_thread.start()
             ready_event.wait()
         else:
             if self.kv_role == 'kv_producer':
                 ready_event_sending = threading.Event()
-                self.kv_send_thread = KVCacheStoreSendingThread(self.tp_rank, self.tp_size, self.m_store, self.engine_id,
+                self.kv_send_thread = KVCacheStoreSendingThread(self.tp_rank, self.tp_size, self.m_store,
                     self.kv_caches_base_addr, self.token_database, self.block_len, self.block_size, ready_event_sending)
                 self.kv_send_thread.start()
             ready_event = threading.Event()
             self.kv_recv_thread = KVCacheStoreRecvingThread(
-                self.tp_rank, self.tp_size, self.m_store, self.engine_id,
+                self.tp_rank, self.tp_size, self.m_store,
                 self.kv_caches_base_addr, self.token_database, self.block_len, self.block_size, ready_event)
             self.kv_recv_thread.start()
             ready_event.wait()
@@ -492,4 +491,3 @@ class MemcacheEngine:
     def close(self) -> None:
         """Close the cache engine and free all the resources"""      
         self.m_store.close()
-
