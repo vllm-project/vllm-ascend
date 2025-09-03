@@ -34,7 +34,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.padding_size = 8
         mock_vllm_config = MagicMock()
         mock_vllm_config.additional_config = {}
-        mock_vllm_config.some_required_field = "mock_value"  # Add any required fields here
         init_ascend_config(mock_vllm_config)
 
     def _create_layer(self):
