@@ -2,6 +2,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 from pytest_mock import MockerFixture
+from vllm.model_executor.models.qwen2_5_vl import \
+    Qwen2_5_VLForConditionalGeneration
 
 from tests.ut.base import PytestBase
 from vllm_ascend.models.qwen2_5_vl_without_padding import (
@@ -396,3 +398,25 @@ class TestAscendQwen2_5_VLForConditionalGeneration_Without_Padding(PytestBase):
             vl_for_conditional_generation,
             AscendQwen2_5_VLForConditionalGeneration_Without_Padding,
         )
+
+    def test_overridden_methods(self):
+        self.assert_method_overridden(
+            AscendQwen2_5_VLForConditionalGeneration_Without_Padding,
+            Qwen2_5_VLForConditionalGeneration,
+            "_process_image_input",
+        )
+
+        self.assert_method_overridden(
+            AscendQwen2_5_VLForConditionalGeneration_Without_Padding,
+            Qwen2_5_VLForConditionalGeneration,
+            "_process_video_input",
+        )
+
+    @staticmethod
+    def assert_method_overridden(subclass, parent, method_name: str):
+        """assert subclass override parent method"""
+        parent_func = parent.__dict__.get(method_name)
+        child_func = subclass.__dict__.get(method_name)
+
+        assert child_func is not None, f"{subclass.__name__} should defined {method_name}"
+        assert child_func is not parent_func, f"{method_name} should override in {subclass.__name__}"
