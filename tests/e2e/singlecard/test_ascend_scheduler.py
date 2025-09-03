@@ -50,8 +50,10 @@ def test_prefix_cache_stats_is_recorded():
                          [4])  # cannot align results when max_tokens > 4
 @pytest.mark.parametrize("chunked_prefill_token_size", [16])
 def test_chunked_prefill_with_ascend_scheduler(
-        example_prompts, max_tokens: int,
-        chunked_prefill_token_size: int) -> None:
+        max_tokens: int, chunked_prefill_token_size: int) -> None:
+    example_prompts = [
+        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."
+    ]
     max_num_seqs = chunked_prefill_token_size
     max_num_batched_tokens = chunked_prefill_token_size
     with VllmRunner(MODEL,
@@ -63,7 +65,6 @@ def test_chunked_prefill_with_ascend_scheduler(
                     },
                     max_num_seqs=max_num_seqs,
                     max_num_batched_tokens=max_num_batched_tokens,
-                    enforce_eager=True,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
         chunked_prefill_output = vllm_model.generate_greedy(
@@ -75,7 +76,6 @@ def test_chunked_prefill_with_ascend_scheduler(
                             'enabled': True,
                         },
                     },
-                    enforce_eager=True,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
