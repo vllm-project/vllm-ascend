@@ -628,6 +628,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self.running_in_graph = False
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
