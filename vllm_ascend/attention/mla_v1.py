@@ -276,7 +276,9 @@ class AscendMLAMetadataBuilder:
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         # TODO(xyx): remove the if condition after mla supports torch mode speculative decoding
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
+            split_decodes_and_prefills(common_attn_metadata,
+                                       decode_threshold=self.decode_threshold,
+                                       is_kv_producer=self.is_kv_producer)
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_actual_tokens
 
