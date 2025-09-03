@@ -10,8 +10,6 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_DETERMINISTIC=True
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
-# Spawn the process inside the vllm maybe cause the circular import issue, using fork here is necessary
-export VLLM_WORKER_MULTIPROC_METHOD="fork"
 
 export VLLM_USE_V1=1
 

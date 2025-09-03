@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument(
         "--dp-size-local",
         type=int,
-        required=True,
+        default=-1,
         help="Local data parallel size."
     )
     parser.add_argument(
@@ -39,7 +39,7 @@ def parse_args():
     parser.add_argument(
         "--dp-rpc-port",
         type=str,
-        required=True,
+        default=12345,
         help="Port for data parallel master node."
     )
     parser.add_argument(
@@ -54,6 +54,8 @@ args = parse_args()
 dp_size = args.dp_size
 tp_size = args.tp_size
 dp_size_local = args.dp_size_local
+if dp_size_local == -1:
+    dp_size_local = dp_size
 dp_rank_start = args.dp_rank_start
 dp_address = args.dp_address
 dp_rpc_port = args.dp_rpc_port
