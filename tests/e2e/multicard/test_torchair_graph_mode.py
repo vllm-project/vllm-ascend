@@ -155,7 +155,6 @@ def _pangu_torchair_test_fixture(
         print(f"Generated text: {vllm_output[i][1]!r}")
 
 
-@pytest.mark.skip("pangu doesn't work, fix me")
 def test_e2e_pangu_with_torchair():
     additional_config = {
         "torchair_graph_config": {
