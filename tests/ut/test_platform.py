@@ -279,6 +279,7 @@ class TestNPUPlatform(TestBase):
 
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
+        print(30 * "=", f"cm.output: {cm.output}")
         self.assertTrue("Model config is missing" in cm.output[0])
 
     @patch("vllm_ascend.utils.is_310p", return_value=False)
@@ -296,6 +297,7 @@ class TestNPUPlatform(TestBase):
 
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
+        print(30 * "=", f"cm.output: {cm.output}")
         self.assertTrue("Compilation disabled, using eager mode by default" in
                         cm.output[0])
         self.assertEqual(
@@ -323,6 +325,7 @@ class TestNPUPlatform(TestBase):
 
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
+            print(30 * "=", f"cm.output: {cm.output}")
             self.assertTrue("NPU does not support" in cm.output[0])
             self.assertEqual(
                 vllm_config.compilation_config.level,
@@ -351,6 +354,7 @@ class TestNPUPlatform(TestBase):
 
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
+            print(30 * "=", f"cm.output: {cm.output}")
             self.assertTrue(
                 "cudagraph_mode is not support on NPU. falling back to NONE" in
                 cm.output[0])
@@ -410,6 +414,7 @@ class TestNPUPlatform(TestBase):
 
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
+        print(30 * "=", f"cm.output: {cm.output}")
         self.assertTrue("Torchair compilation enabled" in cm.output[0])
         self.assertEqual(
             vllm_config.compilation_config.level,
