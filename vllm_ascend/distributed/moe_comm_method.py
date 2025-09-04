@@ -11,6 +11,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
