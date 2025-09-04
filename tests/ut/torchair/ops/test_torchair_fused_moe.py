@@ -24,7 +24,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
-from vllm_ascend.quantization.quantizer import W8A8Quantizer
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
     TorchairAscendFusedMoE, TorchairAscendUnquantizedFusedMoEMethod)
 from vllm_ascend.utils import AscendSocVersion, adapt_patch  # noqa E402
@@ -236,12 +235,9 @@ class TestTorchairAscendFusedMoe:
         mock_quant_method = MockFusedMoEMethod()
         mock_quant_config.get_quant_method.return_value = mock_quant_method
         mock_quant_config.is_layer_skipped_ascend.return_value = False
-        with patch(
-                'vllm_ascend.quantization.quantizer.AscendQuantizer.get_quantizer',
-                return_value=W8A8Quantizer):
+        with patch("vllm_ascend.quantization.quant_config.get_quant_method"):
             moe = TorchairAscendFusedMoE(**default_moe_config,
                                          quant_config=mock_quant_config)
-
             assert moe.quant_method is not None
             assert isinstance(moe.quant_method, AscendFusedMoEMethod)
 
