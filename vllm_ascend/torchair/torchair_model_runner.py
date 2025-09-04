@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 # isort: skip_file
 
+import math
 import types
 from typing import Optional
 
@@ -427,6 +428,11 @@ class NPUTorchairModelRunner(NPUModelRunner):
             for graph_batch_size in self.torchair_graph_batch_sizes:
                 cur_graph_batch_size = (graph_batch_size + tp_size -
                                         1) // tp_size * tp_size
+                # MTP > 1: Cal LCMLeast Common Multiple with graph_batch_size and tp_size,
+                # Both adapter multi-dp and FIA operator
+                if self.speculative_config is not None and self.speculative_config.num_speculative_tokens > 1:
+                    cur_graph_batch_size = (tp_size * graph_batch_size) \
+                                           // math.gcd(tp_size, graph_batch_size)
                 if cur_graph_batch_size not in new_graph_batch_sizes and \
                     cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
                     new_graph_batch_sizes.append(cur_graph_batch_size)
