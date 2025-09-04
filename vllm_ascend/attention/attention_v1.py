@@ -304,34 +304,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
 
-        if self.sliding_window is not None and \
-            attn_metadata.attn_mask.shape[0] > self.sliding_window:
-
-            key = self._repeat_kv(key, self.num_heads // self.num_kv_heads)
-            value = self._repeat_kv(value, self.num_heads // self.num_kv_heads)
-
-            output, _ = torch_npu.npu_fused_infer_attention_score(
-                query,
-                key,
-                value,
-                num_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                input_layout="TND",
-                pre_tokens=self.sliding_window,
-                scale=self.scale,
-                actual_seq_lengths=attn_metadata.seq_lens,
-                actual_seq_lengths_kv=attn_metadata.seq_lens)
-            output = output.view(num_tokens, self.num_heads, self.head_size)
-        else:
-            torch_npu._npu_flash_attention(query=query,
-                                           key=key,
-                                           value=value,
-                                           mask=mask,
-                                           seq_len=attn_metadata.seq_lens,
-                                           scale_value=self.scale,
-                                           num_heads=self.num_heads,
-                                           num_kv_heads=self.num_kv_heads,
-                                           out=output)
+        torch_npu._npu_flash_attention(query=query,
+                                        key=key,
+                                        value=value,
+                                        mask=mask,
+                                        seq_len=attn_metadata.seq_lens,
+                                        scale_value=self.scale,
+                                        num_heads=self.num_heads,
+                                        num_kv_heads=self.num_kv_heads,
+                                        out=output)
         assert output is not None
         return output[:num_tokens, :, :]
 
