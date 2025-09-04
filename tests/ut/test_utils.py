@@ -261,6 +261,20 @@ class TestUtils(TestBase):
         self.assertEqual(
             147,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
+
+        test_vllm_config.speculative_config = mock.MagicMock()
+        test_vllm_config.speculative_config.draft_model_config = mock.MagicMock(
+        )
+        test_vllm_config.speculative_config.draft_model_config.hf_config = mock.MagicMock(
+        )
+        test_vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers = 2
+        os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
+        utils.update_aclgraph_sizes(test_vllm_config)
+        del os.environ['HCCL_OP_EXPANSION_MODE']
+        self.assertEqual(
+            120,
+            len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
+
         # max_num_batch_sizes >= len(original_sizes)
         test_compilation_config = CompilationConfig(
             cudagraph_capture_sizes=[1, 2, 3])
