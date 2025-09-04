@@ -183,7 +183,7 @@ class AllGatherCommImpl(MoECommMethod):
             first_expert_idx = self.moe_config.ep_rank * num_experts
         last_expert_idx = first_expert_idx + num_experts
 
-        permuted_hidden_states, expanded_row_idx, expert_tokens, _ = (
+        permuted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = (
             torch_npu.npu_moe_init_routing_v2(
                 hidden_states,
                 topk_ids,
@@ -192,14 +192,14 @@ class AllGatherCommImpl(MoECommMethod):
                 expert_tokens_num_type=1,  # Only support `count` mode now
                 expert_tokens_num_flag=True,  # Output `expert_tokens`
                 active_expert_range=[first_expert_idx, last_expert_idx],
-                quant_mode=-1,
+                quant_mode=1,
             ))
         self.expanded_row_idx = expanded_row_idx
         permuted_hidden_states = permuted_hidden_states
 
         group_list_type = 1  # `count` mode
 
-        return permuted_hidden_states, expert_tokens, None, group_list_type
+        return permuted_hidden_states, expert_tokens, pertoken_scale, group_list_type
 
     def unpermute(self, mlp_output: torch.Tensor,
                   hidden_states: torch.Tensor) -> None:
