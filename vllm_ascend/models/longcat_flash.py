@@ -84,6 +84,12 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
         self.hidden_size = config.hidden_size
         self.layer_idx = getattr(config, 'layer_idx', 0)
         
+        # 为FlashConfig添加CustomDeepseekV2MLAAttention需要的属性
+        if not hasattr(config, 'first_k_dense_replace'):
+            config.first_k_dense_replace = 0  # LongCat Flash不使用密集层替换
+        if not hasattr(config, 'moe_layer_freq'):
+            config.moe_layer_freq = 1  # 默认频率
+        
         # 初始化input_layernorm
         from vllm.model_executor.layers.layernorm import RMSNorm
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
