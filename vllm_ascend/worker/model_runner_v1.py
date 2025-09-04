@@ -1438,7 +1438,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if num_tokens <= self.mc2_tokens_capacity:
             moe_comm_method = "mc2"
-        elif soc_version in {AscendSocVersion.A2}:
+        elif soc_version in {AscendSocVersion.A2, AscendSocVersion.P3}:
             moe_comm_method = "allgather"
         elif soc_version in {AscendSocVersion.A3}:
             moe_comm_method = "alltoall"
