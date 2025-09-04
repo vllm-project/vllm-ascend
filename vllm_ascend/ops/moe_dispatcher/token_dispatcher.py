@@ -355,53 +355,68 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                 topk_weights.to(hidden_states.dtype)
 
         if expert_map is not None:
-            # Generate token indices and flatten
-            token_indices = (torch.arange(
-                num_tokens, device=device,
-                dtype=torch.int64).unsqueeze(1).expand(-1,
-                                                       self.top_k).reshape(-1))
-
-            # Flatten token-to-expert mappings and map to local experts
-            weights_flat = topk_weights.view(-1)
-            experts_flat = topk_ids.view(-1)
-            local_experts_flat = expert_map[experts_flat]
-
-            # Filter valid token-expert pairs
-            self.mask = local_experts_flat != -1
-            filtered_weights = torch.where(
-                self.mask, weights_flat,
-                torch.zeros_like(weights_flat)).to(dtype)
-            filtered_experts = torch.where(
-                self.mask, local_experts_flat,
-                torch.full_like(local_experts_flat,
-                                self.num_experts_local)).to(topk_ids.dtype)
-
-            # Sort by local expert IDs
-            sort_indices = torch.argsort(filtered_experts.view(torch.float32))
-            self.sorted_token_indices = token_indices[sort_indices]
-            self.sorted_weights = filtered_weights[sort_indices]
-
-            # Compute token counts with minlength of num_experts
-            # This is equivalent to but faster than:
-            # >>> token_counts = torch.bincount(filtered_experts, minlength=num_experts)[:-1]
-            token_counts = torch.zeros(self.num_experts_local + 1,
-                                       device=device,
-                                       dtype=torch.int64)
-            ones = torch.ones_like(filtered_experts, dtype=torch.int64)
-            token_counts.scatter_add_(0, filtered_experts.to(torch.int64),
-                                      ones)
-            token_counts = token_counts[:self.num_experts_local]
-
-            # Rearrange hidden_states
-            sorted_hidden_states = hidden_states[self.sorted_token_indices]
             if self.with_quant:
+                # Generate token indices and flatten
+                token_indices = (torch.arange(
+                    num_tokens, device=device,
+                    dtype=torch.int64).unsqueeze(1).expand(-1,
+                                                        self.top_k).reshape(-1))
+                # Flatten token-to-expert mappings and map to local experts
+                weights_flat = topk_weights.view(-1)
+                experts_flat = topk_ids.view(-1)
+                local_experts_flat = expert_map[experts_flat]
+
+                # Filter valid token-expert pairs
+                self.mask = local_experts_flat != -1
+                filtered_weights = torch.where(
+                    self.mask, weights_flat,
+                    torch.zeros_like(weights_flat)).to(dtype)
+                filtered_experts = torch.where(
+                    self.mask, local_experts_flat,
+                    torch.full_like(local_experts_flat,
+                                    self.num_experts_local)).to(topk_ids.dtype)
+
+                # Sort by local expert IDs
+                sort_indices = torch.argsort(filtered_experts.view(torch.float32))
+                self.sorted_token_indices = token_indices[sort_indices]
+                self.sorted_weights = filtered_weights[sort_indices]
+
+                # Compute token counts with minlength of num_experts
+                token_counts = torch.zeros(self.num_experts_local + 1,
+                                        device=device,
+                                        dtype=torch.int64)
+                ones = torch.ones_like(filtered_experts, dtype=torch.int64)
+                token_counts.scatter_add_(0, filtered_experts.to(torch.int64),
+                                        ones)
+                expert_tokens = token_counts[:self.num_experts_local]
+
+                # Rearrange hidden_states
+                sorted_hidden_states = hidden_states[self.sorted_token_indices]
                 group_list_type = 1
-                expert_tokens = token_counts
             else:
-                expert_tokens = torch.cumsum(token_counts,
-                                             dim=0,
-                                             dtype=torch.int64)
-                group_list_type = 0
+                global_num_experts = len(expert_map)
+                first_expert_idx = get_ep_group().rank_in_group * self.num_experts_local
+                last_expert_idx = first_expert_idx + self.num_experts_local
+
+                sorted_hidden_states, self.expanded_row_idx, expert_tokens, _ = (
+                    torch_npu.npu_moe_init_routing_v2(
+                        hidden_states,
+                        topk_ids,
+                        active_num=num_tokens * self.top_k,
+                        expert_num=global_num_experts,
+                        expert_tokens_num_type=1,  # Only support `count` mode now
+                        expert_tokens_num_flag=True,  # Output `expert_tokens`
+                        active_expert_range=[first_expert_idx, last_expert_idx],
+                        quant_mode=-1,
+                    ))
+                expert_tokens = expert_tokens.to(torch.int64)
+                group_list_type = 1  # `count` mode
+                
+                vector_stream = get_forward_context().vector_stream
+                vector_stream.wait_stream(torch.npu.current_stream())
+                with torch.npu.stream(vector_stream):
+                    mask = (expert_map[topk_ids] != -1)
+                    self.topk_weights = topk_weights * mask
         else:
             active_num = self.max_num_tokens if self.max_num_tokens is not None else num_tokens
             sorted_hidden_states, self.expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
@@ -427,29 +442,34 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
         dtype = hidden_states.dtype
         device = hidden_states.device
         if self.expert_map is not None:
-            assert self.mask is not None
-            assert self.sorted_token_indices is not None
-            assert self.sorted_weights is not None
+            if self.with_quant:
+                assert self.mask is not None
+                assert self.sorted_token_indices is not None
+                assert self.sorted_weights is not None
+                weighted_down_out = hidden_states * \
+                    self.sorted_weights.unsqueeze(1)
 
-            weighted_down_out = hidden_states * \
-                self.sorted_weights.unsqueeze(1)
+                final_hidden_states = torch.zeros(*self.original_shape,
+                                                device=hidden_states.device,
+                                                dtype=hidden_states.dtype)
 
-            final_hidden_states = torch.zeros(*self.original_shape,
-                                              device=hidden_states.device,
-                                              dtype=hidden_states.dtype)
-
-            # TODO: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
-            # This created multiple NaN and index_add_ will mix them up which harms accuracy
-            # remove this mask and filter after it being fixed
-            num_valid_tokens = self.mask.sum()
-            valid_token_mask = torch.arange(
-                0, self.sorted_token_indices.shape[0],
-                device=device).unsqueeze(1) < num_valid_tokens
-            valid_output = torch.where(
-                valid_token_mask, weighted_down_out,
-                torch.zeros_like(weighted_down_out)).to(dtype)
-            final_hidden_states.index_add_(0, self.sorted_token_indices,
-                                           valid_output)
+                # TODO: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
+                # This created multiple NaN and index_add_ will mix them up which harms accuracy
+                # remove this mask and filter after it being fixed
+                num_valid_tokens = self.mask.sum()
+                valid_token_mask = torch.arange(
+                    0, self.sorted_token_indices.shape[0],
+                    device=device).unsqueeze(1) < num_valid_tokens
+                valid_output = torch.where(
+                    valid_token_mask, weighted_down_out,
+                    torch.zeros_like(weighted_down_out)).to(dtype)
+                final_hidden_states.index_add_(0, self.sorted_token_indices,
+                                            valid_output)
+            else:
+                final_hidden_states = torch_npu.npu_moe_token_unpermute(
+                                                    permuted_tokens=hidden_states,
+                                                    sorted_indices=self.expanded_row_idx,
+                                                    probs=self.topk_weights)
         else:
             if self.with_quant:
                 final_hidden_states = torch_npu.npu_moe_finalize_routing(
