@@ -344,17 +344,6 @@ def forward_oot(
         e_score_correction_bias=e_score_correction_bias,
         global_num_experts=global_num_experts)
 
-    # NOTE: During profiling, tokens are fixed and not random, this causes
-    # some experts getting more tokens than others, which consumes more memory
-    # than expected and may lead to OOM.
-    # To avoid this, we replace the selected expert ids with a round-robin
-    # assignment to ensure all experts get similar number of tokens.
-    # FIXME: But what if in real run, experts load is REALLY imbalanced?
-    forward_context = get_forward_context()
-    if forward_context.in_profile_run:
-        indices = torch.arange(topk_ids.numel(), device=topk_ids.device)
-        topk_ids = (indices % global_num_experts).view_as(topk_ids)
-
     if topk_ids.shape[1] < top_k or is_310p():
         assert global_num_experts is not None
         return fused_experts_moge(

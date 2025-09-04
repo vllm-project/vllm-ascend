@@ -11,11 +11,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import pytest
 from unittest.mock import MagicMock, patch
 
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+import pytest
+
 from vllm_ascend.utils import AscendSocVersion
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
 
 # yapf: disable
 @pytest.mark.parametrize(
@@ -65,7 +67,8 @@ def test_select_moe_comm_method(soc_version, enable_expert_parallel,
                return_value=True):
 
         # Call the method under test
-        method = NPUModelRunner._select_moe_comm_method(mock_runner, num_tokens)
+        method = NPUModelRunner._select_moe_comm_method(
+            mock_runner, num_tokens)
 
         # Assert the result
         assert method == expected_method
