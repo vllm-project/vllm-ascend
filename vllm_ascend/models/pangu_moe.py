@@ -57,7 +57,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
 
 _ROUTER_SCALE = None
@@ -497,6 +496,10 @@ class PanguProMoESparseMoeBlock(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         global _ROUTER_SCALE
         _ROUTER_SCALE = self.router_scale
+
+        # TODO(angazenn): Does not support MC2 currently
+        get_forward_context().moe_comm_method_name = "allgathercommimpl"
+
         if not use_h2p():
             final_hidden_states = self.experts.forward_impl(
                 hidden_states=hidden_states, router_logits=router_logits)
@@ -608,9 +611,6 @@ class PanguProMoEAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -621,18 +621,7 @@ class PanguProMoEAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        if self.torchair_graph_enabled:
-            forward_kwargs = {'trace_flag': False}
-            output_shape = q.shape
-            attn_output = torch.empty(output_shape,
-                                      dtype=q.dtype,
-                                      device=q.device)
-            forward_kwargs['output'] = attn_output
-            attn_output = self.attn.impl.forward(self.attn, q, k, v, kv_cache,
-                                                 attn_metadata,
-                                                 **forward_kwargs)
-        else:
-            attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v)
 
         output, _ = self.o_proj(attn_output)
         return output

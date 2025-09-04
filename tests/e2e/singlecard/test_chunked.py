@@ -19,6 +19,8 @@ Compare the outputs of vLLM with and without aclgraph.
 
 Run `pytest tests/compile/test_aclgraph.py`.
 """
+import gc
+
 import pytest
 import torch
 from vllm import SamplingParams
@@ -73,3 +75,7 @@ def test_models(
     print(f"Token IDs cosine similarity: {similarity.item()}")
 
     assert similarity > 0.95
+
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

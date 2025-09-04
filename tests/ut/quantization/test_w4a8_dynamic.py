@@ -39,14 +39,10 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
 
     @patch('vllm_ascend.quantization.w4a8_dynamic.get_current_vllm_config')
     @patch('vllm_ascend.quantization.w4a8_dynamic.get_ep_group')
-    @patch("vllm_ascend.ascend_config.get_ascend_config")
     @patch('vllm_ascend.quantization.w4a8_dynamic.get_mc2_group')
     @patch('torch.distributed.get_rank', return_value=0)
-    def setUp(self, mock_get_rank, mock_get_mc2_group, mock_get_ascend_config,
-              mock_get_ep_group, get_current_vllm_config):
-        mock_ascend_config = Mock()
-        mock_ascend_config.torchair_graph_config = Mock(enabled=False)
-        mock_get_ascend_config.return_value = mock_ascend_config
+    def setUp(self, mock_get_rank, mock_get_mc2_group, mock_get_ep_group,
+              get_current_vllm_config):
         mock_vllm_config = Mock()
         mock_vllm_config.quant_config = Mock(quant_description={
             "group_size": self.group_size,

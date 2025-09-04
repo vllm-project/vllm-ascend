@@ -20,6 +20,7 @@
 import atexit
 import functools
 import math
+import os
 from contextlib import contextmanager
 from enum import Enum
 from threading import Lock
@@ -46,7 +47,7 @@ else:
 # Maximum number of graphs that can be captured by ACL Graph
 MAX_CAPTURE_SIZE = 1920
 
-ASCEND_QUATIZATION_METHOD = "ascend"
+ASCEND_QUANTIZATION_METHOD = "ascend"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 
 ACL_FORMAT_FRACTAL_ND = 2
@@ -168,28 +169,6 @@ def aligned_16(tensor: torch.Tensor):
     new_tensor[:n] = tensor
 
     return new_tensor
-
-
-def maybe_converting_weight_acl_format(model, format=ACL_FORMAT_FRACTAL_NZ):
-    # currently, there are some operations which do not support ACL_FORMAT_FRACTAL_NZ
-    # in eager mode but support it in torchair graph mode. since ACL_FORMAT_FRACTAL_NZ
-    # is much more preferred than ACL_FORMAT_FRACTAL_ND on 300I Duo, we add this
-    # conversion when using torchair graph mode on 300I Duo platform.
-    # TODO: we will remove this conversion if npu_quant_grouped_matmul_dequant
-    # accepts weight format of ACL_FORMAT_FRACTAL_NZ in eager mode.
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-
-    use_torchair = get_ascend_config().torchair_graph_config.enabled
-    if not is_310p() or not use_torchair:
-        return
-    for module in model.modules():
-        if isinstance(module, FusedMoE):
-            if torch_npu.get_npu_format(module.w13_weight.data) == format:
-                return
-            module.w13_weight.data = torch_npu.npu_format_cast(
-                module.w13_weight.data, format)
-            module.w2_weight.data = torch_npu.npu_format_cast(
-                module.w2_weight.data, format)
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
@@ -325,17 +304,54 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         num_hidden_layers = get_max_hidden_layers(hf_config)
     parallel_config = vllm_config.parallel_config
 
+    # Calculate maximum supported batch sizes considering model architecture
+    resources_per_graph = num_hidden_layers + 1
+    if vllm_config.speculative_config is not None:
+        draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
+
     # TODO: Find out whether we need to take into account the pp_size
-    parallel_factor = 1 + sum(size > 1 for size in [
-        parallel_config.data_parallel_size_local,
+    num_comm_groups = sum(size > 1 for size in [
+        parallel_config.data_parallel_size,
         parallel_config.tensor_parallel_size,
     ])
 
-    # Calculate maximum supported batch sizes considering model architecture
-    max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
-                                     (num_hidden_layers + 1) / parallel_factor)
-    logger.info("Calculated maximum supported batch sizes for ACL graph: %s",
-                max_num_batch_sizes)
+    if os.getenv("HCCL_OP_EXPANSION_MODE") == 'AIV':
+        # TODO: Find out whether we need to take into account the pp_size
+        parallel_factor = 1 + num_comm_groups + int(
+            parallel_config.enable_expert_parallel)
+        # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device
+        # Assume the following case:
+        # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
+        # According to the formula, max_num_batch_sizes = math.floor(1920 / (48 + 1) / 2) = 19
+        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
+                                         resources_per_graph / parallel_factor)
+        logger.info(
+            "Calculated maximum supported batch sizes for ACL graph: %s",
+            max_num_batch_sizes)
+    else:
+        # The above describes an empirical formula applicable to the A2 hardware.
+        # Under this configuration, HCCL employs the FFTS+ method for execution unfolding,
+        # which adds only 1 concurrent stream without consuming collective communication execution unfolding streams.
+        # On A3 hardware, HCCL defaults to the AICPU method.
+        # This approach may additionally allocate up to rank_size (max 16) - 1 streams per collective communication domain on the device (worst case).
+        # Using the default collective communication unfolding method on A3 will lead to a significant reduction in the maximum supported sizes.
+        # Therefore, the calculation formula has been modified as follows:
+        # Assume the following case:
+        # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
+        # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
+        max_num_batch_sizes = math.floor(
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph /
+            (1 + num_comm_groups * 2))
+        logger.info(
+            "Calculated maximum supported batch sizes for ACL graph: %s",
+            max_num_batch_sizes)
+        logger.warning(
+            "Currently, communication is performed using FFTS+ method, which reduces "
+            "the number of available streams and, as a result, limits the range of runtime "
+            "shapes that can be handled. To both improve communication performance and "
+            "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
+        )
 
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
@@ -478,9 +494,25 @@ def register_ascend_customop():
     from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
                                         AscendMlpMergedColumnParallelLinear,
                                         AscendMlpRowParallelLinear)
+    from vllm_ascend.ops.rotary_embedding import (
+        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+    from vllm_ascend.ops.vocab_parallel_embedding import (
+        AscendLogitsProcessor, AscendParallelLMHead,
+        AscendVocabParallelEmbedding)
     CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
     CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
                           name="SiluAndMul")
+    CustomOp.register_oot(_decorated_op_cls=AscendRotaryEmbedding,
+                          name="RotaryEmbedding")
+    CustomOp.register_oot(
+        _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
+        name="DeepseekScalingRotaryEmbedding")
+    CustomOp.register_oot(_decorated_op_cls=AscendVocabParallelEmbedding,
+                          name="VocabParallelEmbedding")
+    CustomOp.register_oot(_decorated_op_cls=AscendParallelLMHead,
+                          name="ParallelLMHead")
+    CustomOp.register_oot(_decorated_op_cls=AscendLogitsProcessor,
+                          name="LogitsProcessor")
     if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
         CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
                               name="ColumnParallelLinear")
@@ -492,6 +524,9 @@ def register_ascend_customop():
 
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
+
+    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+    CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
@@ -523,3 +558,7 @@ def get_ascend_soc_version():
     global _ascend_soc_version
     assert _ascend_soc_version is not None
     return _ascend_soc_version
+
+
+def lmhead_tp_enable() -> bool:
+    return get_ascend_config().lmhead_tensor_parallel_size is not None

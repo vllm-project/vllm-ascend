@@ -210,6 +210,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
                    return_value=ascend_config):
             builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
+            builder.decode_threshold = 1
 
         input_batch = MagicMock()
         input_batch.req_ids = [0, 1, 2, 3]
@@ -237,13 +238,19 @@ class TestAscendMLAImpl(TestBase):
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm.distributed.get_tensor_model_parallel_world_size",
            return_value=2)
-    @patch("vllm.config.get_current_vllm_config")
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
-    def setUp(self, ascend_config, vllm_config, mock_get_tp_size, mock_tp):
+    def setUp(self, ascend_config, get_current_vllm_config, mock_get_tp_size,
+              mock_tp):
         mock_tp.world_size = 2
+        vllm_config = MagicMock()
         speculative_config = MagicMock()
+        model_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
+        model_config.dtype = torch.float16
+        vllm_config.model_config = model_config
+        get_current_vllm_config.return_value = vllm_config
 
         num_heads = 256
         head_size = 1024
@@ -303,18 +310,16 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.num_queries_per_kv, 32)
         self.assertEqual(self.impl.tp_size, 2)
 
-    def test_v_up_proj_and_o_proj(self):
+    def test_v_up_proj(self):
         batch_size = 4
         x = torch.randn(batch_size, self.impl.num_heads,
                         self.impl.kv_lora_rank)
 
-        self.impl.o_proj.return_value = (torch.randn(
-            batch_size, self.impl.num_heads * self.impl.v_head_dim), )
         if not hasattr(self.impl, 'W_UV') or self.impl.W_UV is None:
             self.impl.W_UV = torch.randn(self.impl.num_heads,
                                          self.impl.kv_lora_rank,
                                          self.impl.v_head_dim)
-        result = self.impl._v_up_proj_and_o_proj(x)
+        result = self.impl._v_up_proj(x)
 
         self.assertEqual(result.shape[0], batch_size)
         self.assertEqual(result.shape[1],
@@ -371,8 +376,11 @@ class TestAscendMLAImpl(TestBase):
         metadata.prefill = None
         prefix_out = torch.randn(2, 16, 128)
         prefix_lse = torch.randn(2, 16, 8)
-        out, lse = self.impl._compute_prefill_context(query, kv_cache, 32,
-                                                      metadata, prefix_out,
+        q_pe = query[..., self.impl.qk_nope_head_dim:]
+        q_nope = query[..., :self.impl.qk_nope_head_dim]
+
+        out, lse = self.impl._compute_prefill_context(q_nope, q_pe, kv_cache,
+                                                      32, metadata, prefix_out,
                                                       prefix_lse)
 
         self.assertTrue(torch.equal(prefix_out, out))
@@ -386,6 +394,8 @@ class TestAscendMLAImpl(TestBase):
         latent_kv_dim = self.impl.kv_lora_rank
         num_blocks, block_size = 100, 20
         query = torch.randn(S, N, D)
+        q_nope = query[..., :self.impl.qk_nope_head_dim]
+        q_pe = query[..., self.impl.qk_nope_head_dim:]
         kv_cache_0 = torch.randn(num_blocks, block_size, N, latent_kv_dim)
         kv_cache_1 = torch.randn(num_blocks, block_size, N, D)
         kv_cache = [kv_cache_0, kv_cache_1]
@@ -406,9 +416,11 @@ class TestAscendMLAImpl(TestBase):
 
         meta = MagicMock()
         meta.prefill = prefill_meta
+        self.impl.prefill_mask = torch.triu(
+            torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype), 1)
 
-        out, lse = self.impl._compute_prefill_context(query, kv_cache, 32,
-                                                      meta, prefix_out,
+        out, lse = self.impl._compute_prefill_context(q_nope, q_pe, kv_cache,
+                                                      32, meta, prefix_out,
                                                       prefix_lse)
 
         mock_load.assert_called_once()
@@ -417,67 +429,203 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(out.shape, prefix_out.shape)
         self.assertEqual(lse.shape, prefix_lse.shape)
 
-    @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._v_up_proj_and_o_proj")
-    @patch("torch_npu._npu_paged_attention_mla")
-    def test_forward_decode_without_graph(self, mock_page_attention_mla,
+    @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._v_up_proj")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_forward_decode_without_graph(self,
+                                          mock_npu_fused_infer_attention_score,
                                           mock_up_proj):
         num_tokens = 100
-        num_blocks = 256
         block_size = 4
         q_nope = torch.randn(num_tokens, self.impl.num_heads,
                              self.impl.qk_nope_head_dim)
         q_pe = torch.randn(num_tokens, self.impl.num_heads,
                            self.impl.qk_rope_head_dim)
-        kv_c_and_k_pe_cache = torch.randn(num_blocks, block_size,
-                                          self.impl.num_heads,
-                                          self.impl.kv_lora_rank)
+        k_nope = torch.randn(num_tokens, self.impl.num_heads,
+                             self.impl.qk_nope_head_dim)
+        k_pe = torch.randn(num_tokens, self.impl.num_heads,
+                           self.impl.qk_rope_head_dim)
         metadata = MagicMock()
         metadata.decode = MagicMock()
         metadata.decode.block_table = MagicMock()
         metadata.decode.seq_lens = 10
-        mock_page_attention_mla.return_value = torch.randn(
-            num_tokens, self.impl.num_heads, self.impl.kv_lora_rank)
+        mock_npu_fused_infer_attention_score.return_value = [
+            torch.randn(num_tokens, self.impl.num_heads,
+                        self.impl.kv_lora_rank), None
+        ]
         mock_up_proj.return_value = torch.randn(num_tokens,
                                                 self.impl.num_heads,
                                                 self.impl.v_head_dim)
-        result = self.impl._forward_decode(q_nope, q_pe, None, None,
-                                           kv_c_and_k_pe_cache, metadata)
+        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe,
+                                           block_size, metadata)
         self.assertEqual(result.shape[0], num_tokens)
         self.assertEqual(result.shape[1], self.impl.num_heads)
         self.assertEqual(result.shape[2], self.impl.v_head_dim)
         mock_up_proj.assert_called_once()
-        mock_page_attention_mla.assert_called_once()
+        mock_npu_fused_infer_attention_score.assert_called_once()
 
-    @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._forward_prefill")
-    @patch("torch_npu._npu_reshape_and_cache")
-    def test_forward_without_graph(self, _, mock_forward_prefill):
-        num_tokens = 100
-        num_blocks = 256
-        block_size = 4
-        rotary_emb_return_value = (torch.randn(num_tokens, 16,
-                                               self.impl.kv_lora_rank),
-                                   torch.randn(0, 1, self.impl.kv_lora_rank))
-        self.impl.rotary_emb.side_effect = lambda *args, **kwargs: rotary_emb_return_value
-        self.impl.o_proj.side_effect = lambda *args, **kwargs: torch.randn(
-            1, num_blocks, 128)
+    @patch("vllm_ascend.attention.mla_v1.npu_prefetch")
+    def test_mla_preprocess(self, magic_npu_fetch):
+        magic_npu_fetch.return_value = MagicMock()
+        batch_size = 4
+        seq_len = 8
+        hidden_size = 1024
+        hidden_states = torch.randn(batch_size * seq_len, hidden_size)
 
-        hidden_states_or_q_c = torch.randn(num_tokens, self.impl.q_lora_rank)
-        hidden_states_or_kv_c_normed = torch.randn(num_tokens,
-                                                   self.impl.kv_lora_rank)
-        k_pe = torch.randn(num_tokens, self.impl.qk_rope_head_dim)
-        kv_cache = (torch.randn(num_blocks, block_size, self.impl.num_heads,
-                                self.impl.kv_lora_rank),
-                    torch.randn(num_blocks, block_size, self.impl.num_heads,
-                                self.impl.qk_rope_head_dim))
-        output = torch.randn(num_tokens, self.impl.num_heads,
-                             self.impl.v_head_dim)
+        kv_cache = MagicMock()
 
-        metadata = MagicMock()
-        metadata.num_decodes = 0
-        metadata.num_prefills = num_tokens
-        mock_forward_prefill.return_value = torch.randn(
-            0, self.impl.num_heads * self.impl.v_head_dim)
-        result = self.impl.forward(None, hidden_states_or_q_c,
-                                   hidden_states_or_kv_c_normed, k_pe,
-                                   kv_cache, metadata, output, False)
-        self.assertEqual(result.shape[0], num_tokens)
+        attn_metadata = MagicMock()
+        attn_metadata.num_decodes = 2
+        attn_metadata.num_prefills = 2
+        attn_metadata.num_decode_tokens = 2
+        attn_metadata.num_actual_tokens = 4
+        num_prefill_tokens = 2
+        attn_metadata.slot_mapping = torch.arange(4)
+        attn_metadata.decode.cos = torch.randn(2, 64)
+        attn_metadata.decode.sin = torch.randn(2, 64)
+        attn_metadata.prefill.cos = torch.randn(2, 64)
+        attn_metadata.prefill.sin = torch.randn(2, 64)
+
+        self.impl.q_a_proj = MagicMock()
+        self.impl.q_a_layernorm = MagicMock()
+        self.impl.q_a_layernorm.return_value = torch.randn(
+            attn_metadata.num_actual_tokens, self.impl.num_heads,
+            self.impl.qk_rope_head_dim)
+        self.impl.kv_a_proj_with_mqa = MagicMock()
+        self.impl.kv_a_proj_with_mqa.return_value = [
+            torch.randn(num_prefill_tokens, self.impl.num_heads,
+                        self.impl.qk_nope_head_dim + self.impl.kv_lora_rank)
+        ]
+        self.impl.q_proj = MagicMock()
+        self.impl.q_proj.return_value = [
+            torch.randn(num_prefill_tokens, self.impl.num_heads,
+                        self.impl.qk_head_dim)
+        ]
+        self.impl.kv_b_proj = MagicMock()
+        self.impl.kv_b_proj.return_value = [
+            torch.randn(num_prefill_tokens, self.impl.num_heads,
+                        self.impl.v_head_dim + self.impl.qk_nope_head_dim)
+        ]
+        self.impl.rope_single = MagicMock(side_effect=lambda x, cos, sin: x)
+        self.impl.exec_kv_decode = MagicMock()
+        self.impl.exec_kv_decode.return_value = [MagicMock(), MagicMock()]
+        self.impl.exec_kv_prefill = MagicMock()
+        self.impl.exec_kv_prefill.return_value = [
+            torch.randn(num_prefill_tokens, self.impl.num_heads,
+                        self.impl.qk_rope_head_dim),
+            torch.randn(num_prefill_tokens, self.impl.num_heads,
+                        self.impl.kv_lora_rank)
+        ]
+        self.impl._q_proj_and_k_up_proj = MagicMock()
+        self.impl._q_proj_and_k_up_proj.return_value = [
+            MagicMock(), MagicMock()
+        ]
+        self.impl.num_kv_heads = self.impl.num_heads
+
+        decode_res, prefill_res = self.impl._mla_preprocess(
+            hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False)
+
+        self.assertIsNotNone(decode_res)
+        self.assertIsNotNone(prefill_res)
+
+    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    def test_exec_kv_prefill(self, mock_kv_rmsnorm_rope_cache):
+        B = 2
+        N = self.impl.num_kv_heads
+        D = self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
+        kv_no_split = torch.randn(B, N, D)
+        self.impl.enable_kv_nz = None
+        self.impl.kv_a_layernorm.weight = MagicMock()
+        self.impl.kv_a_layernorm.variance_epsilon = MagicMock()
+        cos = MagicMock()
+        sin = MagicMock()
+        slots = MagicMock()
+        kv_cache = [MagicMock(), MagicMock()]
+
+        mock_kv_rmsnorm_rope_cache.return_value = [
+            None, None,
+            torch.randn(B, N, 1, self.impl.qk_rope_head_dim),
+            torch.randn(B, N, 1, self.impl.kv_lora_rank)
+        ]
+
+        k_pe, k_nope = self.impl.exec_kv_prefill(kv_no_split, cos, sin,
+                                                 kv_cache, slots)
+
+        self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
+        self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
+
+    @patch("torch_npu.npu_kv_rmsnorm_rope_cache")
+    def test_exec_kv_decode(self, mock_kv_rmsnorm_rope_cache):
+        B = 2
+        N = self.impl.num_kv_heads
+        D = self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
+        kv_no_split = torch.randn(B, N, D)
+        self.impl.enable_kv_nz = None
+        self.impl.kv_a_layernorm.weight = MagicMock()
+        self.impl.kv_a_layernorm.variance_epsilon = MagicMock()
+        cos = MagicMock()
+        sin = MagicMock()
+        slots = MagicMock()
+        kv_cache = [MagicMock(), MagicMock()]
+
+        mock_kv_rmsnorm_rope_cache.return_value = [
+            torch.randn(B, N, 1, self.impl.qk_rope_head_dim),
+            torch.randn(B, N, 1, self.impl.kv_lora_rank), None, None
+        ]
+
+        k_pe, k_nope = self.impl.exec_kv_decode(kv_no_split, cos, sin,
+                                                kv_cache, slots)
+
+        self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
+        self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
+
+    @patch("torch.npu.stream")
+    @patch("vllm_ascend.attention.mla_v1.get_multistream_comm_context")
+    @patch("torch_npu.npu_fused_infer_attention_score")
+    def test_forward_decode(self, mock_npu_fused_infer_attention_score,
+                            mock_get_multistream_comm_context,
+                            mock_npu_stream):
+        B = 2
+        N = self.impl.num_kv_heads
+        BS = 100
+        HD = self.impl.v_head_dim
+        self.impl.kv_lora_rank = 256
+        self.impl.spec_token_num = 1
+        self.impl._v_up_proj = MagicMock()
+        self.impl._v_up_proj.return_value = torch.randn(B, N, HD)
+        q_nope = torch.randn(B, N, self.impl.qk_nope_head_dim)
+        q_pe = torch.randn(B, N, self.impl.qk_rope_head_dim)
+        k_nope = torch.randn(BS, N, self.impl.kv_lora_rank)
+        k_pe = torch.randn(BS, N, self.impl.qk_rope_head_dim)
+        attn_metadata = MagicMock()
+        attn_metadata.attn_state = AscendAttentionState.SpecDecoding
+        attn_metadata.decode = MagicMock()
+        attn_metadata.decode.actual_seq_lengths_q = MagicMock()
+        attn_metadata.decode.seq_lens_list = MagicMock()
+        self.impl.enable_kv_nz = True
+
+        mock_npu_fused_infer_attention_score.return_value = [
+            torch.randn(B, N, self.impl.kv_lora_rank), None
+        ]
+        mock_get_multistream_comm_context.return_value = None
+
+        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
+                                           attn_metadata)
+
+        self.assertEqual(result.shape[0], B)
+        self.assertEqual(result.shape[1], N)
+        self.assertEqual(result.shape[2], HD)
+
+        self.impl.enable_kv_nz = False
+        attn_metadata.attn_state = None
+        mock_return_value = MagicMock()
+        mock_get_multistream_comm_context.return_value = mock_return_value
+        mock_return_value.before_comm_event = MagicMock()
+        mock_return_value.comm_stream = MagicMock()
+        mock_npu_stream.return_value = MagicMock()
+
+        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
+                                           attn_metadata)
+
+        self.assertEqual(result.shape[0], B)
+        self.assertEqual(result.shape[1], N)
+        self.assertEqual(result.shape[2], HD)

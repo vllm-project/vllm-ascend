@@ -74,4 +74,3 @@ def test_mtp_correctness(
     # Heuristic: expect at least 66% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
-    del spec_llm

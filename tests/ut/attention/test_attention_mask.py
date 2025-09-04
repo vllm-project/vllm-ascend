@@ -28,23 +28,32 @@ class TestAttentionMaskBuilder(TestBase):
         self.assertEqual(attention_mask_builder._seq_len_cached, 1024)
         self.assertEqual(attention_mask_builder.attn_mask_cache.dtype,
                          torch.float16)
-        self.assertEqual(attention_mask_builder.splitfuse_mask_value, -10000)
         self.assertEqual(attention_mask_builder.attn_mask_cache.shape,
                          (1024, 1024))
         self.assertEqual(attention_mask_builder.attn_mask_cache[0][-1],
                          torch.tensor(float("-inf"), dtype=torch.float16))
 
-        # generate attention_mask_builder with int8
-        attention_mask_builder = AttentionMaskBuilder(max_seq_len=512,
-                                                      dtype=torch.int8)
-        self.assertEqual(attention_mask_builder._seq_len_cached, 512)
+        # generate attention_mask_builder with bfloat16
+        attention_mask_builder = AttentionMaskBuilder(max_seq_len=2048,
+                                                      dtype=torch.bfloat16)
+        self.assertEqual(attention_mask_builder._seq_len_cached, 2048)
         self.assertEqual(attention_mask_builder.attn_mask_cache.dtype,
-                         torch.int8)
-        self.assertEqual(attention_mask_builder.splitfuse_mask_value, -10000)
+                         torch.bfloat16)
         self.assertEqual(attention_mask_builder.attn_mask_cache.shape,
-                         (512, 512))
+                         (2048, 2048))
         self.assertEqual(attention_mask_builder.attn_mask_cache[0][-1],
-                         torch.tensor(1, dtype=torch.int8))
+                         torch.tensor(1, dtype=torch.bfloat16))
+
+    def test_get_mask_scale_factor(self):
+        # supported data types
+        self.assertEqual(
+            AttentionMaskBuilder.get_mask_scale_factor(torch.float16), 1)
+        self.assertEqual(
+            AttentionMaskBuilder.get_mask_scale_factor(torch.bfloat16), -10000)
+        # mask_scale_factor now only supports data types: torch.float16 and torch.bfloat16
+        # Otherwise raise ValueError
+        with self.assertRaises(ValueError):
+            AttentionMaskBuilder.get_mask_scale_factor(torch.int8)
 
     def test_get_attn_mask(self):
         # if the len is less than max_seq_len, the attn_mask_cache will not be updated
@@ -77,80 +86,48 @@ class TestAttentionMaskBuilder(TestBase):
         attention_mask_builder = AttentionMaskBuilder(max_seq_len=1024,
                                                       dtype=torch.float16)
         attn_mask = attention_mask_builder.get_splitfuse_attn_mask(
-            seq_lens=[512],
-            query_lens=[512],
-            position=torch.tensor([0]),
+            seq_lens=torch.tensor([10, 20, 100]),
+            position=torch.tensor([7, 8, 9, 18, 19, 99]),
             dtype=torch.float16,
             device=torch.device("cpu"),
         )
-        self.assertEqual(attn_mask.shape, (1, 512))
+        self.assertEqual(attn_mask.shape, (6, 100))
         self.assertEqual(attention_mask_builder._seq_len_cached, 1024)
 
         attn_mask = attention_mask_builder.get_splitfuse_attn_mask(
-            seq_lens=[2048],
-            query_lens=[1024],
-            position=torch.tensor([0]),
+            seq_lens=torch.tensor([10, 3000, 2000]),
+            position=torch.tensor([7, 8, 9, 2999, 1999]),
             dtype=torch.float16,
             device=torch.device("cpu"),
         )
-        self.assertEqual(attn_mask.shape, (1024, 2048))
+        self.assertEqual(attn_mask.shape, (5, 3000))
+        self.assertEqual(attention_mask_builder._seq_len_cached, 3000)
 
-        attention_mask_builder = AttentionMaskBuilder(max_seq_len=1024,
-                                                      dtype=torch.int8)
+        # splitfuse_attn_mask now only supports data types: torch.float16 and torch.bfloat16
+        # otherwise raise ValueError
+        with self.assertRaises(ValueError):
+            attn_mask = attention_mask_builder.get_splitfuse_attn_mask(
+                seq_lens=torch.tensor([10, 20, 100]),
+                position=torch.tensor([7, 8, 9, 18, 19, 99]),
+                dtype=torch.int8,
+                device=torch.device("cpu"),
+            )
+
+    def test_mask_value_cleanliness(self):
+        attention_mask_builder = AttentionMaskBuilder(max_seq_len=6,
+                                                      dtype=torch.bfloat16)
+        self.assertEqual(attention_mask_builder.attn_mask_cache[-2][-1],
+                         torch.tensor(1, dtype=torch.bfloat16))
+
         attn_mask = attention_mask_builder.get_splitfuse_attn_mask(
-            seq_lens=[512],
-            query_lens=[512],
-            position=torch.tensor([0]),
-            dtype=torch.int8,
+            seq_lens=torch.tensor([6]),
+            position=torch.tensor([3, 4, 5]),
+            dtype=torch.bfloat16,
             device=torch.device("cpu"),
         )
-        self.assertEqual(attn_mask.shape, (1, 512))
-
-    def test_use_multiple_masks(self):
-        max_seq_lens = [128, 512, 1024]
-        dtypes = [torch.float16, torch.bfloat16, torch.int8]
-        for max_seq_len, dtype in zip(max_seq_lens, dtypes):
-            with self.subTest(max_seq_len=max_seq_len, dtype=dtype):
-                self._test_use_multiple_masks(max_seq_len, dtype)
-
-    def _test_use_multiple_masks(self, max_seq_len, dtype):
-        expected_mask_value = torch.finfo(
-            torch.float32).min if dtype == torch.float16 else 1
-        if dtype == torch.float16:
-            expected_splitfuse_mask_value = expected_mask_value
-        elif dtype == torch.bfloat16:
-            expected_splitfuse_mask_value = -10000
-        else:
-            assert dtype == torch.int8, "Unsupported dtype for attention mask"
-            expected_splitfuse_mask_value = -16
-
-        attention_mask_builder = AttentionMaskBuilder(max_seq_len=max_seq_len,
-                                                      dtype=dtype)
-
-        splitfuse_attn_mask = attention_mask_builder.get_splitfuse_attn_mask(
-            seq_lens=[max_seq_len],
-            query_lens=[max_seq_len],
-            position=torch.tensor([0]),
-            dtype=dtype,
-            device=torch.device("cpu"),
-        )
-        self.assertEqual(splitfuse_attn_mask.shape, (1, max_seq_len))
         self.assertEqual(
-            splitfuse_attn_mask[0][-1],
-            torch.tensor(expected_splitfuse_mask_value, dtype=dtype))
-        self.assertEqual(attention_mask_builder._seq_len_cached, max_seq_len)
-        self.assertEqual(attention_mask_builder.attn_mask_cache.shape,
-                         (max_seq_len, max_seq_len))
-        self.assertEqual(attention_mask_builder.attn_mask_cache[0][-1],
-                         torch.tensor(expected_mask_value, dtype=dtype))
-
-        attn_mask = attention_mask_builder.get_attn_mask(
-            max_seq_len=max_seq_len, dtype=dtype, device=torch.device("cpu"))
-        self.assertEqual(attn_mask.shape, (max_seq_len, max_seq_len))
-        self.assertEqual(attn_mask[0][-1],
-                         torch.tensor(expected_mask_value, dtype=dtype))
-        self.assertEqual(attention_mask_builder._seq_len_cached, max_seq_len)
-        self.assertEqual(attention_mask_builder.attn_mask_cache.shape,
-                         (max_seq_len, max_seq_len))
-        self.assertEqual(attention_mask_builder.attn_mask_cache[0][-1],
-                         torch.tensor(expected_mask_value, dtype=dtype))
+            attn_mask[-2][-1],
+            torch.tensor(-10000, dtype=torch.bfloat16,
+                         device=attn_mask.device))
+        self.assertEqual(attention_mask_builder.attn_mask_cache[-2][-1],
+                         torch.tensor(1, dtype=torch.bfloat16))
