@@ -66,6 +66,7 @@ from vllm.worker.model_runner_base import (
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.quantization.quantizer import VLLMAscendQuantizer
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -994,7 +995,9 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:
-            self.model = get_model(vllm_config=self.vllm_config)
+            with VLLMAscendQuantizer.no_patch_context(
+                    self.vllm_config.quant_config is None):
+                self.model = get_model(vllm_config=self.vllm_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
