@@ -238,13 +238,19 @@ class TestAscendMLAImpl(TestBase):
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm.distributed.get_tensor_model_parallel_world_size",
            return_value=2)
-    @patch("vllm.config.get_current_vllm_config")
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
-    def setUp(self, ascend_config, vllm_config, mock_get_tp_size, mock_tp):
+    def setUp(self, ascend_config, get_current_vllm_config, mock_get_tp_size,
+              mock_tp):
         mock_tp.world_size = 2
+        vllm_config = MagicMock()
         speculative_config = MagicMock()
+        model_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
+        model_config.dtype = torch.float16
+        vllm_config.model_config = model_config
+        get_current_vllm_config.return_value = vllm_config
 
         num_heads = 256
         head_size = 1024
