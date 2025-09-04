@@ -156,33 +156,22 @@ class TestAscendKVCacheMethod(TestBase):
     def setUp(self):
         # Setup common test fixtures
         self.mock_quant_config = MagicMock(spec=AscendQuantConfig)
-        self.mock_quant_config.quant_description = {"some_config": "value"}
-        self.prefix = "attention_layer"
+        self.mock_quant_config.quant_description = {"kv_quant_type": "C8"}
+        self.prefix = "layer.attn"
 
-        # Mock the quantizer and quant_method
-        self.mock_quantizer = MagicMock()
+        # Mock quant_method
         self.mock_quant_method = MagicMock()
-
-        # Patch the AscendQuantizer
-        self.quantizer_patcher = patch(
-            'vllm_ascend.quantization.quant_config.AscendQuantizer.get_quantizer',
-            return_value=self.mock_quantizer)
-        self.mock_get_quantizer = self.quantizer_patcher.start()
-
-        self.mock_quantizer.build_attention_method.return_value = self.mock_quant_method
+        self.patcher = patch(
+            'vllm_ascend.quantization.quant_config.get_quant_method')
+        self.mock_get_quant_method = self.patcher.start()
+        self.mock_get_quant_method.return_value = self.mock_quant_method
 
         # Create instance
         self.kv_cache_method = AscendKVCacheMethod(self.mock_quant_config,
                                                    self.prefix)
 
     def tearDown(self):
-        self.quantizer_patcher.stop()
-
-    def test_init(self):
-        """Test initialization with proper quantizer setup."""
-        self.mock_get_quantizer.assert_called_once_with(
-            self.mock_quant_config.quant_description, self.prefix)
-        self.mock_quantizer.build_attention_method.assert_called_once()
+        self.patcher.stop()
 
     def test_create_weights(self):
         """Test create_weights delegates to quant_method."""
