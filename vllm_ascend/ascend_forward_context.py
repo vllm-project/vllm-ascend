@@ -85,10 +85,6 @@ def set_ascend_forward_context(
     ):
         forward_context = get_forward_context()
 
-        forward_context.prefetch_stream = prefetch_stream
-        forward_context.prefetch_model = prefetch_model
-        forward_context.prefetch_mlp_up = False
-
         forward_context.moe_comm_method_name = moe_comm_method + "commimpl"
         forward_context.with_prefill = with_prefill
         ep_size = (get_ep_group().world_size if
@@ -112,8 +108,18 @@ def set_ascend_forward_context(
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
 
-        # set this for rope forward_oot using
-        forward_context.is_first_layer = True
+        # set this for layer index
+        forward_context.layer_idx = 0
+
+        # set for mlp weight prefetch
+        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
+            num_tokens is not None and num_tokens < 500
+        if prefetch_mlp_enabled:
+            forward_context.prefetch_stream = prefetch_stream
+            forward_context.prefetch_model = prefetch_model
+            forward_context.prefetch_mlp_gate_up_proj = False
+            forward_context.prefetch_mlp_down_proj = False
+        forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
 
         # set for flashcomm_v1
         flashcomm_v1_enabled = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM and \

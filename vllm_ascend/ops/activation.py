@@ -17,7 +17,6 @@
 
 import torch
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
-from vllm.forward_context import get_forward_context
 
 
 class AscendQuickGELU(QuickGELU):
@@ -30,26 +29,6 @@ class AscendQuickGELU(QuickGELU):
 
 
 class AscendSiluAndMul(SiluAndMul):
-    def prefetch_down_proj(self,
-                           dependency: torch.Tensor):
-        import torch_npu
-        forward_context = get_forward_context()
-        prefetch_model = forward_context.prefetch_model
-        prefetch_stream = forward_context.prefetch_stream
-        layer_idx = forward_context.layer_idx
-
-        prefetch_stream.wait_stream(torch.npu.current_stream())
-
-        with torch.npu.stream(prefetch_stream):
-            MLP_DOWN_PREFETCH_SIZE = 6 * 1024 * 1024
-            torch_npu.npu_prefetch(prefetch_model.model.layers[layer_idx].mlp.down_proj.weight, \
-                                dependency, MLP_DOWN_PREFETCH_SIZE)
-            forward_context.layer_idx += 1
-
-    def wait_prefetch_done(self):
-        forward_context = get_forward_context()
-        prefetch_stream = forward_context.prefetch_stream
-        torch.npu.current_stream().wait_stream(prefetch_stream)
 
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
         import torch_npu
@@ -59,10 +38,7 @@ class AscendSiluAndMul(SiluAndMul):
         if is_310p():
             out = torch_npu.npu_swiglu(x.to(torch.float32)).to(torch.float16)
         else:
-            dependency = x
-            self.prefetch_down_proj(dependency)
-
+            torch.ops.vllm.maybe_prefetch_mlp_down_proj(x)
             out = torch_npu.npu_swiglu(x)
-
-            self.wait_prefetch_done()
+            torch.ops.vllm.maybe_wait_prefetch_done(out)
         return out

@@ -36,12 +36,6 @@ class AddRMSNormW8A8Quant(RMSNorm):
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
         self.layer = layer
 
-    def wait_prefetch_done(self):
-        forward_context = get_forward_context()
-        prefetch_stream = forward_context.prefetch_stream
-        # wait until
-        torch.npu.current_stream().wait_stream(prefetch_stream)
-
     def forward(
         self,
         x: torch.Tensor,
@@ -59,18 +53,11 @@ class AddRMSNormW8A8Quant(RMSNorm):
                 self.layer.aclnn_input_scale,
                 self.layer.aclnn_input_offset,
                 epsilon=self.variance_epsilon)
-
-            if forward_context.prefetch_mlp_up:
-                self.wait_prefetch_done()
-
+            torch.ops.vllm.maybe_wait_prefetch_done(x)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
                                              self.variance_epsilon)
-                                             
-        forward_context = get_forward_context()
-        if forward_context.prefetch_mlp_up:
-                self.wait_prefetch_done()
         return x
 
 
@@ -96,6 +83,7 @@ class AscendRMSNorm(RMSNorm):
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(
                     x, residual, self.weight, self.variance_epsilon)
+                torch.ops.vllm.maybe_wait_prefetch_done(x)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight,

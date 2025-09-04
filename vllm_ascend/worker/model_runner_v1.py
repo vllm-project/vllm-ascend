@@ -37,6 +37,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -181,7 +182,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.device = device
-        self.prefetch_stream = torch.npu.Stream(device=device)
+        if envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP:
+            self.prefetch_stream = torch.npu.Stream(device=device)
+        else:
+            self.prefetch_stream = None
         self.dtype = self.model_config.dtype
         if envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
             # TODO: drop the env config to use ascend sampler by default
@@ -1145,9 +1149,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             inputs_embeds=inputs_embeds,
         )
         if get_forward_context().flashcomm_v1_enabled:
-            from vllm_ascend.utils import all_gather_and_maybe_unpad
-            hidden_states = all_gather_and_maybe_unpad(
-                hidden_states, get_forward_context().pad_size, dim=0)
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            pad_size = get_forward_context().pad_size
+            if pad_size > 0:
+                hidden_states = hidden_states[:-pad_size, :]
         return hidden_states
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,

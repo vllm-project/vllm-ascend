@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import torch_npu
 from vllm.utils import direct_register_custom_op
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_reduce_scatter,
@@ -7,6 +8,7 @@ from vllm.distributed import (tensor_model_parallel_all_gather,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
+import vllm_ascend.envs as envs_ascend
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
@@ -16,6 +18,9 @@ def _maybe_chunk_residual_impl(x: torch.Tensor, residual: torch.Tensor) -> torch
             "Currently, this situation only occurs "
             "when flashcomm_v1 is enabled"
         )
+        pad_size = get_forward_context().pad_size
+        if pad_size > 0:
+            residual = F.pad(residual, (0, 0, 0, pad_size))
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
@@ -44,6 +49,73 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
         return tensor_model_parallel_all_reduce(x)
 
 
+def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor, prefix: str) -> None:
+    forward_context = get_forward_context()
+    if not forward_context.prefetch_mlp_enabled:
+        return
+    prefetch_model = forward_context.prefetch_model
+    prefetch_stream = forward_context.prefetch_stream
+    layer_idx = int(prefix.split('.')[2])
+
+    # start point of gate_up_proj weight prefetch
+    if prefix.split('.')[-2] == "self_attn":
+        forward_context.prefetch_mlp_gate_up_proj = True
+    if forward_context.prefetch_mlp_gate_up_proj:
+        prefetch_stream.wait_stream(torch.npu.current_stream())
+
+        with torch.npu.stream(prefetch_stream):
+            MLP_GATE_UP_PREFETCH_SIZE = envs_ascend.MLP_GATE_UP_PREFETCH_SIZE
+            torch_npu.npu_prefetch(prefetch_model.model.layers[layer_idx].mlp.gate_up_proj.weight, \
+                                x_dependency, MLP_GATE_UP_PREFETCH_SIZE)
+    return
+
+
+def _maybe_prefetch_mlp_gate_up_proj_impl_fake(x_dependency: torch.Tensor, prefix: str) -> None:
+    return
+
+
+def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
+    forward_context = get_forward_context()
+    if not forward_context.prefetch_mlp_enabled:
+        return
+    forward_context.prefetch_mlp_down_proj = True
+    prefetch_model = forward_context.prefetch_model
+    prefetch_stream = forward_context.prefetch_stream
+    layer_idx = forward_context.layer_idx
+
+    # start point of down_proj weight prefetch
+    prefetch_stream.wait_stream(torch.npu.current_stream())
+
+    with torch.npu.stream(prefetch_stream):
+        MLP_DOWN_PREFETCH_SIZE = envs_ascend.MLP_DOWN_PREFETCH_SIZE
+        torch_npu.npu_prefetch(prefetch_model.model.layers[layer_idx].mlp.down_proj.weight, \
+                            x_dependency, MLP_DOWN_PREFETCH_SIZE)
+    forward_context.layer_idx += 1
+    return
+
+
+def _maybe_prefetch_mlp_down_proj_impl_fake(x_dependency: torch.Tensor) -> None:
+    return
+
+
+def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
+    forward_context = get_forward_context()
+    if not forward_context.prefetch_mlp_enabled:
+        return
+    if forward_context.prefetch_mlp_gate_up_proj or \
+        forward_context.prefetch_mlp_down_proj:
+        prefetch_stream = get_forward_context().prefetch_stream
+        # wait until prefetch done
+        torch.npu.current_stream().wait_stream(prefetch_stream)
+        forward_context.prefetch_mlp_gate_up_proj = False
+        forward_context.prefetch_mlp_down_proj = False
+    return
+
+
+def _maybe_wait_prefetch_done_impl_fake(x: torch.Tensor) -> None:
+    return
+
+
 direct_register_custom_op(
     op_name="maybe_chunk_residual",
     op_func=_maybe_chunk_residual_impl,
@@ -66,6 +138,33 @@ direct_register_custom_op(
     op_name="maybe_pad_and_reduce",
     op_func=_maybe_pad_and_reduce_impl,
     fake_impl=lambda x: x,
+    mutates_args=[],
+    dispatch_key="PrivateUse1"
+)
+
+
+direct_register_custom_op(
+    op_name="maybe_prefetch_mlp_gate_up_proj",
+    op_func=_maybe_prefetch_mlp_gate_up_proj_impl,
+    fake_impl=_maybe_prefetch_mlp_gate_up_proj_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1"
+)
+
+
+direct_register_custom_op(
+    op_name="maybe_prefetch_mlp_down_proj",
+    op_func=_maybe_prefetch_mlp_down_proj_impl,
+    fake_impl=_maybe_prefetch_mlp_down_proj_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1"
+)
+
+
+direct_register_custom_op(
+    op_name="maybe_wait_prefetch_done",
+    op_func=_maybe_wait_prefetch_done_impl,
+    fake_impl=_maybe_wait_prefetch_done_impl_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1"
 )
