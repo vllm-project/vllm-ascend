@@ -19,7 +19,8 @@ vLLM Ascend Plugin
 
 ---
 *Latest News* 🔥
-
+- [2025/09] We released the new official version [v0.9.1](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.9.1)! Please follow the [official guide](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/large_scale_ep.html) to start deploy large scale Expert Parallelism (EP) on Ascend.
+- [2025/08] We hosted the [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/7n8OYNrCC_I9SJaybHA_-Q) with vLLM and Tencent! Please find the meetup slides [here](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF).
 - [2025/06] [User stories](https://vllm-ascend.readthedocs.io/en/latest/community/user_stories/index.html) page is now live! It kicks off with ‌LLaMA-Factory/verl//TRL/GPUStack‌ to demonstrate how ‌vLLM Ascend‌ assists Ascend users in enhancing their experience across fine-tuning, evaluation, reinforcement learning (RL), and deployment scenarios.
 - [2025/06] [Contributors](https://vllm-ascend.readthedocs.io/en/latest/community/contributors.html) page is now live! All contributions deserve to be recorded, thanks for all contributors.
 - [2025/05] We've released first official version [v0.7.3](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.7.3)! We collaborated with the vLLM community to publish a blog post sharing our practice: [Introducing vLLM Hardware Plugin, Best Practice from Ascend NPU](https://blog.vllm.ai/2025/05/12/hardware-plugin.html).
