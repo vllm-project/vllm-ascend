@@ -15,10 +15,22 @@
 
 vLLM Ascend every release would not have been possible without the following contributors:
 
-Updated on 2025-06-10:
+Updated on 2025-09-03:
 
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|
+| 117 | [@panchao-hub](https://github.com/panchao-hub) | 2025/8/30 | [7215454](https://github.com/vllm-project/vllm-ascend/commit/7215454de6df78f4f9a49a99c5739f8bb360f5bc) |
+| 116 | [@lidenghui1110](https://github.com/lidenghui1110) | 2025/8/29 | [600b08f](https://github.com/vllm-project/vllm-ascend/commit/600b08f7542be3409c2c70927c91471e8de33d03) |
+| 115 | [@NSDie](https://github.com/NSDie) | 2025/8/28 | [1191a64](https://github.com/vllm-project/vllm-ascend/commit/1191a64ae508183d5613711bc98a90250963f83a) |
+| 114 | [@s-jiayang](https://github.com/s-jiayang) | 2025/8/27 | [6a4ec18](https://github.com/vllm-project/vllm-ascend/commit/6a4ec186e731b9516235f4fd30b5b98227513fe7) |
+| 113 | [@LookAround0301](https://github.com/LookAround0301) | 2025/8/22 | [e9fb895](https://github.com/vllm-project/vllm-ascend/commit/e9fb895b10cef37ea634f4d4af71686b09ca9f20) |
+| 112 | [@ZhaoJiangJiang](https://github.com/ZhaoJiangJiang) | 2025/8/22 | [3629bc4](https://github.com/vllm-project/vllm-ascend/commit/3629bc4431d3edb4224761f9036b3bddb16158d6) |
+| 111 | [@NicholasTao](https://github.com/NicholasTao) | 2025/8/20 | [7bec1a9](https://github.com/vllm-project/vllm-ascend/commit/7bec1a9b9c372785551d45682bf11063ec42b216) |
+| 110 | [@gameofdimension](https://github.com/gameofdimension) | 2025/8/19 | [27d038d](https://github.com/vllm-project/vllm-ascend/commit/27d038dc663bf550a35a8f15659493b2abefda07) |
+| 109 | [@liuchenbing](https://github.com/liuchenbing) | 2025/8/19 | [3648d18](https://github.com/vllm-project/vllm-ascend/commit/3648d18e673f15a33a82d6ea95d3a9dd891ff1f5) |
+| 108 | [@LCAIZJ](https://github.com/LCAIZJ) | 2025/8/18 | [03ca2b2](https://github.com/vllm-project/vllm-ascend/commit/03ca2b26ca9ab6b9a12f021b0595a726ee35e223) |
+| 107 | [@haojiangzheng](https://github.com/haojiangzheng) | 2025/8/11 | [eb43a47](https://github.com/vllm-project/vllm-ascend/commit/eb43a475f429192e7509e85e28b1c65d5097f373) |
+| 106 | [@QwertyJack](https://github.com/QwertyJack) | 2025/8/11 | [9c6d108](https://github.com/vllm-project/vllm-ascend/commit/9c6d108330574176f79eea52f989ea6049336af8) |
 | 105 | [@SlightwindSec](https://github.com/SlightwindSec) | 2025/8/5 | [f3b50c5](https://github.com/vllm-project/vllm-ascend/commit/f3b50c54e8243ad8ccefb9b033277fbdd382a9c4) |
 | 104 | [@CaveNightingale](https://github.com/CaveNightingale) | 2025/8/4 | [957c7f1](https://github.com/vllm-project/vllm-ascend/commit/957c7f108d5f0aea230220ccdc18d657229e4030) |
 | 103 | [@underfituu](https://github.com/underfituu) | 2025/8/4 | [e38fab0](https://github.com/vllm-project/vllm-ascend/commit/e38fab011d0b81f3a8e40d9bbe263c283dd4129b) |
