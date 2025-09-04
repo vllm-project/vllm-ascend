@@ -23,7 +23,7 @@ This is the 1st release candidate of v0.10.1 for vLLM Ascend. Please follow the 
     * Fix bugs and refactor cached mask generation logic. [#2442](https://github.com/vllm-project/vllm-ascend/pull/2442)
     * Fix the nz format does not work in quantization scenarios. [#2549](https://github.com/vllm-project/vllm-ascend/pull/2549)
     * Fix accuracy issue on Qwen series caused by enabling `enable_shared_pert_dp` by default. [#2457](https://github.com/vllm-project/vllm-ascend/pull/2457)
-    * Fix accuracy issue on models whose rope dim is not eqaul to head dim, e.g., GLM4.5. [#2601](https://github.com/vllm-project/vllm-ascend/pull/2601)
+    * Fix accuracy issue on models whose rope dim is not equal to head dim, e.g., GLM4.5. [#2601](https://github.com/vllm-project/vllm-ascend/pull/2601)
 - Performance improved through a lot of prs:
     * Remove torch.cat and replace it by List[0]. [#2153](https://github.com/vllm-project/vllm-ascend/pull/2153)
     * Convert the format of gmm to nz. [#2474](https://github.com/vllm-project/vllm-ascend/pull/2474)
