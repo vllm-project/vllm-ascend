@@ -31,173 +31,7 @@ from vllm_ascend.ops.common_fused_moe import \
     fused_experts as unified_fused_experts
 from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
 from vllm_ascend.ops.layers.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor
-
-
-def apply_mlp_decode(hidden_states: torch.Tensor,
-                     w1: torch.Tensor,
-                     w1_scale: torch.Tensor,
-                     w2: torch.Tensor,
-                     w2_scale: torch.Tensor,
-                     group_list: torch.Tensor,
-                     dynamic_scale: torch.Tensor = None,
-                     group_list_type: int = 1) -> torch.Tensor:
-    """
-    apply MLP: gate_up_proj -> swiglu -> down_proj
-    Args:
-        hidden_states_wrapper: wrapper of input hidden states with shape (num_tokens, hidden_size).
-        w1: expert weights1 with shape
-            (num_experts, hidden_size, intermediate_size * 2)
-        w1_scale: weights1 scale with shape (num_experts, intermediate_size * 2)
-        w2: expert weights2 with shape
-            (num_experts, intermediate_size, hidden_size)
-        w2_scale: weights2 scale with shape (num_experts, hidden_size)
-        group_list: number of tokens for each expert, follow cumsum mode, and
-            with shape (num_experts).
-        transpose_weight:
-            w1: (num_experts, intermediate_size * 2, hidden_size) ->
-                    (num_experts, hidden_size, intermediate_size * 2)
-            w2: (num_experts, hidden_size, intermediate_size) ->
-                    (num_experts, intermediate_size, hidden_size)
-    Returns:
-        hidden_states: output hidden states after MLP.
-    """
-
-    if dynamic_scale is None:
-        unquantized_hidden_states = hidden_states
-        hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
-            hidden_states)
-        # Dispose the original unquantized hidden states
-        # to save npu memory because they're no longer used.
-        dispose_tensor(unquantized_hidden_states)
-    else:
-        pertoken_scale = dynamic_scale
-
-    # gmm1: gate_up_proj
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        split_item=3,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=torch.int32)[0]
-
-    # act_fn: swiglu
-    hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
-        x=hidden_states,
-        weight_scale=w1_scale,
-        activation_scale=pertoken_scale,
-        bias=None,
-        quant_scale=None,
-        quant_offset=None,
-        group_index=group_list,
-        activate_left=True,
-        quant_mode=1,
-    )
-
-    # gmm2: down_proj
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w2],
-        scale=[w2_scale],
-        per_token_scale=[swiglu_out_scale],
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=w2_scale.dtype)[0]
-    return hidden_states
-
-
-def apply_mlp(hidden_states: torch.Tensor,
-              w1: torch.Tensor,
-              w1_scale: torch.Tensor,
-              w2: torch.Tensor,
-              w2_scale: torch.Tensor,
-              group_list: torch.Tensor,
-              dynamic_scale: torch.Tensor = None,
-              group_list_type: int = 1,
-              w1_scale_bias: torch.Tensor = None,
-              w2_scale_bias: torch.Tensor = None) -> torch.Tensor:
-    """
-    apply MLP: gate_up_proj -> swiglu -> down_proj
-
-    Args:
-        hidden_states: input hidden states with shape (num_tokens, hidden_size).
-        w1: expert weights1 with shape
-            (num_experts, hidden_size, intermediate_size * 2)
-        w1_scale: weights1 scale with shape (num_experts, intermediate_size * 2)
-        w2: expert weights2 with shape
-            (num_experts, intermediate_size, hidden_size)
-        w2_scale: weights2 scale with shape (num_experts, hidden_size)
-        group_list: number of tokens for each expert, follow cumsum mode, and
-            with shape (num_experts).
-        transpose_weight:
-            w1: (num_experts, intermediate_size * 2, hidden_size) ->
-                    (num_experts, hidden_size, intermediate_size * 2)
-            w2: (num_experts, hidden_size, intermediate_size) ->
-                    (num_experts, intermediate_size, hidden_size)
-
-    Returns:
-        hidden_states: output hidden states after MLP.
-    """
-
-    if dynamic_scale is None:
-        unquantized_hidden_states = hidden_states
-        hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
-            hidden_states)
-        # Dispose the original unquantized hidden states
-        # to save npu memory because they're no longer used.
-        dispose_tensor(unquantized_hidden_states)
-    else:
-        pertoken_scale = dynamic_scale
-
-    bias1, bias2 = None, None
-    _output_dtype = w2_scale.dtype
-
-    if w1_scale_bias is not None:
-        if group_list_type == 0:
-            group_list = torch.cat(
-                [group_list[:1], torch.diff(group_list, dim=0)])
-            group_list_type = 1
-        bias1 = [w1_scale_bias]
-        bias2 = [w2_scale_bias]
-        # TODO w4a8 scene: dynamic acquisition of dtype in the future
-        _output_dtype = torch.bfloat16
-
-    # gmm1: gate_up_proj
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        scale=[w1_scale],
-        bias=bias1,
-        per_token_scale=[pertoken_scale],
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=_output_dtype)[0]
-
-    # act_fn: swiglu
-    hidden_states = torch_npu.npu_swiglu(hidden_states)
-    hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
-        hidden_states)
-
-    # gmm2: down_proj
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w2],
-        scale=[w2_scale],
-        bias=bias2,
-        per_token_scale=[swiglu_out_scale],
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=_output_dtype)[0]
-
-    return hidden_states
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
 class AscendW8A8DynamicLinearMethod:
@@ -418,7 +252,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         return unified_fused_experts_eager(
             hidden_states=x,
             w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale,
+            w1_scale=layer.w13_weight_scale_fp32,
             w2=layer.w2_weight,
             w2_scale=layer.w2_weight_scale,
             topk_weights=topk_weights,
@@ -431,7 +265,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             shared_gate_up=shared_gate_up,
             shared_dequant_scale=shared_dequant_scale,
             mc2_mask=kwargs.get("mc2_mask", None),
-            with_quant=True)
+            with_quant=True,
+            fusion_mlp=True)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
@@ -439,6 +274,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
+        torch_npu.npu_format_cast_(layer.w13_weight, ACL_FORMAT_FRACTAL_NZ)
         if envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP:
             torch_npu.npu_format_cast_(layer.w2_weight, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
