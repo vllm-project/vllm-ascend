@@ -7,7 +7,8 @@ import torch.nn as nn
 import torch_npu
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
-    get_dp_group, get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+    get_dp_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.distributed.parallel_state import get_mc2_group

@@ -533,7 +533,8 @@ class AscendFusedMoE(FusedMoE):
                 final_hidden_states = final_hidden_states[start:end, :]
                 dispose_tensor(e_hidden_states)
             elif fused_moe_state == FusedMoEState.AllGather:
-                final_hidden_states = get_dp_group().reduce_scatter(e_hidden_states, 0)
+                final_hidden_states = get_dp_group().reduce_scatter(
+                    e_hidden_states, 0)
                 final_hidden_states = final_hidden_states[:num_tokens]
                 dispose_tensor(e_hidden_states)
             else:
