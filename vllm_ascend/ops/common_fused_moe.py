@@ -170,15 +170,6 @@ def fused_experts_moge(
     local_num_experts = global_num_experts // ep_size
     local_num_group = top_k // ep_size
 
-    if apply_router_weight_on_input:
-        assert (topk_weights.dim() == 2
-                ), "`topk_weights` should be in shape (num_tokens, topk)"
-        _, topk = topk_weights.shape
-        assert (
-            topk == 1
-        ), "Only support topk=1 when `apply_router_weight_on_input` is True"
-        hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
-
     bsz, _ = hidden_states.shape
     flatten_topk_ids = topk_ids.view(-1)
     sorted_topk_ids = torch.argsort(flatten_topk_ids.float())
@@ -407,6 +398,7 @@ class AscendFusedMoE(FusedMoE):
         prefix="",
         custom_routing_function=None,
         scoring_func="softmax",
+        routed_scaling_fator: float = 1.0,
         e_score_correction_bias=None,
         apply_router_weight_on_input=False,
         activation="silu",
@@ -414,31 +406,59 @@ class AscendFusedMoE(FusedMoE):
         num_redundant_experts=0,
         has_bias=False,
     ):
-        super().__init__(
-            num_experts,
-            top_k,
-            hidden_size,
-            intermediate_size,
-            params_dtype,
-            reduce_results,
-            renormalize,
-            use_grouped_topk,
-            num_expert_group,
-            topk_group,
-            quant_config,
-            tp_size,
-            ep_size,
-            dp_size,
-            prefix,
-            custom_routing_function,
-            scoring_func,
-            e_score_correction_bias,
-            apply_router_weight_on_input,
-            activation,
-            enable_eplb,
-            num_redundant_experts,
-            has_bias,
-        )
+        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
+            super().__init__(
+                num_experts,
+                top_k,
+                hidden_size,
+                intermediate_size,
+                params_dtype,
+                reduce_results,
+                renormalize,
+                use_grouped_topk,
+                num_expert_group,
+                topk_group,
+                quant_config,
+                tp_size,
+                ep_size,
+                dp_size,
+                prefix,
+                custom_routing_function,
+                scoring_func,
+                e_score_correction_bias,
+                apply_router_weight_on_input,
+                activation,
+                enable_eplb,
+                num_redundant_experts,
+                has_bias,
+            )
+        else:
+            super().__init__(
+                num_experts,
+                top_k,
+                hidden_size,
+                intermediate_size,
+                params_dtype,
+                reduce_results,
+                renormalize,
+                use_grouped_topk,
+                num_expert_group,
+                topk_group,
+                quant_config,
+                tp_size,
+                ep_size,
+                dp_size,
+                prefix,
+                custom_routing_function,
+                scoring_func,
+                routed_scaling_fator,
+                e_score_correction_bias,
+                apply_router_weight_on_input,
+                activation,
+                enable_eplb,
+                num_redundant_experts,
+                has_bias,
+            )
 
         setup_token_dispatchers(self.moe_config.ep_size,
                                 top_k=self.top_k,
