@@ -82,7 +82,11 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
         nn.Module.__init__(self)
         
         self.hidden_size = config.hidden_size
-        self.layer_idx = getattr(config, 'layer_idx', 0)
+        # 从 prefix 中提取层索引，prefix 格式应该是 "model.layers.{idx}"
+        try:
+            self.layer_idx = int(prefix.split(".")[-1])
+        except (ValueError, IndexError):
+            self.layer_idx = 0  # 默认值
         
         # 为FlashConfig添加CustomDeepseekV2MLAAttention需要的属性
         if not hasattr(config, 'first_k_dense_replace'):
@@ -125,7 +129,7 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
                 cache_config=cache_config,
                 quant_config=None if "self_attn" in getattr(
                     config, "disable_quant_module", []) else quant_config,
-                prefix=f"{prefix}.self_attn.{i}",
+                prefix=f"model.layers.{self.layer_idx}.self_attn.{i}",
             ) for i in range(2)
         ])
 
