@@ -569,6 +569,9 @@ if __name__ == '__main__':
     uvicorn.run(app, host=global_args.host, port=global_args.port)
 ```
 
+vllm proxy
+python3 examples/online_serving/disaggregated_serving/disagg_proxy_demo.py --model /mnt/weight/DeepSeek-V2-Lite-Chat --prefill 90.90.97.27:8100 --decode 90.90.97.27:8200 --port 8001
+
 ### 五、下发推理请求
 
 命令中的localhost、端口还有模型权重的路径配置成自己的
