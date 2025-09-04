@@ -505,3 +505,23 @@ def get_ascend_soc_version():
     global _ascend_soc_version
     assert _ascend_soc_version is not None
     return _ascend_soc_version
+
+if self.enable_sequence_parallel:
+            model_len_per_sp_cp = self.max_model_len // self.context_parallel_size // self.tensor_parallel_size
+        else:
+            model_len_per_sp_cp = self.max_model_len // self.context_parallel_size
+        if (self.max_num_batched_tokens < model_len_per_sp_cp
+                and not self.chunked_prefill_enabled):
+            raise ValueError(
+                f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
+                f"smaller than max_model_len ({self.max_model_len}). "
+                "This effectively limits the maximum sequence length to "
+                "max_num_batched_tokens and makes vLLM reject longer "
+                "sequences. Please increase max_num_batched_tokens or "
+                "decrease max_model_len.")
+
+
+
+            context_parallel_size=self.context_parallel_size,
+            tensor_parallel_size=self.tensor_parallel_size,
+            enable_sequence_parallel=self.enable_sequence_parallel
