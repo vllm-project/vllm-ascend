@@ -185,12 +185,6 @@ class NPUPlatform(Platform):
                     "and use_cached_kv_cache_bytes in torchair_graph_config.")
                 delete_torchair_cache_file()
 
-        if parallel_config.distributed_executor_backend == "ray":
-            logger.warning(
-                "Ray distributed executor backend is not compatible with ACL Graph mode "
-                "right now. Setting CUDAGraphMode to NONE")
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
 

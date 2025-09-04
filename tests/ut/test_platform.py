@@ -366,36 +366,6 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    def test_check_and_update_config_disable_aclgraph_when_ray_enabled(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
-        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
-        )
-        vllm_config = TestNPUPlatform.mock_vllm_config()
-        vllm_config.model_config.enforce_eager = False
-        vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
-        vllm_config.parallel_config.distributed_executor_backend = "ray"
-
-        with self.assertLogs(logger="vllm", level="WARNING") as cm:
-            from vllm_ascend import platform
-
-            importlib.reload(platform)
-            self.platform.check_and_update_config(vllm_config)
-            print(30 * "=", f"cm.output: {cm.output}")
-            self.assertTrue(
-                "Ray distributed executor backend is not compatible with ACL Graph mode"
-                in cm.output[0])
-            self.assertEqual(
-                vllm_config.compilation_config.level,
-                CompilationLevel.NO_COMPILATION,
-            )
-            self.assertEqual(
-                vllm_config.compilation_config.cudagraph_mode,
-                CUDAGraphMode.NONE,
-            )
-
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
     def test_check_and_update_config_torchair_enabled_compilation(
             self, mock_init_ascend, mock_check_ascend, mock_is_310p):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
