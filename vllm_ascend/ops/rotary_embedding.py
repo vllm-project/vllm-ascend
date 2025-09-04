@@ -146,8 +146,8 @@ class AscendRotaryEmbedding(RotaryEmbedding):
                                                              2).chunk(2,
                                                                       dim=-2)
             # BSNH
-            self.register_buffer("cos", cos.view(1, -1, 1, last_dim).contiguous(), persistent=False)
-            self.register_buffer("sin", sin.view(1, -1, 1, last_dim).contiguous(), persistent=False)
+            self.cos = cos.view(1, -1, 1, last_dim).contiguous()
+            self.sin = sin.view(1, -1, 1, last_dim).contiguous()
             forward_context.is_first_layer = False
         return _rope_forward_oot(
             self,
