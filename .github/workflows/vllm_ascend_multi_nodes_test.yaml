@@ -57,7 +57,7 @@ jobs:
 
         - name: Launch cluster
           run: |
-            kubectl apply -f tests/multi_node_mp/lws.yaml
+            kubectl apply -f tests/e2e/multi_nodes/multi_node_mp/lws.yaml
 
         - name: Checkout vllm-project/vllm
           uses: actions/checkout@v4
