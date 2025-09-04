@@ -135,6 +135,15 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature in eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLP_OPTIMIZE", '0'))),
+    # Determine the number of physical devices in a non-full-use scenario
+    # caused by the initialization of the Mooncake connector.
+    "PHYSICAL_DEVICES":
+    lambda: os.getenv("PHYSICAL_DEVICES", None),
+    # Timeout (in seconds) for delayed KVCache block release. In the prefill
+    # node, if a request is marked for delayed KV block release and the blocks
+    # are not freed within this timeout, they will be forcibly released.
+    "VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT":
+    lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
 }
 
 # end-env-vars-definition
