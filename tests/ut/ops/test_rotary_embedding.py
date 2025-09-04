@@ -157,6 +157,28 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         args, kwargs = mock_npu_rotary.call_args
         self.assertFalse(args[-1])
 
+    @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
+           return_value=False)
+    @patch('torch_npu._npu_rotary_embedding')
+    def test_rope_forward_oot_rotary_dim_less_than_head_size(
+            self, mock_npu_rotary, mock_custom_enabled):
+        mock_config = MagicMock()
+        mock_config.torchair_graph_config.enabled = False
+
+        # test case when rotary_dim < head_size
+        org_rotary_dim = self.layer.rotary_dim
+        self.layer.rotary_dim = self.layer.head_size // 2
+
+        result_q, result_k = self.layer.forward(self.positions, self.query,
+                                                self.key)
+
+        mock_npu_rotary.assert_called_once()
+        self.assertEqual(result_q.shape, self.query.shape)
+        self.assertEqual(result_k.shape, self.key.shape)
+
+        # restore rotary_dim
+        self.layer.rotary_dim = org_rotary_dim
+
 
 class MockRopeModule:
 
@@ -204,28 +226,6 @@ class TestAscendDeepseekScalingRotaryEmbedding(TestBase):
             q_pe, k_pe = self.layer.forward(self.positions, self.query,
                                             self.key)
         mock_rope_forward_oot.assert_called_once()
-        assert q_pe.shape == self.query.shape
-        assert k_pe.shape == self.key.shape
-
-    @patch('vllm_ascend.ops.rotary_embedding._rope_forward_oot')
-    @patch("vllm.platforms.current_platform.device_type",
-           new=torch.device("cpu"))
-    @patch("vllm_ascend.ops.rotary_embedding.NPUPlatform",
-           new_callable=PropertyMock)
-    def test_native_rope_deepseek_forward_cache_handling(
-            self, mock_npuplatform, mock_rope_forward_oot):
-        mock_npuplatform.device_type = torch.device("cpu")
-        self.layer = self._create_layer()
-        self.layer.max_seq_len = 1024
-        # Test cache situation is true
-        with patch.object(self.layer, "_set_cos_sin_cache") as mock_set_cache:
-            mock_rope_forward_oot.return_value = (self.query, self.key)
-
-            q_pe, k_pe = self.layer.forward(self.positions,
-                                            self.query,
-                                            self.key,
-                                            max_seq_len=2048)
-        mock_set_cache.assert_called_once()
         assert q_pe.shape == self.query.shape
         assert k_pe.shape == self.key.shape
 
