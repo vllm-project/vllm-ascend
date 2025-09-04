@@ -59,10 +59,10 @@ class AscendScheduler(Scheduler):
         self.running: list[Request] = []
 
         self.finished_prefill_reqs: deque[Request] = deque()
-        self.phase = "" if vllm_config.scheduler_config.decode_batch_size == 0 else "prefill"
-        decode_batch_size = getattr(self.scheduler_config, 'decode_batch_size',
-                                    None)
-        self.max_num_decode_running_reqs = self.max_num_running_reqs if decode_batch_size is None or decode_batch_size == 0 else vllm_config.scheduler_config.decode_batch_size
+        enable_pd_transfer = getattr(self.scheduler_config, 
+                                    'enable_pd_transfer',
+                                    False)
+        self.phase = "" if not enable_pd_transfer else "prefill"
 
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:
@@ -92,7 +92,7 @@ class AscendScheduler(Scheduler):
         skipped_waiting_requests: deque[Request] = deque()
 
         # if max_num_decode_running_reqs configured, pop request that finished prefill to finished_prefill_reqs
-        if self.max_num_decode_running_reqs != self.max_num_running_reqs and self.phase == "prefill":
+        if self.phase == "prefill":
             remaining_running_reqs = []
             for request in self.running:
                 # move request has finished prefill to finished_prefill_reqs
@@ -101,12 +101,13 @@ class AscendScheduler(Scheduler):
                 else:
                     remaining_running_reqs.append(request)
             self.running = remaining_running_reqs
+            # all request prefilled, change phase to decode
+            if self.waiting and not self.running:
+                self.phase = "decode"
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
-            if len(self.running) == (self.max_num_decode_running_reqs
-                                     if self.phase == "decode" else
-                                     self.max_num_running_reqs):
+            if len(self.running) == self.max_num_running_reqs:
                 break
 
             request = self.waiting[0]
@@ -264,13 +265,10 @@ class AscendScheduler(Scheduler):
         if skipped_waiting_requests:
             self.waiting.extendleft(skipped_waiting_requests)
 
-        if self.max_num_decode_running_reqs != self.max_num_running_reqs and self.phase == "prefill" and not self.waiting and not self.running:
-            logger.info("change scheduler phase to pure decode")
-            self.phase = "decode"
         if self.phase == "decode":
             while len(
                     self.running
-            ) < self.max_num_decode_running_reqs and self.finished_prefill_reqs:
+            ) < self.max_num_running_reqs and self.finished_prefill_reqs:
                 request = self.finished_prefill_reqs.popleft()
                 self.running.append(request)
 
@@ -376,9 +374,7 @@ class AscendScheduler(Scheduler):
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
-        assert len(
-            self.running
-        ) <= self.max_num_decode_running_reqs if self.phase == "decode" else self.max_num_running_reqs
+        assert len(self.running) <= self.max_num_running_reqs
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
             scheduled_running_reqs) <= len(self.running)
 

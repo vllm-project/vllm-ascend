@@ -175,9 +175,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
                                            self.block_size)
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        decode_batch_size = getattr(self.scheduler_config, 'decode_batch_size',
-                                    None)
-        self.max_num_reqs = self.scheduler_config.max_num_seqs if decode_batch_size is None or decode_batch_size == 0 else self.scheduler_config.decode_batch_size
+        self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.device = device
