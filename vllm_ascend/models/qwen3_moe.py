@@ -22,6 +22,7 @@ from typing import Optional, Union
 import torch
 from torch import nn
 import torch_npu
+import torch_npu
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, CompilationLevel, VllmConfig
@@ -281,7 +282,7 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
-        # call atb
+        # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache) may cause performance degradation at runtime.
         x = torch.rand((2, 4), dtype=torch.float16).npu()
         weight = torch.rand((2,4), dtype=torch.float16).npu()
         c = torch.rand((4, 4), dtype=torch.float32).npu()

@@ -102,6 +102,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_custom_kernel(self, mock_rotary_embedding,
                                             mock_custom_enabled, mock_is_310p,
                                             mock__c):
@@ -131,6 +132,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_contiguous(self, mock_npu_rotary,
                                          mock_custom_enabled):
         mock_config = MagicMock()
@@ -157,6 +159,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_with_offsets(self):
         mock_config = MagicMock()
         mock_config.torchair_graph_config.enabled = False
@@ -180,6 +183,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_neox_style_override(self, mock_npu_rotary,
                                                   mock_custom_enabled):
         mock_config = MagicMock()
