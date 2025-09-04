@@ -16,7 +16,7 @@ from vllm.model_executor.models.utils import IntermediateTensors
 # 继承原始的vLLM LongCat Flash实现
 from vllm.model_executor.models.longcat_flash import (
     FlashConfig,
-    LongcatMoe,
+    LongcatRouter,
     FlashDecoderLayer,
     FlashModel,
     LongcatFlashForCausalLM
@@ -26,6 +26,72 @@ from vllm.model_executor.models.longcat_flash import (
 from vllm_ascend.models.deepseek_v2 import CustomDeepseekV2MLAAttention
 
 logger = init_logger(__name__)
+
+
+class CustomLongcatMoe(nn.Module):
+    """避免AscendFusedMoE参数不兼容问题的自定义LongcatMoe。
+    明确使用原始vLLM的FusedMoE而不是AscendFusedMoE。
+    """
+    
+    def __init__(
+        self,
+        config,
+        num_experts: int,
+        top_k: int,
+        hidden_size: int,
+        intermediate_size: int,
+        params_dtype = None,
+        quant_config = None,
+        prefix: str = "",
+        enable_eplb: bool = False,
+    ):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.zero_expert_num = config.zero_expert_num
+        self.zero_expert_type = config.zero_expert_type
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.enable_eplb = enable_eplb
+        # Gate always runs at half / full precision for now.
+        self.rounter_params_dtype = params_dtype
+        if config.router_dtype == "float32":
+            self.rounter_params_dtype = torch.float32
+
+        # 使用原始LongcatRouter
+        self.router = LongcatRouter(
+            config=config,
+            zero_expert_num=self.zero_expert_num,
+            rounter_params_dtype=self.rounter_params_dtype,
+            prefix=f"{prefix}.gate")
+
+        # 关键：明确使用原始vLLM的FusedMoE绝对路径，避免被算子替换机制影响
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoE as OriginalFusedMoE
+        self.experts = OriginalFusedMoE(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            reduce_results=True,
+            params_dtype=params_dtype,
+            e_score_correction_bias=self.router.e_score_correction_bias,
+            renormalize=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+            zero_expert_num=self.zero_expert_num,
+            zero_expert_type=self.zero_expert_type,
+            enable_eplb=self.enable_eplb,
+            routed_scaling_factor=config.routed_scaling_factor,
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        router_logits = self.router(hidden_states.to(
+            self.rounter_params_dtype))
+        final_hidden_states = self.experts(hidden_states=hidden_states,
+                                           router_logits=router_logits)
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 
 class CustomFlashDecoderLayer(FlashDecoderLayer):
@@ -94,8 +160,8 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
             ) for i in range(2)
         ])
 
-        # 直接使用原始LongcatMoe
-        self.mlp = LongcatMoe(
+        # 使用CustomLongcatMoe避免被算子替换机制影响
+        self.mlp = CustomLongcatMoe(
             config=config,
             num_experts=config.n_routed_experts if hasattr(
                 config, "n_routed_experts") else
