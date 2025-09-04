@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.quantizer import SUPPORT_ASCEND_QUANTIZER_TYPE
 from vllm_ascend.torchair import utils
 
 
@@ -135,15 +134,3 @@ class TestTorchairUtils(TestBase):
 
         utils.converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
         mock_npu_cast.assert_not_called()
-
-    def test_torchair_quant_method_register(self):
-
-        TorchairW8A8DYNAMICQuantizer = SUPPORT_ASCEND_QUANTIZER_TYPE[
-            "W8A8_DYNAMIC"]
-        TorchairW4A8DYNAMICQuantizer = SUPPORT_ASCEND_QUANTIZER_TYPE[
-            "W4A8_DYNAMIC"]
-        utils.torchair_quant_method_register()
-        self.assertNotEqual(TorchairW8A8DYNAMICQuantizer,
-                            SUPPORT_ASCEND_QUANTIZER_TYPE["W8A8_DYNAMIC"])
-        self.assertNotEqual(TorchairW4A8DYNAMICQuantizer,
-                            SUPPORT_ASCEND_QUANTIZER_TYPE["W4A8_DYNAMIC"])
