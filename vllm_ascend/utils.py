@@ -525,3 +525,4 @@ if self.enable_sequence_parallel:
             context_parallel_size=self.context_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             enable_sequence_parallel=self.enable_sequence_parallel
+https://github.com/LookAround0301/vllm-ascend-origin.git
