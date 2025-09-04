@@ -111,7 +111,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
             vllm_config = VllmConfig()
             model_config = ModelConfig(MODEL,
                                        tokenizer=MODEL,
-                                       max_model_len=MAX_NUM_BATCHED_TOKENS)
+                                       max_model_len=MAX_NUM_BATCHED_TOKEND)
             model_config.hf_config = PretrainedConfig()
             vllm_config.model_config = model_config
             with set_ascend_forward_context(None, vllm_config):
@@ -142,7 +142,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         vllm_config = VllmConfig()
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
-                                   max_model_len=MAX_NUM_BATCHED_TOKENS)
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
         model_config.hf_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
@@ -170,7 +170,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         vllm_config = VllmConfig()
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
-                                   max_model_len=MAX_NUM_BATCHED_TOKENS)
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
         model_config.hf_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
@@ -195,7 +195,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
             vllm_config = VllmConfig()
             model_config = ModelConfig(MODEL,
                                        tokenizer=MODEL,
-                                       max_model_len=MAX_NUM_BATCHED_TOKENS)
+                                       max_model_len=MAX_NUM_BATCHED_TOKEND)
             model_config.hf_config = PretrainedConfig()
             vllm_config.model_config = model_config
             with set_ascend_forward_context(None, vllm_config):
@@ -217,7 +217,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         vllm_config = VllmConfig()
         model_config = ModelConfig(MODEL,
                                    tokenizer=MODEL,
-                                   max_model_len=MAX_NUM_BATCHED_TOKENS)
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
         model_config.hf_config = PretrainedConfig()
         vllm_config.model_config = model_config
         with set_ascend_forward_context(None, vllm_config):
