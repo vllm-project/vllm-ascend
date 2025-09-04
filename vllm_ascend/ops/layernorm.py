@@ -44,6 +44,8 @@ class AddRMSNormW8A8Quant(RMSNorm):
         import torch_npu
 
         if residual is not None:
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            assert x.size(0) == residual.size(0)
             x, _, residual = torch_npu.npu_add_rms_norm_quant(
                 x,
                 residual,
@@ -69,6 +71,8 @@ class AscendRMSNorm(RMSNorm):
 
         from vllm_ascend.utils import is_310p
         if residual is not None:
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            assert x.size(0) == residual.size(0)
             if is_310p():
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)

@@ -1143,6 +1143,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
+        if get_forward_context().flashcomm_v1_enabled:
+            from vllm_ascend.utils import all_gather_and_maybe_unpad
+            hidden_states = all_gather_and_maybe_unpad(
+                hidden_states, get_forward_context().pad_size, dim=0)
         return hidden_states
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
