@@ -38,7 +38,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
-from .quantizer import AscendQuantizer
+from .utils import get_quant_method
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -150,18 +150,15 @@ class AscendQuantConfig(QuantizationConfig):
 class AscendLinearMethod(LinearMethodBase):
     """Linear method for Ascend quantization.
 
-    This class calls AscendQuantizer to search a specific quantization
-    implementations supported on ascend hardware for linear methods.
-
     Args:
         quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]) -> None:
-        self.quantizer = AscendQuantizer.get_quantizer(
-            quant_config.quant_description, prefix, packed_modules_mapping)
-        self.quant_method = self.quantizer.build_linear_method()
+        self.quant_method = get_quant_method(quant_config.quant_description,
+                                             prefix, "linear",
+                                             packed_modules_mapping)
 
     def create_weights(
         self,
@@ -231,17 +228,13 @@ class AscendLinearMethod(LinearMethodBase):
 class AscendKVCacheMethod(BaseKVCacheMethod):
     """KVCache method for Ascend quantization.
 
-    This class calls AscendQuantizer to search a specific quantization
-    implementations supported on ascend hardware for kvcache methods.
-
     Args:
         quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str) -> None:
-        self.quantizer = AscendQuantizer.get_quantizer(
-            quant_config.quant_description, prefix)
-        self.quant_method = self.quantizer.build_attention_method()
+        self.quant_method = get_quant_method(quant_config.quant_description,
+                                             prefix, "attention")
 
     def create_weights(self, layer: torch.nn.Module) -> None:
         # Different from linear method, there are no weight processing/slicing
@@ -263,18 +256,15 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
 class AscendFusedMoEMethod(FusedMoEMethodBase):
     """FusedMoE method for Ascend quantization.
 
-    This class calls AscendQuantizer to search a specific quantization
-    implementations supported on ascend hardware for kvcache methods.
-
     Args:
         quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]):
-        self.quantizer = AscendQuantizer.get_quantizer(
-            quant_config.quant_description, prefix, packed_modules_mapping)
-        self.quant_method = self.quantizer.build_moe_method()
+        self.quant_method = get_quant_method(quant_config.quant_description,
+                                             prefix, "moe",
+                                             packed_modules_mapping)
 
     def create_weights(
         self,
@@ -344,14 +334,13 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
 class AscendEmbeddingMethod(AscendLinearMethod):
     """Embedding method for Ascend quantization.
-      This class calls AscendQuantizer to search a specific quantization
-      implementations supported on ascend hardware for Embedding methods.
+    
       Args:
           quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]) -> None:
-        self.quantizer = AscendQuantizer.get_quantizer(
-            quant_config.quant_description, prefix, packed_modules_mapping)
-        self.quant_method = self.quantizer.build_linear_method()
+        self.quant_method = get_quant_method(quant_config.quant_description,
+                                             prefix, "linear",
+                                             packed_modules_mapping)

@@ -180,15 +180,22 @@ def register_torchair_model():
 
 
 def torchair_quant_method_register():
-    from vllm_ascend.quantization.quantizer import \
-        SUPPORT_ASCEND_QUANTIZER_TYPE
-    from vllm_ascend.torchair.quantization.torchair_quantizer import (
-        TorchairW4A8DYNAMICQuantizer, TorchairW8A8DYNAMICQuantizer)
+    from vllm_ascend.quantization.utils import ASCEND_QUANTIZATION_METHOD_MAP
+    from vllm_ascend.torchair.quantization.torchair_w4a8_dynamic import (
+        TorchairAscendW4A8DynamicFusedMoEMethod,
+        TorchairAscendW4A8DynamicLinearMethod)
+    from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import (
+        TorchairAscendW8A8DynamicFusedMoEMethod,
+        TorchairAscendW8A8DynamicLinearMethod)
 
-    SUPPORT_ASCEND_QUANTIZER_TYPE[
-        "W8A8_DYNAMIC"] = TorchairW8A8DYNAMICQuantizer
-    SUPPORT_ASCEND_QUANTIZER_TYPE[
-        "W4A8_DYNAMIC"] = TorchairW4A8DYNAMICQuantizer
+    ASCEND_QUANTIZATION_METHOD_MAP["W8A8_DYNAMIC"][
+        "linear"] = TorchairAscendW8A8DynamicLinearMethod
+    ASCEND_QUANTIZATION_METHOD_MAP["W8A8_DYNAMIC"][
+        "moe"] = TorchairAscendW8A8DynamicFusedMoEMethod
+    ASCEND_QUANTIZATION_METHOD_MAP["W4A8_DYNAMIC"][
+        "linear"] = TorchairAscendW4A8DynamicLinearMethod
+    ASCEND_QUANTIZATION_METHOD_MAP["W4A8_DYNAMIC"][
+        "moe"] = TorchairAscendW4A8DynamicFusedMoEMethod
 
 
 def torchair_ops_patch():
