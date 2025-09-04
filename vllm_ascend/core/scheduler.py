@@ -60,8 +60,7 @@ class AscendScheduler(Scheduler):
 
         self.finished_prefill_reqs: deque[Request] = deque()
         enable_pd_transfer = getattr(self.scheduler_config, 
-                                    'enable_pd_transfer',
-                                    False)
+                                    'enable_pd_transfer', False)
         self.phase = "" if not enable_pd_transfer else "prefill"
 
     def schedule(self) -> SchedulerOutput:
