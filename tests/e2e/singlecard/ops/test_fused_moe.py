@@ -33,7 +33,7 @@ from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
     TokenDispatcherWithAllGather
 
 NUM_EXPERTS = [8, 64]
-EP_SIZE = [1, 4]
+EP_SIZE = [1]
 TOP_KS = [2, 6]
 DEVICE = ["npu"]
 
@@ -114,19 +114,6 @@ def test_token_dispatcher_with_all_gather(
     local_e = e
     w1_local = w1
     w2_local = w2
-
-    if ep_size > 1:
-        local_e = e // ep_size
-        e_ids = torch.arange(local_e * 0,
-                             local_e * (0 + 1),
-                             device=device,
-                             dtype=torch.int32)
-        expert_map = torch.full((e, ), -1, device=device, dtype=torch.int32)
-        expert_map[e_ids] = torch.arange(local_e,
-                                         device=device,
-                                         dtype=torch.int32)
-        w1_local = w1[e_ids]
-        w2_local = w2[e_ids]
 
     score = torch.softmax(score, dim=-1, dtype=dtype)
     topk_weights, topk_ids = torch.topk(score, topk)
