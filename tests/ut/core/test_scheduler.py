@@ -900,7 +900,7 @@ class TestAscendScheduler(TestBase):
     def test_scheduler_with_pd_transfer(self):
         scheduler = self.create_scheduler()
         scheduler.phase = "prefill"
-        requests = create_request(num_requests=32)
+        requests = create_requests(num_requests=32)
         for request in requests:
             scheduler.add_request(request)
         

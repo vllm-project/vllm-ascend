@@ -91,7 +91,6 @@ class AscendScheduler(Scheduler):
         # and put back at the head of the waiting queue later
         skipped_waiting_requests: deque[Request] = deque()
 
-        # if max_num_decode_running_reqs configured, pop request that finished prefill to finished_prefill_reqs
         if self.phase == "prefill":
             remaining_running_reqs = []
             for request in self.running:
@@ -102,7 +101,7 @@ class AscendScheduler(Scheduler):
                     remaining_running_reqs.append(request)
             self.running = remaining_running_reqs
             # all request prefilled, change phase to decode
-            if self.waiting and not self.running:
+            if not self.waiting and not self.running:
                 self.phase = "decode"
 
         # Schedule prefill requests first.
@@ -272,7 +271,8 @@ class AscendScheduler(Scheduler):
                 request = self.finished_prefill_reqs.popleft()
                 self.running.append(request)
 
-        # If no prefill requests are scheduled, schedule decode requests next.
+        # If no prefill requests are scheduled,
+        # Schedule decode requests next.
         if len(self.scheduled_req_ids) == 0:
             req_index = 0
             while req_index < len(self.running) and token_budget > 0:
