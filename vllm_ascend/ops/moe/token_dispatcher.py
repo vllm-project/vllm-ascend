@@ -99,12 +99,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
         self.a3_need_extra_args = \
             get_ascend_soc_version() == AscendSocVersion.A3
-        # NOTE: Currently, when in A2, Setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
+        # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
-        self.a2_need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A2
-                                  and os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
-                                  and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
+        self.a2_need_extra_args = (
+            get_ascend_soc_version() == AscendSocVersion.A2
+            and os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
+            and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
         self.output = None
         self.assist_info_for_combine = None
         self.ep_recv_counts = None
@@ -161,7 +162,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             })
         if self.a2_need_extra_args:
             stage1_kwargs.update({
-                "expert_scales": topk_weights.to(torch.float32),
+                "expert_scales":
+                topk_weights.to(torch.float32),
             })
 
         kwargs_mc2.update(stage1_kwargs)
