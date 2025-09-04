@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.quantizer import SUPPORT_ASCEND_QUANTIZER_TYPE
 from vllm_ascend.torchair import utils
 
 
@@ -49,13 +48,23 @@ class TestTorchairUtils(TestBase):
         self.assertFalse(utils.check_kv_cache_bytes_cache_exist(),
                          "Delete kv cache bytes cache dir failed")
 
+    def test_delete_torchair_cache_file_multiple_times(self):
+        utils.write_kv_cache_bytes_to_file(0, 100)
+        utils.delete_torchair_cache_file()
+        for i in range(5):
+            try:
+                utils.delete_torchair_cache_file()
+            except FileNotFoundError:
+                self.fail(
+                    f"Unexpected FileNotFoundError on delete call #{i+2}")
+
     @patch('vllm.ModelRegistry')
     def test_register_torchair_model(self, mock_model_registry):
         mock_registry = MagicMock()
         mock_model_registry.return_value = mock_registry
         utils.register_torchair_model()
 
-        self.assertEqual(mock_model_registry.register_model.call_count, 5)
+        self.assertEqual(mock_model_registry.register_model.call_count, 6)
         call_args_list = mock_model_registry.register_model.call_args_list
 
         expected_registrations = [
@@ -71,7 +80,11 @@ class TestTorchairUtils(TestBase):
             ("Qwen2ForCausalLM",
              "vllm_ascend.torchair.models.qwen2:CustomQwen2ForCausalLM"),
             ("Qwen3MoeForCausalLM",
-             "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+             "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM"
+             ),
+            ("PanguProMoEForCausalLM",
+             "vllm_ascend.torchair.models.torchair_pangu_moe:PanguProMoEForCausalLM"
+             )
         ]
 
         for i, (expected_name,
@@ -121,15 +134,3 @@ class TestTorchairUtils(TestBase):
 
         utils.converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
         mock_npu_cast.assert_not_called()
-
-    def test_torchair_quant_method_register(self):
-
-        TorchairW8A8DYNAMICQuantizer = SUPPORT_ASCEND_QUANTIZER_TYPE[
-            "W8A8_DYNAMIC"]
-        TorchairW4A8DYNAMICQuantizer = SUPPORT_ASCEND_QUANTIZER_TYPE[
-            "W4A8_DYNAMIC"]
-        utils.torchair_quant_method_register()
-        self.assertNotEqual(TorchairW8A8DYNAMICQuantizer,
-                            SUPPORT_ASCEND_QUANTIZER_TYPE["W8A8_DYNAMIC"])
-        self.assertNotEqual(TorchairW4A8DYNAMICQuantizer,
-                            SUPPORT_ASCEND_QUANTIZER_TYPE["W4A8_DYNAMIC"])
