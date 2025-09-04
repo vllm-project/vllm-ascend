@@ -304,6 +304,12 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         num_hidden_layers = get_max_hidden_layers(hf_config)
     parallel_config = vllm_config.parallel_config
 
+    # Calculate maximum supported batch sizes considering model architecture
+    resources_per_graph = num_hidden_layers + 1
+    if vllm_config.speculative_config is not None:
+        draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
+
     # TODO: Find out whether we need to take into account the pp_size
     num_comm_groups = sum(size > 1 for size in [
         parallel_config.data_parallel_size,
@@ -318,8 +324,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor(1920 / (48 + 1) / 2) = 19
-        max_num_batch_sizes = math.floor(
-            MAX_CAPTURE_SIZE / (num_hidden_layers + 1) / parallel_factor)
+        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
+                                         resources_per_graph / parallel_factor)
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes)
@@ -335,8 +341,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
         max_num_batch_sizes = math.floor(
-            (MAX_CAPTURE_SIZE - num_comm_groups * 40) /
-            (num_hidden_layers + 1) / (1 + num_comm_groups * 2))
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph /
+            (1 + num_comm_groups * 2))
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes)
