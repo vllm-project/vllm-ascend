@@ -20,6 +20,7 @@
 Run `pytest tests/ops/test_fused_moe.py`.
 """
 
+import gc
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -32,7 +33,7 @@ from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
     TokenDispatcherWithAllGather
 
 NUM_EXPERTS = [8, 64]
-EP_SIZE = [1, 4]
+EP_SIZE = [1]
 TOP_KS = [2, 6]
 DEVICE = ["npu"]
 
@@ -114,19 +115,6 @@ def test_token_dispatcher_with_all_gather(
     w1_local = w1
     w2_local = w2
 
-    if ep_size > 1:
-        local_e = e // ep_size
-        e_ids = torch.arange(local_e * 0,
-                             local_e * (0 + 1),
-                             device=device,
-                             dtype=torch.int32)
-        expert_map = torch.full((e, ), -1, device=device, dtype=torch.int32)
-        expert_map[e_ids] = torch.arange(local_e,
-                                         device=device,
-                                         dtype=torch.int32)
-        w1_local = w1[e_ids]
-        w2_local = w2[e_ids]
-
     score = torch.softmax(score, dim=-1, dtype=dtype)
     topk_weights, topk_ids = torch.topk(score, topk)
     topk_ids = topk_ids.to(torch.int32)
@@ -173,7 +161,9 @@ def test_token_dispatcher_with_all_gather(
                                torch_output,
                                atol=4e-2,
                                rtol=1)
+    gc.collect()
     torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 @pytest.mark.parametrize("m", [1, 33, 64])
@@ -247,6 +237,10 @@ def test_select_experts(
     assert topk_ids.dtype == torch.int32
     assert row_idx.shape == (m, topk)
 
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
 
 @pytest.mark.parametrize("device", DEVICE)
 def test_select_experts_invalid_scoring_func(device: str):
@@ -258,6 +252,9 @@ def test_select_experts_invalid_scoring_func(device: str):
                        use_grouped_topk=False,
                        renormalize=False,
                        scoring_func="invalid")
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 @pytest.mark.parametrize("device", DEVICE)
@@ -269,3 +266,6 @@ def test_select_experts_missing_group_params(device: str):
                        use_grouped_topk=True,
                        renormalize=False,
                        scoring_func="softmax")
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

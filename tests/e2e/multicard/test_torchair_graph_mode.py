@@ -54,7 +54,6 @@ def _deepseek_torchair_test_fixture(
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
-            enforce_eager=False,
             additional_config=additional_config,
     ) as vllm_model:
         # use greedy sampler to make sure the generated results are fix
@@ -131,7 +130,6 @@ def _pangu_torchair_test_fixture(
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
-            enforce_eager=False,
             additional_config=additional_config,
             enable_expert_parallel=True,
     ) as vllm_model:
