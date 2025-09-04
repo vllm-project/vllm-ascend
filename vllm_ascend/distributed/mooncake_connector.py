@@ -803,10 +803,17 @@ class MooncakeConnectorScheduler:
         self._decode_tp_size = decode_parallel_config["tp_size"]
 
         if self.vllm_config.model_config.use_mla or self.ascend_config.use_sfa:
-            return self._decode_tp_size
+            num_need_pulls = 1
         else:
-            # TODO support mha and gqa
-            return None
+            num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
+            num_p_block_heads = max(1, num_key_value_heads // self._prefill_tp_size)
+            num_d_block_heads = max(1, num_key_value_heads // self._decode_tp_size)
+            num_need_pulls = num_d_block_heads // num_p_block_heads
+        kv_role = self.vllm_config.kv_transfer_config.kv_role
+        if kv_role == 'kv_producer':
+            return num_need_pulls * self._decode_tp_size
+        else:
+            return self._decode_tp_size
 
 
 class MooncakeConnectorWorker:
@@ -879,12 +886,12 @@ class MooncakeConnectorWorker:
         # kv_transfer variables
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        self.num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
-        num_d_block_heads = max(1, self.num_key_value_heads // self.tp_size)
-        num_p_block_heads = max(1, self.num_key_value_heads // self._prefill_tp_size)
         if self.vllm_config.model_config.is_deepseek_mla:
             self.num_need_pulls = 1
         else:
+            self.num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
+            num_d_block_heads = max(1, self.num_key_value_heads // self.tp_size)
+            num_p_block_heads = max(1, self.num_key_value_heads // self._prefill_tp_size)
             self.num_need_pulls = num_d_block_heads // num_p_block_heads
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
