@@ -2058,6 +2058,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
 
+        # Force dummy run on prefill stage when this node is deemed as kv producer.
+        if self.is_kv_producer:
+            with_prefill = True
+
         attn_metadata = self._build_attention_metadata(with_prefill,
                                                        num_reqs,
                                                        skip_attn=True)
