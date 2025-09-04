@@ -403,7 +403,7 @@ class SendingLayerThread(threading.Thread):
             for group_remote_block_id, group_local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
                 src = src_layer_base_addr + group_local_block_id[0] * block_len
                 dst = dst_layer_base_addr + group_remote_block_id[0] * block_len
-                length = len(local_block_ids) * block_len
+                length = len(group_local_block_id) * block_len
                 src_list.append(src)
                 dst_list.append(dst)
                 length_list.append(length)
