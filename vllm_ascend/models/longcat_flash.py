@@ -24,47 +24,8 @@ from vllm.model_executor.models.longcat_flash import (
 
 # 导入Ascend特定的实现
 from vllm_ascend.models.deepseek_v2 import CustomDeepseekV2MLAAttention
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
 
 logger = init_logger(__name__)
-
-
-class CustomLongcatMoe(LongcatMoe):
-    """Ascend优化的LongcatMoe，使用AscendFusedMoE替代原始FusedMoE"""
-    
-    def __init__(
-        self,
-        config: FlashConfig,
-        num_experts: int,
-        top_k: int,
-        hidden_size: int,
-        intermediate_size: int,
-        params_dtype=None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-        enable_eplb: bool = False,
-    ):
-        # 调用父类初始化，获得所有基础组件
-        super().__init__(config, num_experts, top_k, hidden_size, intermediate_size, 
-                         params_dtype, quant_config, prefix, enable_eplb)
-        
-        # 只需要重写一个关键组件：使用AscendFusedMoE替代原始FusedMoE
-        self.experts = AscendFusedMoE(
-            num_experts=num_experts,
-            top_k=top_k,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            reduce_results=True,
-            params_dtype=params_dtype,
-            e_score_correction_bias=self.router.e_score_correction_bias,
-            renormalize=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-            zero_expert_num=self.zero_expert_num,
-            zero_expert_type=self.zero_expert_type,
-            enable_eplb=self.enable_eplb,
-            routed_scaling_factor=config.routed_scaling_factor,
-        )
 
 
 class CustomFlashDecoderLayer(FlashDecoderLayer):
@@ -133,8 +94,8 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
             ) for i in range(2)
         ])
 
-        # 使用CustomLongcatMoe替代原始LongcatMoe
-        self.mlp = CustomLongcatMoe(
+        # 直接使用原始LongcatMoe
+        self.mlp = LongcatMoe(
             config=config,
             num_experts=config.n_routed_experts if hasattr(
                 config, "n_routed_experts") else
