@@ -227,8 +227,8 @@ python load_balance_proxy_server_example.py \
     --port 8080 \
     --prefiller-hosts 192.0.0.1 \
     --prefiller-port 13700 \
-    --decoder-hosts 192.0.0.2 \
-    --decoder-ports 13700
+    --decoder-hosts 192.0.0.2 192.0.0.3 \
+    --decoder-ports 13700 13700
 ```
 
 ## Verification
