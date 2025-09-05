@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Type, TypeVar
+from typing import (TYPE_CHECKING, List, NamedTuple, Optional, Tuple, Type,
+                    TypeVar)
 
 import torch
 import torch_npu
@@ -1055,5 +1056,5 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         has_prefill = attn_metadata.num_prefills > 0
         if has_prefill:
-            maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+            maybe_save_kv_layer_to_connector(layer_name, List(kv_cache))
         return output_padded
