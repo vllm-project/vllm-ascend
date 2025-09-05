@@ -66,8 +66,6 @@ def mock_dist_env(mocker: MockerFixture):
          patch('torch.distributed.all_to_all_single', return_value=torch.randn(8, 32)), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.tensor_model_parallel_all_reduce',
                return_value=torch.randn(5, 32)), \
-         patch('vllm_ascend.torchair.ops.torchair_fused_moe.data_parallel_reduce_scatter',
-               return_value=torch.randn(5, 32)), \
          patch('vllm.model_executor.layers.fused_moe.config.get_dp_group',
                return_value=mock_dp_and_tp_group(mocker)), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_config',
