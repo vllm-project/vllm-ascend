@@ -14,7 +14,8 @@ def min_p_logits_processor_init_func(self, *args, **kwargs):
     if decode_max_num_seqs != 0:
         device = args[1]
         is_pin_memory = args[2]
-        max_num_reqs = max(vllm_config.scheduler_config.max_num_seqs, decode_max_num_seqs)
+        max_num_reqs = max(vllm_config.scheduler_config.max_num_seqs,
+                           decode_max_num_seqs)
 
         self.min_p_cpu_tensor = torch.zeros((max_num_reqs, ),
                                             dtype=torch.float32,

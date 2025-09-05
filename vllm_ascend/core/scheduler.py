@@ -64,7 +64,8 @@ class AscendScheduler(Scheduler):
         decode_max_num_seqs = getattr(self.scheduler_config,
                                       'decode_max_num_seqs', 0)
         self.phase = "" if not enable_pd_transfer else "prefill"
-        self.decode_max_num_running_reqs = max(self.max_num_running_reqs, decode_max_num_seqs)
+        self.decode_max_num_running_reqs = max(self.max_num_running_reqs,
+                                               decode_max_num_seqs)
 
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:
