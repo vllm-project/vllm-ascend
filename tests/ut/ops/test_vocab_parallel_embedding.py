@@ -17,9 +17,13 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
+import torch_npu
+from vllm.config import set_current_vllm_config
+from vllm.config.compilation import CompilationLevel, CUDAGraphMode
 
 from vllm_ascend.ops.vocab_parallel_embedding import (
-    AscendLogitsProcessor, AscendParallelLMHead, AscendVocabParallelEmbedding)
+    AscendLogitsProcessor, AscendParallelLMHead,
+    AscendUnquantizedEmbeddingMethod, AscendVocabParallelEmbedding)
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
 
@@ -178,6 +182,53 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
                     # Call the forward method
                     output = layer.forward(input_)
                 self.assertEqual(output.shape, expected_shape)
+
+    def test_nz_format_embedding_with_aclgraph(self):
+        """Test that weight format is correct."""
+        layer = self._create_layer()
+        self.assertEqual(type(layer.quant_method),
+                         AscendUnquantizedEmbeddingMethod)
+        layer.weight.data = torch.randn(15, 35).to(torch.float16).npu()
+
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.compilation_config = MagicMock()
+        mock_vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
+        mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        with set_current_vllm_config(mock_vllm_config), \
+             patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config), \
+             patch.object(torch.version, "cann", "8.2.RC1"):
+            layer.quant_method.process_weights_after_loading(layer)
+            self.assertNotEqual(torch_npu.get_npu_format(layer.weight.data),
+                                29)
+
+        with set_current_vllm_config(mock_vllm_config), \
+             patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config), \
+             patch.object(torch.version, "cann", "8.3.RC1"):
+            layer.quant_method.process_weights_after_loading(layer)
+            self.assertNotEqual(torch_npu.get_npu_format(layer.weight.data),
+                                29)
+
+    def test_nz_format_embedding_without_aclgraph(self):
+        """Test that weight format is correct."""
+        layer = self._create_layer()
+        layer.weight.data = torch.randn(15, 35).to(torch.float16).npu()
+
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.compilation_config = MagicMock()
+        mock_vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION
+        mock_vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        with set_current_vllm_config(mock_vllm_config), \
+             patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config), \
+             patch.object(torch.version, "cann", "8.2.RC1"):
+            layer.quant_method.process_weights_after_loading(layer)
+            self.assertNotEqual(torch_npu.get_npu_format(layer.weight.data),
+                                29)
+
+        with set_current_vllm_config(mock_vllm_config), \
+             patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config), \
+             patch.object(torch.version, "cann", "8.3.RC1"):
+            layer.quant_method.process_weights_after_loading(layer)
+            self.assertEqual(torch_npu.get_npu_format(layer.weight.data), 29)
 
 
 class TestAscendLogitsProcessor(unittest.TestCase):

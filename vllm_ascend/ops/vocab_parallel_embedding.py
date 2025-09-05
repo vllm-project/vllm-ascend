@@ -18,8 +18,11 @@
 from typing import Optional, Tuple
 
 import torch
+import torch_npu
 from torch import nn
 from torch.nn.parameter import Parameter
+from vllm.config import get_current_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import divide, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -31,7 +34,20 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
-from vllm_ascend.utils import lmhead_tp_enable
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, lmhead_tp_enable
+
+
+class AscendUnquantizedEmbeddingMethod(UnquantizedEmbeddingMethod):
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+
+        cudagraph_mode = get_current_vllm_config(
+        ).compilation_config.cudagraph_mode
+        if torch.version.cann.startswith("8.3") and (cudagraph_mode
+                                                     == CUDAGraphMode.NONE):
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
 
 
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
@@ -80,7 +96,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         if quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
         if quant_method is None:
-            quant_method = UnquantizedEmbeddingMethod()
+            quant_method = AscendUnquantizedEmbeddingMethod()
 
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another
