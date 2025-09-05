@@ -16,6 +16,7 @@ from vllm.model_executor.models.utils import IntermediateTensors
 # 继承原始的vLLM LongCat Flash实现
 from vllm.model_executor.models.longcat_flash import (
     FlashConfig,
+    LongcatMoe,
     LongcatRouter,
     FlashDecoderLayer,
     FlashModel,
@@ -160,8 +161,8 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
             ) for i in range(2)
         ])
 
-        # 使用CustomLongcatMoe避免被算子替换机制影响
-        self.mlp = CustomLongcatMoe(
+        # 直接使用原始LongcatMoe，现在AscendFusedMoE已经支持LongCat Flash参数
+        self.mlp = LongcatMoe(
             config=config,
             num_experts=config.n_routed_experts if hasattr(
                 config, "n_routed_experts") else

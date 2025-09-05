@@ -92,6 +92,7 @@ def select_experts(hidden_states: torch.Tensor,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
             global_num_experts=global_num_experts,
         )
     if row_idx is None:
@@ -221,6 +222,7 @@ def _native_select_experts(
     custom_routing_function: Optional[Callable] = None,
     scoring_func: str = "softmax",
     e_score_correction_bias: Optional[torch.Tensor] = None,
+    routed_scaling_factor: float = 1.0,
     global_num_experts: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
@@ -271,6 +273,20 @@ def _native_select_experts(
             global_num_experts=global_num_experts)
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)
+        return topk_weights, topk_ids
+
+    # 处理 e_score_correction_bias 的情况
+    if e_score_correction_bias is not None:
+        from vllm_ascend.ops.fused_moe import fused_topk_bias
+        topk_weights, topk_ids = fused_topk_bias(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            e_score_correction_bias=e_score_correction_bias.data,
+            topk=top_k,
+            renormalize=renormalize)
+        # 应用 routed_scaling_factor
+        if routed_scaling_factor is not None and routed_scaling_factor != 1.0:
+            topk_weights *= routed_scaling_factor
         return topk_weights, topk_ids
 
     topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
