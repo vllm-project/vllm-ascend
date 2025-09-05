@@ -169,7 +169,8 @@ class TestAscendQwen2_5_VisionBlock(PytestBase):
             mlp_hidden_dim=mlp_hidden_dim,
         )
         args, kwargs = mocker_vit.call_args
-        assert args == (dim, num_heads, mlp_hidden_dim, F.silu, None, None, "", False)
+        assert args == (dim, num_heads, mlp_hidden_dim, F.silu, None, None, "",
+                        False)
         assert not kwargs
 
         args1, kwargs1 = mocker_attn.call_args
