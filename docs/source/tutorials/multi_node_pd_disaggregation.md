@@ -147,10 +147,6 @@ export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 
 vllm serve /model/Qwen3-30B-A3B  \
-  --data-parallel-size 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-address 192.0.0.2 \
-  --data-parallel-rpc-port 13356 \
   --api-server-count 2 \
   --host 0.0.0.0 \
   --port 13700 \
@@ -192,15 +188,9 @@ export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 
 vllm serve /model/Qwen3-30B-A3B  \
-  --data-parallel-size 2 \
-  --data-parallel-size-local 1 \
-  --data-parallel-address 192.0.0.2 \
-  --data-parallel-rpc-port 13356 \
-  --data-parallel-start-rank 1 \
   --host 0.0.0.0 \
-  --headless \
-  --no-enable-prefix-caching \
   --port 13700 \
+  --no-enable-prefix-caching \
   --tensor-parallel-size 2 \
   --no-enable-prefix-caching \
   --seed 1024 \
