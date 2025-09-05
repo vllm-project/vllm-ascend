@@ -38,7 +38,7 @@ AscendType get_dtype_from_torch(at::ScalarType scalarType)
     }
 }
 
-std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::Tensor &query, at::Tensor &key,
+void rotary_embedding(at::Tensor &positions, at::Tensor &query, std::optional<at::Tensor> key,
     int64_t head_size, at::Tensor &cos_sin_cache,  bool is_neox)
 {
     int32_t deviceId = 0;
@@ -47,22 +47,23 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
     TORCH_CHECK(
         positions_ndim == 1 || positions_ndim == 2,
         "positions must have shape [num_tokens] or [batch_size, seq_len]");
+    TORCH_CHECK(key.has_value(), "rotary_embedding: key must have a value");
     if (positions_ndim == 1) {
       TORCH_CHECK(
-          query.size(0) == positions.size(0) && key.size(0) == positions.size(0),
+          query.size(0) == positions.size(0) && key.value().size(0) == positions.size(0),
           "query, key and positions must have the same number of tokens");
     }
     if (positions_ndim == 2) {
       TORCH_CHECK(
           query.size(0) == positions.size(0) &&
-              key.size(0) == positions.size(0) &&
+              key.value().size(0) == positions.size(0) &&
               query.size(1) == positions.size(1) &&
-              key.size(1) == positions.size(1),
+              key.value().size(1) == positions.size(1),
           "query, key and positions must have the same batch_size and seq_len");
     }
     TORCH_CHECK(head_size % 32 == 0, "rotary_embedding: headSize should be divisible by 32");
     int query_hidden_size = query.numel() / num_tokens;
-    int key_hidden_size = key.numel() / num_tokens;
+    int key_hidden_size = key.value().numel() / num_tokens;
     TORCH_CHECK(query_hidden_size % head_size == 0);
     TORCH_CHECK(key_hidden_size % head_size == 0);
     TORCH_CHECK(is_neox == true, "rotary_embedding: neox=false is not supported as custom kernel in vllm-ascend");
@@ -72,7 +73,7 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
     int num_kv_heads = key_hidden_size / head_size;
     TORCH_CHECK(num_heads % num_kv_heads == 0);
     at::Tensor query_dst = at::empty({num_tokens, num_heads, head_size}, query.options());
-    at::Tensor key_dst = at::empty({num_tokens, num_kv_heads, head_size}, key.options());
+    at::Tensor key_dst = at::empty({num_tokens, num_kv_heads, head_size}, key.value().options());
 
     int rot_dim = cos_sin_cache.size(1);
     int seq_dim_idx = positions_ndim - 1;
@@ -80,10 +81,10 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
     void *query_dst_ptr = query_dst.data_ptr();
     void *key_dst_ptr = key_dst.data_ptr();
     void *query_ptr = query.data_ptr();
-    void *key_ptr = key.data_ptr();
+    void *key_ptr = key.value().data_ptr();
     void *cos_sin_cache_ptr = cos_sin_cache.data_ptr();
     int64_t query_stride = query.stride(seq_dim_idx);
-    int64_t key_stride = key.stride(seq_dim_idx);
+    int64_t key_stride = key.value().stride(seq_dim_idx);
     int64_t dst_query_stride = query_dst.stride(0);
     int64_t dst_key_stride = key_dst.stride(0);
     at::ScalarType scalar_type = query.scalar_type();
@@ -104,7 +105,9 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
         return 0;
     });
     cmd.Run();
-    return {query_dst, key_dst};
+
+    query.copy_(query_dst);
+    key.value().copy_(key_dst);
 }
 
 std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
@@ -385,20 +388,8 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
 }
 } // namespace vllm_ascend
 
-TORCH_LIBRARY_EXPAND(_C, ops)
+TORCH_LIBRARY_FRAGMENT_EXPAND(_C, ops)
 {
-    // vLLM-Ascend custom ops
-    ops.def("weak_ref_tensor(Tensor input) -> Tensor");
-    ops.impl("weak_ref_tensor", torch::kPrivateUse1, &vllm_ascend::weak_ref_tensor);
-
-    // Rotary embedding
-    // Apply GPT-NeoX style rotary embedding to query and key.
-    ops.def(
-        "rotary_embedding(Tensor positions, Tensor! query,"
-        "                 Tensor! key, int head_size,"
-        "                 Tensor cos_sin_cache, bool is_neox) -> (Tensor query, Tensor key)");
-    ops.impl("rotary_embedding", torch::kPrivateUse1, &vllm_ascend::rotary_embedding);
-
     ops.def(
         "get_masked_input_and_mask(Tensor input, "
         "                         int org_vocab_start_index, "
@@ -406,22 +397,27 @@ TORCH_LIBRARY_EXPAND(_C, ops)
         "                         int num_org_vocab_padding, "
         "                         int added_vocab_start_index, "
         "                         int added_vocab_end_index) -> (Tensor masked_input, Tensor mask)");
-    ops.impl("get_masked_input_and_mask", torch::kPrivateUse1, &vllm_ascend::get_masked_input_and_mask);
-
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
-    ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
-
     ops.def(
         "bgmv_expand(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y,"
         "            int slice_offset, int slice_size) -> Tensor");
-    ops.impl("bgmv_expand", torch::kPrivateUse1, &vllm_ascend::bgmv_expand);
-
     ops.def("sgmv_shrink(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y, float scale) -> ()");
-    ops.impl("sgmv_shrink", torch::kPrivateUse1, &vllm_ascend::sgmv_shrink);
-
     ops.def(
         "sgmv_expand(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y,"
         "            int slice_offset, int slice_size) -> Tensor");
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(_C, PrivateUse1, ops)
+{
+    // vLLM-Ascend custom ops
+    ops.impl("weak_ref_tensor", torch::kPrivateUse1, &vllm_ascend::weak_ref_tensor);
+    // Rotary embedding
+    // Apply GPT-NeoX style rotary embedding to query and key.
+    ops.impl("rotary_embedding", torch::kPrivateUse1, &vllm_ascend::rotary_embedding);
+    ops.impl("get_masked_input_and_mask", torch::kPrivateUse1, &vllm_ascend::get_masked_input_and_mask);
+    ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
+    ops.impl("bgmv_expand", torch::kPrivateUse1, &vllm_ascend::bgmv_expand);
+    ops.impl("sgmv_shrink", torch::kPrivateUse1, &vllm_ascend::sgmv_shrink);
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
 }
 
