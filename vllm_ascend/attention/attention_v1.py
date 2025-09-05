@@ -291,14 +291,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                              ACL_FORMAT_FRACTAL_NZ)
 
         torch_npu._npu_flash_attention(query=query,
-                                        key=key,
-                                        value=value,
-                                        mask=mask,
-                                        seq_len=attn_metadata.seq_lens,
-                                        scale_value=self.scale,
-                                        num_heads=self.num_heads,
-                                        num_kv_heads=self.num_kv_heads,
-                                        out=output)
+                                       key=key,
+                                       value=value,
+                                       mask=mask,
+                                       seq_len=attn_metadata.seq_lens,
+                                       scale_value=self.scale,
+                                       num_heads=self.num_heads,
+                                       num_kv_heads=self.num_kv_heads,
+                                       out=output)
         assert output is not None
         return output[:num_tokens, :, :]
 
