@@ -127,6 +127,7 @@ def test_all_gather_comm_impl(
     # Simulate MLP output
     native_mlp_output = torch.randn_like(native_permuted_hidden)
     native_impl.unpermute(native_mlp_output, native_hidden_states_out)
+    native_permuted_hidden, dynamic_scale = torch_npu.npu_dynamic_quant(native_permuted_hidden)
 
     # --- Run AllGather Implementation ---
     all_gather_hidden_states_out = hidden_states.clone()
