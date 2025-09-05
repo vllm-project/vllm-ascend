@@ -57,6 +57,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
+        get_ascend_config()
         self.use_aclgraph = (vllm_config.compilation_config.level
                              == CompilationLevel.PIECEWISE
                              and not vllm_config.model_config.enforce_eager)
