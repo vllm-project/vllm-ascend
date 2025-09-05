@@ -147,12 +147,10 @@ export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 
 vllm serve /model/Qwen3-30B-A3B  \
-  --api-server-count 2 \
   --host 0.0.0.0 \
   --port 13700 \
   --no-enable-prefix-caching \
   --tensor-parallel-size 2 \
-  --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name qwen3-moe \
   --max-model-len 6144  \
@@ -192,7 +190,6 @@ vllm serve /model/Qwen3-30B-A3B  \
   --port 13700 \
   --no-enable-prefix-caching \
   --tensor-parallel-size 2 \
-  --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name qwen3-moe \
   --max-model-len 6144  \
@@ -236,7 +233,7 @@ python load_balance_proxy_server_example.py \
 Check service health using the proxy server endpoint.
 
 ```shell
-curl http://192.0.0.1:18080/v1/completions \
+curl http://192.0.0.1:8080/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "qwen3-moe",
