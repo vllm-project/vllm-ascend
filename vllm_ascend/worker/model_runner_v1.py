@@ -1278,7 +1278,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
-            logger.info(spec_decode_metadata)
             logits_indices = spec_decode_metadata.logits_indices
 
         if lmhead_tp_enable():

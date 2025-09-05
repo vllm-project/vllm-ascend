@@ -647,7 +647,7 @@ class BailingMoeModel(nn.Module):
             if (
                 hasattr(self.config, "norm_head")
                 and self.config.norm_head
-                and "lm_head.wieght" in name
+                and "lm_head.weight" in name
             ):
                 loaded_weight = F.normalize(loaded_weight,
                                             dim=0,
