@@ -258,7 +258,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
-
+            worker._sleep_saved_buffers = {}
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
