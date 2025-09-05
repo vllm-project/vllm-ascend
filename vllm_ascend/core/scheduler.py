@@ -108,7 +108,7 @@ class AscendScheduler(Scheduler):
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
-            if len(self.running) == (self.decode_max_num_seqs
+            if len(self.running) == (self.decode_max_num_running_reqs
                                      if self.phase == "decode" else
                                      self.max_num_running_reqs):
 
