@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Type, TypeVar
 
 import torch
+import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.attention.backends.abstract import (AttentionBackend,
@@ -9,6 +10,7 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               MLAAttentionImpl)
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
@@ -17,10 +19,13 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
+from vllm_ascend.distributed.parallel_state import get_mla_sp_world_group
+from vllm_ascend.mla_sp_context import get_sp_context
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
+from vllm_ascend.ops.shard import RowShardLinear
 from vllm_ascend.utils import npu_prefetch
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
@@ -960,6 +965,113 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_value)
         return decode_preprocess_res, prefill_preprocess_res
 
+    def _forward_prefill_sp(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: Tuple[torch.Tensor],
+        attn_metadata: M,
+    ) -> torch.Tensor:
+        sp_context = get_sp_context()
+        assert sp_context is not None
+        npu_prefetch(self.q_a_proj.weight,
+                     hidden_states,
+                     enabled=self.enable_prefetch)
+        # Split inputs from local DP to each device.
+        dp_sp_hidden_states = hidden_states
+        device_sp_hidden_states = dp_sp_hidden_states[
+            sp_context.local_device_sp_start_token_within_dp:sp_context.
+            local_device_sp_end_token_within_dp]
+        # MLA prefill:
+        # 1. Perform q_a_proj and q_a_layernorm to obtain q_c
+        # 2. Perform kv_a_proj_with_mqa to obtain kv_no_split
+        # 3. If need_gather_q_kv, perform all_gather.
+        sp_ckq = self.q_a_proj(device_sp_hidden_states)[0]
+        sp_hidden_states_or_q_c = self.q_a_layernorm(sp_ckq)
+        sp_kv_no_split = self.kv_a_proj_with_mqa(device_sp_hidden_states)[0]
+        # Rearrange down_proj outputs across DP.
+        sp_down_proj_output = torch.cat([sp_hidden_states_or_q_c, sp_kv_no_split], dim=1)
+        global_sp_down_proj_output = get_mla_sp_world_group().all_gather(sp_down_proj_output, 0)
+        local_dp = sp_context.local_dp
+        dp_ori_down_proj_output = global_sp_down_proj_output[sp_context.start_token_of_dp[local_dp]:
+                                                             sp_context.end_token_of_dp[local_dp]]
+        prefill_q_c, prefill_kv_no_split = dp_ori_down_proj_output.split(
+            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+            dim=-1)
+
+        if attn_metadata is None:
+            # Dummy run, just construct the attention outputs.
+            output_prefill = torch.empty(
+                [prefill_q_c.shape[0], self.num_heads * self.v_head_dim],
+                dtype=hidden_states.dtype,
+                device=hidden_states.device)
+        else:
+            # Preprocess prefill tokens, write kv cache and get:
+            # prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value
+            prefill_q = self.q_proj(prefill_q_c)[0]\
+                .view(-1, self.num_heads, self.qk_head_dim)
+            prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
+            prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
+            assert attn_metadata.prefill is not None
+            cos = attn_metadata.prefill.cos
+            sin = attn_metadata.prefill.sin
+            prefill_slots = attn_metadata.slot_mapping
+            prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
+            prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(
+                prefill_kv_no_split, cos, sin, kv_cache, prefill_slots)
+            prefill_k_pe = prefill_k_pe.view(prefill_q_c.shape[0],
+                                             self.num_kv_heads, -1)
+            prefill_k_nope, prefill_value = self.kv_b_proj(
+                prefill_k_c_normed)[0].view(
+                    -1, self.num_heads,
+                    self.qk_nope_head_dim + self.v_head_dim).split(
+                        [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            prefill_k_pe = prefill_k_pe.expand(
+                (*prefill_k_nope.shape[:-1], -1))
+            # Attention outputs.
+            output_prefill = self._forward_prefill(prefill_q_nope,
+                                                   prefill_q_pe,
+                                                   prefill_k_nope,
+                                                   prefill_k_pe, prefill_value,
+                                                   kv_cache, attn_metadata)
+
+        # Rearrange attention outputs across DP to run SP.
+        sp_world_group = get_mla_sp_world_group()
+        tp_size = get_tp_group().world_size
+        total_receive_len = sp_context.local_device_total_receive_len
+        sp_o_proj_input = torch.empty(
+                [total_receive_len * tp_size, self.num_heads * self.v_head_dim],
+                dtype=output_prefill.dtype,
+                device=output_prefill.device)
+        if get_dp_group().world_size == 1:
+            if output_prefill.shape[0] < sp_context.num_padded_global_tokens:
+                output_prefill = nn.functional.pad(
+                    output_prefill,
+                    (0, 0, 0, sp_context.num_padded_global_tokens - output_prefill.shape[0]))
+            dist.all_to_all_single(
+                output=sp_o_proj_input,
+                input=output_prefill,
+                group=sp_world_group.device_group,
+            )
+        else:
+            dist.all_to_all_single(
+                output=sp_o_proj_input,
+                input=output_prefill,
+                output_split_sizes=sp_context.output_split_sizes,
+                input_split_sizes=sp_context.input_split_sizes,
+                group=sp_world_group.device_group,
+            )
+        sp_o_proj_input = sp_o_proj_input.reshape(
+            total_receive_len,
+            tp_size * self.num_heads * self.v_head_dim)
+        if total_receive_len < sp_context.num_tokens_per_device:
+            sp_o_proj_input = nn.functional.pad(
+                sp_o_proj_input,
+                (0, 0, 0, sp_context.num_tokens_per_device - total_receive_len))
+        # O proj
+        sp_o_proj_output = self.o_proj(sp_o_proj_input)[0]
+        del sp_o_proj_input
+        return get_tp_group().all_gather(sp_o_proj_output, 0)
+
     def forward(
         self,
         hidden_states: torch.Tensor,  # query in unified attn
@@ -969,6 +1081,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+        if get_sp_context() is not None:
+            # SP across DP
+            output[...] = self._forward_prefill_sp(hidden_states, kv_cache,
+                                                   attn_metadata)
+            return output
         if attn_metadata is None:
             # Profiling run.
             return output
@@ -1021,6 +1138,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                     current_ms_metadata.after_comm_event.record()
             else:
                 o_proj_input[num_decode_tokens:] = output_prefill
+
+        # When o_proj sharding is enabled, make sure the second dimension is complete while decoding.
+        if isinstance(self.o_proj, RowShardLinear):
+            o_proj_input = get_tp_group().all_gather(o_proj_input, dim=-1)
+
         # O proj
         current_ms_metadata = get_multistream_comm_context()
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024

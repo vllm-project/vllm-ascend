@@ -28,6 +28,7 @@
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
+import torch.distributed as dist
 import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
@@ -68,7 +69,10 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_o_shard_group
+from vllm_ascend.mla_sp_context import get_sp_context, set_sp_context
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.ops.shard import RowShardLinear
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
@@ -497,10 +501,16 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
-        if (config.n_routed_experts is not None
-                and self.debug_layer_idx >= config.first_k_dense_replace
-                and self.debug_layer_idx % config.moe_layer_freq == 0
-                and self.enable_shared_expert_dp):
+        if ascend_config.enable_o_shard:
+            self.o_proj = RowShardLinear(self.num_heads * self.v_head_dim,
+                                         self.hidden_size,
+                                         bias=False,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.o_proj")
+        elif (config.n_routed_experts is not None
+              and self.debug_layer_idx >= config.first_k_dense_replace
+              and self.debug_layer_idx % config.moe_layer_freq == 0
+              and self.enable_shared_expert_dp):
             self.o_proj = CustomDeepseekV2RowParallelLinearReplaceAllreduce(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
@@ -799,6 +809,67 @@ class CustomDeepseekV2Model(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
+        ascend_config = get_ascend_config()
+        self.allow_mla_sp = model_config.use_mla\
+                            and hasattr(config, "q_lora_rank")\
+                            and ascend_config.enable_mla_sp\
+                            and ascend_config.enable_o_shard\
+                            and get_pp_group().world_size == 1\
+                            and not ascend_config.enable_shared_expert_dp
+
+    def maybe_initialize_o_shard(self):
+        ascend_config = get_ascend_config()
+        if not ascend_config.enable_o_shard:
+            return
+        full_layers = ascend_config.o_shard_full_layers
+        assert self.start_layer + full_layers < self.end_layer
+        assert full_layers >= 0
+        assert not ascend_config.enable_shared_expert_dp
+        if hasattr(self, 'o_proj_weight_window'):
+            return
+        group_for_shard = get_o_shard_group()
+        world_size = group_for_shard.world_size
+        shard_rank = group_for_shard.rank_in_group
+
+        sample = self.layers[self.start_layer].self_attn.o_proj.weight.data
+        self.o_proj_weight_window = [
+            torch.empty((sample.shape[0] * world_size, sample.shape[1]),
+                        dtype=sample.dtype,
+                        device=sample.device) for _ in range(full_layers + 1)
+        ]
+        full = torch.empty_like(self.o_proj_weight_window[0])
+
+        from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND,
+                                       ACL_FORMAT_FRACTAL_NZ)
+        for i in range(len(self.o_proj_weight_window)):
+            torch_npu.npu_format_cast_(self.o_proj_weight_window[i],
+                                       ACL_FORMAT_FRACTAL_NZ)
+
+        for i in range(self.start_layer, self.end_layer):
+            o_proj = self.layers[i].self_attn.o_proj
+
+            o_proj.aclnn_input_scale.data = o_proj.aclnn_input_scale.data.repeat(
+                world_size)
+            o_proj.aclnn_input_scale_reciprocal.data = o_proj.aclnn_input_scale_reciprocal.data.repeat(
+                world_size)
+            o_proj.aclnn_input_offset.data = o_proj.aclnn_input_offset.data.repeat(
+                world_size)
+
+            torch_npu.npu_format_cast_(full, ACL_FORMAT_FRACTAL_ND)
+            dist.all_gather_into_tensor(full,
+                                        o_proj.weight.data,
+                                        group=group_for_shard.device_group)
+            torch_npu.npu_format_cast_(full, ACL_FORMAT_FRACTAL_NZ)
+            dispose_tensor(o_proj.weight.data)
+            if i < self.start_layer + full_layers or i % world_size == shard_rank:
+                o_proj.weight.data = full.clone().detach()
+            else:
+                o_proj.weight.data = self.o_proj_weight_window[i %
+                                                               (full_layers +
+                                                                1)]
+            assert torch_npu.get_npu_format(
+                o_proj.weight.data) == ACL_FORMAT_FRACTAL_NZ
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -811,6 +882,22 @@ class CustomDeepseekV2Model(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_o_shard:
+            self.maybe_initialize_o_shard()
+            group_for_shard = get_o_shard_group()
+
+        if self.allow_mla_sp:
+            set_sp_context(input_ids, attn_metadata)
+        sp_context = get_sp_context()
+        if sp_context is not None:
+            assert intermediate_tensors is None
+            assert inputs_embeds is None
+            local_dp = sp_context.local_dp
+            input_ids = sp_context.global_tokens[
+                sp_context.dp_sp_start_token[local_dp]:sp_context.
+                dp_sp_end_token[local_dp]]
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -826,6 +913,23 @@ class CustomDeepseekV2Model(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
+
+            if ascend_config.enable_o_shard:
+                o_proj = layer.self_attn.o_proj
+                if i < self.start_layer + ascend_config.o_shard_full_layers:
+                    o_proj.work = None
+                pre_load_layer_idx = i + ascend_config.o_shard_full_layers
+                if pre_load_layer_idx < self.end_layer:
+                    src = group_for_shard.ranks[pre_load_layer_idx %
+                                                group_for_shard.world_size]
+                    next_o_proj = self.layers[
+                        pre_load_layer_idx].self_attn.o_proj
+                    next_o_proj.work = dist.broadcast(
+                        next_o_proj.weight.data,
+                        src=src,
+                        group=group_for_shard.device_group,
+                        async_op=True)
+
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -834,6 +938,46 @@ class CustomDeepseekV2Model(nn.Module):
                           self.start_layer] if kv_caches is not None else None,
                 attn_metadata,
                 replace_allreduce=replace_allreduce)
+
+        if sp_context is not None:
+            local_dp = sp_context.local_dp
+            local_dp_start_token = sp_context.start_token_of_dp[local_dp]
+            local_dp_end_token = sp_context.end_token_of_dp[local_dp]
+            local_dp_sp_start_token = sp_context.dp_sp_start_token[local_dp]
+            local_dp_sp_end_token = sp_context.dp_sp_end_token[local_dp]
+            sp_send, _ = self.norm(hidden_states, residual)
+            sp_send = sp_send[:max(0, min(local_dp_sp_end_token, sp_context.end_token_of_dp[-1]) - local_dp_sp_start_token)]
+            dp_group = get_dp_group()
+            if dp_group.world_size == 1:
+                return sp_send
+            input_split_sizes = []
+            output_split_sizes = []
+            for i in range(dp_group.world_size):
+                other_dp_start_token = sp_context.start_token_of_dp[i]
+                other_dp_end_token = sp_context.end_token_of_dp[i]
+                send_start = max(local_dp_sp_start_token, other_dp_start_token)
+                send_end = min(local_dp_sp_end_token, other_dp_end_token)
+                send_len = max(0, send_end - send_start)
+                input_split_sizes.append(send_len)
+
+                other_dp_sp_start_token = sp_context.dp_sp_start_token[i]
+                other_dp_sp_end_token = sp_context.dp_sp_end_token[i]
+                receive_start = max(other_dp_sp_start_token, local_dp_start_token)
+                receive_end = min(other_dp_sp_end_token, local_dp_end_token)
+                receive_len = max(0, receive_end - receive_start)
+                output_split_sizes.append(receive_len)
+            sp_output = torch.empty(
+                [local_dp_end_token - local_dp_start_token, hidden_states.shape[1]],
+                dtype=sp_send.dtype,
+                device=sp_send.device)
+            dist.all_to_all_single(
+                output=sp_output,
+                input=sp_send,
+                output_split_sizes=output_split_sizes,
+                input_split_sizes=input_split_sizes,
+                group=dp_group.device_group,
+            )
+            return sp_output
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
