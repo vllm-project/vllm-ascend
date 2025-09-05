@@ -32,7 +32,7 @@ class TestAscendQwen2_5_VisionAttention(PytestBase):
             prefix=prefix,
         )
         args, kwargs = mocker_attn.call_args
-        assert args == (embed_dim, num_heads, projection_size, None, "")
+        assert args == (embed_dim, num_heads, projection_size, None, "", False)
         assert not kwargs
         attention.num_attention_heads_per_partition = num_heads
         return attention
@@ -169,7 +169,7 @@ class TestAscendQwen2_5_VisionBlock(PytestBase):
             mlp_hidden_dim=mlp_hidden_dim,
         )
         args, kwargs = mocker_vit.call_args
-        assert args == (dim, num_heads, mlp_hidden_dim, F.silu, None, None, "")
+        assert args == (dim, num_heads, mlp_hidden_dim, F.silu, None, None, "", False)
         assert not kwargs
 
         args1, kwargs1 = mocker_attn.call_args
@@ -180,6 +180,7 @@ class TestAscendQwen2_5_VisionBlock(PytestBase):
             "projection_size": dim,
             "quant_config": None,
             "prefix": ".attn",
+            "use_data_parallel": False,
         }
         return vision_block
 
