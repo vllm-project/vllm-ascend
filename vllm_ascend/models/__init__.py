@@ -59,3 +59,8 @@ def register_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "vllm_ascend.models.pangu_moe:PanguProMoEForCausalLM")
+
+    ModelRegistry.register_model(
+        "Step3TextForCausalLM",
+        "vllm_ascend.models.step3_text:CustomStep3TextForCausalLM"
+    )
