@@ -452,8 +452,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         new_max_num_reqs = max(new_graph_batch_sizes)
         if self.max_num_reqs != new_max_num_reqs:
             logger.warning(
-                f"max_num_reqs is updated to {new_max_num_reqs}, as the original max_num_reqs {self.max_num_reqs} "
-                f"is not divisible by tp_size {tp_size}.")
+                f"max_num_reqs is updated to {new_max_num_reqs}")
             self.max_num_reqs = new_max_num_reqs
             self.scheduler_config.max_num_seqs = new_max_num_reqs
 
