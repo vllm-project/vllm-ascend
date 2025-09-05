@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from torch import nn
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -800,12 +800,6 @@ class TorchairAscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        if self.torchair_graph_enabled:
-            self.use_aclgraph = False
-        else:
-            self.use_aclgraph = (vllm_config.compilation_config.level
-                                 == CompilationLevel.PIECEWISE and
-                                 not vllm_config.model_config.enforce_eager)
 
         try:
             device_group = get_mc2_group().device_group
