@@ -39,6 +39,11 @@ class AscendConfig:
                                                       {})
         self.torchair_graph_config = TorchairGraphConfig(torchair_graph_config)
 
+        ascend_compilation_config = additional_config.get(
+            "ascend_compilation_config", {})
+        self.ascend_compilation_config = AscendCompilationConfig(
+            **ascend_compilation_config)
+
         ascend_scheduler_config = additional_config.get(
             "ascend_scheduler_config", {})
         self.ascend_scheduler_config = AscendSchedulerConfig(
@@ -131,6 +136,22 @@ class TorchairGraphConfig:
             )
 
 
+class AscendCompilationConfig:
+    """
+    Configuration Object for ascend_compilation_config from additional_config
+    """
+
+    def __init__(self,
+                 enable_graph_rewriter: bool = True,
+                 fx_graph_eager: bool = False,
+                 enable_quantization_fusion: bool = True,
+                 **kwargs):
+        self.enable_graph_rewriter = enable_graph_rewriter
+        self.fx_graph_eager = fx_graph_eager
+        self.enable_quantization_fusion = enable_quantization_fusion
+        # Add more compilation related configs here as needed
+
+
 class AscendSchedulerConfig:
     """
     Configuration Object for ascend_scheduler_config from additional_config
@@ -200,6 +221,16 @@ def check_ascend_config(vllm_config, enforce_eager):
                     "it has been disabled automatically.")
         # aclgraph case
         else:
+            # This graph fusion can actually works on eager mode.
+            if ascend_config.ascend_compilation_config.enable_graph_rewriter:
+                logger.info(
+                    "Graph rewriter enabled! Automatic kernel fusion is expected."
+                )
+
+                if ascend_config.ascend_compilation_config.enable_quantization_fusion:
+                    logger.info(
+                        "Quantization fusion enabled! op fusion on quantization are expected. "
+                    )
             # aclgraph doesn't work with deepseek model and only qwen model is well tested.
             if vllm_config.model_config:
                 model_type = vllm_config.model_config.hf_config.model_type
