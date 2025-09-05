@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Ascend NPU优化的LongCat Flash模型，通过继承vLLM实现来减少代码重复。"""
-from typing import Optional, Union
+from typing import Optional, Union, Iterable, Callable
+import typing
 import torch
 from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils import block_dequant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.distributed import get_pp_group
@@ -15,7 +17,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.model_executor.models.utils import (
     IntermediateTensors, PPMissingLayer, make_empty_intermediate_tensors_factory,
-    make_layers, maybe_prefix
+    make_layers, maybe_prefix, is_pp_missing_parameter
 )
 
 # 继承原始的vLLM LongCat Flash实现
@@ -284,8 +286,8 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
                                                    torch.Tensor]]) -> set[str]:
 
         stacked_params_mapping = [
-            #("fused_qkv_a_proj", "q_a_proj", 0),
-            #("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
+            ("fused_qkv_a_proj", "q_a_proj", 0),
+            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
@@ -303,6 +305,11 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
                 if "mlp" in name and "mlps" not in name:
                     continue
                 name = name.replace(weight_name, param_name)
+                # QKV fusion is optional, fall back to normal
+                # weight loading if it's not enabled
+                if ((param_name == "fused_qkv_a_proj")
+                        and name not in params_dict):
+                    continue
                 # Skip loading extra bias for GPTQ models.
                 if (name.endswith(".bias")
                         or name.endswith("_bias")) and name not in params_dict:
