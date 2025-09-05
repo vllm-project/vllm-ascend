@@ -268,7 +268,7 @@ class CPUOffloadingConnectorWorker:
         self.save_thread.start()
         self.done_sending_count: defaultdict[str, int] = defaultdict(int)
 
-        # start matadata server to init cpu_kv_cache_manager and handle rpc requests
+        # start metadata server to init cpu_kv_cache_manager and handle rpc requests
         # all dp shared the same metadata server, only start the process on data_rank 0
         if vllm_config.parallel_config.data_parallel_rank == 0 and self.tp_rank == 0:
             config = VllmConfig()
