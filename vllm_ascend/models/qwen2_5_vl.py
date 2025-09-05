@@ -502,7 +502,7 @@ class AscendQwen2_5_VLForConditionalGeneration(
             "up_proj",
         ],
     }
-    
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
