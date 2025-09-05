@@ -81,7 +81,7 @@ class AttentionMaskBuilder:
         mask_scale_factor = AttentionMaskBuilder.get_mask_scale_factor(dtype)
         attn_mask = torch.index_select(self.attn_mask_cache,
                                        dim=0,
-                                       index=position)[:, :max_seq_len]
+                                       index=position.cpu())[:, :max_seq_len]
         attn_mask *= mask_scale_factor
         return attn_mask.contiguous().to(device, non_blocking=True)
 
