@@ -189,26 +189,14 @@ class CustomFlashModel(FlashModel):
     """Ascend优化的Flash模型，使用CustomFlashDecoderLayer"""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
+        # 调用父类初始化方法，传递必需的参数
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        
+        # 重写layers，使用CustomFlashDecoderLayer替代FlashDecoderLayer
+        config = self.config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        self.config = config
-
-        self.padding_idx = getattr(config, "pad_token_id", None)
-        self.vocab_size = config.vocab_size
-
-        # Pipeline Parallel支持：只在第一个rank创建embed_tokens
-        if get_pp_group().is_first_rank:
-            self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                prefix=maybe_prefix(prefix, "embed_tokens"),
-            )
-        else:
-            self.embed_tokens = PPMissingLayer()
         
-        # 创建layers，使用CustomFlashDecoderLayer替代FlashDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: CustomFlashDecoderLayer(
@@ -218,17 +206,6 @@ class CustomFlashModel(FlashModel):
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers")
-        
-        # Pipeline Parallel支持：只在最后一个rank创建norm
-        if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        else:
-            self.norm = PPMissingLayer()
-        
-        # 使用与父类相同的make_empty_intermediate_tensors工厂函数
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
     
     # CustomFlashModel继承所有父类方法，无需重复实现
 
