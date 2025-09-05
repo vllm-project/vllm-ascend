@@ -16,8 +16,8 @@ from vllm.utils import cdiv, round_down
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         split_decodes_and_prefills,
                                          maybe_save_kv_layer_to_connector,
+                                         split_decodes_and_prefills,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context

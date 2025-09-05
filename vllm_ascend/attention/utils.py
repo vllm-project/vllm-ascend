@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Any, List
 
 import torch
-
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
@@ -128,4 +127,3 @@ def maybe_save_kv_layer_to_connector(
         return
     connector.save_kv_layer(layer_name, kv_cache_layer,
                             attn_metadata[layer_name])
-
