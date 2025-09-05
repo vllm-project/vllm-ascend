@@ -292,12 +292,11 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         return out_weight
 
     def pad_qkv_weight_scale_offset(self, data):
-        data1 = data.reshape(
+        reshaped_data = data.reshape(
             -1, 3, self.origin_hidden_size_per_attention_head, 1
-        )[:, :, :self.half_origin_hidden_size_per_attention_head, :] 
-        data2 = data.reshape(
-            -1, 3, self.origin_hidden_size_per_attention_head, 1
-        )[:, :, self.half_origin_hidden_size_per_attention_head:, :]
+        )
+        data1 = reshaped_data[:, :, :self.half_origin_hidden_size_per_attention_head, :]
+        data2 = reshaped_data[:, :, self.half_origin_hidden_size_per_attention_head:, :]
         data1_paded = torch.nn.functional.pad(data1,(0, 0,
                                                     0, self.half_pad_hidden_size_per_attention_head,
                                                     0, 0,
@@ -313,12 +312,11 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         return res
 
     def pad_qkv_deq_scale_quant_bias(self, data):
-        data1 = data.reshape(
+        reshaped_data = data.reshape(
             -1, 3, self.origin_hidden_size_per_attention_head
-        )[:, :, :self.half_origin_hidden_size_per_attention_head]
-        data2 = data.reshape(
-            -1, 3, self.origin_hidden_size_per_attention_head
-        )[:, :, self.half_origin_hidden_size_per_attention_head:]
+        )
+        data1 = reshaped_data[:, :, :self.half_origin_hidden_size_per_attention_head]
+        data2 = reshaped_data[:, :, self.half_origin_hidden_size_per_attention_head:]
         
         data1_paded = torch.nn.functional.pad(data1,(0, self.half_pad_hidden_size_per_attention_head))
         data2_paded = torch.nn.functional.pad(data2,(0, self.half_pad_hidden_size_per_attention_head))
