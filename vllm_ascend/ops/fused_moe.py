@@ -1231,6 +1231,7 @@ class AscendFusedMoE(FusedMoE):
             self.dp_rank - 1]
         end = cu_tokens_across_dp_cpu[self.dp_rank]
         buffer[start:end, :].copy_(x)
+        dispose_tensor(x)
         for idx in range(self.dp_size):
             start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
             end = cu_tokens_across_dp_cpu[idx]
