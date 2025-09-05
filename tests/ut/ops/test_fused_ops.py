@@ -139,7 +139,6 @@ def mock_dist_env(mocker: MockerFixture):
         patch('torch.distributed.all_gather'), \
         patch('torch.distributed.all_to_all_single'), \
         patch('vllm_ascend.ops.fused_moe.tensor_model_parallel_all_reduce'), \
-        patch('vllm_ascend.ops.fused_moe.data_parallel_reduce_scatter'), \
         patch('vllm.model_executor.layers.fused_moe.config.get_dp_group',
             return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm_ascend.ops.fused_moe.get_ascend_config',
