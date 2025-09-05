@@ -61,7 +61,10 @@ class AscendScheduler(Scheduler):
         self.finished_prefill_reqs: deque[Request] = deque()
         enable_pd_transfer = getattr(self.scheduler_config,
                                      'enable_pd_transfer', False)
+        decode_max_num_seqs = getattr(self.scheduler_config,
+                                      'decode_max_num_seqs', 0)
         self.phase = "" if not enable_pd_transfer else "prefill"
+        self.decode_max_num_running_reqs = self.max_num_running_reqs if decode_max_num_seqs == 0 else decode_max_num_seqs
 
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:
@@ -105,7 +108,10 @@ class AscendScheduler(Scheduler):
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
-            if len(self.running) == self.max_num_running_reqs:
+            if len(self.running) == (self.decode_max_num_seqs
+                                     if self.phase == "decode" else
+                                     self.max_num_running_reqs):
+
                 break
 
             request = self.waiting[0]
@@ -268,7 +274,7 @@ class AscendScheduler(Scheduler):
         if self.phase == "decode":
             while len(
                     self.running
-            ) < self.max_num_running_reqs and self.finished_prefill_reqs:
+            ) < self.decode_max_num_running_reqs and self.finished_prefill_reqs:
                 request = self.finished_prefill_reqs.popleft()
                 self.running.append(request)
 
@@ -375,7 +381,9 @@ class AscendScheduler(Scheduler):
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs
+        assert len(
+            self.running
+            ) <= self.decode_max_num_running_reqs if self.phase == "decode" else self.max_num_running_reqs
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
             scheduled_running_reqs) <= len(self.running)
 

@@ -29,6 +29,7 @@ class AscendSchedulerConfig(SchedulerConfig):
     scheduler_cls: Union[str, Type[object]] = (
         "vllm_ascend.core.scheduler.AscendScheduler")
     enable_pd_transfer: bool = False
+    decode_max_num_seqs: int = 0
 
     @classmethod
     def initialize_from_config(
@@ -47,6 +48,7 @@ class AscendSchedulerConfig(SchedulerConfig):
         scheduler_config["scheduler_cls"] = (
             "vllm_ascend.core.scheduler.AscendScheduler")
         scheduler_config["enable_pd_transfer"] = False
+        scheduler_config["decode_max_num_seqs"] = 0
         # Override params in original SchedulerConfig with params in ascend_scheduler_config
         for k, _ in scheduler_config.items():
             if hasattr(ascend_scheduler_config, k):
