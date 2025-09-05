@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Ascend NPU优化的LongCat Flash模型，通过继承vLLM实现来减少代码重复。"""
-from typing import Optional
+from typing import Optional, Union
 import torch
 from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.distributed import get_pp_group
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsLoRA
-from vllm.model_executor.models.utils import IntermediateTensors
+from vllm.model_executor.models.utils import (
+    IntermediateTensors, PPMissingLayer, make_empty_intermediate_tensors_factory,
+    make_layers, maybe_prefix
+)
 
 # 继承原始的vLLM LongCat Flash实现
 from vllm.model_executor.models.longcat_flash import (
@@ -30,8 +35,7 @@ logger = init_logger(__name__)
 
 
 class CustomLongcatMoe(nn.Module):
-    """避免AscendFusedMoE参数不兼容问题的自定义LongcatMoe。
-    明确使用原始vLLM的FusedMoE而不是AscendFusedMoE。
+    """Ascend NPU优化的LongcatMoe，使用AscendFusedMoE支持LongCat Flash零专家功能。
     """
     
     def __init__(
@@ -64,9 +68,9 @@ class CustomLongcatMoe(nn.Module):
             rounter_params_dtype=self.rounter_params_dtype,
             prefix=f"{prefix}.gate")
 
-        # 关键：明确使用原始vLLM的FusedMoE绝对路径，避免被算子替换机制影响
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE as OriginalFusedMoE
-        self.experts = OriginalFusedMoE(
+        # 关键：使用vllm_ascend的AscendFusedMoE替代原始FusedMoE
+        from vllm_ascend.ops.fused_moe import AscendFusedMoE
+        self.experts = AscendFusedMoE(
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
@@ -96,7 +100,7 @@ class CustomLongcatMoe(nn.Module):
 
 
 class CustomFlashDecoderLayer(FlashDecoderLayer):
-    """Ascend优化的Flash decoder layer，使用CustomDeepseekV2MLAAttention"""
+    """Ascend优化的Flash decoder layer，使用CustomDeepseekV2MLAAttention和CustomLongcatMoe"""
 
     def __init__(
         self,
@@ -108,38 +112,18 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
     ) -> None:
         # 不调用父类初始化，直接初始化nn.Module
         nn.Module.__init__(self)
-        
+        self.layer_idx = int(prefix.split(sep='.')[-1])
         self.hidden_size = config.hidden_size
-        # 从 prefix 中提取层索引，prefix 格式应该是 "model.layers.{idx}"
-        try:
-            self.layer_idx = int(prefix.split(".")[-1])
-        except (ValueError, IndexError):
-            self.layer_idx = 0  # 默认值
-        
-        # 为FlashConfig添加CustomDeepseekV2MLAAttention需要的属性
-        if not hasattr(config, 'first_k_dense_replace'):
-            config.first_k_dense_replace = 0  # LongCat Flash不使用密集层替换
-        if not hasattr(config, 'moe_layer_freq'):
-            config.moe_layer_freq = 1  # 默认频率
-        
-        # 初始化input_layernorm
-        from vllm.model_executor.layers.layernorm import RMSNorm
-        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        
-        # 初始化post_attention_layernorm  
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        
-        # 只需要重写两个关键组件：self_attn 和 mlp
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
         if rope_scaling is not None and getattr(
                 config, "original_max_position_embeddings", None):
             rope_scaling["original_max_position_embeddings"] = (
                 config.original_max_position_embeddings)
 
-        # 关键修改：使用CustomDeepseekV2MLAAttention替代DeepseekV2MLAAttention
+        # Dual attention structure - 关键修改：使用CustomDeepseekV2MLAAttention
         self.self_attn = nn.ModuleList([
             CustomDeepseekV2MLAAttention(
                 config=config,
@@ -157,12 +141,35 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
                 cache_config=cache_config,
                 quant_config=None if "self_attn" in getattr(
                     config, "disable_quant_module", []) else quant_config,
-                prefix=f"model.layers.{self.layer_idx}.self_attn_{i}",
+                prefix=f"{prefix}.self_attn_{i}",
+            ) for i in range(2)
+        ])
+        
+        # Dual layernorm structure - 与父类保持一致
+        self.input_layernorm = nn.ModuleList([
+            RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            for i in range(2)
+        ])
+        self.post_attention_layernorm = nn.ModuleList([
+            RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            for i in range(2)
+        ])
+
+        # Dual MLP structure - 与父类保持一致，导入FlashMLP
+        from vllm.model_executor.models.longcat_flash import FlashMLP
+        self.mlps = nn.ModuleList([
+            FlashMLP(
+                hidden_size=self.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=None if "mlps" in getattr(
+                    config, "disable_quant_module", []) else quant_config,
+                prefix=f"{prefix}.mlps.{i}",
             ) for i in range(2)
         ])
 
-        # 直接使用原始LongcatMoe，现在AscendFusedMoE已经支持LongCat Flash参数
-        self.mlp = LongcatMoe(
+        # MoE层 - 关键修改：使用CustomLongcatMoe替代LongcatMoe
+        self.mlp = CustomLongcatMoe(
             config=config,
             num_experts=config.n_routed_experts if hasattr(
                 config, "n_routed_experts") else
@@ -174,142 +181,136 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
             quant_config=quant_config,
             prefix=(f"{prefix}.mlp"),
         )
-    
+
     def forward(
         self,
-        hidden_states,
-        attention_mask,
-        position_ids,
-        kv_cache,
-        attn_metadata,
-        residual=None,
-    ):
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """与父类FlashDecoderLayer保持完全一致的forward实现"""
+        
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            hidden_states = self.input_layernorm[0](hidden_states)
         else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+            hidden_states, residual = self.input_layernorm[0](hidden_states,
+                                                              residual)
 
-        # 使用双注意力机制
-        attn_outputs = []
-        for i, attn_layer in enumerate(self.self_attn):
-            attn_output = attn_layer(
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                position_ids=position_ids,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-            )
-            attn_outputs.append(attn_output)
-        
-        # 合并注意力输出
-        hidden_states = attn_outputs[0] + attn_outputs[1]
-        
-        # 残差连接
-        hidden_states, residual = self.post_attention_layernorm(
+        hidden_states = self.self_attn[0](
+            positions=positions,
+            hidden_states=hidden_states,
+        )
+
+        hidden_states, residual = self.post_attention_layernorm[0](
             hidden_states, residual)
-        
-        # MLP层
-        hidden_states = self.mlp(hidden_states)
-        
+
+        # moe
+        hidden_states_copy = hidden_states.clone()
+        moe_hidden_states = self.mlp(hidden_states_copy)
+
+        # first mlp
+        hidden_states = self.mlps[0](hidden_states)
+
+        hidden_states, residual = self.input_layernorm[1](hidden_states,
+                                                          residual)
+
+        # second_attn
+        hidden_states = self.self_attn[1](
+            positions=positions,
+            hidden_states=hidden_states,
+        )
+        hidden_states, residual = self.post_attention_layernorm[1](
+            hidden_states, residual)
+
+        # second_mlp
+        hidden_states = self.mlps[1](hidden_states)
+
+        hidden_states = hidden_states + moe_hidden_states
+
         return hidden_states, residual
-    
-    def make_empty_intermediate_tensors(
-        self, batch_size: int, dtype, device
-    ):
-        return {
-            "hidden_states": torch.zeros(
-                (batch_size, self.hidden_size),
-                dtype=dtype,
-                device=device,
-            ),
-            "residual": torch.zeros(
-                (batch_size, self.hidden_size),
-                dtype=dtype,
-                device=device,
-            ),
-        }
 
 
 class CustomFlashModel(FlashModel):
     """Ascend优化的Flash模型，使用CustomFlashDecoderLayer"""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # 不调用父类初始化，直接初始化nn.Module
-        nn.Module.__init__(self)
-        
+        super().__init__()
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
-        self.config = config
-        lora_config = vllm_config.lora_config
+        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        self.config = config
+
+        self.padding_idx = getattr(config, "pad_token_id", None)
+        self.vocab_size = config.vocab_size
+
+        # Pipeline Parallel支持：只在第一个rank创建embed_tokens
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                prefix=maybe_prefix(prefix, "embed_tokens"),
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
         
-        self.lora_config = lora_config
-        self.quant_config = quant_config
-        
-        # 初始化embed_tokens
-        from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-        from vllm.model_executor.models.utils import maybe_prefix
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "embed_tokens"),
-        )
-        
-        # 创建layers，使用CustomFlashDecoderLayer
-        from vllm.model_executor.models.utils import make_layers
+        # 创建layers，使用CustomFlashDecoderLayer替代FlashDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
-            self.config.num_hidden_layers,
+            config.num_hidden_layers,
             lambda prefix: CustomFlashDecoderLayer(
-                self.config,
-                cache_config=vllm_config.cache_config,
-                quant_config=vllm_config.quant_config,
+                config,
+                cache_config=cache_config,
+                quant_config=quant_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers")
-            
-        # 初始化norm
-        from vllm.model_executor.layers.layernorm import RMSNorm
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         
+        # Pipeline Parallel支持：只在最后一个rank创建norm
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
+        
+        # 使用与父类相同的make_empty_intermediate_tensors工厂函数
         self.make_empty_intermediate_tensors = (
-            self.layers[0].make_empty_intermediate_tensors
-            if self.layers else None)
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
     
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches,
-        attn_metadata,
-        intermediate_tensors = None,
-    ):
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = self.embed_tokens(input_ids)
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(
+                positions,
                 hidden_states,
-                attention_mask=None,
-                position_ids=positions,
-                kv_cache=kv_caches[i - self.start_layer],
-                attn_metadata=attn_metadata,
-                residual=residual,
+                residual,
             )
-        
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
-                "residual": residual,
+                "residual": residual
             })
-        
+
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
