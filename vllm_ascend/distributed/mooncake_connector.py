@@ -80,7 +80,8 @@ class KVCacheTaskTracker:
 
     def __init__(self,
                  target_count: int = 1,
-                 callback: Callable[[str], None] = lambda x: None):
+                 on_done: Callable[[str], None] = lambda x: None,
+                 on_timeout: Callable[[str], None] = lambda x: None):
         super().__init__()
         self.target_count = target_count
         self.done_task_lock = threading.Lock()
@@ -91,7 +92,8 @@ class KVCacheTaskTracker:
         # timestamp). If a request remains in this queue for too long, it will
         # be force-freed.
         self.delayed_free_requests: deque[Tuple[str, float]] = deque()
-        self.callback = callback
+        self.on_done = on_done
+        self.on_timeout = on_timeout
 
     def update_done_task_count(self, request_id: str):
         self.done_task_counts[request_id] += 1
@@ -99,7 +101,7 @@ class KVCacheTaskTracker:
             with self.done_task_lock:
                 self.finished_requests.add(request_id)
             self.done_task_counts.pop(request_id)
-            self.callback(request_id)
+            self.on_done(request_id)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -112,6 +114,7 @@ class KVCacheTaskTracker:
             expired_requests = self._retrieve_expired_requests()
             finished_requests.update(expired_requests)
             self.finished_requests.clear()
+        self.on_timeout(expired_requests)
         return finished_requests
 
     def add_delayed_request(self, request_id: str, delay_start_time: float):
@@ -249,7 +252,8 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.side_channel_host = side_channel_host
         self.side_channel_port = side_channel_port
         self.task_tracker = KVCacheTaskTracker(total_layers,
-                                               self._post_transfer)
+                                               on_done=self._post_transfer,
+                                               on_timeout=self._abort_requests)
         self.send_layer_thread = SendingLayerThread(self.task_tracker,
                                                     total_layers, engine,
                                                     local_kv_base_addr,
@@ -340,6 +344,11 @@ class KVCacheSendingLayerThread(threading.Thread):
             else:
                 self.pending_decode.setdefault(request_id, []).append(
                     (layer_name, local_block_ids, layer_index))
+                
+    def _abort_requests(self, request_ids: set[str]):
+        with self.lock:
+            for request_id in request_ids:
+                self.pending_decode.pop(request_id, None)
 
 
 class SendingLayerThread(threading.Thread):
