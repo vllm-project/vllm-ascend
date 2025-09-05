@@ -903,7 +903,7 @@ class TestAscendScheduler(TestBase):
         requests = create_requests(num_requests=32)
         for request in requests:
             scheduler.add_request(request)
-        
+
         # 1st iteration, move 16 requests from waiting to running for prefill
         scheduler_output = scheduler.schedule()
         model_runner_output = make_output(scheduler)
