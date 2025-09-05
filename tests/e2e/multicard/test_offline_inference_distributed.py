@@ -23,12 +23,16 @@ Run `pytest tests/test_offline_inference.py`.
 import os
 from unittest.mock import patch
 
+import pytest
+
 from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
+
+QWEN_DENSE_MODELS = ["Qwen/QwQ-32B", "Qwen/Qwen-32B"]
 
 
 def test_models_distributed_QwQ():
@@ -150,3 +154,23 @@ def test_sp_for_qwen3_moe() -> None:
                     enable_expert_parallel=True,
                     enforce_eager=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM": "1"})
+def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model, enforce_eager):
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download(model),
+            max_model_len=8192,
+            enforce_eager=enforce_eager,
+            dtype="auto",
+            tensor_parallel_size=4,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)

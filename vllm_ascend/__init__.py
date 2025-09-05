@@ -23,5 +23,10 @@ def register():
 
 
 def register_model():
+    import vllm.envs as envs
+
+    import vllm_ascend.envs as envs_ascend
+
     from .models import register_model
+
     register_model()

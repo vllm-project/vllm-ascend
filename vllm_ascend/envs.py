@@ -131,6 +131,13 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
+    # Whether to enable FlashComm optimization when tensor parallel is enabled.
+    # this feature will get better performance in prefill phase.
+    "VLLM_ASCEND_ENABLE_FLASHCOMM":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))),
+    # Whether to enable dense model and general optimizations for better performance.
+    "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE", '0'))),
     # Whether to enable mlp optimize when tensor parallel is enabled.
     # this feature in eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
