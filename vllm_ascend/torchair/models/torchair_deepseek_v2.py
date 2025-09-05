@@ -644,8 +644,10 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        is_mtp_block=False,
     ) -> None:
         nn.Module.__init__(self)
+        self.is_mtp_block = is_mtp_block
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -719,12 +721,14 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         attn_metadata: Optional[AttentionMetadata] = None,
         replace_allreduce: bool = False,
     ) -> torch.Tensor:
+        dispose_residual = False
         # Self Attention
         if attn_metadata is not None and attn_metadata.num_decodes > 0:
             mla_moe_communication = self.mla_moe_communication and replace_allreduce
         else:
             mla_moe_communication = False
         if residual is None:
+            dispose_residual = self.is_mtp_block
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
@@ -745,6 +749,9 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
+
+        if dispose_residual:
+            ori_residual = residual
 
         if mla_moe_communication and residual.shape[0] != hidden_states.shape[
                 0]:
@@ -778,6 +785,9 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
+
+        if dispose_residual:
+            dispose_tensor(ori_residual)
 
         if isinstance(self.mlp, TorchairDeepseekV2MoE):
             hidden_states = self.mlp(hidden_states,
@@ -851,6 +861,7 @@ class TorchairDeepseekV2Model(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                is_mtp_block=False,
             ),
             prefix=f"{prefix}.layers")
 
