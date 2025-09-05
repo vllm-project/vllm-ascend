@@ -587,9 +587,10 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
-        output = self.mla_attn.impl.forward(hidden_states, kv_cache,
-                                            forward_context.attn_metadata,
-                                            need_gather_q_kv, output)
+        output = self.mla_attn.impl.forward(self.mla_attn.layer_name,
+                                            hidden_states, kv_cache,
+                                            attn_metadata, need_gather_q_kv,
+                                            output)
         output = output.view(-1, output_shape[-1])
         return output
 
@@ -742,7 +743,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states = get_tp_group().all_gather(hidden_states, 0)
             residual = get_tp_group().all_gather(residual, 0)
 
-            attn_metadata = get_forward_context().attn_metadata
             if attn_metadata is not None:
                 num_tokens = attn_metadata.num_actual_tokens
             else:
