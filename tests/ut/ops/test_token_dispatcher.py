@@ -92,7 +92,8 @@ class TestTokenDispatcherWithMC2(TestBase):
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
         with patch("torch_npu.npu_moe_distribute_dispatch_v2",
-                   return_value=(torch.randn(10, 128), ) * 5 + (None, None)) as mock_dispatch:
+                   return_value=(torch.randn(10, 128), ) * 5 +
+                   (None, None)) as mock_dispatch:
             output = self.dispatcher.token_dispatch(hidden_states,
                                                     topk_weights, topk_ids,
                                                     self.row_idx, expert_map)
