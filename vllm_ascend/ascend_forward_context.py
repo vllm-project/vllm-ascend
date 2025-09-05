@@ -66,7 +66,8 @@ def set_ascend_forward_context(
         moe_comm_method: str = "",
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        batch_descriptor: Optional[BatchDescriptor] = None):
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        prefetch_model: torch.nn.Module = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -81,6 +82,32 @@ def set_ascend_forward_context(
             batch_descriptor=batch_descriptor,
     ):
         forward_context = get_forward_context()
+
+        # set layer_idx to enable optimization features that depend on this information.
+        # This is only applicable to models that contain these necessary attributes.
+        forward_context.layer_idx = None
+        if prefetch_model is not None and \
+            hasattr(prefetch_model, "model") and \
+            hasattr(prefetch_model.model, "start_layer"):
+            forward_context.layer_idx = prefetch_model.model.start_layer
+            forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
+
+        # set for addrmsnorm+quant fusion.
+        # this optim now just support dense models due to the specific operators used.
+        # Once the necessary conditions are met, support for MOE models will also be added.
+        addrmsnorm_quant_fusion_enabled = False
+        if envs_ascend.VLLM_ASCEND_ENABLE_ADDRMSNORM_QUANT_FUSION and \
+            vllm_config.model_config.hf_config.model_type in ["llama", "qwen2", "qwen3"] and \
+            forward_context.layer_idx is not None:
+            from vllm_ascend.quantization.quant_config import AscendQuantConfig
+            assert isinstance(vllm_config.quant_config, AscendQuantConfig), \
+                "Expected quant_config to be an instance of AscendQuantConfig"
+            forward_context.prefetch_model = prefetch_model
+            layer_idx = forward_context.layer_idx
+            forward_context.fusion_linear = "gate_up_dense" if layer_idx == 0 else "qkv_dense"
+            addrmsnorm_quant_fusion_enabled = True
+        forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
+                
         forward_context.moe_comm_method_name = moe_comm_method + "commimpl"
         forward_context.with_prefill = with_prefill
         tp_world_size = get_tensor_model_parallel_world_size()
