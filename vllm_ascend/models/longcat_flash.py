@@ -203,6 +203,7 @@ class CustomFlashModel(FlashModel):
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        self.do_not_compile = true
         self.config = config
 
         self.padding_idx = getattr(config, "pad_token_id", None)
