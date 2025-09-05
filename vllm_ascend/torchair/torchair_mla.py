@@ -23,7 +23,6 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
-from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata,
                                         npu_stream_switch, npu_wait_tensor)
 from vllm_ascend.utils import npu_prefetch
@@ -862,9 +861,9 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                                   dtype=query.dtype,
                                   device=query.device)
         attn_lse = torch.empty(self.num_heads,
-                                   num_tokens,
-                                   dtype=torch.float32,
-                                   device=query.device)
+                               num_tokens,
+                               dtype=torch.float32,
+                               device=query.device)
         k_nope, value = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim).split(
                 [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
@@ -877,28 +876,27 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
             torch.ones(512, 512, device=query.device, dtype=query.dtype),
             1)  # 512: mask only support 512
         if attn_metadata.num_prefills > 1:
-            mask = mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1,
-                                            1)
-        torch_npu.atb.npu_ring_mla(
-            q_nope=q_nope,
-            q_rope=q_pe,
-            k_nope=k_nope,
-            k_rope=k_pe,
-            value=value,
-            mask=mask,
-            seqlen=torch.tensor(attn_metadata.prefill.query_lens,
-                                dtype=torch.int32),
-            head_num=self.num_heads,
-            kv_head_num=self.num_heads,
-            pre_out=None,
-            prev_lse=None,
-            qk_scale=self.scale,
-            kernel_type="kernel_type_high_precision",
-            mask_type="mask_type_triu",
-            input_layout="type_bsnd",
-            calc_type="calc_type_first_ring",
-            output=attn_output,
-            softmax_lse=attn_lse)
+            mask = mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1, 1)
+        torch_npu.atb.npu_ring_mla(q_nope=q_nope,
+                                   q_rope=q_pe,
+                                   k_nope=k_nope,
+                                   k_rope=k_pe,
+                                   value=value,
+                                   mask=mask,
+                                   seqlen=torch.tensor(
+                                       attn_metadata.prefill.query_lens,
+                                       dtype=torch.int32),
+                                   head_num=self.num_heads,
+                                   kv_head_num=self.num_heads,
+                                   pre_out=None,
+                                   prev_lse=None,
+                                   qk_scale=self.scale,
+                                   kernel_type="kernel_type_high_precision",
+                                   mask_type="mask_type_triu",
+                                   input_layout="type_bsnd",
+                                   calc_type="calc_type_first_ring",
+                                   output=attn_output,
+                                   softmax_lse=attn_lse)
         attn_output, attn_lse = self._compute_prefill_context( \
             query, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
 
