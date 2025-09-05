@@ -64,17 +64,17 @@ Assume that we use device 0,1 on the prefiller server node and device 6,7 on bot
 # On the prefiller node
 cd vllm-ascend/examples/disaggregate_prefill_v1/
 bash gen_ranktable.sh --ips 192.0.0.1 192.0.0.2 192.0.0.3 \
-  --npus-per-node  2 --network-card-name eth0 --prefill-device-cnt 2 --decode-device-cnt 2 --local-device-ids 0,1
+  --npus-per-node  2 --network-card-name eth0 --prefill-device-cnt 2 --decode-device-cnt 4 --local-device-ids 0,1
 
 # On the decoder 1
 cd vllm-ascend/examples/disaggregate_prefill_v1/
 bash gen_ranktable.sh --ips 192.0.0.1 192.0.0.2 192.0.0.3 \
-  --npus-per-node  2 --network-card-name eth0 --prefill-device-cnt 2 --decode-device-cnt 2 --local-device-ids 6,7
+  --npus-per-node  2 --network-card-name eth0 --prefill-device-cnt 2 --decode-device-cnt 4 --local-device-ids 6,7
 
 # On the decoder 2
 cd vllm-ascend/examples/disaggregate_prefill_v1/
 bash gen_ranktable.sh --ips 192.0.0.1 192.0.0.2 192.0.0.3 \
-  --npus-per-node  2 --network-card-name eth0 --prefill-device-cnt 2 --decode-device-cnt 2 --local-device-ids 6,7
+  --npus-per-node  2 --network-card-name eth0 --prefill-device-cnt 2 --decode-device-cnt 4 --local-device-ids 6,7
 ```
 
 Rank table will generated at /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
