@@ -9,7 +9,8 @@ from torch import nn
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils import block_dequant
+from vllm.model_executor.layers.quantization.utils.int8_utils import (
+    block_dequant)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.distributed import get_pp_group
