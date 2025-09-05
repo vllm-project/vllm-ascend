@@ -243,17 +243,6 @@ class AscendFusedMoE(FusedMoE):
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
 
-    def must_reduce_shared_expert_outputs(self) -> bool:
-        """NOTE(Yizhou): This is to override the parent class method. Note that this
-        method will be called in the __init__ function so we cannot switch this during
-        runtime. An known issue is that if we are using AllGatherCommImpl, actually
-        we do not need to reduce the outputs THIS EARLY since it will will be done
-        in the AllGatherCommImpl.finalize function. But this does not affect the
-        correctness, only introduces some redundant communication, so to quickly
-        support DeepSeek and other models, we keep it as is for now.
-        """
-        return True
-
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """NOTE(Yizhou): This is to override the parent class method. In `mc2commimpl`,
@@ -364,6 +353,38 @@ class AscendFusedMoE(FusedMoE):
                                                  shard_size)
         # w2, down_proj: Load into only logical weight of w2.
         expert_data.copy_(loaded_weight)
+
+
+class AscendSharedFusedMoE(AscendFusedMoE):
+
+    def __init__(
+        self,
+        shared_experts: torch.nn.Module,
+        use_overlapped: bool = True,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self._shared_experts = shared_experts
+        self.use_overlapped = use_overlapped
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        shared_out = self._shared_experts(hidden_states)
+
+        # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
+        forward_context = get_forward_context()
+        moe_comm_method_name = forward_context.moe_comm_method_name
+        if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
+            shared_out = tensor_model_parallel_all_reduce(shared_out)
+
+        fused_out = super().forward(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+        )
+        return shared_out, fused_out
 
 
 class AscendSharedFusedMoE(AscendFusedMoE):
