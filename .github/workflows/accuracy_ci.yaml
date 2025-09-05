@@ -1,0 +1,269 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+name: Benchmarks / accuracy-ci
+
+on:
+  pull_request:
+    branches:
+      - 'main'
+      - '*-dev'
+    paths:
+      - '.github/workflows/accuracy_ci.yaml'
+      - 'tests/e2e/models/**'
+  schedule:
+    - cron: '0 */6 * * *'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare_matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set_matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+    
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+          pip install yq
+    
+      - name: Set mappings
+        run: |
+          mappings_json='{}'
+          
+          for config_file in tests/e2e/models/configs/*.yaml; do
+            echo "Processing config file: $config_file"
+            full_model_name=$(yq -r '.model_name' "$config_file" | tr -d '"')
+            model_name=$(echo "$full_model_name" | awk -F'/' '{print $NF}')
+            runner=$(yq -r '.runner' "$config_file" | tr -d '"')
+            
+            echo "Raw model_name: $full_model_name"
+            echo "Extracted model_name: $model_name"
+            echo "Runner: $runner"
+            
+            mappings_json=$(echo "$mappings_json" | jq --arg key "$model_name" --arg value "$runner" '. + {($key): $value}')
+          done
+
+          compact_json=$(echo "$mappings_json" | jq -c .) 
+
+          echo "Generated mappings:"
+          echo "$mappings_json"
+          echo "MAPPINGS_JSON=$compact_json" >> $GITHUB_ENV
+
+      - name: Prepare matrix
+        id: set_matrix
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          event="${GITHUB_EVENT_NAME}"
+          matrix="[]"
+
+          if [[ "$event" == "schedule" ]]; then
+            matrix=$(echo "$MAPPINGS_JSON" | jq '[to_entries[] | {model_name: .key, runner: .value}]')
+          else
+            pr_number=$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH" || true)
+
+            changed_files=""
+            echo "PR detected: #$pr_number — fetching changed files via API"
+            changed_files=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls/$pr_number/files?per_page=100" \
+              | jq -r '.[].filename' || true)
+
+            echo "Changed files:"
+            echo "$changed_files"
+
+            run_all=false
+
+            for f in $changed_files; do
+              if [[ "$f" != tests/e2e/models/configs/* ]]; then
+                echo "Non-config file changed: $f, will run all models"
+                run_all=true
+                break
+              fi
+            done
+
+            if [[ "$run_all" == "true" ]]; then
+              matrix=$(echo "$MAPPINGS_JSON" | jq '[to_entries[] | {model_name: .key, runner: .value}]')
+            else
+              for f in $changed_files; do
+                if [[ "$f" == tests/e2e/models/configs/*.yaml ]]; then
+                  name=$(basename "$f" .yaml)
+                  runner=$(echo "$MAPPINGS_JSON" | jq -r --arg key "$name" '.[$key] // empty')
+                  if [[ -n "$runner" ]]; then
+                    matrix=$(echo "$matrix" | jq --arg model "$name" --arg runner "$runner" '. += [{"model_name":$model, "runner":$runner}]')
+                  else
+                    echo "Config $name not found in mappings; skipping."
+                  fi
+                fi
+              done
+            fi
+          fi
+
+          echo "Generated matrix (raw): $matrix"
+          compact_matrix=$(echo "$matrix" | jq -c 'if type=="array" then . else [] end')
+          echo "matrix=$compact_matrix" >> $GITHUB_OUTPUT
+          echo "Final matrix output: $compact_matrix"
+
+  accuracy_tests:
+    needs: prepare_matrix
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.prepare_matrix.outputs.matrix) }}
+      fail-fast: false
+    name: ${{ matrix.model_name }} accuracy
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      env:
+        VLLM_USE_MODELSCOPE: True
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set model name as output
+        id: set_output
+        run: |
+          echo "model_name=${{ matrix.model_name }}" >> $GITHUB_OUTPUT
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: v0.10.1.1
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm-ascend
+          path: ./vllm-ascend
+
+      - name: Install vllm-project/vllm-ascend
+        working-directory: ./vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Get vLLM commit hash and URL
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_COMMIT=$(git rev-parse --short=7 HEAD)
+          echo "VLLM_COMMIT=$VLLM_COMMIT" >> $GITHUB_ENV
+
+      - name: Get vLLM-Ascend commit hash and URL
+        working-directory: ./vllm-ascend
+        run: |
+          VLLM_ASCEND_COMMIT=$(git rev-parse --short=7 HEAD)
+          echo "VLLM_ASCEND_COMMIT=$VLLM_ASCEND_COMMIT" >> $GITHUB_ENV
+
+      - name: Collect version info
+        run: |
+          for dir in /usr/local/Ascend/ascend-toolkit/*; do
+            dname=$(basename "$dir")
+            if [ "$dname" != "latest" ]; then
+              TOOLKIT_DIR="$dname"
+              break
+            fi
+          done
+          INFO_FILE="/usr/local/Ascend/ascend-toolkit/${TOOLKIT_DIR}/$(uname -i)-linux/ascend_toolkit_install.info"
+          GHA_CANN_VERSION=$(grep "version=" "$INFO_FILE" \
+                           | head -n1 \
+                           | cut -d'=' -f2 \
+                           | tr -d '"')
+          {
+            echo "GHA_CANN_VERSION=$GHA_CANN_VERSION"
+            pip show torch | grep "Version:" | awk '{print "GHA_TORCH_VERSION="$2}'
+            pip show torch_npu | grep "Version:" | awk '{print "GHA_TORCH_NPU_VERSION="$2}'
+            pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
+          } >> "$GITHUB_ENV"
+
+      - name: Run accuracy test
+        id: report
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+          VLLM_VERSION: ${{ env.GHA_VLLM_VERSION }}
+          VLLM_COMMIT: ${{ env.VLLM_COMMIT }}
+          VLLM_ASCEND_VERSION: ${{ env.GHA_VLLM_ASCEND_VERSION || github.ref }}
+          VLLM_ASCEND_COMMIT: ${{ env.VLLM_ASCEND_COMMIT }}
+          CANN_VERSION: ${{ env.GHA_CANN_VERSION }}
+          TORCH_VERSION: ${{ env.GHA_TORCH_VERSION }}
+          TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
+        run: |
+          model_base_name=$(basename ${{ matrix.model_name }})
+          markdown_name="${model_base_name}"
+          echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
+          mkdir -p ./benchmarks/accuracy
+          pytest -sv ./tests/e2e/models/test_lm_eval_correctness.py \
+          --config ./tests/e2e/models/configs/${{ matrix.model_name }}.yaml
+
+      - name: Generate step summary
+        if: ${{ always() }}
+        run: |
+          cat ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Sanitize version string for artifact naming
+        run: |
+          SAFE_VLLM_ASCEND_VERSION="${GHA_VLLM_ASCEND_VERSION//\//-}"
+          echo "SAFE_VLLM_ASCEND_VERSION=$SAFE_VLLM_ASCEND_VERSION" >> "$GITHUB_ENV"
+
+      - name: Upload Report 
+        uses: actions/upload-artifact@v4
+        with:
+          name: "report-${{ env.SAFE_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}"
+          path: ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true

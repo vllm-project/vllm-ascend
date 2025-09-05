@@ -1,4 +1,5 @@
 model_name: "Qwen/Qwen3-30B-A3B"
+runner: "linux-aarch64-a2-2"
 tasks:
 - name: "gsm8k"
   metrics:

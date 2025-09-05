@@ -1,4 +1,5 @@
 model_name: "deepseek-ai/DeepSeek-V2-Lite"
+runner: "linux-aarch64-a2-2"
 tasks:
 - name: "gsm8k"
   metrics:

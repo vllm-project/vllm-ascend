@@ -1,4 +1,5 @@
 model_name: "Qwen/Qwen3-8B-Base"
+runner: "linux-aarch64-a2-1"
 tasks:
 - name: "gsm8k"
   metrics:
