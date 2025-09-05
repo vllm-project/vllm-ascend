@@ -383,7 +383,7 @@ class AscendScheduler(Scheduler):
         assert token_budget >= 0
         assert len(
             self.running
-            ) <= self.decode_max_num_running_reqs if self.phase == "decode" else self.max_num_running_reqs
+        ) <= self.decode_max_num_running_reqs if self.phase == "decode" else self.max_num_running_reqs
         assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
             scheduled_running_reqs) <= len(self.running)
 
