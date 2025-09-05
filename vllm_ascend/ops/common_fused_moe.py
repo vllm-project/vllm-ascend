@@ -482,11 +482,6 @@ class AscendFusedMoE(FusedMoE):
         forward_context = get_forward_context()
         moe_comm_method_name = forward_context.moe_comm_method_name
 
-        # TODO: Can we refactor this logic to model_runner?
-        # TODO: Adjusted logic to differentiate between A2 and A3, we check ep_size here since mc2 only support ep_size >= 16 on A3 now
-        if self.moe_config.ep_size < 16:
-            moe_comm_method_name = "allgathercommimpl"
-
         forward_context.moe_comm_method = getattr(self, moe_comm_method_name)
 
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
