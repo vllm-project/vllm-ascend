@@ -25,6 +25,8 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.attention.layer import (maybe_save_kv_layer_to_connector,
+                                  wait_for_kv_layer_from_connector)
 from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, direct_register_custom_op
@@ -570,6 +572,7 @@ def unified_ascend_attention_with_output(
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
+    wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.no_compile_layers[layer_name]
@@ -582,6 +585,7 @@ def unified_ascend_attention_with_output(
                       attn_metadata,
                       output,
                       trace_flag=False)
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return
 
 

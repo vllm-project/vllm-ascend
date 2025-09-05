@@ -1525,7 +1525,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata, self.with_prefill, maybe_padded_num_tokens,
                     input_ids, positions, intermediate_tensors, inputs_embeds)
 
-            self.maybe_wait_for_kv_save()
+            finished_dumping = self.maybe_wait_for_kv_save()
             finished_sending, finished_recving = self.get_finished_kv_transfer(
                 scheduler_output)
 
@@ -1735,7 +1735,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 pooler_output=[],
                 **extra_args,
             )
-
+        model_runner_output.finished_dumping = finished_dumping
         durations = ProfileExecuteDuration().pop_captured_sync()
         if durations:
             dr_str = [
@@ -1790,9 +1790,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_connector.start_load_kv(get_forward_context())
 
     @staticmethod
-    def maybe_wait_for_kv_save() -> None:
+    def maybe_wait_for_kv_save():
         if has_kv_transfer_group():
-            get_kv_transfer_group().wait_for_save()
+            return get_kv_transfer_group().wait_for_save()
 
     @staticmethod
     def get_finished_kv_transfer(
