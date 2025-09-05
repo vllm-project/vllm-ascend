@@ -562,3 +562,7 @@ def get_ascend_soc_version():
 
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().lmhead_tensor_parallel_size is not None
+
+
+def embedding_tp_enable() -> bool:
+    return get_ascend_config().embedding_tensor_parallel_size is not None
