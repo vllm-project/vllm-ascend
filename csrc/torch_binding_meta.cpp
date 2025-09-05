@@ -36,23 +36,25 @@
 namespace vllm_ascend {
 namespace meta {
 
-std::tuple<at::Tensor, at::Tensor> rotary_embedding_meta(
+void rotary_embedding_meta(
   at::Tensor &positions,
   at::Tensor &query,
-  at::Tensor &key,
+  std::optional<at::Tensor> key,
   int64_t head_size, 
   at::Tensor &cos_sin_cache,
   bool is_neox) {
+    TORCH_CHECK(key.has_value(), "rotary_embedding_meta: key must have a value");
     auto num_tokens = positions.sym_numel();
     auto query_hidden_size = query.sym_numel() / num_tokens;
-    auto key_hidden_size = key.sym_numel() / num_tokens;
+    auto key_hidden_size = key.value().sym_numel() / num_tokens;
 
     auto num_heads = query_hidden_size / head_size;
     auto num_kv_heads = key_hidden_size / head_size;
-    at::Tensor query_dst = at::empty_symint({num_tokens, num_heads, head_size}, query.options());
-    at::Tensor key_dst = at::empty_symint({num_tokens, num_kv_heads, head_size}, key.options());
 
-    return {query_dst, key_dst};
+    c10::SymIntArrayRef query_shape({num_tokens, num_heads, head_size});
+    c10::SymIntArrayRef key_shape({num_tokens, num_kv_heads, head_size});
+    query.resize__symint(query_shape);
+    key.value().resize__symint(key_shape);
 }
 
 std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(

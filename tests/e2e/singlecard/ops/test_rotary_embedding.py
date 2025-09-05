@@ -182,7 +182,7 @@ def test_rotary_embedding_quant_with_leading_dim(
     )
 
     ref_query, ref_key = rope.forward_native(positions, query, key)
-    query, key = torch.ops._C.rotary_embedding(
+    torch.ops._C.rotary_embedding(
         positions,
         query,
         key,
@@ -239,7 +239,8 @@ class ModelwithRotaryEmbedding(nn.Module):
         # we simulated a simple attention layer to test if it can be seamlessly captured into aclgraph
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(3, dim=-1)
-        query, key = torch.ops._C.rotary_embedding(
+        q_shape = q.shape
+        torch.ops._C.rotary_embedding(
             positions,
             q,
             k,
@@ -247,8 +248,7 @@ class ModelwithRotaryEmbedding(nn.Module):
             self.rope.cos_sin_cache,
             self.rope.is_neox_style,
         )
-        query = query.view(q.shape)
-        key = key.view(k.shape)
+        query = q.view(q_shape)
         o = self.o_proj(query)
         return o
 
