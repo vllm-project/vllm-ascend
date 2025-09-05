@@ -55,7 +55,11 @@ class AscendSchedulerConfig(SchedulerConfig):
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
         self.chunked_prefill_enabled = self.enable_chunked_prefill
-        if (self.max_num_batched_tokens < self.max_model_len
+        if self.enable_sequence_parallel:
+            model_len_per_sp_cp = self.max_model_len // self.context_parallel_size // self.tensor_parallel_size
+        else:
+            model_len_per_sp_cp = self.max_model_len // self.context_parallel_size
+        if (self.max_num_batched_tokens < model_len_per_sp_cp
                 and not self.chunked_prefill_enabled):
             raise ValueError(
                 "Ascend scheduler is enabled without chunked prefill feature. "

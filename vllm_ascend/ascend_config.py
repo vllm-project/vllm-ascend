@@ -49,7 +49,8 @@ class AscendConfig:
             "chunked_prefill_for_mla", False)
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp", False
-        ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
+        ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel \
+          and not vllm_config.parallel_config.enable_sequence_parallel
         self.enable_prefetch = additional_config.get("enable_prefetch", False)
         self.lmhead_tensor_parallel_size = additional_config.get(
             "lmhead_tensor_parallel_size", None)

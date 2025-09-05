@@ -20,11 +20,12 @@
 from typing import Optional, Union
 
 import torch
+import torch.distributed as dist
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, CompilationLevel, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_context_model_parallel_world_size, get_cp_group
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group)
 from vllm.forward_context import get_forward_context
@@ -262,6 +263,8 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.config = config
+        self.cp_size = get_context_model_parallel_world_size()
+        self.cp_group = get_cp_group().device_group
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -289,6 +292,10 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         inputs_embeds: Optional[torch.Tensor] = None,
         _metadata_for_padding: Optional[MetadataForPadding] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        is_prefill = 0
+        attn_metadata = get_forward_context().attn_metadata
+        if attn_metadata:
+            is_prefill = attn_metadata.num_prefills
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -317,6 +324,12 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
             hidden_states = _metadata_for_padding.allgather_unpadding_aligned(
                 hidden_states)
+
+        if self.cp_size > 1 and is_prefill:
+            chunk_hidden_states = [torch.empty_like(hidden_states) for _ in range(self.cp_size)]
+            dist.all_gather(list(chunk_hidden_states), hidden_states, self.cp_group)
+            hidden_states = torch.cat(chunk_hidden_states, dim=0)
+            hidden_states = torch.index_select(hidden_states, 0, attn_metadata.prefill.cp_metadata.cp_kv_recover_idx)
 
         return hidden_states
 
