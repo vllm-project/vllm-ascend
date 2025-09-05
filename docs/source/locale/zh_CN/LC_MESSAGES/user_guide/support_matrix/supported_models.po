@@ -9,7 +9,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version:  vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2025-09-03 17:45+0800\n"
+"POT-Creation-Date: 2025-09-05 16:35+0800\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language: zh_CN\n"
@@ -30,14 +30,17 @@ msgid ""
 "Get the newest info here: [https://github.com/vllm-project/vllm-"
 "ascend/issues/1608](https://github.com/vllm-project/vllm-"
 "ascend/issues/1608)"
-msgstr "最新信息请见：[https://github.com/vllm-project/vllm-ascend/issues/1608](https://github.com/vllm-project/vllm-ascend/issues/1608)"
+msgstr ""
+"最新信息请见：[https://github.com/vllm-project/vllm-"
+"ascend/issues/1608](https://github.com/vllm-project/vllm-"
+"ascend/issues/1608)"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:5
 msgid "Text-only Language Models"
 msgstr "纯文本语言模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md:7
-#: ../../source/user_guide/support_matrix/supported_models.md:39
+#: ../../source/user_guide/support_matrix/supported_models.md:41
 msgid "Generative Models"
 msgstr "生成模型"
 
@@ -67,7 +70,7 @@ msgstr "DeepSeek R1"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "DeepSeek Distill (Qwen/LLama)"
-msgstr "DeepSeek 精炼（Qwen/LLama）"
+msgstr "DeepSeek Distill（Qwen/LLama）"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Qwen3"
@@ -158,14 +161,28 @@ msgid "Pooling Models"
 msgstr "池化模型"
 
 #: ../../source/user_guide/support_matrix/supported_models.md
-msgid "XLM-RoBERTa-based"
-msgstr "基于XLM-RoBERTa"
-
-#: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Molmo"
 msgstr "Molmo"
 
-#: ../../source/user_guide/support_matrix/supported_models.md:37
+#: ../../source/user_guide/support_matrix/supported_models.md
+msgid "bge-reranker-large"
+msgstr "bge-reranker-large"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+#, fuzzy
+msgid ""
+"only V0 [#2646](https://github.com/vllm-project/vllm-"
+"ascend/pull/2646#issuecomment-3248367003)"
+msgstr ""
+"仅V0支持 [#2646](https://github.com/vllm-project/vllm-"
+"ascend/pull/2646#issuecomment-3248367003)"
+
+#: ../../source/user_guide/support_matrix/supported_models.md
+#, fuzzy
+msgid "bge-m3"
+msgstr "bge-m3"
+
+#: ../../source/user_guide/support_matrix/supported_models.md:39
 msgid "Multimodal Language Models"
 msgstr "多模态语言模型"
 
@@ -220,4 +237,10 @@ msgstr "GLM-4v"
 #: ../../source/user_guide/support_matrix/supported_models.md
 msgid "Ultravox"
 msgstr "Ultravox"
+
+#~ msgid "XLM-RoBERTa-based"
+#~ msgstr "XLM-RoBERTa-based"
+
+#~ msgid "BERT-based"
+#~ msgstr "BERT-based"
 

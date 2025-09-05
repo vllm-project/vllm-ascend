@@ -31,8 +31,10 @@ Get the newest info here: [https://github.com/vllm-project/vllm-ascend/issues/16
 ### Pooling Models
 | Model | Supported | Note |
 |-------|---------|------|
-| XLM-RoBERTa-based | ✅ |  |
 | Molmo | ✅ |  |
+| bge-reranker-large | ✅ | only V0 [#2646](https://github.com/vllm-project/vllm-ascend/pull/2646#issuecomment-3248367003) |
+| bge-m3 | ✅ | only V0 [#2464](https://github.com/vllm-project/vllm-ascend/pull/2646#issuecomment-3248367003)  |
+| bge-reranker-large | ✅ | only V0 [#2646](https://github.com/vllm-project/vllm-ascend/pull/2646#issuecomment-3248367003)  |
 
 ## Multimodal Language Models
 
