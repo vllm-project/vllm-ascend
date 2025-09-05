@@ -18,24 +18,49 @@ limitations under the License.
 from typing import Optional, Union
 
 import torch
+import torch_npu
 from torch.nn.parameter import Parameter
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
-                                               ColumnParallelLinear,
-                                               LinearBase,
-                                               MergedColumnParallelLinear,
-                                               RowParallelLinear)
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tensor_model_parallel_rank,
     get_mlp_tensor_model_parallel_world_size, get_mlp_tp_group)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+
+# iosrt and yapf have conflict, skip one
+from vllm.model_executor.layers.linear import (  # isort: skip
+    WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear, LinearBase,
+    MergedColumnParallelLinear, QKVParallelLinear, RowParallelLinear,
+    UnquantizedLinearMethod)
+
+
+class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        if torch.version.cann.startswith("8.3"):
+            layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if torch.version.cann.startswith("8.3"):
+            if bias is None:
+                return torch.matmul(x, layer.weight)
+            else:
+                return torch.matmul(x, layer.weight) + bias
+        else:
+            return torch.nn.functional.linear(x, layer.weight, bias)
 
 
 class AscendMlpColumnParallelLinear(ColumnParallelLinear):
@@ -85,6 +110,9 @@ class AscendMlpColumnParallelLinear(ColumnParallelLinear):
                             quant_config,
                             prefix,
                             return_bias=return_bias)
+        if quant_config is None:
+            self.quant_method: Optional[
+                QuantizeMethodBase] = AscendUnquantizedLinearMethod()
 
         self.gather_output = gather_output
 
@@ -155,6 +183,9 @@ class AscendMlpRowParallelLinear(RowParallelLinear):
                             quant_config,
                             prefix,
                             return_bias=return_bias)
+        if quant_config is None:
+            self.quant_method: Optional[
+                QuantizeMethodBase] = AscendUnquantizedLinearMethod()
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
@@ -307,3 +338,56 @@ class AscendMlpMergedColumnParallelLinear(MergedColumnParallelLinear):
         if not self.return_bias:
             return output
         return output, output_bias
+
+
+class AscendQKVParallelLinear(QKVParallelLinear):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        head_size: int,
+        total_num_heads: int,
+        total_num_kv_heads: Optional[int] = None,
+        bias: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+    ):
+        self.hidden_size = hidden_size
+        self.head_size = head_size
+        self.total_num_heads = total_num_heads
+        if total_num_kv_heads is None:
+            total_num_kv_heads = total_num_heads
+        self.total_num_kv_heads = total_num_kv_heads
+        # Divide the weight matrix along the last dimension.
+        tp_size = get_tensor_model_parallel_world_size()
+        self.num_heads = divide(self.total_num_heads, tp_size)
+        if tp_size >= self.total_num_kv_heads:
+            self.num_kv_heads = 1
+            self.num_kv_head_replicas = divide(tp_size,
+                                               self.total_num_kv_heads)
+        else:
+            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+            self.num_kv_head_replicas = 1
+        input_size = self.hidden_size
+        output_size = (self.num_heads +
+                       2 * self.num_kv_heads) * tp_size * self.head_size
+        self.output_sizes = [
+            self.num_heads * self.head_size * tp_size,  # q_proj
+            self.num_kv_heads * self.head_size * tp_size,  # k_proj
+            self.num_kv_heads * self.head_size * tp_size,  # v_proj 
+        ]
+
+        AscendMlpColumnParallelLinear.__init__(self,
+                                               input_size=input_size,
+                                               output_size=output_size,
+                                               bias=bias,
+                                               gather_output=False,
+                                               skip_bias_add=skip_bias_add,
+                                               params_dtype=params_dtype,
+                                               quant_config=quant_config,
+                                               prefix=prefix,
+                                               return_bias=return_bias)

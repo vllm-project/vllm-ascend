@@ -493,7 +493,8 @@ def register_ascend_customop():
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
                                         AscendMlpMergedColumnParallelLinear,
-                                        AscendMlpRowParallelLinear)
+                                        AscendMlpRowParallelLinear,
+                                        AscendQKVParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -521,6 +522,8 @@ def register_ascend_customop():
         CustomOp.register_oot(
             _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
             name="MergedColumnParallelLinear")
+        CustomOp.register_oot(_decorated_op_cls=AscendQKVParallelLinear,
+                              name="QKVParallelLinear")
 
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")

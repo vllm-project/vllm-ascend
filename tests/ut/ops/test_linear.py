@@ -4,10 +4,88 @@ from unittest import mock
 
 import torch
 
+from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
                                     AscendMlpMergedColumnParallelLinear,
-                                    AscendMlpRowParallelLinear, LinearBase,
+                                    AscendMlpRowParallelLinear,
+                                    AscendQKVParallelLinear,
+                                    AscendUnquantizedLinearMethod, LinearBase,
                                     QuantizationConfig)
+
+
+class TestAscendUnquantizedLinearMethod(TestBase):
+
+    def setUp(self):
+        self.method = AscendUnquantizedLinearMethod()
+
+    @mock.patch("torch_npu.npu_format_cast")
+    @mock.patch("torch.version")
+    def test_process_weights_after_loading_is_cann_8_3(self, mock_version,
+                                                       mock_format_cast):
+        layer = mock.MagicMock()
+
+        mock_version.cann = "8.3.RC1"
+        self.method.process_weights_after_loading(layer)
+        mock_format_cast.assert_called_once()
+
+    @mock.patch("torch.version")
+    def test_process_weights_after_loading_not_cann_8_3(self, mock_version):
+        layer = mock.MagicMock()
+
+        mock_version.cann = "8.2.RC1"
+        # Should not raise exception
+        self.method.process_weights_after_loading(layer)
+
+    @mock.patch("torch.matmul")
+    @mock.patch("torch.version")
+    def test_apply_with_bias_is_cann_8_3(self, mock_version, mock_npu_matmul):
+        layer = mock.MagicMock()
+        layer.weight = torch.randn(128, 256)
+
+        x = torch.randn(32, 128)
+        bias = torch.randn(256)
+
+        expected_y_output = torch.randn(32, 256)
+        mock_npu_matmul.return_value = expected_y_output
+
+        mock_version.cann = "8.3.RC1"
+        output = self.method.apply(layer, x, bias)
+
+        expected_y_output += bias
+        self.assertTrue(torch.equal(output, expected_y_output))
+
+    @mock.patch("torch.matmul")
+    @mock.patch("torch.version")
+    def test_apply_without_bias_is_cann_8_3(self, mock_version,
+                                            mock_npu_matmul):
+        layer = mock.MagicMock()
+        layer.weight = torch.randn(128, 256)
+
+        x = torch.randn(32, 128)
+
+        expected_y_output = torch.randn(32, 256)
+        mock_npu_matmul.return_value = expected_y_output
+
+        mock_version.cann = "8.3.RC1"
+        output = self.method.apply(layer, x)
+
+        self.assertTrue(torch.equal(output, expected_y_output))
+
+    @mock.patch("torch.nn.functional.linear")
+    @mock.patch("torch.version")
+    def test_apply_not_cann_8_3(self, mock_version, mock_npu_linear):
+        layer = mock.MagicMock()
+        layer.weight = torch.randn(128, 256)
+
+        x = torch.randn(32, 128)
+
+        expected_y_output = torch.randn(32, 256)
+        mock_npu_linear.return_value = expected_y_output
+
+        mock_version.cann = "8.2.RC1"
+        output = self.method.apply(layer, x)
+
+        self.assertTrue(torch.equal(output, expected_y_output))
 
 
 class TestAscendMlpRowParallelLinear(unittest.TestCase):
@@ -180,6 +258,9 @@ class TestAscendMlpColumnParallelLinear(unittest.TestCase):
         self.linear_base_init_patch.start()
 
         self.quant_method_mock = mock.MagicMock()
+        self.unquant_method_patch = mock.patch(
+            'vllm_ascend.ops.linear.AscendUnquantizedLinearMethod')
+        self.unquant_method_mock = self.unquant_method_patch.start()
 
     def mock_linear_base_init(self, instance, *args, **kwargs):
         instance.quant_method = self.quant_method_mock
@@ -197,8 +278,9 @@ class TestAscendMlpColumnParallelLinear(unittest.TestCase):
         self.tp_rank_patch.stop()
         self.divide_patch.stop()
         self.linear_base_init_patch.stop()
+        self.unquant_method_patch.stop()
 
-    def test_mlp_optimize_initialization(self):
+    def test_mlp_optimize_initialization_unquantized(self):
         # Test when prefix contains "gate_up_proj"
         with mock.patch.object(torch.nn.Module, 'register_parameter'):
             layer = AscendMlpColumnParallelLinear(
@@ -206,6 +288,28 @@ class TestAscendMlpColumnParallelLinear(unittest.TestCase):
                 output_size=8,
                 prefix="model.layers.0.gate_up_proj",
                 bias=False,
+                quant_config=None,
+            )
+
+        # Verify MLP optimization flags
+        self.assertTrue(layer.enable_mlp_optimze)
+        self.assertEqual(layer.tp_size, 2)
+        self.assertEqual(layer.tp_rank, 0)
+        self.assertEqual(layer.input_size_per_partition, 16)
+        self.assertEqual(layer.output_size_per_partition, 4)
+
+        # Check quant_method.create_weights was called
+        self.unquant_method_mock().create_weights.assert_called_once()
+
+    def test_mlp_optimize_initialization_quantized(self):
+        # Test when prefix contains "gate_up_proj"
+        with mock.patch.object(torch.nn.Module, 'register_parameter'):
+            layer = AscendMlpColumnParallelLinear(
+                input_size=16,
+                output_size=8,
+                prefix="model.layers.0.gate_up_proj",
+                bias=False,
+                quant_config=mock.MagicMock(),
             )
 
         # Verify MLP optimization flags
@@ -361,3 +465,62 @@ class TestAscendMlpMergedColumnParallelLinear(unittest.TestCase):
         self.tensor_rank_patch.stop()
         self.get_mlp_tp_group_mock.stop()
         self.tensor_model_parallel_all_gather_mock.stop()
+
+
+class TestAscendQKVParallelLinear(unittest.TestCase):
+
+    def setUp(self):
+        os.environ["VLLM_ASCEND_ENABLE_MLP_OPTIMIZE"] = "1"
+        # Mock get_tensor_model_parallel_world_size function
+        self.get_tensor_model_parallel_world_size_patch = mock.patch(
+            'vllm_ascend.ops.linear.get_tensor_model_parallel_world_size',
+            return_value=2)
+        self.get_tensor_model_parallel_world_size_mock = \
+            self.get_tensor_model_parallel_world_size_patch.start()
+        # Mock divide function (assumed to be in your module)
+        self.divide_patch = mock.patch('vllm_ascend.ops.linear.divide')
+        self.divide_mock = self.divide_patch.start()
+        self.divide_mock.side_effect = lambda x, y: x // y  # Simulate division
+
+        # Mock AscendMlpColumnParallelLinear's __init__
+        self.linear_init_patch = mock.patch.object(
+            AscendMlpColumnParallelLinear,
+            "__init__",
+            side_effect=self.mock_linear_init)
+        self.linear_init_patch.start()
+
+        # Create mock objects
+        self.quant_method_mock = mock.MagicMock()
+
+    def mock_linear_init(self, instance, *args, **kwargs):
+        torch.nn.Module.__init__(instance)
+        # Set quant_method and other attributes
+        instance.quant_method = self.quant_method_mock
+        instance.bias = torch.nn.Parameter(torch.randn(8))  # Example bias
+        instance.input_size = 16
+        instance.output_size = 8
+        instance.gather_output = False
+        instance.skip_bias_add = False
+        instance.return_bias = True
+
+    def testDown(self):
+        self.get_tensor_model_parallel_world_size_patch.stop()
+        self.divide_patch.stop()
+
+    def test_init_tpsize_larger_than_total_kv_head(self):
+        layer = AscendQKVParallelLinear(
+            hidden_size=16,
+            head_size=8,
+            total_num_heads=1,
+        )
+        self.assertEqual(layer.num_kv_heads, 1)
+        self.assertEqual(layer.num_kv_head_replicas, 2)
+
+    def test_init_tpsize_smaller_than_total_kv_head(self):
+        layer = AscendQKVParallelLinear(
+            hidden_size=16,
+            head_size=8,
+            total_num_heads=4,
+        )
+        self.assertEqual(layer.num_kv_heads, 2)
+        self.assertEqual(layer.num_kv_head_replicas, 1)
