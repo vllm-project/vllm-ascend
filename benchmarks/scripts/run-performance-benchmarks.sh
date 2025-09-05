@@ -78,6 +78,7 @@ kill_npu_processes() {
   ps -aux
   lsof -t -i:8000 | xargs -r kill -9
   pgrep python3 | xargs -r kill -9
+  # vLLM now names the process with VLLM prefix after https://github.com/vllm-project/vllm/pull/21445
   pgrep VLLM | xargs -r kill -9
 
   sleep 4
