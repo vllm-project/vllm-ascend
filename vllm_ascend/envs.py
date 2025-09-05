@@ -131,10 +131,26 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
+    # Whether to enable FlashComm optimization when tensor parallel is enabled.
+    # this feature will get better performance in prefill phase.
+    "VLLM_ASCEND_ENABLE_FLASHCOMM":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))),
+    # Whether to enable dense model and general optimizations for better performance.
+    "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE", '0'))),
     # Whether to enable mlp optimize when tensor parallel is enabled.
     # this feature in eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLP_OPTIMIZE", '0'))),
+    # Whether to enable MLP weight prefetch, only used in decode.
+    "VLLM_ASCEND_ENABLE_PREFETCH_MLP":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", '0'))),
+    # buffer size for gate up prefetch
+    "MLP_GATE_UP_PREFETCH_SIZE":
+    lambda: int(os.getenv("MLP_GATE_UP_PREFETCH_SIZE", 18 * 1024 * 1024)),
+    # buffer size for down proj prefetch
+    "MLP_DOWN_PREFETCH_SIZE":
+    lambda: int(os.getenv("MLP_DOWN_PREFETCH_SIZE", 18 * 1024 * 1024)),
     # Determine the number of physical devices in a non-full-use scenario
     # caused by the initialization of the Mooncake connector.
     "PHYSICAL_DEVICES":

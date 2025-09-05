@@ -55,6 +55,12 @@ if not (vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1")):
 else:
     DraftTokenIds = None
 
+torch._dynamo.trace_rules.clear_lru_cache()
+from torch._dynamo.variables import TorchInGraphFunctionVariable
+torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(["torch.npu.current_stream"], TorchInGraphFunctionVariable,)
+torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable
+torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)
+
 
 class NPUWorker(WorkerBase):
 

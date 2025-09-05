@@ -37,6 +37,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -181,6 +182,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.device = device
+        if envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP:
+            self.prefetch_stream = torch.npu.Stream(device=device)
+        else:
+            self.prefetch_stream = None
         self.dtype = self.model_config.dtype
         if envs_ascend.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
             # TODO: drop the env config to use ascend sampler by default
@@ -1143,6 +1148,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
+        if get_forward_context().flashcomm_v1_enabled:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            pad_size = get_forward_context().pad_size
+            if pad_size > 0:
+                hidden_states = hidden_states[:-pad_size, :]
         return hidden_states
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
@@ -1518,7 +1528,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     num_actual_tokens=scheduler_output.
-                    total_num_scheduled_tokens):
+                    total_num_scheduled_tokens,
+                    prefetch_stream=self.prefetch_stream,
+                    prefetch_model=self.model):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
@@ -1965,7 +1977,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     moe_comm_method=moe_comm_method,
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
-                    batch_descriptor=batch_descriptor):
+                    batch_descriptor=batch_descriptor,
+                    prefetch_stream=self.prefetch_stream,
+                    prefetch_model=self.model):
                 hidden_states = self._generate_dummy_run_hidden_states(
                     with_prefill, is_torchair_compile, input_ids, positions,
                     attn_metadata, num_tokens, intermediate_tensors,

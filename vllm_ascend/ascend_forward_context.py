@@ -67,7 +67,9 @@ def set_ascend_forward_context(
         moe_comm_method: str = "",
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        batch_descriptor: Optional[BatchDescriptor] = None):
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        prefetch_stream: torch.npu.Stream = None,
+        prefetch_model: torch.nn.Module = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -82,6 +84,7 @@ def set_ascend_forward_context(
             batch_descriptor=batch_descriptor,
     ):
         forward_context = get_forward_context()
+
         forward_context.moe_comm_method_name = moe_comm_method + "commimpl"
         forward_context.with_prefill = with_prefill
         ep_size = (get_ep_group().world_size if
@@ -104,6 +107,31 @@ def set_ascend_forward_context(
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
+
+        # set this for layer index
+        forward_context.layer_idx = 0
+
+        # set for mlp weight prefetch
+        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
+            num_tokens is not None and num_tokens < 500
+        if prefetch_mlp_enabled:
+            forward_context.prefetch_stream = prefetch_stream
+            forward_context.prefetch_model = prefetch_model
+            forward_context.prefetch_mlp_gate_up_proj = False
+            forward_context.prefetch_mlp_down_proj = False
+        forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
+
+        # set for flashcomm_v1
+        flashcomm_v1_enabled = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM and \
+            num_tokens is not None and num_tokens > 1000
+        
+        if flashcomm_v1_enabled:
+            tp_world_size = get_tensor_model_parallel_world_size()
+            pad_size = (tp_world_size -
+                        (num_tokens % tp_world_size)) % tp_world_size
+            forward_context.pad_size = pad_size
+
+        forward_context.flashcomm_v1_enabled = flashcomm_v1_enabled
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens

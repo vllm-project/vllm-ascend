@@ -24,6 +24,7 @@ import vllm_ascend.ops.vocab_parallel_embedding  # noqa
 from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
 from vllm_ascend.ops.rotary_embedding import (
     AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+import vllm_ascend.ops.flashcomm_gate_ops
 
 
 class dummyFusionOp:
