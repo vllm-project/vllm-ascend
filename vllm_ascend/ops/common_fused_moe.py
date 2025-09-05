@@ -320,13 +320,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
         # Once torch.randint_like is supported or removed, this flag can be removed.
         vllm_config = get_current_vllm_config()
-        ascend_config = get_ascend_config()
-        if ascend_config.torchair_graph_config.enabled:
-            self.use_aclgraph = False
-        else:
-            self.use_aclgraph = (vllm_config.compilation_config.level
-                                 == CompilationLevel.PIECEWISE and
-                                 not vllm_config.model_config.enforce_eager)
+        self.use_aclgraph = (vllm_config.compilation_config.level
+                             == CompilationLevel.PIECEWISE
+                             and not vllm_config.model_config.enforce_eager)
 
     def process_weights_after_loading(self, layer):
         super().process_weights_after_loading(layer)
