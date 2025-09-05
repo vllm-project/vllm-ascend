@@ -267,6 +267,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         self.use_aux_hidden_state_outputs = True
                 elif self.speculative_config.method == 'deepseek_mtp':
                     self.drafter = MtpProposer(self.vllm_config, self)
+                elif self.speculative_config.method == 'bailing_mtp':
+                    self.drafter = MtpProposer(self.vllm_config, self)
+                    self.use_eagle = True
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -1275,6 +1278,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
+            logger.info(spec_decode_metadata)
             logits_indices = spec_decode_metadata.logits_indices
 
         if lmhead_tp_enable():
@@ -1524,6 +1528,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 spec_decode_metadata, positions, num_scheduled_tokens,
                 hidden_states, aux_hidden_states)
         elif self.speculative_config.method == 'deepseek_mtp':
+            draft_token_ids = self._generate_mtp_token_ids(
+                valid_sampled_token_ids, sampling_metadata, scheduler_output,
+                spec_decode_metadata, positions, num_scheduled_tokens,
+                hidden_states, attn_metadata)
+        elif self.speculative_config.method == 'bailing_mtp':
             draft_token_ids = self._generate_mtp_token_ids(
                 valid_sampled_token_ids, sampling_metadata, scheduler_output,
                 spec_decode_metadata, positions, num_scheduled_tokens,

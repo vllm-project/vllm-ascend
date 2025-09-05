@@ -59,3 +59,7 @@ def register_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "vllm_ascend.models.pangu_moe:PanguProMoEForCausalLM")
+
+    ModelRegistry.register_model(
+        "BailingMoeForCausalLM",
+        "vllm_ascend.models.bailing_moe_v2:BailingMoeV2ForCausalLM")
