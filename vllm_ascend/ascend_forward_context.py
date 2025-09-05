@@ -129,6 +129,22 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
 
+        # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
+        # It will be improved later by implementing operator fusion through the FX graph.
+        #
+        # set for addrmsnorm+quant fusion.
+        # this optim now just support dense models due to the specific operators used.
+        # Once the necessary conditions are met, support for MOE models will also be added.
+        from vllm_ascend.quantization.quant_config import AscendQuantConfig
+        addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
+            vllm_config.model_config.hf_config.model_type in ["llama", "qwen2", "qwen3"] and \
+            forward_context.layer_idx is not None
+        if addrmsnorm_quant_fusion_enabled:
+            forward_context.model_instance = model_instance
+            forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
+            forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
+        forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
+
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
 
