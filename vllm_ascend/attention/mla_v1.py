@@ -981,32 +981,23 @@ class AscendMLAImpl(MLAAttentionImpl):
                      enabled=self.enable_prefetch)
         # Split inputs from local DP to each device.
         dp_sp_hidden_states = hidden_states
-        rank_sp_hidden_states = dp_sp_hidden_states[
-            sp_context.my_rank_sp_start_token_within_dp:sp_context.
-            my_rank_sp_end_token_within_dp]
-        sp_tokens = rank_sp_hidden_states.shape[0]
-        if sp_tokens == 0:
-            rank_sp_hidden_states = nn.functional.pad(rank_sp_hidden_states,
-                                                      (0, 0, 0, 1))
-            sp_tokens = 1
+        device_sp_hidden_states = dp_sp_hidden_states[
+            sp_context.local_device_sp_start_token_within_dp:sp_context.
+            local_device_sp_end_token_within_dp]
         # MLA prefill:
         # 1. Perform q_a_proj and q_a_layernorm to obtain q_c
         # 2. Perform kv_a_proj_with_mqa to obtain kv_no_split
         # 3. If need_gather_q_kv, perform all_gather.
-        sp_ckq = self.q_a_proj(rank_sp_hidden_states)[0]
+        sp_ckq = self.q_a_proj(device_sp_hidden_states)[0]
         sp_hidden_states_or_q_c = self.q_a_layernorm(sp_ckq)
-        sp_kv_no_split = self.kv_a_proj_with_mqa(rank_sp_hidden_states)[0]
+        sp_kv_no_split = self.kv_a_proj_with_mqa(device_sp_hidden_states)[0]
         # Rearrange down_proj outputs across DP.
-        sp_output = torch.cat([sp_hidden_states_or_q_c, sp_kv_no_split], dim=1)
-        if sp_tokens < sp_context.num_tokens_per_rank:
-            sp_output = nn.functional.pad(
-                sp_output,
-                (0, 0, 0, sp_context.num_tokens_per_rank - sp_tokens))
-        global_sp_output = get_mla_sp_world_group().all_gather(sp_output, 0)
-        my_dp = sp_context.my_dp
-        dp_output = global_sp_output[sp_context.start_token_of_dp[my_dp]:
-                                     sp_context.end_token_of_dp[my_dp]]
-        prefill_q_c, prefill_kv_no_split = dp_output.split(
+        sp_down_proj_output = torch.cat([sp_hidden_states_or_q_c, sp_kv_no_split], dim=1)
+        global_sp_down_proj_output = get_mla_sp_world_group().all_gather(sp_down_proj_output, 0)
+        local_dp = sp_context.local_dp
+        dp_ori_down_proj_output = global_sp_down_proj_output[sp_context.start_token_of_dp[local_dp]:
+                                                             sp_context.end_token_of_dp[local_dp]]
+        prefill_q_c, prefill_kv_no_split = dp_ori_down_proj_output.split(
             [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
             dim=-1)
 
@@ -1049,60 +1040,40 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Rearrange attention outputs across DP to run SP.
         sp_world_group = get_mla_sp_world_group()
         tp_size = get_tp_group().world_size
-        my_rank = sp_context.my_rank
-        my_rank_start_token = sp_context.rank_sp_start_token[my_rank]
-        my_rank_end_token = sp_context.rank_sp_end_token[my_rank]
-        num_sp_tokens = max(my_rank_end_token - my_rank_start_token, 0)
-        sp_send = output_prefill
+        total_receive_len = sp_context.local_device_total_receive_len
+        sp_o_proj_input = torch.empty(
+                [total_receive_len * tp_size, self.num_heads * self.v_head_dim],
+                dtype=output_prefill.dtype,
+                device=output_prefill.device)
         if get_dp_group().world_size == 1:
-            padded_len = sp_context.num_tokens_per_rank * sp_world_group.world_size
-            if sp_context.num_global_tokens < padded_len:
-                sp_send = nn.functional.pad(
-                    sp_send,
-                    (0, 0, 0, padded_len - sp_context.num_global_tokens))
-            sp_output = torch.empty([
-                sp_context.num_tokens_per_rank * tp_size,
-                self.num_heads * self.v_head_dim
-            ],
-                                    dtype=sp_send.dtype,
-                                    device=sp_send.device)
+            if output_prefill.shape[0] < sp_context.num_padded_global_tokens:
+                output_prefill = nn.functional.pad(
+                    output_prefill,
+                    (0, 0, 0, sp_context.num_padded_global_tokens - output_prefill.shape[0]))
             dist.all_to_all_single(
-                output=sp_output,
-                input=sp_send,
+                output=sp_o_proj_input,
+                input=output_prefill,
                 group=sp_world_group.device_group,
             )
-            sp_output = sp_output.reshape(
-                sp_context.num_tokens_per_rank,
-                tp_size * self.num_heads * self.v_head_dim)
-            sp_output = sp_output[:num_sp_tokens]
         else:
-            sp_output = torch.empty(
-                [num_sp_tokens * tp_size, self.num_heads * self.v_head_dim],
-                dtype=sp_send.dtype,
-                device=sp_send.device)
             dist.all_to_all_single(
-                output=sp_output,
-                input=sp_send,
+                output=sp_o_proj_input,
+                input=output_prefill,
                 output_split_sizes=sp_context.output_split_sizes,
                 input_split_sizes=sp_context.input_split_sizes,
                 group=sp_world_group.device_group,
             )
-            sp_output = sp_output.reshape(
-                num_sp_tokens, tp_size * self.num_heads * self.v_head_dim)
-        sp_tokens = sp_output.shape[0]
-        if sp_tokens == 0:
-            sp_output = nn.functional.pad(sp_output, (0, 0, 0, 1))
-            sp_tokens = 1
+        sp_o_proj_input = sp_o_proj_input.reshape(
+            total_receive_len,
+            tp_size * self.num_heads * self.v_head_dim)
+        if total_receive_len < sp_context.num_tokens_per_device:
+            sp_o_proj_input = nn.functional.pad(
+                sp_o_proj_input,
+                (0, 0, 0, sp_context.num_tokens_per_device - total_receive_len))
         # O proj
-        o_output = self.o_proj(sp_output)[0]
-        del sp_output
-        if sp_tokens < sp_context.num_tokens_per_rank:
-            o_output = nn.functional.pad(
-                o_output,
-                (0, 0, 0, sp_context.num_tokens_per_rank - sp_tokens))
-        dp_output = get_tp_group().all_gather(o_output, 0)
-        dp_output = dp_output[:sp_context.num_my_dp_sp_tokens]
-        return dp_output
+        sp_o_proj_output = self.o_proj(sp_o_proj_input)[0]
+        del sp_o_proj_input
+        return get_tp_group().all_gather(sp_o_proj_output, 0)
 
     def forward(
         self,

@@ -742,17 +742,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
 
-        sp_context = get_sp_context()
-        if sp_context is not None:
-            sp_tokens = hidden_states.shape[0]
-            if sp_tokens == 0:
-                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, 1))
         if isinstance(self.mlp, CustomDeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, attn_metadata)
         else:
             hidden_states = self.mlp(hidden_states)
-        if sp_context is not None:
-            hidden_states = hidden_states[:sp_tokens]
 
         if isinstance(
                 self.mlp,
@@ -911,10 +904,10 @@ class CustomDeepseekV2Model(nn.Module):
         if sp_context is not None:
             assert intermediate_tensors is None
             assert inputs_embeds is None
-            my_dp = sp_context.my_dp
+            local_dp = sp_context.local_dp
             input_ids = sp_context.global_tokens[
-                sp_context.dp_sp_start_token[my_dp]:sp_context.
-                dp_sp_end_token[my_dp]]
+                sp_context.dp_sp_start_token[local_dp]:sp_context.
+                dp_sp_end_token[local_dp]]
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -958,33 +951,34 @@ class CustomDeepseekV2Model(nn.Module):
                 replace_allreduce=replace_allreduce)
 
         if sp_context is not None:
-            dp_group = get_dp_group()
+            local_dp = sp_context.local_dp
+            local_dp_start_token = sp_context.start_token_of_dp[local_dp]
+            local_dp_end_token = sp_context.end_token_of_dp[local_dp]
+            local_dp_sp_start_token = sp_context.dp_sp_start_token[local_dp]
+            local_dp_sp_end_token = sp_context.dp_sp_end_token[local_dp]
             sp_send, _ = self.norm(hidden_states, residual)
+            sp_send = sp_send[:max(0, min(local_dp_sp_end_token, sp_context.end_token_of_dp[-1]) - local_dp_sp_start_token)]
+            dp_group = get_dp_group()
             if dp_group.world_size == 1:
                 return sp_send
             input_split_sizes = []
             output_split_sizes = []
-            my_dp = sp_context.my_dp
-            my_dp_start_token = sp_context.start_token_of_dp[my_dp]
-            my_dp_end_token = sp_context.end_token_of_dp[my_dp]
-            my_dp_sp_start_token = sp_context.dp_sp_start_token[my_dp]
-            my_dp_sp_end_token = sp_context.dp_sp_end_token[my_dp]
             for i in range(dp_group.world_size):
                 other_dp_start_token = sp_context.start_token_of_dp[i]
                 other_dp_end_token = sp_context.end_token_of_dp[i]
-                send_start = max(my_dp_sp_start_token, other_dp_start_token)
-                send_end = min(my_dp_sp_end_token, other_dp_end_token)
+                send_start = max(local_dp_sp_start_token, other_dp_start_token)
+                send_end = min(local_dp_sp_end_token, other_dp_end_token)
                 send_len = max(0, send_end - send_start)
                 input_split_sizes.append(send_len)
 
                 other_dp_sp_start_token = sp_context.dp_sp_start_token[i]
                 other_dp_sp_end_token = sp_context.dp_sp_end_token[i]
-                receive_start = max(other_dp_sp_start_token, my_dp_start_token)
-                receive_end = min(other_dp_sp_end_token, my_dp_end_token)
+                receive_start = max(other_dp_sp_start_token, local_dp_start_token)
+                receive_end = min(other_dp_sp_end_token, local_dp_end_token)
                 receive_len = max(0, receive_end - receive_start)
                 output_split_sizes.append(receive_len)
             sp_output = torch.empty(
-                [my_dp_end_token - my_dp_start_token, hidden_states.shape[1]],
+                [local_dp_end_token - local_dp_start_token, hidden_states.shape[1]],
                 dtype=sp_send.dtype,
                 device=sp_send.device)
             dist.all_to_all_single(
