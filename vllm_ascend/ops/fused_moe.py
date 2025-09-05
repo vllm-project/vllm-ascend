@@ -51,59 +51,111 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, dispose_tensor,
                                get_all_reduce_merge_state,
                                get_rm_router_logits_state, is_310p)
 
-
-def compute_identity_npu(
-    hidden_states: torch.Tensor,
-    expert_scales: torch.Tensor,
-    top_k: int,
-) -> torch.Tensor:
+def compute_identity_kernel_npu(top_k, hidden_states, expert_scales, output, hidden_dim, scales_stride):
     """
-    在Ascend NPU上使用PyTorch实现身份映射计算
-    Args:
-        hidden_states: [num_tokens, hidden_dim] 输入的隐藏状态
-        expert_scales: [num_tokens, top_k] 专家权重缩放因子
-        top_k: 每个token选择的专家数量
-
-    Returns:
-        output: [num_tokens, hidden_dim] 计算结果
+    使用PyTorch操作实现compute_identity_kernel的功能，适用于Ascend NPU。
     """
-    # 将expert_scales扩展到hidden_dim维度: [num_tokens, top_k, 1]
-    expert_scales_expanded = expert_scales.unsqueeze(-1)
-    
-    # 将hidden_states扩展到top_k维度: [num_tokens, 1, hidden_dim] -> [num_tokens, top_k, hidden_dim]
+    num_tokens = hidden_states.size(0)
+    # 将expert_scales扩展为与hidden_states相同的形状
+    expert_scales_expanded = expert_scales.view(num_tokens, top_k, 1).expand(-1, -1, hidden_dim)
+    # 将hidden_states扩展为与expert_scales相同的形状
     hidden_states_expanded = hidden_states.unsqueeze(1).expand(-1, top_k, -1)
-    
-    # 逐元素相乘并在top_k维度上求和: [num_tokens, top_k, hidden_dim] -> [num_tokens, hidden_dim]
-    result = torch.sum(hidden_states_expanded * expert_scales_expanded, dim=1)
-    
-    return result
+    # 计算每个expert的贡献
+    expert_contributions = hidden_states_expanded * expert_scales_expanded
+    # 求和所有expert的贡献
+    output = expert_contributions.sum(dim=1)
+    return output
 
-
-def zero_experts_compute_npu(expert_indices, expert_scales, num_experts,
-                             zero_expert_type, hidden_states):
-    """在Ascend NPU上处理LongCat Flash模型的零专家计算逻辑"""
+def zero_experts_compute_npu(expert_indices, expert_scales, num_experts, zero_expert_type, hidden_states):
+    """
+    使用PyTorch操作实现zero_experts_compute_triton的功能，适用于Ascend NPU。
+    """
+    N = expert_indices.numel()
     top_k = expert_indices.size(-1)
     
+    # 创建副本以避免修改原始张量
+    expert_indices = expert_indices.clone()
+    expert_scales = expert_scales.clone()
+    
     if zero_expert_type == "identity":
-        # 创建零专家掩码：专家索引 < num_experts 的为真正的专家
         zero_expert_mask = expert_indices < num_experts
-        
-        # 复制专家权重，将真正专家的权重设为0
         zero_expert_scales = expert_scales.clone()
         zero_expert_scales[zero_expert_mask] = 0.0
-        
-        # 使用NPU优化的身份映射计算
-        output = compute_identity_npu(
-            hidden_states=hidden_states,
-            expert_scales=zero_expert_scales,
-            top_k=top_k
-        )
-        
-        return output
     else:
-        # 其他零专家类型的处理可以在这里添加
-        raise NotImplementedError(f"Zero expert type '{zero_expert_type}' not supported on Ascend NPU")
+        zero_expert_scales = expert_scales
 
+    normal_expert_mask = expert_indices >= num_experts
+    expert_indices[normal_expert_mask] = 0
+    expert_scales[normal_expert_mask] = 0.0
+    
+    output = torch.zeros_like(hidden_states).to(hidden_states.device)
+    hidden_dim = hidden_states.size(-1)
+    num_tokens = hidden_states.size(0)
+    
+    # 调用NPU优化的实现
+    output = compute_identity_kernel_npu(
+        top_k,
+        hidden_states,
+        zero_expert_scales,
+        output,
+        hidden_dim,
+        zero_expert_scales.stride(0)
+    )
+    
+    return output
+
+#def compute_identity_npu(
+#    hidden_states: torch.Tensor,
+#    expert_scales: torch.Tensor,
+#    top_k: int,
+#) -> torch.Tensor:
+#    """
+#    在Ascend NPU上使用PyTorch实现身份映射计算
+#    Args:
+#        hidden_states: [num_tokens, hidden_dim] 输入的隐藏状态
+#        expert_scales: [num_tokens, top_k] 专家权重缩放因子
+#        top_k: 每个token选择的专家数量
+#
+#    Returns:
+#        output: [num_tokens, hidden_dim] 计算结果
+#    """
+#    # 将expert_scales扩展到hidden_dim维度: [num_tokens, top_k, 1]
+#    expert_scales_expanded = expert_scales.unsqueeze(-1)
+#    
+#    # 将hidden_states扩展到top_k维度: [num_tokens, 1, hidden_dim] -> [num_tokens, top_k, hidden_dim]
+#    hidden_states_expanded = hidden_states.unsqueeze(1).expand(-1, top_k, -1)
+#    
+#    # 逐元素相乘并在top_k维度上求和: [num_tokens, top_k, hidden_dim] -> [num_tokens, hidden_dim]
+#    result = torch.sum(hidden_states_expanded * expert_scales_expanded, dim=1)
+#    
+#    return result
+#
+#
+#def zero_experts_compute_npu(expert_indices, expert_scales, num_experts,
+#                             zero_expert_type, hidden_states):
+#    """在Ascend NPU上处理LongCat Flash模型的零专家计算逻辑"""
+#    top_k = expert_indices.size(-1)
+#    
+#    if zero_expert_type == "identity":
+#        # 创建零专家掩码：专家索引 < num_experts 的为真正的专家
+#        zero_expert_mask = expert_indices < num_experts
+#        
+#        # 复制专家权重，将真正专家的权重设为0
+#        zero_expert_scales = expert_scales.clone()
+#        zero_expert_scales[zero_expert_mask] = 0.0
+#        
+#        # 使用NPU优化的身份映射计算
+#        output = compute_identity_npu(
+#            hidden_states=hidden_states,
+#            expert_scales=zero_expert_scales,
+#            top_k=top_k
+#        )
+#        
+#        return output
+#    else:
+#        # 其他零专家类型的处理可以在这里添加
+#        raise NotImplementedError(f"Zero expert type '{zero_expert_type}' not supported on Ascend NPU")
+#
 
 def fused_topk_bias(
     hidden_states: torch.Tensor,
