@@ -2,7 +2,7 @@
 
 ## Getting Start
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) and DP (Data Parallel) options. This guide take one-by-one steps to verify these features with constrained resources.
+vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide take one-by-one steps to verify these features with constrained resources.
 
 Take the Qwen3-30B-A3B model as an example, use 3 Atlas 800T A2 servers to deploy the "1P2D" architecture. Assume the ip of the prefiller server is 192.0.0.1, and the decoder servers are 192.0.0.2 (decoder 1) and 192.0.0.3 (decoder 2). On each server, use 2 NPUs to deploy one service instance.
 
@@ -217,7 +217,7 @@ vllm serve /model/Qwen3-30B-A3B  \
 
 :::::
 
-## Example proxy for Distributed DP Server
+## Example proxy for Deployment
 
 Run a proxy server on the same node with prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
