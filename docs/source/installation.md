@@ -141,7 +141,13 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
    :substitutions:
 
 # Install vllm-project/vllm from pypi
-pip install vllm==|pip_vllm_version|
+# Re-enable binary install after vllm-ascend/issues/2742 resolved
+# pip install vllm==|pip_vllm_version|
+# Install vllm-project/vllm from source
+git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm vllm-empty
+cd vllm-empty
+VLLM_TARGET_DEVICE=empty pip install -v -e .
+cd ..
 
 # Install vllm-project/vllm-ascend from pypi.
 pip install vllm-ascend==|pip_vllm_ascend_version|
