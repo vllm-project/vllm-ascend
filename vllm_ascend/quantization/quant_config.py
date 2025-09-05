@@ -38,7 +38,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
 
-from .utils import get_quant_method
+from .quantizer import AscendQuantizer
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -86,6 +86,8 @@ class AscendQuantConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention
+        if prefix.startswith("language_model"):
+            prefix = prefix.split('.', 1)[-1]
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
@@ -150,15 +152,18 @@ class AscendQuantConfig(QuantizationConfig):
 class AscendLinearMethod(LinearMethodBase):
     """Linear method for Ascend quantization.
 
+    This class calls AscendQuantizer to search a specific quantization
+    implementations supported on ascend hardware for linear methods.
+
     Args:
         quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]) -> None:
-        self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix, "linear",
-                                             packed_modules_mapping)
+        self.quantizer = AscendQuantizer.get_quantizer(
+            quant_config.quant_description, prefix, packed_modules_mapping)
+        self.quant_method = self.quantizer.build_linear_method()
 
     def create_weights(
         self,
@@ -228,13 +233,17 @@ class AscendLinearMethod(LinearMethodBase):
 class AscendKVCacheMethod(BaseKVCacheMethod):
     """KVCache method for Ascend quantization.
 
+    This class calls AscendQuantizer to search a specific quantization
+    implementations supported on ascend hardware for kvcache methods.
+
     Args:
         quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str) -> None:
-        self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix, "attention")
+        self.quantizer = AscendQuantizer.get_quantizer(
+            quant_config.quant_description, prefix)
+        self.quant_method = self.quantizer.build_attention_method()
 
     def create_weights(self, layer: torch.nn.Module) -> None:
         # Different from linear method, there are no weight processing/slicing
@@ -256,15 +265,18 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
 class AscendFusedMoEMethod(FusedMoEMethodBase):
     """FusedMoE method for Ascend quantization.
 
+    This class calls AscendQuantizer to search a specific quantization
+    implementations supported on ascend hardware for kvcache methods.
+
     Args:
         quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]):
-        self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix, "moe",
-                                             packed_modules_mapping)
+        self.quantizer = AscendQuantizer.get_quantizer(
+            quant_config.quant_description, prefix, packed_modules_mapping)
+        self.quant_method = self.quantizer.build_moe_method()
 
     def create_weights(
         self,
@@ -334,13 +346,14 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
 class AscendEmbeddingMethod(AscendLinearMethod):
     """Embedding method for Ascend quantization.
-    
+      This class calls AscendQuantizer to search a specific quantization
+      implementations supported on ascend hardware for Embedding methods.
       Args:
           quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]) -> None:
-        self.quant_method = get_quant_method(quant_config.quant_description,
-                                             prefix, "linear",
-                                             packed_modules_mapping)
+        self.quantizer = AscendQuantizer.get_quantizer(
+            quant_config.quant_description, prefix, packed_modules_mapping)
+        self.quant_method = self.quantizer.build_linear_method()
