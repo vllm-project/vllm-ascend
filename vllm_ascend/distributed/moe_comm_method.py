@@ -7,12 +7,11 @@ import torch.nn as nn
 import torch_npu
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
+    get_dp_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.distributed.communication_op import \
-    data_parallel_reduce_scatter
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
@@ -147,7 +146,7 @@ class AllGatherCommImpl(MoECommMethod):
         When TP size > 1, all-reduce the hidden states to get the final output.
         """
         if self.moe_config.dp_size > 1:
-            hidden_states = data_parallel_reduce_scatter(hidden_states, dim=0)
+            hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
             hidden_states = hidden_states[:self.num_tokens]
 
         if reduce_results and (self.moe_config.tp_size > 1
