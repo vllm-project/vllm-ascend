@@ -63,6 +63,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import direct_register_custom_op
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.common_fused_moe import AscendSharedFusedMoE
 from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 
