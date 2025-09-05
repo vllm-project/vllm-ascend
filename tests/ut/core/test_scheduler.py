@@ -910,7 +910,7 @@ class TestAscendScheduler(TestBase):
         scheduler.update_from_output(scheduler_output, model_runner_output)
         first_iter_prefilled_req_num = len(scheduler.running)
         self.assertEqual(len(scheduler_output.scheduled_new_reqs),
-                        scheduler.max_num_running_reqs)
+                         scheduler.max_num_running_reqs)
         self.assertEqual(scheduler_output.scheduled_cached_reqs.num_reqs, 0)
         self.assertEqual(len(scheduler_output.finished_req_ids), 0)
 
@@ -920,7 +920,7 @@ class TestAscendScheduler(TestBase):
         model_runner_output = make_output(scheduler)
         scheduler.update_from_output(scheduler_output, model_runner_output)
         self.assertEqual(len(scheduler.finished_prefill_reqs),
-                        first_iter_prefilled_req_num)
+                         first_iter_prefilled_req_num)
 
         # 3rd iteration, all requests prefilled, change scheduler phase to decode
         scheduler_output = scheduler.schedule()
