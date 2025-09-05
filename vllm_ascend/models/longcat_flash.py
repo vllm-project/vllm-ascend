@@ -123,6 +123,12 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
             rope_scaling["original_max_position_embeddings"] = (
                 config.original_max_position_embeddings)
 
+        # 动态添加缺失的配置属性，确保与CustomDeepseekV2MLAAttention兼容
+        if not hasattr(config, 'first_k_dense_replace'):
+            config.first_k_dense_replace = 0
+        if not hasattr(config, 'moe_layer_freq'):
+            config.moe_layer_freq = 1
+
         # Dual attention structure - 关键修改：使用CustomDeepseekV2MLAAttention
         self.self_attn = nn.ModuleList([
             CustomDeepseekV2MLAAttention(
