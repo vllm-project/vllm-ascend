@@ -285,6 +285,7 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
+        print("[DEBUG] Starting load_weights process")
 
         stacked_params_mapping = [
             ("fused_qkv_a_proj", "q_a_proj", 0),
@@ -292,59 +293,79 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
+        print(f"[DEBUG] Stacked params mapping: {stacked_params_mapping}")
 
         expert_params_mapping = self.get_expert_mapping()
+        print(f"[DEBUG] Expert params mapping count: {len(expert_params_mapping)}")
+        print(f"[DEBUG] Expert params mapping: {expert_params_mapping}")
         loaded_params: set[str] = set()
 
         params_dict = dict(self.named_parameters())
+        print(f"[DEBUG] Total parameters in model: {len(params_dict)}")
         for name, loaded_weight in weights:
+            print(f"[DEBUG] Processing weight: {name}, shape: {loaded_weight.shape}")
             if "rotary_emb.inv_freq" in name:
+                print(f"[DEBUG] Skipping rotary_emb.inv_freq: {name}")
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 if "mlp" in name and "mlps" not in name:
+                    print(f"[DEBUG] Skipping mlp weight (not mlps): {name}")
                     continue
                 name = name.replace(weight_name, param_name)
+                print(f"[DEBUG] Mapping {weight_name} -> {param_name}, new name: {name}")
                 # QKV fusion is optional, fall back to normal
                 # weight loading if it's not enabled
                 if ((param_name == "fused_qkv_a_proj")
                         and name not in params_dict):
+                    print(f"[DEBUG] QKV fusion not enabled, skipping: {name}")
                     continue
                 # Skip loading extra bias for GPTQ models.
                 if (name.endswith(".bias")
                         or name.endswith("_bias")) and name not in params_dict:
+                    print(f"[DEBUG] Skipping extra bias: {name}")
                     continue
                 # Skip mtp
                 if ".mtp." in name:
+                    print(f"[DEBUG] Skipping mtp: {name}")
                     continue
                 if is_pp_missing_parameter(name, self):
+                    print(f"[DEBUG] Skipping PP missing parameter: {name}")
                     continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
+                print(f"[DEBUG] Loading stacked param: {name}, shard_id: {shard_id}")
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                print(f"[DEBUG] Processing as non-stacked weight: {name}")
                 is_expert_weight = False
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
+                    print(f"[DEBUG] Found expert weight: {name}, expert_id: {expert_id}")
                     is_expert_weight = True
                     name_mapped = name.replace(weight_name, param_name)
+                    print(f"[DEBUG] Expert weight mapping: {name} -> {name_mapped}")
                     # Skip mtp
                     if ".mtp." in name_mapped:
+                        print(f"[DEBUG] Skipping expert mtp: {name_mapped}")
                         continue
                     if (name_mapped.endswith(".bias")
                             or name_mapped.endswith("_bias")
                         ) and name not in params_dict:
+                        print(f"[DEBUG] Skipping expert bias: {name_mapped}")
                         continue
                     if is_pp_missing_parameter(name, self):
+                        print(f"[DEBUG] Skipping expert PP missing: {name_mapped}")
                         continue
                     param = params_dict[name_mapped]
                     weight_loader = param.weight_loader
                     weight_loader = typing.cast(Callable[..., bool],
                                                 param.weight_loader)
+                    print(f"[DEBUG] Loading expert weight: {name_mapped}, expert_id: {expert_id}, shard_id: {shard_id}")
                     success = weight_loader(param,
                                             loaded_weight,
                                             name_mapped,
@@ -352,6 +373,7 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
                                             expert_id=expert_id,
                                             return_success=True)
                     if success:
+                        print(f"[DEBUG] Successfully loaded expert weight: {name_mapped}")
                         name = name_mapped
                         break
                 else:
@@ -359,29 +381,40 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
                         # We've checked that this is an expert weight
                         # However it's not mapped locally to this rank
                         # So we simply skip it
+                        print(f"[DEBUG] Skipping expert weight not mapped to this rank: {name}")
                         continue
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        print(f"[DEBUG] Skipping extra bias: {name}")
                         continue
                     # Skip loading kv_scale from ckpts towards new design.
                     if name.endswith(".kv_scale") and name not in params_dict:
+                        print(f"[DEBUG] Skipping kv_scale: {name}")
                         continue
                     # Skip mtp
                     if ".mtp." in name:
+                        print(f"[DEBUG] Skipping mtp: {name}")
                         continue
                     if name is None:
+                        print(f"[DEBUG] Skipping None name")
                         continue
                     if is_pp_missing_parameter(name, self):
+                        print(f"[DEBUG] Skipping PP missing parameter: {name}")
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
+                    print(f"[DEBUG] Loading regular weight: {name}")
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+            print(f"[DEBUG] Added to loaded_params: {name}")
+        print(f"[DEBUG] Starting post-processing for {self.config.num_hidden_layers} layers")
         for layer_id in range(self.config.num_hidden_layers):
             for i in range(2):
                 if isinstance(self.model.layers[layer_id], PPMissingLayer):
+                    print(f"[DEBUG] Skipping PP missing layer {layer_id}")
                     continue
+                print(f"[DEBUG] Post-processing layer {layer_id}, attention {i}")
                 self_attn = self.model.layers[layer_id].self_attn[i]
                 if hasattr(self.quant_config, "weight_block_size"
                            ) and self_attn.kv_b_proj.weight.dtype in (
@@ -414,4 +447,5 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
                     self_attn.kv_a_layernorm.weight.data *= (
                         self.config.hidden_size /
                         self.config.kv_lora_rank)**0.5
+        print(f"[DEBUG] Load weights completed, total loaded: {len(loaded_params)}")
         return loaded_params
