@@ -7,6 +7,7 @@ import torch
 from torch import nn
 
 from vllm.config import CacheConfig, VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -94,9 +95,12 @@ class CustomLongcatMoe(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        forward_context = get_forward_context()
+        is_prefill = forward_context.with_prefill
         router_logits = self.router(hidden_states.to(
             self.rounter_params_dtype))
         final_hidden_states = self.experts(hidden_states=hidden_states,
+                                          is_prefill=is_prefill,
                                            router_logits=router_logits)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
