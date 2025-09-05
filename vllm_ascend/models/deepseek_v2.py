@@ -32,14 +32,16 @@ import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
+                         get_current_vllm_config)
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -55,23 +57,28 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models import deepseek_v2
 from vllm.model_executor.models.deepseek_v2 import \
     DeepseekV2ForCausalLM  # noqa: E501
 from vllm.model_executor.models.deepseek_v2 import \
     yarn_get_mscale  # noqa: E501
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2MLAAttention,
-    get_spec_layer_idx_from_weight_name)
+    DeepseekV2MLP, DeepseekV2MoE, get_spec_layer_idx_from_weight_name)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
+from vllm.utils import direct_register_custom_op
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.common_fused_moe import AscendSharedFusedMoE
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
+
+deepseek_v2.SharedFusedMoE = AscendSharedFusedMoE
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -562,15 +569,15 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             o_proj=self.o_proj,
         )
 
-    def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: Optional[torch.Tensor] = None,
-            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        forward_context = get_forward_context()
-        if kv_cache is None:
-            kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
+    def forward(self,
+                positions: torch.Tensor,
+                hidden_states: torch.Tensor,
+                kv_cache: Optional[torch.Tensor] = None) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
         need_gather_q_kv = False
         if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
@@ -584,12 +591,12 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             if num_tokens % self.tp_size:
                 rows += 1
             output_shape = (rows, hidden_states.shape[1])
+        # FIXME: This does not seem right, should make sure the buffer is fixed
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
-        output = self.mla_attn.impl.forward(hidden_states, kv_cache,
-                                            forward_context.attn_metadata,
-                                            need_gather_q_kv, output)
+        torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output,
+                                   self.prefix)
         output = output.view(-1, output_shape[-1])
         return output
 
@@ -644,13 +651,17 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
-            self.mlp = CustomDeepseekV2MoE(
+            self.mlp = DeepseekV2MoE(
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
+            if self.mlp.gate.e_score_correction_bias is not None:
+                self.mlp.gate.e_score_correction_bias.data = (
+                    self.mlp.gate.e_score_correction_bias.data.to(
+                        dtype=torch.get_default_dtype()))
         else:
-            self.mlp = CustomDeepseekV2MLP(
+            self.mlp = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -692,7 +703,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
         )
 
         if hidden_states.dtype == torch.float16:
@@ -755,6 +765,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         return hidden_states, residual
 
 
+@support_torch_compile
 class CustomDeepseekV2Model(nn.Module):
 
     fall_back_to_pt_during_load = False
@@ -984,3 +995,36 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                    attn_metadata, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
+
+
+def mla_forward(
+    hidden_states: torch.Tensor,
+    need_gather_q_kv: bool,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    self = forward_context.no_compile_layers[layer_name]
+    kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
+    self.mla_attn.impl.forward(hidden_states, kv_cache, attn_metadata,
+                               need_gather_q_kv, output)
+    return
+
+
+def mla_forward_fake(
+    hidden_states: torch.Tensor,
+    need_gather_q_kv: bool,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="mla_forward",
+    op_func=mla_forward,
+    mutates_args=["output"],
+    fake_impl=mla_forward_fake,
+    dispatch_key="PrivateUse1",
+)

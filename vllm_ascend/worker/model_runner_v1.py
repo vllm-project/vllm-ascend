@@ -83,6 +83,7 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+from vllm_ascend.models.deepseek_v2 import CustomDeepseekV2MLAAttention
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
@@ -354,7 +355,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-        self.mc2_tokens_capacity = 512 * self.parallel_config.tensor_parallel_size
+        # NOTE: Technically, MC2 can have 512 tokens each rank, but this will consume too much memory. The formula is:
+        # ((maxBs * tokenNeedSizeDispatch * ep_worldsize * localMoeExpertNum) + (maxBs * tokenNeedSizeCombine * (k + sharedExpertNum))) * 2
+        # so we have to limit the MC2 tokens to save memory, should fix this in the future.
+        self.mc2_tokens_capacity = 512
         self.reserved_mc2_mask = torch.zeros(
             self.mc2_tokens_capacity,
             dtype=torch.bool,
@@ -2312,6 +2316,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         for layer_name, attn_module in forward_ctx.items():
             if isinstance(attn_module, FusedMoE):
+                continue
+            if isinstance(attn_module, CustomDeepseekV2MLAAttention):
                 continue
 
             # TODO: Support other attention modules, e.g., sliding window,
