@@ -288,8 +288,8 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
         print("[DEBUG] Starting load_weights process")
 
         stacked_params_mapping = [
-            ("fused_qkv_a_proj", "q_a_proj", 0),
-            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
+            #("fused_qkv_a_proj", "q_a_proj", 0),
+            #("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
@@ -301,7 +301,8 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
         loaded_params: set[str] = set()
 
         params_dict = dict(self.named_parameters())
-        print(f"[DEBUG] Total parameters in model: {len(params_dict)}")
+        print(f"[DEBUG] Total parameters length in model: {len(params_dict)}")
+        print(f"[DEBUG] Total parameters in model: {params_dict}")
         for name, loaded_weight in weights:
             print(f"[DEBUG] Processing weight: {name}, shape: {loaded_weight.shape}")
             if "rotary_emb.inv_freq" in name:
