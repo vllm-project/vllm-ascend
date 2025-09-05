@@ -89,7 +89,7 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
-from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
+from vllm_ascend.torchair.eagle_torchair_proposer import EagleTorchairProposer
 from vllm_ascend.torchair.torchair_attention import AscendTorchairMetadata
 from vllm_ascend.torchair.torchair_mla import AscendMLATorchairMetadata
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
@@ -196,13 +196,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches: List[torch.Tensor] = []
         # TODO: remove Dict[str, Dict[int, torch.Tensor]] type after 0.10.1.1
         self.encoder_cache: Union[Dict[str, Dict[int, torch.Tensor]],
-                                  Dict[str, torch.Tensor]] = {}
+        Dict[str, torch.Tensor]] = {}
         self.attn_mask = None
         self.attn_state = None
         self.requests: Dict[str, CachedRequestState] = {}
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
         ascend_config = get_ascend_config()
+        is_torchair_graph = ascend_config.torchair_graph_config.enabled
         if ascend_config.ascend_scheduler_config.enabled:
             self.chunked_prefill_enabled = self.scheduler_config.chunked_prefill_enabled
         else:
@@ -239,7 +240,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
-                                     MtpProposer]] = None
+        EagleTorchairProposer]] = None
         self.actual_seq_lengths_q = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -258,7 +259,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if get_pp_group().is_last_rank:
                 self.drafter = get_spec_decode_method(
                     self.speculative_config.method, self.vllm_config,
-                    self.device, self)
+                    self.device, self, is_torchair_graph)
                 self.rejection_sampler = AscendRejectionSampler()
 
         # Persistent batch.
@@ -302,7 +303,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.arange_np: npt.NDArray[np.int32] = np.arange(max(
             self.max_num_reqs + 1, self.model_config.max_model_len,
             self.max_num_tokens),
-                                                          dtype=np.int32)
+            dtype=np.int32)
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
         # not make any assumptions about the values in these tensors.
@@ -718,7 +719,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 src_end = num_computed_tokens + prompt_part_len
 
                 self.mrope_positions_cpu[:, dst_start:dst_end] = \
-                    req.mrope_positions[:,src_start:src_end]
+                    req.mrope_positions[:, src_start:src_end]
 
                 mrope_pos_ptr += prompt_part_len
 
@@ -1864,7 +1865,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
         # for GQA/MQA.
         max_query_len = self.uniform_decode_query_len if uniform_decode else \
-                                                                num_tokens
+            num_tokens
 
         max_num_reqs = self.scheduler_config.max_num_seqs
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
@@ -2022,9 +2023,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         gc.collect()
 
     def _dummy_pooler_run_task(
-        self,
-        hidden_states: torch.Tensor,
-        task: PoolingTask,
+            self,
+            hidden_states: torch.Tensor,
+            task: PoolingTask,
     ) -> PoolerOutput:
         num_tokens = hidden_states.shape[0]
         max_num_reqs = self.scheduler_config.max_num_seqs
