@@ -49,7 +49,7 @@ for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 
 ## Generate Ranktable
 
-The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to nodes. For more details please refer to the [vllm-ascend examples](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/README.md). Execute the following commands for reference.
+The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to nodes. For more details please refer to the [vllm-ascend examples](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/README.md). Execute the following commands for reference.
 
 ```shell
 cd vllm-ascend/examples/disaggregate_prefill_v1/
@@ -229,7 +229,7 @@ vllm serve /model/Qwen3-30B-A3B  \
 
 ## Example proxy for Distributed DP Server
 
-Run a proxy server on the same node with prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)
+Run a proxy server on the same node with prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 ```shell
 python load_balance_proxy_server_example.py \
