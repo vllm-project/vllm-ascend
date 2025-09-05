@@ -4,6 +4,7 @@ from vllm.v1.sample.logits_processor import MinPLogitsProcessor
 
 original_min_p_logits_processor_init_func = MinPLogitsProcessor.__init__
 
+
 def min_p_logits_processor_init_func(self, *args, **kwargs):
     original_min_p_logits_processor_init_func(self, *args, **kwargs)
 
@@ -32,5 +33,6 @@ def min_p_logits_processor_init_func(self, *args, **kwargs):
         else:
             self.min_p_device = self.min_p_cpu_tensor
         self.min_p = self.min_p_device[:0]
+
 
 MinPLogitsProcessor.__init__ = min_p_logits_processor_init_func
