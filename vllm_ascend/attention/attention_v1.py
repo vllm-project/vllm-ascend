@@ -607,12 +607,13 @@ direct_register_custom_op(
     dispatch_key="PrivateUse1",
 )
 
-def wait_for_kv_layer_from_connector(layer_name: str):
+
+def wait_for_kv_layer_from_connector(layer_name: str = None):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
-    
+
     connector = get_kv_transfer_group()
-    
+
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is None:
@@ -621,14 +622,14 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
 
 def maybe_save_kv_layer_to_connector(
-    layer_name:str,
-    kv_cache_layer: List[torch.Tensor],
+    layer_name: str = None,
+    kv_cache_layer: List[torch.Tensor] = None,
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
-    
+
     connector = get_kv_transfer_group()
-    
+
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is None:

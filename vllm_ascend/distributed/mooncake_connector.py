@@ -308,13 +308,16 @@ class KVCacheSendingLayerThread(threading.Thread):
 
                     metadata = decoder.decode(payload[0])
                     request_id = metadata.req_id
+                    logger.debug(
+                        f"Prefiller has received that requset {request_id} from the decoder."
+                    )
                     sock.send_multipart((identity, b"", b"ACK"))
                     with self.lock:
                         self.ready_decode[request_id] = metadata
                         pending = self.pending_decode.pop(request_id, [])
-                    for layer_name, local_block_ids, layer_index in pending:
+                    for local_block_ids, layer_index in pending:
                         self.send_layer_thread.send_queue.put(
-                            (metadata, request_id, layer_name, local_block_ids,
+                            (metadata, request_id, local_block_ids,
                              layer_index))
                 except Exception as e:
                     logger.error("Failed to decode message: %s", e)
@@ -331,20 +334,20 @@ class KVCacheSendingLayerThread(threading.Thread):
             if ack != b"ACK":
                 raise ValueError(f"Unexpected ACK response: {ack}")
 
-    def add_request(self, request_id: str, layer_name: str,
-                    local_block_ids: list[int], layer_index: int):
+    def add_request(self, request_id: str, local_block_ids: list[int],
+                    layer_index: int):
         #TODO layerwise step 8
         # if request_id in self.decode_request:
         #   self.send_layer_thread.send_queue.add(request)
         with self.lock:
             if request_id in self.ready_decode:
                 self.send_layer_thread.send_queue.put(
-                    (self.ready_decode[request_id], request_id, layer_name,
+                    (self.ready_decode[request_id], request_id,
                      local_block_ids, layer_index))
             else:
                 self.pending_decode.setdefault(request_id, []).append(
-                    (layer_name, local_block_ids, layer_index))
-                
+                    (local_block_ids, layer_index))
+
     def _abort_requests(self, request_ids: set[str]):
         with self.lock:
             for request_id in request_ids:
@@ -382,7 +385,7 @@ class SendingLayerThread(threading.Thread):
                                              str, list[int], int]):
         #TODO layerwise step8
         # send kv layer to remote
-        req_meta, request_id, layer_name, local_block_ids, layer_index = request
+        req_meta, request_id, local_block_ids, layer_index = request
 
         try:
             logger.debug(
@@ -1347,6 +1350,9 @@ class MooncakeConnectorWorker:
         else:
             if self.vllm_config.kv_transfer_config.is_kv_producer:
                 for req_id, meta in metadata.requests.items():
+                    logger.debug(
+                        f"Send requset: {req_id} to proxy metaserver: {meta.metaserver}"
+                    )
                     if self.tp_rank == 0:
                         kv_transfer_params = {
                             "do_remote_prefill": True,
@@ -1374,6 +1380,9 @@ class MooncakeConnectorWorker:
                 for req_id, meta in metadata.requests.items():
                     path = make_zmq_path("tcp", meta.remote_host,
                                          meta.remote_port + self.tp_rank)
+                    logger.debug(
+                        f"Notify the prefiller: {path} that requset: {req_id} from decoder is ready."
+                    )
                     msg_encoder = msgspec.msgpack.Encoder()
                     metadata = DecodeMooncakeAgentMetadata(
                         req_id=req_id,
@@ -1401,15 +1410,9 @@ class MooncakeConnectorWorker:
                       connector_metadata: MooncakeConnectorMetadata,
                       **kwargs) -> None:
         """MooncakeConnector does not save explicitly."""
-        #TODO layerwise step8
-        # ansyc send kv layer
-        # self.kv_send_layer_thread.add_request(  # type: ignore[union-attr]
-        #         request_id=req_id,
-        #         layer_name=layer_name,
-        #         local_block_ids=prefill_block_ids,
-        #     )
         if self.layer_wise and self.kv_role == 'kv_producer':
             for req_id, request in connector_metadata.requests.items():
+                logger.debug(f"Add request {req_id} to kv send layer thread.")
                 self.kv_send_layer_thread.add_request(
                     request_id=req_id,
                     layer_name=layer_name,
