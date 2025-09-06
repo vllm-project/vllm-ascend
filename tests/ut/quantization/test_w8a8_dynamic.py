@@ -18,17 +18,37 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
     @patch("vllm_ascend.quantization.w8a8_dynamic.get_ep_group")
     def setUp(self, mock_get_ep_group, mock_get_ascend_config,
               mock_get_mc2_group, mock_get_rank):
-        mock_ep_group = Mock()
-        mock_get_ep_group.return_value = mock_ep_group
-        mock_ascend_config = Mock()
-        mock_ascend_config.torchair_graph_config = Mock(enabled=False)
-        mock_get_ascend_config.return_value = mock_ascend_config
-        mock_mc2_group = Mock(device_group=0)
-        mock_get_mc2_group.return_value = mock_mc2_group
-        mock_rank = Mock()
-        mock_get_rank.return_value = mock_rank
+        with patch(
+                'vllm_ascend.quantization.w8a8_dynamic.get_current_vllm_config'
+        ) as mock_get_current_vllm_config:
+            mock_vllm_config = Mock()
+            mock_vllm_config.quant_config = Mock(
+                quant_description={"group_size": 256})
+            mock_vllm_config.scheduler_config = Mock(
+                max_num_batched_tokens=2048,
+                max_model_len=2048,
+                enable_chunked_prefill=False)
+            mock_get_current_vllm_config.return_value = mock_vllm_config
+            mock_ep_group = Mock()
+            mock_get_ep_group.return_value = mock_ep_group
+            mock_ascend_config = Mock()
 
-        self.quant_method = AscendW8A8DynamicFusedMoEMethod()
+            # 创建一个具有具体属性的 Mock 对象来表示 ascend_scheduler_config
+            mock_ascend_scheduler_config = Mock()
+            mock_ascend_scheduler_config.enabled = False
+            mock_ascend_scheduler_config.max_num_batched_tokens = 1024
+            mock_ascend_scheduler_config.max_model_len = 2048
+            mock_ascend_config.ascend_scheduler_config = mock_ascend_scheduler_config
+
+            mock_ascend_config.torchair_graph_config = Mock(enabled=False)
+            mock_ascend_config.enable_chunked_prefill = False
+            mock_get_ascend_config.return_value = mock_ascend_config
+            mock_mc2_group = Mock(device_group=0)
+            mock_get_mc2_group.return_value = mock_mc2_group
+            mock_rank = Mock()
+            mock_get_rank.return_value = mock_rank
+
+            self.quant_method = AscendW8A8DynamicFusedMoEMethod()
 
     def test_get_weight(self):
         param_dict = self.quant_method.get_weight(self.num_experts,
