@@ -21,7 +21,6 @@ import torch_npu
 from torch.nn.functional import pad
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.utils import dispose_tensor, is_310p
 
 
@@ -77,7 +76,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     bias1, bias2 = None, None
     _output_dtype = w2_scale.dtype
 
-    is_mc2 = get_forward_context().fused_moe_state == FusedMoEState.MC2
+    is_mc2 = get_forward_context().moe_comm_method_name == "mc2commimpl"
     if w1_scale_bias is None and is_mc2:
         if w1_scale.dtype != torch.float32:
             w1_scale = w1_scale.to(torch.float32)
