@@ -61,36 +61,35 @@ class MoECommMethod(ABC):
         return hidden_states
 
     def fused_experts(
-        self,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        row_idx: torch.Tensor,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-        use_int8_w8a8: bool = False,
-        use_int4_w4a8: bool = False,
-        global_num_experts: Optional[int] = None,
-        expert_map: Optional[torch.Tensor] = None,
-        w1_scale: Optional[torch.Tensor] = None,
-        w2_scale: Optional[torch.Tensor] = None,
-        w1_scale_bias: torch.Tensor = None,
-        w2_scale_bias: torch.Tensor = None,
-        # For TorchAir graph
-        is_torchair: bool = False,
-        # For Cube/Vector parallel
-        shared_experts: Optional[Any] = None,
-        shared_gate_up: Optional[Any] = None,
-        shared_dequant_scale: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
-        # For load balance
-        log2phy: torch.Tensor = None,
-        global_redundant_expert_num: int = 0,
-        need_trans: bool = False
-    ) -> torch.Tensor:
+            self,
+            hidden_states: torch.Tensor,
+            w1: torch.Tensor,
+            w2: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+            row_idx: torch.Tensor,
+            activation: str = "silu",
+            apply_router_weight_on_input: bool = False,
+            use_int8_w8a8: bool = False,
+            use_int4_w4a8: bool = False,
+            global_num_experts: Optional[int] = None,
+            expert_map: Optional[torch.Tensor] = None,
+            w1_scale: Optional[torch.Tensor] = None,
+            w2_scale: Optional[torch.Tensor] = None,
+            w1_scale_bias: torch.Tensor = None,
+            w2_scale_bias: torch.Tensor = None,
+            # For TorchAir graph
+            is_torchair: bool = False,
+            # For Cube/Vector parallel
+            shared_experts: Optional[Any] = None,
+            shared_gate_up: Optional[Any] = None,
+            shared_dequant_scale: Optional[Any] = None,
+            quantized_x_for_share: Optional[Any] = None,
+            dynamic_scale_for_share: Optional[Any] = None,
+            # For load balance
+            log2phy: torch.Tensor = None,
+            global_redundant_expert_num: int = 0,
+            need_trans: bool = False) -> torch.Tensor:
         # Check constraints
         assert hidden_states.shape[1] == w1.shape[1], (
             f"Hidden size mismatch {hidden_states.shape[1]} != {w1.shape[1]}")
