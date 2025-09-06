@@ -89,6 +89,7 @@ class MoECommMethod(ABC):
         # For load balance
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
+        fusion_mlp: bool = False,
         need_trans: bool = False
     ) -> torch.Tensor:
         # Check constraints
@@ -136,6 +137,7 @@ class MoECommMethod(ABC):
                                        w2_scale_bias=w2_scale_bias,
                                        with_quant=use_int8_w8a8
                                        or use_int4_w4a8,
+                                       fusion=fusion_mlp,
                                        need_trans=need_trans)
 
         hidden_states[:] = self.token_dispatcher.token_combine(

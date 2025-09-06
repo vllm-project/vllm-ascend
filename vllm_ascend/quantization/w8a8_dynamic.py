@@ -248,8 +248,9 @@ class AscendW8A8DynamicFusedMoEMethod:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         topk_weights = topk_weights.to(x.dtype)
-
-        return unified_fused_experts_eager(
+        
+        moe_comm_method = get_forward_context().moe_comm_method
+        return moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
             w1_scale=layer.w13_weight_scale_fp32,
@@ -258,15 +259,34 @@ class AscendW8A8DynamicFusedMoEMethod:
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             row_idx=row_idx,
+            use_int8_w8a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
             global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
             shared_gate_up=shared_gate_up,
             shared_dequant_scale=shared_dequant_scale,
-            mc2_mask=kwargs.get("mc2_mask", None),
-            with_quant=True,
-            fusion_mlp=True)
+            fusion_mlp=True
+        )
+            
+        # return unified_fused_experts_eager(
+        #     hidden_states=x,
+        #     w1=layer.w13_weight,
+        #     w1_scale=layer.w13_weight_scale_fp32,
+        #     w2=layer.w2_weight,
+        #     w2_scale=layer.w2_weight_scale,
+        #     topk_weights=topk_weights,
+        #     topk_ids=topk_ids,
+        #     row_idx=row_idx,
+        #     expert_map=expert_map,
+        #     log2phy=log2phy,
+        #     global_redundant_expert_num=global_redundant_expert_num,
+        #     shared_experts=shared_experts,
+        #     shared_gate_up=shared_gate_up,
+        #     shared_dequant_scale=shared_dequant_scale,
+        #     mc2_mask=kwargs.get("mc2_mask", None),
+        #     with_quant=True,
+        #     fusion_mlp=True)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
