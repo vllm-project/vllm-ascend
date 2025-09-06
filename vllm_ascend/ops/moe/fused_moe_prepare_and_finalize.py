@@ -54,10 +54,10 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
         hidden states and router logits. And if TP size > 1, we also need to split
         the tensors accordingly.
         """
-        self.replace_all_reduce = replace_allreduce
+        self.replace_allreduce = replace_allreduce
         self.enable_shared_expert_dp = enable_shared_expert_dp
 
-        if not self.replace_all_reduce:
+        if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
             forward_context = get_forward_context()
             mc2_mask = forward_context.mc2_mask
@@ -95,7 +95,7 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
         
         Also, unpad the hidden states if needed.
         """
-        if not (self.enable_shared_expert_dp or self.replace_all_reduce):
+        if not (self.enable_shared_expert_dp or self.replace_allreduce):
             if self.tp_size > 1:
                 dist.all_gather(list(self.split_hidden_states), hidden_states,
                                 self.moe_config.tp_group.device_group)
@@ -126,10 +126,10 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
                 rm_router_logits: bool = False,
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        self.replace_all_reduce = replace_allreduce
+        self.replace_allreduce = replace_allreduce
         self.enable_shared_expert_dp = enable_shared_expert_dp
 
-        if not (self.replace_all_reduce or self.enable_shared_expert_dp):
+        if not (self.replace_allreduce or self.enable_shared_expert_dp):
             self.num_tokens, _ = hidden_states.shape
             pad_size = self.tp_size - self.num_tokens
 
@@ -159,7 +159,7 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
 
         Also, unpad the hidden states if needed.
         """
-        if not (self.enable_shared_expert_dp or self.replace_all_reduce):
+        if not (self.enable_shared_expert_dp or self.replace_allreduce):
             if self.tp_size > 1:
                 dist.all_gather(list(self.split_hidden_states), hidden_states,
                                 self.moe_config.tp_group.device_group)
@@ -181,7 +181,7 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
                 router_logits: torch.Tensor,
                 enable_shared_expert_dp: bool = False,
                 rm_router_logits: bool = False,
-                replace_all_reduce: bool = False,
+                replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """When DP size > 1, pad the hidden states and router logits for communication."""
         self.rm_router_logits = rm_router_logits
