@@ -19,6 +19,7 @@
 #
 
 import os
+
 from typing import Any, Callable, Dict
 
 # The begin-* and end* here are used by the documentation generator
