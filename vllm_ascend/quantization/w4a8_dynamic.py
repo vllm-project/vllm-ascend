@@ -275,9 +275,9 @@ class AscendW4A8DynamicFusedMoEMethod:
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts)
 
-        fused_moe_state = get_forward_context().fused_moe_state
+        fused_moe_state = get_forward_context().moe_comm_method_name
         shared_gate_up, shared_dequant_scale = None, None
-        if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
+        if shared_experts is not None and fused_moe_state == "mc2commimpl":
             share_up_out, _ = shared_experts.gate_up_proj(
                 (quantized_x_for_share, dynamic_scale_for_share))
             shared_gate_up, shared_dequant_scale = share_up_out[
@@ -290,8 +290,10 @@ class AscendW4A8DynamicFusedMoEMethod:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         topk_weights = topk_weights.to(x.dtype)
-
-        return unified_fused_experts_eager(
+        
+        moe_comm_method = get_forward_context().moe_comm_method
+        print("using w4a8")
+        return moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -302,14 +304,34 @@ class AscendW4A8DynamicFusedMoEMethod:
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             row_idx=row_idx,
+            use_int4_w4a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
             global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
             shared_gate_up=shared_gate_up,
-            shared_dequant_scale=shared_dequant_scale,
-            mc2_mask=kwargs.get("mc2_mask", None),
-            with_quant=True)
+            shared_dequant_scale=shared_dequant_scale
+        )
+
+        # return unified_fused_experts_eager(
+        #     hidden_states=x,
+        #     w1=layer.w13_weight,
+        #     w2=layer.w2_weight,
+        #     w1_scale=layer.w13_weight_scale_second,
+        #     w2_scale=layer.w2_weight_scale_second,
+        #     w1_scale_bias=layer.w13_scale_bias,
+        #     w2_scale_bias=layer.w2_scale_bias,
+        #     topk_weights=topk_weights,
+        #     topk_ids=topk_ids,
+        #     row_idx=row_idx,
+        #     expert_map=expert_map,
+        #     log2phy=log2phy,
+        #     global_redundant_expert_num=global_redundant_expert_num,
+        #     shared_experts=shared_experts,
+        #     shared_gate_up=shared_gate_up,
+        #     shared_dequant_scale=shared_dequant_scale,
+        #     mc2_mask=kwargs.get("mc2_mask", None),
+        #     with_quant=True)
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         group_num, k, n = weight.shape
