@@ -1,11 +1,11 @@
-import torch
-import torch_npu
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+import torch_npu
+from vllm import VllmConfig
 
 from tests.ut.base import PytestBase
-from vllm import VllmConfig
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
