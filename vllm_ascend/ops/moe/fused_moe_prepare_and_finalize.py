@@ -189,9 +189,6 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
 
 class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
 
-    def __init__(self, moe_config: FusedMoEConfig):
-        super().__init__(moe_config)
-
     def prepare(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
