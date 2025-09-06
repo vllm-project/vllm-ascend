@@ -3,7 +3,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch_npu
-from vllm import VllmConfig
 
 from tests.ut.base import PytestBase
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -15,7 +14,7 @@ class TestNPUModelRunnerEventSync(PytestBase):
     @pytest.fixture
     def mock_vllm_config(self):
         """Create minimal mock VllmConfig for testing"""
-        config = MagicMock(spec=VllmConfig)
+        config = MagicMock()
         config.model_config = MagicMock()
         config.model_config.max_model_len = 1024  # Test the new max_model_len attribute
         config.cache_config = MagicMock()
