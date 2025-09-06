@@ -19,6 +19,7 @@ from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 import torch_npu
 from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
@@ -28,7 +29,9 @@ from vllm.lora.utils import LinearBase
 from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
                                                ColumnParallelLinear,
                                                MergedColumnParallelLinear,
-                                               RowParallelLinear)
+                                               QuantizeMethodBase,
+                                               RowParallelLinear,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
@@ -80,14 +83,14 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
                 divide(output_size, self.tp_size)
                 for output_size in self.output_sizes
             ]
-        LinearBase.__init__(self,
-                            input_size,
-                            output_size,
-                            skip_bias_add,
-                            params_dtype,
-                            quant_config,
-                            prefix,
-                            return_bias=return_bias)
+        AscendLinearBase.__init__(self,
+                                  input_size,
+                                  output_size,
+                                  skip_bias_add,
+                                  params_dtype,
+                                  quant_config,
+                                  prefix,
+                                  return_bias=return_bias)
 
         self.gather_output = gather_output
 
@@ -160,14 +163,14 @@ class AscendRowParallelLinear(RowParallelLinear):
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
 
-        LinearBase.__init__(self,
-                            input_size,
-                            output_size,
-                            skip_bias_add,
-                            params_dtype,
-                            quant_config,
-                            prefix,
-                            return_bias=return_bias)
+        AscendLinearBase.__init__(self,
+                                  input_size,
+                                  output_size,
+                                  skip_bias_add,
+                                  params_dtype,
+                                  quant_config,
+                                  prefix,
+                                  return_bias=return_bias)
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
@@ -401,3 +404,38 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         if not self.return_bias:
             return output
         return output, output_bias
+
+
+class AscendLinearBase(LinearBase):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+    ):
+        nn.Module.__init__(self)
+
+        # Keep input parameters
+        self.input_size = input_size
+        self.output_size = output_size
+        self.skip_bias_add = skip_bias_add
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
+        self.quant_config = quant_config
+        self.prefix = prefix
+        if quant_config is None:
+            self.quant_method: Optional[
+                QuantizeMethodBase] = UnquantizedLinearMethod()
+        else:
+            self.quant_method = quant_config.get_quant_method(self,
+                                                              prefix=prefix)
+        self.return_bias = return_bias
+        self.disable_tp = disable_tp
