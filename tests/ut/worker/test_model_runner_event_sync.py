@@ -107,6 +107,6 @@ class TestNPUModelRunnerEventSync(PytestBase):
         # Verify copy was called with non_blocking=True
         model_runner.sampled_token_ids_pinned_cpu.copy_.assert_called_once()
         _, kwargs = model_runner.sampled_token_ids_pinned_cpu.copy_.call_args
-        assert kwargs.get('non_blocking') == True
+        assert kwargs.get('non_blocking')
 
         assert result == [[5], [10]]
