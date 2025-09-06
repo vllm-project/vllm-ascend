@@ -193,3 +193,15 @@ class TestTorchairDeepSeekMTP(PytestBase):
                                    previous_hidden_states, inputs_embeds,
                                    spec_step_idx)
         assert torch.allclose(output, torch.tensor([[1.0, 2.0, 3.0]]))
+
+    def test_load_weights(mocker, setup_mtp):
+
+        weights_data = [("gate_proj", torch.randn(10, 10)),
+                        ("up_proj", torch.randn(10, 10)),
+                        ("q_a_proj", torch.randn(10, 10)),
+                        ("kv_a_proj_with_mqa", torch.randn(10, 10))]
+        setup_mtp.config.num_nextn_predict_layers = 3
+
+        loaded_params = setup_mtp.load_weights(weights_data)
+
+        assert loaded_params is not None
