@@ -75,6 +75,11 @@ class Memcachestore():
     def batch_exists(self, keys:list[str]) -> list[bool]:
         return self.store.batch_is_exist(keys)
 
+    def _register(self, ptr, length):
+        ret_value = self.store.register_buffer(ptr, length)
+        if ret_value != 0:
+            raise RuntimeError("Memcache memory registration failed.")
+
     def get(self, key: MemcacheEngineKey, addr: list[int], size: list[int], block_id: int):
         try:
             res = self.store.get_into_layers(key.to_string(), addr, size, MmcDirect.COPY_G2L.value)
