@@ -12,6 +12,7 @@
 # This file is a part of the vllm-ascend project.
 
 import tempfile
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -30,20 +31,14 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.worker.npu_input_batch import InputBatch
-
-from unittest.mock import MagicMock, patch
-
-import pytest
-
 from vllm_ascend.utils import AscendSocVersion
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
+from vllm_ascend.worker.npu_input_batch import InputBatch
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE = 'cpu'
+
 
 # yapf: disable
 @pytest.mark.parametrize(
@@ -307,4 +302,3 @@ def test_prepare_inputs(model_runner, dist_init):
     _is_attn_metadata_match(attn_metadata)
     assert all(input_ids.to('cpu') == torch.tensor([1, 2, 3]))
     assert all(positions.to('cpu') == torch.tensor([0, 1, 2]))
-
