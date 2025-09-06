@@ -69,7 +69,9 @@ class TestNPUModelRunnerEventSync(PytestBase):
     def test_to_list_method_functionality(self, model_runner):
         """Test the new _to_list method implementation"""
         # Create test input tensor
-        sampled_token_ids = torch.tensor([[1], [2], [3]], dtype=torch.int64, device="npu:0")
+        sampled_token_ids = torch.tensor([[1], [2], [3]],
+                                         dtype=torch.int64,
+                                         device="npu:0")
 
         # Mock event methods to verify they're called
         model_runner.transfer_event.record = MagicMock()
@@ -87,7 +89,9 @@ class TestNPUModelRunnerEventSync(PytestBase):
 
     def test_to_list_uses_pinned_memory_buffer(self, model_runner):
         """Test that _to_list uses the pinned memory buffer correctly"""
-        sampled_token_ids = torch.tensor([[5], [10]], dtype=torch.int64, device="npu:0")
+        sampled_token_ids = torch.tensor([[5], [10]],
+                                         dtype=torch.int64,
+                                         device="npu:0")
 
         # Mock events
         model_runner.transfer_event.record = MagicMock()
@@ -95,7 +99,8 @@ class TestNPUModelRunnerEventSync(PytestBase):
 
         # Mock copy to verify non_blocking=True is used
         original_copy = model_runner.sampled_token_ids_pinned_cpu.copy_
-        model_runner.sampled_token_ids_pinned_cpu.copy_ = MagicMock(side_effect=original_copy)
+        model_runner.sampled_token_ids_pinned_cpu.copy_ = MagicMock(
+            side_effect=original_copy)
 
         result = model_runner._to_list(sampled_token_ids)
 
