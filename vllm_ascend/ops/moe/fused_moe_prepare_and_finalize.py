@@ -189,9 +189,6 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
 
 class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
 
-    def __init__(self, moe_config: FusedMoEConfig):
-        super().__init__(moe_config)
-
     def prepare(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
@@ -200,7 +197,6 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """When DP size > 1, pad the hidden states and router logits for communication."""
-        self.rm_router_logits = rm_router_logits
         self.enable_shared_expert_dp = enable_shared_expert_dp
 
         if self.moe_config.dp_size > 1:
@@ -212,13 +208,13 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states,
                                                   (0, 0, 0, pad_size))
-                if not self.rm_router_logits:
+                if not rm_router_logits:
                     router_logits = nn.functional.pad(router_logits,
                                                       (0, 0, 0, pad_size))
 
             hidden_states = self.moe_config.dp_group.all_gather(
                 hidden_states, 0)
-            if self.rm_router_logits:
+            if rm_router_logits:
                 router_logits, _ = gate(hidden_states)
             else:
                 router_logits = self.moe_config.dp_group.all_gather(
@@ -235,6 +231,64 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
         if self.moe_config.dp_size > 1 and not self.enable_shared_expert_dp:
             hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
             hidden_states = hidden_states[:self.num_tokens]
+
+        if reduce_results and (self.moe_config.tp_size > 1
+                               or self.moe_config.ep_size > 1):
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+
+        return hidden_states
+
+
+class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
+
+    def _naive_multicast(self, x: torch.Tensor,
+                         cu_tokens_across_dp_cpu: torch.Tensor):
+        assert (len(x.shape) == 2)
+        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
+                             device=x.device,
+                             dtype=x.dtype)
+        start = 0 if self.moe_config.dp_rank == 0 else cu_tokens_across_dp_cpu[
+            self.moe_config.dp_rank - 1]
+        end = cu_tokens_across_dp_cpu[self.moe_config.dp_rank]
+        buffer[start:end, :].copy_(x)
+        for idx in range(self.moe_config.dp_size):
+            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
+            end = cu_tokens_across_dp_cpu[idx]
+            get_dp_group().broadcast(buffer[start:end, :], idx)
+        return buffer
+
+    def prepare(self,
+                hidden_states: torch.Tensor,
+                router_logits: torch.Tensor,
+                enable_shared_expert_dp: bool = False,
+                rm_router_logits: bool = False,
+                replace_allreduce: bool = False,
+                gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if self.moe_config.dp_size > 1:
+            self.cu_tokens_across_dp_cpu = get_forward_context(
+            ).dp_metadata.cu_tokens_across_dp_cpu
+            hidden_states = self._naive_multicast(hidden_states,
+                                                  self.cu_tokens_across_dp_cpu)
+            if rm_router_logits:
+                router_logits, _ = gate(hidden_states)
+            else:
+                router_logits = self._naive_multicast(
+                    router_logits, self.cu_tokens_across_dp_cpu)
+
+            return hidden_states, router_logits, None
+
+    def finalize(self, hidden_states: torch.Tensor,
+                 reduce_results: bool) -> torch.Tensor:
+        """When DP size > 1, reduce-scatter the hidden states to get the final output.
+
+        When TP size > 1, all-reduce the hidden states to get the final output.
+        """
+        if self.moe_config.dp_size > 1 and not self.enable_shared_expert_dp:
+            start = 0 if self.moe_config.dp_rank == 0 else self.cu_tokens_across_dp_cpu[
+                self.moe_config.dp_rank - 1]
+            end = self.cu_tokens_across_dp_cpu[self.moe_config.dp_rank]
+            hidden_states = get_dp_group().all_reduce(hidden_states)
+            hidden_states = hidden_states[start:end, :]
 
         if reduce_results and (self.moe_config.tp_size > 1
                                or self.moe_config.ep_size > 1):
