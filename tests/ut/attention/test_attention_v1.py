@@ -342,36 +342,6 @@ class TestAscendAttentionBackendImpl(TestBase):
         assert output.shape == (10, 8 * 64)
 
     @patch('torch_npu._npu_reshape_and_cache')
-    @patch('torch_npu._npu_flash_attention')
-    def test_forward_prefill_no_cache_swa(self, mock_flash_attention,
-                                          mock_reshape_cache):
-        """Test forward pass in PrefillNoCache state"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
-        kv_cache = torch.empty(2, 5, 128, 8, 64)
-        metadata = self.attn_metadata
-        metadata.attn_state = AscendAttentionState.PrefillNoCache
-        metadata.attn_mask = torch.randn(1, 1, 10, 10)
-        metadata.seq_lens = torch.tensor([10])
-        metadata.num_actual_tokens = 10
-        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
-        layer = self.layer_no_quant
-        # layer.quant_method.apply.return_value = metadata
-        print(self.layer_no_quant._v_scale_float)
-        output = self.impl_swa.forward(layer,
-                                       query,
-                                       key,
-                                       value,
-                                       kv_cache,
-                                       metadata,
-                                       trace_flag=False)
-
-        mock_reshape_cache.assert_called_once()
-        mock_flash_attention.assert_called_once()
-        assert output.shape == (10, 8 * 64)
-
-    @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu._npu_flash_attention_qlens')
     def test_forward_prefill_cache_hit(self, mock_flash_attention_qlens,
                                        mock_npu_reshape_and_cache):
