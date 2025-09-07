@@ -414,16 +414,21 @@ class EagleProposer(Proposer):
         self.input_ids[:num_tokens - 1] = target_token_ids[1:]
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-        self.input_ids[last_token_indices] = next_token_ids[0]
+        self.input_ids[last_token_indices] = next_token_ids
+        seq_lens = (target_positions[last_token_indices] + 1).int()
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
+        attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
+            seq_lens, target_positions,
+            self.vllm_config.model_config.dtype, self.device)
+
+
 
         common_attn_metadata = AscendCommonAttentionMetadata(
-            query_start_loc=self.runner.query_start_loc[:batch_size + 1],
-            query_start_loc_cpu=self.runner.query_start_loc_cpu[:batch_size +
-                                                                1],
-            seq_lens_cpu=self.runner.seq_lens_cpu,
+            query_start_loc=cu_num_tokens.to(device),
+            query_start_loc_cpu=cu_num_tokens,
+            seq_lens_cpu=seq_lens.cpu(),
             max_query_len=max_query_len,
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
@@ -432,7 +437,7 @@ class EagleProposer(Proposer):
             get_device_tensor(),
             slot_mapping_cpu=target_slot_mapping,
             positions=target_positions,
-            attn_mask=self.runner.attn_mask,
+            attn_mask=attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
@@ -484,9 +489,8 @@ class EagleProposer(Proposer):
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
-
-        if self.vllm_config.speculative_config.num_speculative_tokens > 2:
-            raise ValueError("Speculative tokens > 2 are not supported yet.")
+        query_lens.fill_(1)
+        attn_metadata.query_lens = query_lens
 
         attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         for now_speculative in range(
@@ -543,7 +547,7 @@ class EagleProposer(Proposer):
             self.hidden_states[:batch_size] = hidden_states
             positions = positions_cpu.to(device)
             attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
-                attn_metadata.seq_lens, positions,
+                attn_metadata.seq_lens, positions_cpu,
                 self.vllm_config.model_config.dtype, self.device)
 
             attn_metadata.attn_mask = attn_mask
@@ -634,7 +638,7 @@ class EagleProposer(Proposer):
                     dtype=torch.int32,
                     device=out_tensor.device) + offset_tensor
                 values_to_store = torch.tensor(
-                    index_start, dtype=torch.int32,
+                    index_start + global_start_offset, dtype=torch.int32,
                     device=out_tensor.device) + offset_tensor
                 mask = (target_indices >= start_pos) & \
                     (target_indices < end_pos) & \
