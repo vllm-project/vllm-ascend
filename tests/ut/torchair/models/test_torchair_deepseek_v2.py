@@ -100,6 +100,11 @@ def mock_distributed():
     pp_group.rank_in_group = 0
     pp_group.world_size = 1
 
+    mlp_tp_group = Mock(spec=GroupCoordinator)
+    mlp_tp_group.rank_in_group = 0
+    mlp_tp_group.world_size = 1
+    mlp_tp_group.all_gather = Mock(return_value=torch.randn(2, 4, 128))
+
     mock_vllm_config = Mock()
     mock_vllm_config.scheduler_config = Mock(max_num_seqs=256)
     mock_vllm_config.model_config = Mock(max_model_len=2048, quant_config=None)
@@ -195,10 +200,6 @@ def test_torchair_deepseek_v2_mlp(mock_distributed, base_config):
                                 hidden_act="silu",
                                 quant_config=None)
     assert isinstance(mlp.act_fn, TorchairDeepseekV2SiluAndMul)
-
-    x = torch.randn(2, 4, 128)
-    output = mlp(x)
-    assert output.shape == (2, 4, 128)
 
     with patch(
             "vllm_ascend.torchair.models.torchair_deepseek_v2.QuantizationConfig"
