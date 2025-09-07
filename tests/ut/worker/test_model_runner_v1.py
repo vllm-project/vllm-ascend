@@ -112,7 +112,8 @@ class TestNPUModelRunnerInit:
 
     @patch('vllm_ascend.worker.model_runner_v1.torch_npu')
     @patch('vllm_ascend.worker.model_runner_v1.torch')
-    def test_init_creates_transfer_event_and_pinned_memory(self, mock_torch, mock_torch_npu):
+    def test_init_creates_transfer_event_and_pinned_memory(
+            self, mock_torch, mock_torch_npu):
         """Test that initialization creates transfer event and pinned CPU memory."""
         # This is a simplified test focusing only on the new attributes
         # We mock the entire __init__ process and only test the specific lines we added
@@ -148,12 +149,12 @@ class TestNPUModelRunnerInit:
 
         # Verify pinned CPU memory is created with correct parameters
         assert runner.sampled_token_ids_pinned_cpu == mock_pinned_tensor
-        mock_torch.empty.assert_called_with(
-            (2048, 1),
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=True
-        )
+        mock_torch.empty.assert_called_with((2048, 1),
+                                            dtype=torch.int64,
+                                            device="cpu",
+                                            pin_memory=True)
+
+
 class TestNPUModelRunnerToList:
     """Tests for the _to_list method in NPUModelRunner."""
 
