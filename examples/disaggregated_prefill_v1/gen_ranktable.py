@@ -24,8 +24,16 @@ decode_device_cnt = args.decode_device_cnt
 
 print("enter py")
 
-hccn_tool_path = os.environ.get("HCCN_TOOL_PATH",
-                                "/usr/local/Ascend/driver/tools/hccn_tool")
+DEFAULT_PATHS = ["/usr/local/Ascend/driver/tools/hccn_tool", "/usr/bin/hccn_tool"]
+hccn_tool_path = os.environ.get("HCCN_TOOL_PATH")
+if not hccn_tool_path:
+    for default_path in  DEFAULT_PATHS:
+        if os.path.exists(default_path):
+            hccn_tool_path = default_path
+            break
+    else:
+        raise Exception("can't get correct hccn_tool_path")
+
 master_addr = os.environ.get("MASTER_ADDR")
 master_port = os.environ.get("MASTER_PORT")
 rank = os.environ.get("RANK")
@@ -47,9 +55,12 @@ def get_cmd_stdout(cmd):
 print(f"local_host: {local_host}")
 print("gen ranktable.json")
 
-num_cards = get_cmd_stdout("npu-smi info -l | grep \"Total Count\"").split(
-    ":")[1].strip()
-num_cards = int(num_cards)
+def extract_id(d):
+    d = d.split(":")[1].strip()
+    return int(d)
+
+card_ids = [*map(extract_id, get_cmd_stdout("npu-smi info -l | grep \"NPU ID\"").split("\n"))]
+
 chips_per_card = get_cmd_stdout("npu-smi info -l | grep \"Chip Count\"").split(
     "\n")[0].split(":")[1].strip()
 chips_per_card = int(chips_per_card)
@@ -58,7 +69,7 @@ chips_per_card = int(chips_per_card)
 local_device_list: list[dict[str, str]] = list()
 if local_rank == "0":
     super_pod_id = "0"
-    for card_id in range(num_cards):
+    for card_id in card_ids:
         for chip_id in range(chips_per_card):
             device_id = card_id * chips_per_card + chip_id
             if soc_info == AscendSocVersion.A3:
