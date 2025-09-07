@@ -23,7 +23,7 @@ import math
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -878,11 +878,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> tuple[Union[AscendMetadata, AscendMLAMetadata, AscendTorchairMetadata,
-                     AscendMLATorchairMetadata], torch.Tensor, np.ndarray, int,
-               torch.Tensor, int, torch.Tensor, SpecDecodeMetadata,
-               Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> tuple[dict[str,
+                    Union[AscendMetadata, AscendMLAMetadata,
+                          AscendTorchairMetadata, AscendMLATorchairMetadata]],
+               torch.Tensor, np.ndarray, int, torch.Tensor, int, torch.Tensor,
+               SpecDecodeMetadata, Optional[torch.Tensor],
+               Optional[torch.Tensor], Optional[torch.Tensor]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -1033,10 +1034,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             graph_pad_size=self.graph_pad_size,
             decode_token_per_req=self.decode_token_per_req,
         )
-        attn_metadata = self.attn_metadata_builder.build(
-            common_attn_metadata, self.model)
-        if self.vllm_config.model_config.use_mla:
-            attn_metadata.num_input_tokens = num_input_tokens
+
+        attn_metadata: dict[str, Any] = {}
+        # Prepare the attention metadata for each KV cache group and make layers
+        # in the same group share the same metadata.
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups):
+            attn_metadata_i = self.attn_metadata_builder.build(
+                common_attn_metadata, self.model)
+            if self.vllm_config.model_config.use_mla:
+                attn_metadata_i.num_input_tokens = num_input_tokens
+            for layer_name in kv_cache_group_spec.layer_names:
+                attn_metadata[layer_name] = attn_metadata_i
 
         # Prepare input_ids
         token_indices = (positions_np +
@@ -1329,9 +1338,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         positions: torch.Tensor,
         num_scheduled_tokens: int,
         hidden_states: torch.Tensor,
-        attn_metadata: Union[AscendMetadata, AscendMLAMetadata,
-                             AscendTorchairMetadata,
-                             AscendMLATorchairMetadata],
+        attn_metadata: dict[str, Union[AscendMetadata, AscendMLAMetadata,
+                                       AscendTorchairMetadata,
+                                       AscendMLATorchairMetadata]],
         aux_hidden_states: torch.Tensor = None,
     ) -> Optional[list[list[int]]]:
         if not self.drafter:
@@ -1804,11 +1813,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return None, None
 
     def _build_attention_metadata(self, with_prefill, num_reqs, skip_attn):
-        if skip_attn:
-            attn_metadata = None
-        else:
+        attn_metadata: Optional[dict[str, Any]] = None
+        if not skip_attn:
             # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
-            attn_metadata = None
+            # Prepare the attention metadata for each KV cache group and make layers
+            # in the same group share the same metadata.
+            attn_metadata = {}
+            for kv_cache_group_spec in self.kv_cache_config.kv_cache_groups:
+                attn_metadata_i = self.attn_metadata_builder.build_dummy(
+                    num_reqs=num_reqs, num_actual_tokens=1)
+                for layer_name in kv_cache_group_spec.layer_names:
+                    attn_metadata[layer_name] = attn_metadata_i
         return attn_metadata
 
     def _generate_dummy_run_hidden_states(self, with_prefill,

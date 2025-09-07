@@ -204,13 +204,16 @@ class MtpProposer(Proposer):
                                       dtype=torch.int32,
                                       device=self.device)
         accepted_token_indices = None
+        # At this moment, we assume all eagle layers belong to the same KV
+        # cache group, thus using the same attention metadata.
+        eagle_attn_metadata = list(attn_metadata.values())[0]
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
             target_token_ids = self.runner.input_ids[:num_scheduled_tokens]
             target_positions = positions[:num_scheduled_tokens]
             target_hidden_states = hidden_states[:num_scheduled_tokens]
-            target_slot_mapping = attn_metadata.slot_mapping
-            cu_num_tokens = attn_metadata.query_start_loc
+            target_slot_mapping = eagle_attn_metadata.slot_mapping
+            cu_num_tokens = eagle_attn_metadata.query_start_loc
         else:
             # TODO(woosuk): Refactor this.
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
@@ -225,12 +228,12 @@ class MtpProposer(Proposer):
             )
             cu_num_tokens, accepted_token_indices, target_token_ids, \
                 target_positions, target_hidden_states, target_slot_mapping = self._prepare_inputs(
-                attn_metadata.query_start_loc,
+                eagle_attn_metadata.query_start_loc,
                 num_rejected_tokens,
                 self.runner.input_ids[:num_scheduled_tokens],
                 positions[:num_scheduled_tokens],
                 hidden_states[:num_scheduled_tokens],
-                attn_metadata.slot_mapping[:num_scheduled_tokens],
+                eagle_attn_metadata.slot_mapping[:num_scheduled_tokens],
                 is_torchair_graph=self.runner._build_drafter_prepare_inputs_torchair_param(),
             )
 
@@ -241,7 +244,7 @@ class MtpProposer(Proposer):
             target_slot_mapping=target_slot_mapping,
             next_token_ids=next_token_ids,
             cu_num_tokens=cu_num_tokens,
-            block_table=attn_metadata.block_tables,
+            block_table=eagle_attn_metadata.block_tables,
             sampling_metadata=sampling_metadata,
             token_indices=accepted_token_indices)
         spec_token_ids = draft_token_ids.tolist()
