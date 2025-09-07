@@ -174,7 +174,6 @@ def test_row_parallel_linear(cls, mock_distributed):
     linear = cls(input_size=128, output_size=64, bias=False, quant_config=None)
     linear.quant_method = Mock()
     linear.quant_method.apply.return_value = torch.randn(2, 4, 64)
-
     input_ = torch.randn(2, 4, 128)
     with patch("vllm_ascend.models.deepseek_v2.split_tensor_along_last_dim",
                return_value=[torch.randn(2, 4, 64)]):
