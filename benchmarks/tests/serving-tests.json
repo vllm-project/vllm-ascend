@@ -23,7 +23,8 @@
       "hf_split": "train",
       "endpoint": "/v1/chat/completions",
       "dataset_path": "lmarena-ai/vision-arena-bench-v0.1",
-      "num_prompts": 200
+      "num_prompts": 200,
+      "no_stream": ""
     }
   },
   {
