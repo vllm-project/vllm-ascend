@@ -628,6 +628,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self.running_in_graph = False
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -1019,7 +1020,6 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                 input_layout = "BNSD"
 
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
-                assert num_tokens % self.spec_token_num == 0
                 input_layout = "TND"
                 # [bs * q_seq_len, num_heads_per_rank, dim]
                 q_nope = q_nope.view(num_tokens, self.num_heads, -1)

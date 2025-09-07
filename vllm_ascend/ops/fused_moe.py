@@ -40,8 +40,6 @@ from vllm.model_executor.layers.quantization.base_config import \
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
-from vllm_ascend.distributed.communication_op import \
-    data_parallel_reduce_scatter
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.layers.experts_selector import select_experts
@@ -70,7 +68,8 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
                                 shared_dequant_scale: Optional[Any] = None,
                                 mc2_mask: Optional[torch.Tensor] = None,
                                 apply_router_weight_on_input: bool = False,
-                                with_quant: bool = False):
+                                with_quant: bool = False,
+                                fusion_mlp: bool = False):
     token_dispatcher = get_forward_context().token_dispatcher
 
     results = token_dispatcher.token_dispatch(
@@ -100,7 +99,8 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
         w1_scale_bias=w1_scale_bias,
         w2_scale_bias=w2_scale_bias,
         topk_scales=results.get("topk_scales"),
-        with_quant=with_quant)
+        with_quant=with_quant,
+        fusion=fusion_mlp)
     final_hidden_states = token_dispatcher.token_combine(expert_output)
     return final_hidden_states
 
@@ -535,8 +535,8 @@ class AscendFusedMoE(FusedMoE):
                 final_hidden_states = final_hidden_states[start:end, :]
                 dispose_tensor(e_hidden_states)
             elif fused_moe_state == FusedMoEState.AllGather:
-                final_hidden_states = data_parallel_reduce_scatter(
-                    e_hidden_states, dim=0)
+                final_hidden_states = get_dp_group().reduce_scatter(
+                    e_hidden_states, 0)
                 final_hidden_states = final_hidden_states[:num_tokens]
                 dispose_tensor(e_hidden_states)
             else:

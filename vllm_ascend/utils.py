@@ -304,6 +304,12 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         num_hidden_layers = get_max_hidden_layers(hf_config)
     parallel_config = vllm_config.parallel_config
 
+    # Calculate maximum supported batch sizes considering model architecture
+    resources_per_graph = num_hidden_layers + 1
+    if vllm_config.speculative_config is not None:
+        draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
+
     # TODO: Find out whether we need to take into account the pp_size
     num_comm_groups = sum(size > 1 for size in [
         parallel_config.data_parallel_size,
@@ -318,8 +324,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor(1920 / (48 + 1) / 2) = 19
-        max_num_batch_sizes = math.floor(
-            MAX_CAPTURE_SIZE / (num_hidden_layers + 1) / parallel_factor)
+        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
+                                         resources_per_graph / parallel_factor)
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes)
@@ -335,8 +341,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
         max_num_batch_sizes = math.floor(
-            (MAX_CAPTURE_SIZE - num_comm_groups * 40) /
-            (num_hidden_layers + 1) / (1 + num_comm_groups * 2))
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph /
+            (1 + num_comm_groups * 2))
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes)
@@ -485,12 +491,10 @@ def register_ascend_customop():
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.linear import (AscendDenseMergedColumnParallelLinear,
-                                        AscendDenseQKVParallelLinear,
-                                        AscendDenseRowParallelLinear,
-                                        AscendMlpColumnParallelLinear,
-                                        AscendMlpMergedColumnParallelLinear,
-                                        AscendMlpRowParallelLinear)
+    from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
+                                        AscendMergedColumnParallelLinear,
+                                        AscendQKVParallelLinear,
+                                        AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -501,6 +505,14 @@ def register_ascend_customop():
                           name="SiluAndMul")
     CustomOp.register_oot(_decorated_op_cls=AscendRotaryEmbedding,
                           name="RotaryEmbedding")
+    CustomOp.register_oot(_decorated_op_cls=AscendColumnParallelLinear,
+                          name="ColumnParallelLinear")
+    CustomOp.register_oot(_decorated_op_cls=AscendRowParallelLinear,
+                          name="RowParallelLinear")
+    CustomOp.register_oot(_decorated_op_cls=AscendMergedColumnParallelLinear,
+                          name="MergedColumnParallelLinear")
+    CustomOp.register_oot(_decorated_op_cls=AscendQKVParallelLinear,
+                          name="QKVParallelLinear")
     CustomOp.register_oot(
         _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
         name="DeepseekScalingRotaryEmbedding")
@@ -510,22 +522,6 @@ def register_ascend_customop():
                           name="ParallelLMHead")
     CustomOp.register_oot(_decorated_op_cls=AscendLogitsProcessor,
                           name="LogitsProcessor")
-    if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
-                              name="ColumnParallelLinear")
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpRowParallelLinear,
-                              name="RowParallelLinear")
-        CustomOp.register_oot(
-            _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
-            name="MergedColumnParallelLinear")
-    if envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE:
-        CustomOp.register_oot(
-            _decorated_op_cls=AscendDenseMergedColumnParallelLinear,
-            name="MergedColumnParallelLinear")
-        CustomOp.register_oot(_decorated_op_cls=AscendDenseQKVParallelLinear,
-                              name="QKVParallelLinear")
-        CustomOp.register_oot(_decorated_op_cls=AscendDenseRowParallelLinear,
-                              name="RowParallelLinear")
 
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
@@ -567,3 +563,19 @@ def get_ascend_soc_version():
 
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().lmhead_tensor_parallel_size is not None
+
+
+def oproj_tp_enable() -> bool:
+    return get_ascend_config().oproj_tensor_parallel_size is not None
+
+
+def mlp_tp_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE
+
+
+def matmul_allreduce_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
+
+
+def dense_optim_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE

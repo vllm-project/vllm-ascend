@@ -108,7 +108,7 @@ def set_ascend_forward_context(
         # set for flashcomm_v1
         flashcomm_v1_enabled = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM and \
             num_tokens is not None and num_tokens > 1000
-        
+
         if flashcomm_v1_enabled:
             tp_world_size = get_tensor_model_parallel_world_size()
             pad_size = (tp_world_size -

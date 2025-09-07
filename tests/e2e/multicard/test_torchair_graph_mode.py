@@ -22,8 +22,6 @@ Run `pytest tests/multicard/test_torchair_graph_mode.py`.
 import os
 from typing import Dict
 
-import pytest
-
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
@@ -155,7 +153,6 @@ def _pangu_torchair_test_fixture(
         print(f"Generated text: {vllm_output[i][1]!r}")
 
 
-@pytest.mark.skip("pangu doesn't work, fix me")
 def test_e2e_pangu_with_torchair():
     additional_config = {
         "torchair_graph_config": {

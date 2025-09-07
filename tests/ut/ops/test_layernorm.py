@@ -1,10 +1,8 @@
-import os
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 import torch
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 
 
 @pytest.fixture
@@ -32,9 +30,10 @@ def mock_add_rms_norm(x, residual, weight, eps):
                          [None, torch.randn(4, 8, dtype=torch.float32)])
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
 @patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
-@patch("torch.ops.vllm.maybe_chunk_residual", side_effect=mock_maybe_chunk_residual)
-def test_RMSNorm_forward(mock_maybe_chunk_residual, mock_add_rmsnorm, mock_rmsnorm,
-                         is_310p_return,residual, dummy_tensor):
+@patch("torch.ops.vllm.maybe_chunk_residual",
+       side_effect=mock_maybe_chunk_residual)
+def test_RMSNorm_forward(mock_maybe_chunk_residual, mock_add_rmsnorm,
+                         mock_rmsnorm, is_310p_return, residual, dummy_tensor):
 
     with patch("vllm_ascend.utils.is_310p", return_value=is_310p_return):
         layer = RMSNorm(hidden_size=8, eps=1e-05)
@@ -65,8 +64,10 @@ def test_RMSNorm_forward(mock_maybe_chunk_residual, mock_add_rmsnorm, mock_rmsno
 
 @patch("vllm_ascend.utils.is_310p", return_value=False)
 @patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
-@patch("torch.ops.vllm.maybe_chunk_residual", side_effect=mock_maybe_chunk_residual)
-def test_RMSNorm_forward_with_flashcomm_v1(mock_maybe_chunk_residual, mock_add_rms_norm, mock_is310p):
+@patch("torch.ops.vllm.maybe_chunk_residual",
+       side_effect=mock_maybe_chunk_residual)
+def test_RMSNorm_forward_with_flashcomm_v1(mock_maybe_chunk_residual,
+                                           mock_add_rms_norm, mock_is310p):
     x = torch.randn(4, 512, dtype=torch.bfloat16)
     residual = torch.randn(16, 512, dtype=torch.bfloat16)
     layer = RMSNorm(hidden_size=512, eps=1e-05)
