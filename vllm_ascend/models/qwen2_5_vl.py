@@ -293,37 +293,35 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
 
     def pad_qkv_weight_scale_offset(self, data):
         reshaped_data = data.reshape(
-            -1, 3, self.origin_hidden_size_per_attention_head, 1
-        )
-        data1 = reshaped_data[:, :, :self.half_origin_hidden_size_per_attention_head, :]
-        data2 = reshaped_data[:, :, self.half_origin_hidden_size_per_attention_head:, :]
-        data1_paded = torch.nn.functional.pad(data1,(0, 0,
-                                                    0, self.half_pad_hidden_size_per_attention_head,
-                                                    0, 0,
-                                                    0, 0))
-        data2_paded = torch.nn.functional.pad(data2,(0, 0,
-                                                    0, self.half_pad_hidden_size_per_attention_head,
-                                                    0, 0,
-                                                    0, 0))
-        res = torch.cat(
-            [data1_paded, data2_paded],
-            dim=2)
-        res = res.reshape(-1,1)
+            -1, 3, self.origin_hidden_size_per_attention_head, 1)
+        data1 = reshaped_data[:, :, :self.
+                              half_origin_hidden_size_per_attention_head, :]
+        data2 = reshaped_data[:, :, self.
+                              half_origin_hidden_size_per_attention_head:, :]
+        data1_paded = torch.nn.functional.pad(
+            data1, (0, 0, 0, self.half_pad_hidden_size_per_attention_head, 0,
+                    0, 0, 0))
+        data2_paded = torch.nn.functional.pad(
+            data2, (0, 0, 0, self.half_pad_hidden_size_per_attention_head, 0,
+                    0, 0, 0))
+        res = torch.cat([data1_paded, data2_paded], dim=2)
+        res = res.reshape(-1, 1)
         return res
 
     def pad_qkv_deq_scale_quant_bias(self, data):
         reshaped_data = data.reshape(
-            -1, 3, self.origin_hidden_size_per_attention_head
-        )
-        data1 = reshaped_data[:, :, :self.half_origin_hidden_size_per_attention_head]
-        data2 = reshaped_data[:, :, self.half_origin_hidden_size_per_attention_head:]
-        
-        data1_paded = torch.nn.functional.pad(data1,(0, self.half_pad_hidden_size_per_attention_head))
-        data2_paded = torch.nn.functional.pad(data2,(0, self.half_pad_hidden_size_per_attention_head))
-        
-        res = torch.cat(
-            [data1_paded, data2_paded],
-            dim=2)
+            -1, 3, self.origin_hidden_size_per_attention_head)
+        data1 = reshaped_data[:, :, :self.
+                              half_origin_hidden_size_per_attention_head]
+        data2 = reshaped_data[:, :,
+                              self.half_origin_hidden_size_per_attention_head:]
+
+        data1_paded = torch.nn.functional.pad(
+            data1, (0, self.half_pad_hidden_size_per_attention_head))
+        data2_paded = torch.nn.functional.pad(
+            data2, (0, self.half_pad_hidden_size_per_attention_head))
+
+        res = torch.cat([data1_paded, data2_paded], dim=2)
         res = res.reshape(-1)
         return res
 
@@ -354,13 +352,17 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-                if ("attn.proj.weight_scale" in name or "attn.proj.weight_offset" in name) and self.enable_pad:
+                if ("attn.proj.weight_scale" in name or
+                        "attn.proj.weight_offset" in name) and self.enable_pad:
                     continue
-                elif ("attn.proj.deq_scale" in name or "attn.proj.quant_bias" in name) and self.enable_pad:
+                elif ("attn.proj.deq_scale" in name
+                      or "attn.proj.quant_bias" in name) and self.enable_pad:
                     continue
-                elif ("attn.qkv.weight_scale" in name or "attn.qkv.weight_offset" in name) and self.enable_pad:
+                elif ("attn.qkv.weight_scale" in name
+                      or "attn.qkv.weight_offset" in name) and self.enable_pad:
                     param.data = self.pad_qkv_weight_scale_offset(param.data)
-                elif ("attn.qkv.deq_scale" in name or "attn.qkv.quant_bias" in name) and self.enable_pad:
+                elif ("attn.qkv.deq_scale" in name
+                      or "attn.qkv.quant_bias" in name) and self.enable_pad:
                     param.data = self.pad_qkv_deq_scale_quant_bias(param.data)
                 elif ("attn.proj.weight" in name) and self.enable_pad:
                     param.data = self.pad_proj_weight(param.data)
