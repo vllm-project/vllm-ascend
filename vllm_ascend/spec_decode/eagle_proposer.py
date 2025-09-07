@@ -428,7 +428,7 @@ class EagleProposer(Proposer):
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=cu_num_tokens.to(device),
             query_start_loc_cpu=cu_num_tokens,
-            seq_lens_cpu=sep_lens.cpu(),
+            seq_lens_cpu=seq_lens.cpu(),
             max_query_len=max_query_len,
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
