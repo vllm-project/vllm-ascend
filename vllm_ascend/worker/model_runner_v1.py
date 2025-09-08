@@ -1905,7 +1905,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         max_query_len = self.uniform_decode_query_len if uniform_decode else \
                                                                 num_tokens
 
-        max_num_reqs = self.scheduler_config.max_num_seqs
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
