@@ -828,6 +828,7 @@ class TestNPUWorker(TestBase):
 
             # Mock scheduler_output and return result
             mock_scheduler_output = MagicMock()
+            mock_scheduler_output.total_num_scheduled_tokens = 1
             # Create a real ModelRunnerOutput instance or mock
             mock_model_output = MagicMock(spec=ModelRunnerOutput)
             worker.model_runner.execute_model.return_value = mock_model_output
