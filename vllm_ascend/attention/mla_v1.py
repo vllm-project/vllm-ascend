@@ -841,7 +841,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             input_layout = "BNSD"
 
         if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
-            assert num_tokens % self.spec_token_num == 0
             input_layout = "TND"
             # [bs * q_seq_len, num_heads_per_rank, dim]
             q_nope = q_nope.view(num_tokens, self.num_heads, -1)

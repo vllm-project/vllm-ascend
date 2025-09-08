@@ -35,8 +35,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
+from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
+                                                    get_otp_group)
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, mlp_tp_enable,
+                               oproj_tp_enable)
 
 from .utils import get_quant_method
 
@@ -220,9 +223,15 @@ class AscendLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if isinstance(layer, RowParallelLinear):
-            tp_rank = get_tensor_model_parallel_rank()
-            return self.quant_method.apply(layer, x, bias, tp_rank)
-        return self.quant_method.apply(layer, x, bias)
+            if layer.prefix.find("o_proj") != -1 and oproj_tp_enable():
+                tp_rank = get_otp_group().rank_in_group
+            elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
+                tp_rank = get_mlp_tp_group().rank_in_group
+            else:
+                tp_rank = get_tensor_model_parallel_rank()
+        else:
+            tp_rank = 0
+        return self.quant_method.apply(layer, x, bias, tp_rank)
 
 
 class AscendKVCacheMethod(BaseKVCacheMethod):
