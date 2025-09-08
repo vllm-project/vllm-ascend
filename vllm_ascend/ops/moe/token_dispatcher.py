@@ -28,6 +28,7 @@ import torch
 import torch_npu
 from vllm.distributed.parallel_state import get_ep_group
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.distributed.tensor_parallel import \
     gather_from_sequence_parallel_region
@@ -49,6 +50,9 @@ def setup_token_dispatchers(ep_size: int, **kwargs):
     existing_dispatchers = set(_Dispatchers.keys())
 
     if ep_size == 1 and "TokenDispatcherWithAllGather" not in existing_dispatchers:
+        _register_token_dispatcher(TokenDispatcherWithAllGather(**kwargs))
+    elif envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1 \
+        and "TokenDispatcherWithAllGather" not in existing_dispatchers:
         _register_token_dispatcher(TokenDispatcherWithAllGather(**kwargs))
     elif ep_size < 16 and "TokenDispatcherWithAll2AllV" not in existing_dispatchers:
         _register_token_dispatcher(TokenDispatcherWithAll2AllV(**kwargs))
