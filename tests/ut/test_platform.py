@@ -559,9 +559,8 @@ class TestNPUPlatform(TestBase):
 
     def test_get_punica_wrapper(self):
         result = self.platform.get_punica_wrapper()
-        self.assertEqual(
-            result,
-            "vllm_ascend.lora.punica_wrapper.punica_npu.PunicaWrapperNPU")
+        self.assertEqual(result,
+                         "vllm_ascend.lora.punica_npu.PunicaWrapperNPU")
 
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.max_memory_allocated")
