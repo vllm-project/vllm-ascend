@@ -14,28 +14,27 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
-from multiprocessing import Process
+from multiprocessing import Process, Manager
+from queue import Queue
 from typing import Any
 
 import networkx as nx  # type: ignore
 import numpy as np
 import torch
 import torch.distributed as dist
-
-from vllm.distributed import get_ep_group, get_node_count
-from vllm.distributed.eplb import EplbPolicy
-from vllm.distributed.eplb.eplb_policy.policy_factory import PolicyFactory
-from vllm.distributed.eplb.eplb_utils.eplb_utils import generate_log2phy_map
 from vllm.logger import logger
 
+from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
+from vllm_ascend.eplb.core.policy.policy_factory import (DynamicConfig,
+                                                         PolicyFactory)
 
 
 class EplbWorker:
 
     def __init__(self, shared_dict, policy_type, enable_d2d: bool = True):
         self.policy_type = policy_type
-        self.policy = PolicyFactory.generate_policy(policy_type)
+        self.policy = PolicyFactory.generate_policy(policy_type,
+                                                    DynamicConfig())
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
@@ -291,20 +290,8 @@ class EplbWorker:
         if self.old_expert_maps is None:
             return False, None, None
 
-        ep_group = get_ep_group().device_group
-        num_replicas = model.num_physical_experts
-        num_groups = model.num_expert_groups
-        num_nodes = get_node_count()
-        num_npus = ep_group.size()
-        old_global_expert_indices = EplbPolicy.convert_table(old_placement, num_layer=model.num_layers)
-        global_expert_load = EplbPolicy.convert_format(old_placement, load_info)
         changed, priority, new_map = self.policy.rebalance_experts(
-            old_global_expert_indices,
-            global_expert_load,
-            num_replicas,
-            num_groups,
-            num_nodes,
-            num_npus)
+            old_placement, load_info)
         return changed, priority, new_map
 
     def get_init_expert_maps(self):
@@ -400,9 +387,6 @@ class EplbWorker:
 class EplbProcess:
 
     def __init__(self,
-                 shared_dict,
-                 planner_q,
-                 block_update_q,
                  policy_type: int = 0,
                  enable_d2d: bool = True):
         """
@@ -411,11 +395,16 @@ class EplbProcess:
             policy_type: Integer passed to PolicyFactory.generate_policy
             enable_d2d: Whether to enable D2D loading
         """
-        self.shared_dict = shared_dict
+        self.manager = Manager()
+        self.shared_dict = self.manager.dict({
+            "expert_map": None,
+            "moe_load": None,
+            "expert_maps": None
+        })
         self.policy_type = policy_type
         self.enable_d2d = enable_d2d
-        self.planner_q = planner_q
-        self.block_update_q = block_update_q
+        self.planner_q = Queue()
+        self.block_update_q = Queue(maxsize=1)
 
         # Create EplbWorker instance
         self.worker = EplbWorker(self.shared_dict, self.policy_type,
