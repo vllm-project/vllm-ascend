@@ -581,7 +581,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _sync_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
-        if self.dp_size == 1 or self.vllm_config.model_config.enforce_eager:
+        if self.dp_size == 1:
             return num_tokens, None, with_prefill, enable_dbo
 
         # Sync num_tokens, with_prefill, enable_dbo across dp ranks
