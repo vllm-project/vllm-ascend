@@ -413,23 +413,14 @@ class SendingLayerThread(threading.Thread):
         remote_kv_base_addrs = req_meta.kv_caches_base_addr
 
         remote_block_ids = req_meta.block_ids
-        if not self.use_mla:
-            layer_local_kv_base_addr = [
-                self.local_kv_base_addr[i]
-                for i in [layer_index, layer_index + self.total_layers]
-            ]
-            layer_remote_kv_base_addr = [
-                remote_kv_base_addrs[i]
-                for i in [layer_index, layer_index + self.total_layers]
-            ]
-        else:
-            layer_local_kv_base_addr = [
-                self.local_kv_base_addr[i] for i in [layer_index]
-            ]
-            layer_remote_kv_base_addr = [
-                remote_kv_base_addrs[i] for i in [layer_index]
-            ]
-
+        layer_local_kv_base_addr = [
+            self.local_kv_base_addr[i]
+            for i in [2 * layer_index, 2 * layer_index + 1]
+        ]
+        layer_remote_kv_base_addr = [
+            remote_kv_base_addrs[i]
+            for i in [2 * layer_index, 2 * layer_index + 1]
+        ]
         grouped_remote_block_ids, grouped_local_block_ids = \
             group_concurrent_contiguous(remote_block_ids, local_block_ids)
 
@@ -886,9 +877,6 @@ class MooncakeConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
         self.layer_wise = layer_wise
-        if self.layer_wise and vllm_config.scheduler_config.chunked_prefill_enabled:
-            logger.warning("Layer-wise KV transfer does not support chunked prefill. Disable it now.")
-            vllm_config.scheduler_config.chunked_prefill_enabled = False
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
@@ -906,7 +894,7 @@ class MooncakeConnectorScheduler:
         # the scheduler. Used to make metadata passed to Worker.
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
         self._reqs_need_send: dict[str, float] = {}
-        self._reqs_need_send_layerwise: dict[str, tuple[str, list[int]]] = {}
+        self._reqs_need_send_layerwise: dict[str, tuple[str, int, list[int]]] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -937,7 +925,7 @@ class MooncakeConnectorScheduler:
                                              "prefill with num_computed_tokens == 0."
             # Assume that the request's KV cache is already fully prefilled and
             # can be fetched entirely from the prefill node.
-            count = len(request.prompt_token_ids)
+            count = len(request.prompt_token_ids) - 1
             if count > 0:
                 return count, True
 
@@ -977,7 +965,7 @@ class MooncakeConnectorScheduler:
                 "do_remote_decode"):
             local_block_ids = (blocks.get_block_ids()[0])
             self._reqs_need_send_layerwise[request.request_id] = (
-                params["metaserver"], local_block_ids)
+                params["metaserver"], len(request.all_token_ids), local_block_ids)
 
     def build_connector_meta(
         self,
@@ -1000,15 +988,28 @@ class MooncakeConnectorScheduler:
         # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
 
-        for request_id, (
-                metaserver,
-                local_block_ids) in self._reqs_need_send_layerwise.items():
-            meta.add_new_req(request_id=request_id,
-                             local_block_ids=local_block_ids,
-                             kv_transfer_params=defaultdict(lambda: None),
-                             metaserver=metaserver)
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        new_reqs = scheduler_output.scheduled_new_reqs
+        for req_id, new_blocks in zip(cached_reqs.req_ids, cached_reqs.new_block_ids):
+            if req_id in self._reqs_need_send_layerwise:
+                metaserver, total_tokens, block_ids = self._reqs_need_send_layerwise[req_id]
+                block_ids.extend(new_blocks)
 
-        self._reqs_need_send_layerwise.clear()
+        computed_tokens = dict(list(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens)) + 
+                               [(x.req_id, x.num_computed_tokens) for x in new_reqs])
+        for req_id, scheduled_tokens in scheduler_output.num_scheduled_tokens.items():
+            if req_id in self._reqs_need_send_layerwise:
+                metaserver, total_tokens, block_ids = self._reqs_need_send_layerwise[req_id]
+                current_tokens = computed_tokens.get(req_id, 0) + scheduled_tokens
+                if current_tokens == total_tokens:
+                    meta.add_new_req(
+                        request_id=req_id,
+                        local_block_ids=block_ids,
+                        kv_transfer_params=defaultdict(lambda: None),
+                        metaserver=metaserver)
+                    self._reqs_need_send_layerwise.pop(req_id)
+                
+
         meta.requests_to_send = self._reqs_need_send
         self._reqs_need_send = {}
 
@@ -1139,7 +1140,7 @@ class MooncakeConnectorWorker:
         assert len(device_ids) > self.tp_rank  # type: ignore
         self.device_id = device_ids[self.tp_rank]  # type: ignore
 
-        if self.soc_info == AscendSocVersion.A3:
+        if vllm_config.kv_transfer_config.get_from_extra_config('use_ascend_direct', False):
             self._initialize(hostname=self.side_channel_host, device_name=None)
         else:
             self._initialize(
