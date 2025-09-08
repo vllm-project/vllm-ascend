@@ -226,7 +226,8 @@ class AscendMLAMetadataBuilder:
             mask_value = torch.finfo(torch.float32).min
         else:
             mask_value = 1
-        self.prefill_mask = torch.where(prefill_attn_mask==1, mask_value, 0).to(self.model_config.dtype)
+        self.prefill_mask = torch.where(prefill_attn_mask == 1, mask_value,
+                                        0).to(self.model_config.dtype)
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
