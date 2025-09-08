@@ -37,7 +37,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
-
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -84,11 +84,6 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
-from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
-from vllm_ascend.eplb.core.eplb_worker import EplbProcess
-from vllm_ascend.eplb.eplb_updator import EplbUpdator
-from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
@@ -366,13 +361,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             dtype=torch.bool,
             device=self.device,
         )
-        self.dynamic_eplb = ascend_config.dynamic_eplb
-        if self.dynamic_eplb:
-            self.is_eplb_warmuped = False
-            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
-            self.eplb_loader = D2DExpertWeightLoader(eplb_adaptor=self.eplb_adaptor)
-            self.eplb_process = EplbProcess(policy_type=1, enable_d2d=True)
-            self.eplb_updator = EplbUpdator(ascend_config, self.eplb_adaptor, self.eplb_loader, self.eplb_process)
 
     def _use_aclgraph(self) -> bool:
         return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.level == CompilationLevel.PIECEWISE and not self.model_config.enforce_eager
@@ -1195,6 +1183,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
+        if get_forward_context().flashcomm_v1_enabled:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            pad_size = get_forward_context().pad_size
+            if pad_size > 0:
+                hidden_states = hidden_states[:-pad_size, :]
         return hidden_states
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
@@ -1544,19 +1537,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # Return empty ModelRunnerOuptut if there's no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output)
-
-            if self.dynamic_eplb:
-                self.eplb_updator.forward_before()
-
             (attn_metadata, positions, num_scheduled_tokens_np,
              num_input_tokens, num_tokens_across_dp, maybe_padded_num_tokens,
              logits_indices, spec_decode_metadata, input_ids, inputs_embeds,
              intermediate_tensors) = (self._prepare_inputs(
                  scheduler_output, intermediate_tensors))
-
-            if self.dynamic_eplb:
-                self.eplb_updator.take_update_info_from_eplb_process()
-
 
         moe_comm_method = self._select_moe_comm_method(num_input_tokens)
 
@@ -1805,8 +1790,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             captured_name = "Decode" if self.attn_state == AscendAttentionState.DecodeOnly else "Prefill"
             logger.info("Profile execute duration [%s]:%s", captured_name,
                         " ".join(dr_str))
-        if self.dynamic_eplb:
-            self.eplb_updator.forward_end()
 
         return model_runner_output
 
@@ -1963,9 +1946,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                        num_reqs,
                                                        skip_attn=True)
 
-        if not is_torchair_compile and not self.in_profile_run and self.dynamic_eplb:
-            self.eplb_updator.forward_before()
-
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             if self.is_multimodal_model:
@@ -2046,11 +2026,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens_across_dp=num_tokens_across_dp)
                 if need_dummy_logits:
                     dummy_compute_logits(hidden_states)
-            if self.in_profile_run and self.dynamic_eplb:
-                self.model.clear_all_moe_loads()
-            if not is_torchair_compile and not self.in_profile_run and self.dynamic_eplb:
-                self.eplb_updator.take_update_info_from_eplb_process()
-                self.eplb_updator.forward_end()
             return hidden_states
 
     @contextmanager
@@ -2182,18 +2157,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
-    def eplb_warmup(self):
-        if self.dynamic_eplb and not self.is_eplb_warmuped:
-            self.is_eplb_warmuped = True
-            self.eplb_updator.warm_up_eplb()
-
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
-            if self.dynamic_eplb:
-                model_register(self.model, self.model_config)
 
             if is_310p():
                 from vllm.model_executor.layers.linear import (
