@@ -1,9 +1,10 @@
 from pytest_mock import MockerFixture
-from vllm.config import VllmConfig, SchedulerConfig
+from vllm.config import SchedulerConfig, VllmConfig
 from vllm.v1.sample.logits_processor import MinPLogitsProcessor
 
 from tests.ut.base import PytestBase
-from vllm_ascend.ops.min_p_logits_processor import min_p_logits_processor_init_func
+from vllm_ascend.ops.min_p_logits_processor import \
+    min_p_logits_processor_init_func
 
 
 class TestMinPLogitsProcessorInitFunc(PytestBase):
