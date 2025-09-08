@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
+# Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py 
 #
 
 import copy
