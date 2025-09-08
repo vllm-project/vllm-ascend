@@ -117,8 +117,10 @@ class EagleProposer(Proposer):
                   skip_attn: bool = False,
                   num_reqs: int = 0,
                   num_tokens_across_dp: Optional[torch.Tensor] = None):
+        moe_comm_method = self.runner._select_moe_comm_method(num_tokens)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
+                                        moe_comm_method=moe_comm_method,
                                         num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
@@ -445,12 +447,16 @@ class EagleProposer(Proposer):
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
         else:
             num_input_tokens = num_tokens
+
+        moe_comm_method = self.runner._select_moe_comm_method(num_input_tokens)
+
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
         attn_metadata.block_tables = block_table.to(device)
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
+                                        moe_comm_method=moe_comm_method,
                                         num_tokens=num_input_tokens):
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
@@ -481,6 +487,9 @@ class EagleProposer(Proposer):
             input_batch_size = self.vllm_config.pad_for_cudagraph(batch_size)
         else:
             input_batch_size = batch_size
+
+        moe_comm_method = self.runner._select_moe_comm_method(input_batch_size)
+
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
@@ -551,6 +560,7 @@ class EagleProposer(Proposer):
             # Run the model.
             with set_ascend_forward_context(attn_metadata,
                                             self.vllm_config,
+                                            moe_comm_method=moe_comm_method,
                                             num_tokens=input_batch_size):
 
                 last_hidden_states, hidden_states = self.model(
