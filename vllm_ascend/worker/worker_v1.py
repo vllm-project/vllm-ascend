@@ -224,6 +224,8 @@ class NPUWorker(WorkerBase):
         if (not kv_connector_output.finished_sending
                 and not kv_connector_output.finished_recving):
             return EMPTY_MODEL_RUNNER_OUTPUT
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.kv_connector_output = kv_connector_output
         return output
 
     def load_model(self) -> None:
