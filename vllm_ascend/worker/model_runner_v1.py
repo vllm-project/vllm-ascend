@@ -37,6 +37,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -1182,6 +1183,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
+        if get_forward_context().flashcomm_v1_enabled:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            pad_size = get_forward_context().pad_size
+            if pad_size > 0:
+                hidden_states = hidden_states[:-pad_size, :]
         return hidden_states
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
