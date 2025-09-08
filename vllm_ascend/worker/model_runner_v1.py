@@ -581,7 +581,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _sync_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
-        if self.dp_size == 1 or self.vllm_config.model_config.enforce_eager:
+        # TODO: In vLLM, the only thing that needs to be synced is num_tokens, but in
+        # our case, we still need to sync the other two flags as well. So we need to
+        # include them in the all_reduce operation, and more over, we CANNOT skip it
+        # even if we are running in eager mode, which harms performance.
+        # FIXME: Restore the `or self.vllm_config.model_config.enforce_eager` here
+        # immediately once the other two flags are no longer needed.
+        if self.dp_size == 1:
             return num_tokens, None, with_prefill, enable_dbo
 
         # Sync num_tokens, with_prefill, enable_dbo across dp ranks
