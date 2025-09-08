@@ -26,6 +26,9 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group,
+                                          is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -35,6 +38,37 @@ from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d, nd_to_nz_spec)
 from vllm_ascend.worker.npu_input_batch import InputBatch
+
+
+def wait_for_kv_layer_from_connector(layer_name: str):
+    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+        return
+
+    connector = get_kv_transfer_group()
+
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if attn_metadata is None:
+        return
+    # TODO: assert ascendMetadata
+    connector.wait_for_layer_load(layer_name)
+
+
+def maybe_save_kv_layer_to_connector(
+    layer_name: str,
+    kv_cache_layer: List[torch.Tensor],
+):
+    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+        return
+
+    connector = get_kv_transfer_group()
+
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if attn_metadata is None:
+        return
+    # TODO: assert ascendMetadata
+    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
 class AscendAttentionBackend(AttentionBackend):
@@ -265,20 +299,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
 
-    def _repeat_kv(self, hidden_states: torch.Tensor,
-                   n_rep: int) -> torch.Tensor:
-        """
-        This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
-        num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
-        """
-        num_key_value_heads, slen, head_dim = hidden_states.shape
-        if n_rep == 1:
-            return hidden_states
-        hidden_states = hidden_states[:, None, :, :].expand(
-            num_key_value_heads, n_rep, slen, head_dim)
-        return hidden_states.reshape(num_key_value_heads * n_rep, slen,
-                                     head_dim)
-
     def _forward_prefill_no_cache(
         self,
         query: torch.Tensor,
@@ -304,34 +324,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
 
-        if self.sliding_window is not None and \
-            attn_metadata.attn_mask.shape[0] > self.sliding_window:
-
-            key = self._repeat_kv(key, self.num_heads // self.num_kv_heads)
-            value = self._repeat_kv(value, self.num_heads // self.num_kv_heads)
-
-            output, _ = torch_npu.npu_fused_infer_attention_score(
-                query,
-                key,
-                value,
-                num_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                input_layout="TND",
-                pre_tokens=self.sliding_window,
-                scale=self.scale,
-                actual_seq_lengths=attn_metadata.seq_lens,
-                actual_seq_lengths_kv=attn_metadata.seq_lens)
-            output = output.view(num_tokens, self.num_heads, self.head_size)
-        else:
-            torch_npu._npu_flash_attention(query=query,
-                                           key=key,
-                                           value=value,
-                                           mask=mask,
-                                           seq_len=attn_metadata.seq_lens,
-                                           scale_value=self.scale,
-                                           num_heads=self.num_heads,
-                                           num_kv_heads=self.num_kv_heads,
-                                           out=output)
+        torch_npu._npu_flash_attention(query=query,
+                                       key=key,
+                                       value=value,
+                                       mask=mask,
+                                       seq_len=attn_metadata.seq_lens,
+                                       scale_value=self.scale,
+                                       num_heads=self.num_heads,
+                                       num_kv_heads=self.num_kv_heads,
+                                       out=output)
         assert output is not None
         return output[:num_tokens, :, :]
 
@@ -570,6 +571,7 @@ def unified_ascend_attention_with_output(
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
+    wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.no_compile_layers[layer_name]
@@ -582,6 +584,7 @@ def unified_ascend_attention_with_output(
                       attn_metadata,
                       output,
                       trace_flag=False)
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return
 
 

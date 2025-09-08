@@ -491,9 +491,9 @@ def register_ascend_customop():
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
-                                        AscendMlpMergedColumnParallelLinear,
-                                        AscendMlpRowParallelLinear)
+    from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
+                                        AscendMergedColumnParallelLinear,
+                                        AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
@@ -504,6 +504,12 @@ def register_ascend_customop():
                           name="SiluAndMul")
     CustomOp.register_oot(_decorated_op_cls=AscendRotaryEmbedding,
                           name="RotaryEmbedding")
+    CustomOp.register_oot(_decorated_op_cls=AscendColumnParallelLinear,
+                          name="ColumnParallelLinear")
+    CustomOp.register_oot(_decorated_op_cls=AscendRowParallelLinear,
+                          name="RowParallelLinear")
+    CustomOp.register_oot(_decorated_op_cls=AscendMergedColumnParallelLinear,
+                          name="MergedColumnParallelLinear")
     CustomOp.register_oot(
         _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
         name="DeepseekScalingRotaryEmbedding")
@@ -513,14 +519,6 @@ def register_ascend_customop():
                           name="ParallelLMHead")
     CustomOp.register_oot(_decorated_op_cls=AscendLogitsProcessor,
                           name="LogitsProcessor")
-    if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
-                              name="ColumnParallelLinear")
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpRowParallelLinear,
-                              name="RowParallelLinear")
-        CustomOp.register_oot(
-            _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
-            name="MergedColumnParallelLinear")
 
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
@@ -562,3 +560,15 @@ def get_ascend_soc_version():
 
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().lmhead_tensor_parallel_size is not None
+
+
+def oproj_tp_enable() -> bool:
+    return get_ascend_config().oproj_tensor_parallel_size is not None
+
+
+def mlp_tp_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE
+
+
+def matmul_allreduce_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
