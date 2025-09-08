@@ -99,7 +99,6 @@ def test_ngram_correctness(
     assert matches > int(0.7 * len(ref_outputs))
 
 
-@pytest.mark.skipif(True, reason="oom in CI, fix me")
 @pytest.mark.parametrize("use_eagle3", [False, True], ids=["eagle", "eagle3"])
 def test_eagle_correctness(
     test_prompts: list[list[dict[str, Any]]],
@@ -121,10 +120,8 @@ def test_eagle_correctness(
     spec_model_name = eagle3_model_name() if use_eagle3 else eagle_model_name()
     with VllmRunner(
             model_name,
-            trust_remote_code=True,
             enable_chunked_prefill=True,
             max_num_seqs=1,
-            max_num_batched_tokens=2048,
             gpu_memory_utilization=0.6,
             speculative_config={
                 "method": "eagle3" if use_eagle3 else "eagle",

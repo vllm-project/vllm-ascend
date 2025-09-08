@@ -136,8 +136,6 @@ class EagleProposer(Proposer):
                            hidden_states: torch.Tensor = None,
                            attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None):
-        if self.name == SpecDcodeType.EAGLE:
-            raise NotImplementedError("Eagle Is Not Supported Yet.")
 
         attn_metadata = self._get_eagle_atten_dict(scheduler_output)
         next_token_ids: list[int] = []
@@ -485,9 +483,6 @@ class EagleProposer(Proposer):
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
 
-        if self.vllm_config.speculative_config.num_speculative_tokens > 2:
-            raise ValueError("Speculative tokens > 2 are not supported yet.")
-
         attn_metadata.attn_state = AscendAttentionState.ChunkedPrefill
         for now_speculative in range(
                 self.vllm_config.speculative_config.num_speculative_tokens -
@@ -541,9 +536,8 @@ class EagleProposer(Proposer):
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
-            positions = positions_cpu.to(device)
             attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
-                attn_metadata.seq_lens, positions,
+                attn_metadata.seq_lens, positions_cpu,
                 self.vllm_config.model_config.dtype, self.device)
 
             attn_metadata.attn_mask = attn_mask
