@@ -685,7 +685,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                            self.ring_mla_mask_size,
                            device=q_nope.device,
                            dtype=q_nope.dtype), 1)
-            self.prefill_mask = torch.where(prefill_mask==1, mask_value, 
+            self.prefill_mask = torch.where(prefill_mask == 1, mask_value, 
                                             0).to(q_nope.dtype)
         torch_npu.atb.npu_ring_mla(q_nope=q_nope,
                                    q_rope=q_pe,
