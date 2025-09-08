@@ -220,8 +220,7 @@ class AscendMLAMetadataBuilder:
             torch.ones(512,
                        512,
                        device=self.device,
-                       dtype=self.model_config.dtype),
-            1)
+                       dtype=self.model_config.dtype), 1)
         if self.model_config.dtype == torch.float16:
             mask_value = torch.finfo(torch.float32).min
         else:
