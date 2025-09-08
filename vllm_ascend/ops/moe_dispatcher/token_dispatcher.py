@@ -742,20 +742,9 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                 raise ValueError(
                     "num_global_tokens_per_local_expert must be set before operations."
                 )
-            # 使用安全的方式避免Ascend NPU上的分布式通信问题
-            try:
-                self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
-                    self.expert_ids_per_ep_rank,
-                    self.num_global_tokens_per_local_expert.ravel())
-            except RuntimeError as e:
-                if "HcclAllreduce" in str(e):
-                    # 在Ascend NPU上出现分布式通信错误时的回退方案
-                    # 使用本地计算替代分布式操作
-                    expert_ids_flat = self.expert_ids_per_ep_rank.repeat_interleave(
-                        self.num_global_tokens_per_local_expert.ravel().cpu()).to(self.expert_ids_per_ep_rank.device)
-                    self.global_input_tokens_local_experts_indices = expert_ids_flat
-                else:
-                    raise e
+            self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
+                self.expert_ids_per_ep_rank,
+                self.num_global_tokens_per_local_expert.ravel())
 
         return num_tokens_per_local_expert
 
