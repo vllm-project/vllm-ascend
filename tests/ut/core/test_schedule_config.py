@@ -171,8 +171,10 @@ class TestAscendSchedulerConfig(TestBase):
             self.basic_scheduler_config,
             AscendSchedulerConfig(
                 enable_pd_transfer=True,
+                decode_max_num_seqs=48,
                 max_num_batched_tokens=4096,
                 max_model_len=4096,
             ),
         )
         self.assertEqual(ascend_config.enable_pd_transfer, True)
+        self.assertEqual(ascend_config.decode_max_num_seqs, 48)
