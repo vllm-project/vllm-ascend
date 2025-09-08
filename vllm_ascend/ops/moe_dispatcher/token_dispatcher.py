@@ -742,40 +742,22 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                 raise ValueError(
                     "num_global_tokens_per_local_expert must be set before operations."
                 )
-            # 添加异常处理来解决HcclAllreduce错误
+            # 使用安全的方式避免Ascend NPU上的分布式通信问题
             try:
                 self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
                     self.expert_ids_per_ep_rank,
                     self.num_global_tokens_per_local_expert.ravel())
             except RuntimeError as e:
-                # 检查是否是Hccl相关的错误
-                if "HcclAllreduce" in str(e) or "c10::HcclError" in str(e):
-                    # 使用本地计算作为回退方案
-                    self.global_input_tokens_local_experts_indices = self._local_repeat_interleave(
-                        self.expert_ids_per_ep_rank,
-                        self.num_global_tokens_per_local_expert.ravel())
+                if "HcclAllreduce" in str(e):
+                    # 在Ascend NPU上出现分布式通信错误时的回退方案
+                    # 使用本地计算替代分布式操作
+                    expert_ids_flat = self.expert_ids_per_ep_rank.repeat_interleave(
+                        self.num_global_tokens_per_local_expert.ravel().cpu()).to(self.expert_ids_per_ep_rank.device)
+                    self.global_input_tokens_local_experts_indices = expert_ids_flat
                 else:
-                    # 如果不是Hccl错误，重新抛出异常
                     raise e
 
         return num_tokens_per_local_expert
-
-    def _local_repeat_interleave(self, expert_ids, repeats):
-        """
-        本地实现的repeat_interleave功能，避免分布式通信错误
-        """
-        # 将repeats转换为CPU上的numpy数组以避免分布式操作
-        repeats_cpu = repeats.cpu()
-        result = []
-        for i, repeat_count in enumerate(repeats_cpu):
-            # 使用本地的repeat操作替代torch.repeat_interleave
-            repeated = expert_ids[i].repeat(repeat_count)
-            result.append(repeated)
-        # 使用torch.cat连接所有重复的张量
-        if result:
-            return torch.cat(result, dim=0).to(expert_ids.device)
-        else:
-            return torch.empty(0, dtype=expert_ids.dtype, device=expert_ids.device)
 
     def _dispatch_postprocess(self, global_input_tokens, dynamic_scale=None):
         # Early return if no local experts or no tokens
