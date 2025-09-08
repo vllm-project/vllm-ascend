@@ -1,5 +1,6 @@
-#
+# Copyright (c) 2024; NVIDIA CORPORATION. All rights reserved.
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
 # This file is a part of the vllm-ascend project.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
