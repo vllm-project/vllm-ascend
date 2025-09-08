@@ -869,7 +869,6 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                 [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
         # Here is only 2 possibility of input, ChunkedPrefill or PrefillNoCache
-        ascend_config = get_ascend_config()
         q_pe = query[..., self.qk_nope_head_dim:]
         q_nope = query[..., :self.qk_nope_head_dim]
         mask = torch.triu(
