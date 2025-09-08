@@ -39,7 +39,7 @@ class TestMinPLogitsProcessorInitFunc(PytestBase):
                                          mock_vllm_config, "npu:0", True)
 
         assert mock_min_p_logits_processor.min_p_cpu.shape[0] == 256
-        assert mock_min_p_logits_processor.use_double_tensor == True
+        assert mock_min_p_logits_processor.use_double_tensor is True
 
     def test_init_func_with_decode_max_num_seqs_and_cpu(
             self, mocker: MockerFixture):
@@ -58,4 +58,4 @@ class TestMinPLogitsProcessorInitFunc(PytestBase):
         min_p_logits_processor_init_func(mock_min_p_logits_processor,
                                          mock_vllm_config, "cpu:0", True)
 
-        assert mock_min_p_logits_processor.use_double_tensor == False
+        assert mock_min_p_logits_processor.use_double_tensor is False
