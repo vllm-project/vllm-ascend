@@ -413,8 +413,6 @@ class AscendFusedMoE(FusedMoE):
             # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
             shared_hidden_states = shared_experts(hidden_states)
 
-        mc2_mask = forward_context.mc2_mask
-
         enable_sp = _metadata_for_padding is not None and _metadata_for_padding.not_dummy_and_is_prefill
         tp_size = get_tensor_model_parallel_world_size()
         if enable_sp:
