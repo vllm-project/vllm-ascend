@@ -293,6 +293,7 @@ class AscendFusedMoE(FusedMoE):
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
+        self.dynamic_eplb = ascend_config.dynamic_eplb
         if expert_map_path and os.path.exists(expert_map_path):
             # moe expert load balance
             expert_load_balancer = ExpertLoadBalancer(expert_map_path,
@@ -311,6 +312,12 @@ class AscendFusedMoE(FusedMoE):
             self.local_num_experts, self.expert_map = determine_expert_map(
                 self.ep_size,
                 get_ep_group().rank_in_group, self.global_num_experts)
+            if self.dynamic_eplb:
+                from vllm_ascend.eplb.core.eplb_utils import \
+                    determine_default_log2phy_map
+                self.log2phy = determine_default_log2phy_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank
+                )
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
@@ -338,6 +345,11 @@ class AscendFusedMoE(FusedMoE):
 
         local_num_experts = torch.sum(self.expert_map != -1) \
             if self.expert_map is not None else num_experts
+
+        self.moe_load = None
+
+        if self.dynamic_eplb:
+            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
 
         moe_quant_params = {
             "num_experts": local_num_experts,
@@ -511,8 +523,12 @@ class AscendFusedMoE(FusedMoE):
         )
 
         if shared_experts:
-            if isinstance(e_hidden_states, tuple):
+            if isinstance(e_hidden_states, tuple) and len(e_hidden_states) == 2:
                 e_hidden_states, shared_hidden_states = e_hidden_states
+
+        if self.dynamic_eplb and isinstance(e_hidden_states, tuple) and len(e_hidden_states) == 3:
+            self.moe_load += e_hidden_states[2] if e_hidden_states[1] == 0 else \
+                torch.cat(e_hidden_states[2][:1], e_hidden_states[2][1:] - e_hidden_states[2][:-1])
 
         if (fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,

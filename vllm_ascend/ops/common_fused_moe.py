@@ -137,7 +137,7 @@ def fused_experts(
 
     moe_comm_method.unpermute(down_output, hidden_states)
 
-    return hidden_states
+    return hidden_states, group_list_type, expert_tokens
 
 
 def fused_experts_moge(
