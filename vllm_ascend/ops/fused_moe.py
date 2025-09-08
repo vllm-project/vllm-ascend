@@ -80,13 +80,14 @@ def zero_experts_compute_npu(expert_indices, expert_scales, num_experts, zero_ex
     if zero_expert_type == "identity":
         zero_expert_mask = expert_indices < num_experts
         zero_expert_scales = expert_scales.clone()
-        zero_expert_scales[zero_expert_mask] = 0.0
+        # 使用masked_fill避免分布式环境下的索引赋值问题
+        zero_expert_scales = zero_expert_scales.masked_fill(zero_expert_mask, 0.0)
     else:
         zero_expert_scales = expert_scales
 
     normal_expert_mask = expert_indices >= num_experts
-    expert_indices[normal_expert_mask] = 0
-    expert_scales[normal_expert_mask] = 0.0
+    expert_indices = expert_indices.masked_fill(normal_expert_mask, 0)
+    expert_scales = expert_scales.masked_fill(normal_expert_mask, 0.0)
     
     output = torch.zeros_like(hidden_states).to(hidden_states.device)
     hidden_dim = hidden_states.size(-1)
@@ -99,7 +100,7 @@ def zero_experts_compute_npu(expert_indices, expert_scales, num_experts, zero_ex
         zero_expert_scales,
         output,
         hidden_dim,
-        zero_expert_scales.stride(0)
+        zero_expert_scales.stride(0) if zero_expert_scales.stride(0) > 0 else 1
     )
     
     return output
