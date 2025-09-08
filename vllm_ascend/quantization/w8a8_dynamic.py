@@ -27,10 +27,8 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.common_fused_moe import \
-    fused_experts as unified_fused_experts
 from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
-from vllm_ascend.ops.layers.experts_selector import select_experts
+from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
 
@@ -221,12 +219,14 @@ class AscendW8A8DynamicFusedMoEMethod:
             global_num_experts=global_num_experts)
 
         if self.use_aclgraph:
-            return unified_fused_experts(
+            moe_comm_method = get_forward_context().moe_comm_method
+            return moe_comm_method.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                row_idx=row_idx,
                 use_int8_w8a8=True,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,

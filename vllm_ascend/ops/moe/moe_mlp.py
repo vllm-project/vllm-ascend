@@ -176,14 +176,18 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     return hidden_states
 
 
-def unquant_apply_mlp(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        group_list: torch.Tensor,
-        group_list_type: int = 1,
-        topk_scales: Optional[torch.Tensor] = None) -> torch.Tensor:
-    w1 = w1.transpose(1, 2)
+def unquant_apply_mlp(hidden_states: torch.Tensor,
+                      w1: torch.Tensor,
+                      w2: torch.Tensor,
+                      group_list: torch.Tensor,
+                      group_list_type: int = 1,
+                      topk_scales: Optional[torch.Tensor] = None,
+                      need_trans: bool = True) -> torch.Tensor:
+
+    if need_trans:
+        w1 = w1.transpose(1, 2)
+        w2 = w2.transpose(1, 2)
+
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],
@@ -201,7 +205,6 @@ def unquant_apply_mlp(
     if topk_scales is not None:
         gate_up_out *= topk_scales
 
-    w2 = w2.transpose(1, 2)
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[gate_up_out],
         weight=[w2],
@@ -225,7 +228,8 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                       w2_scale_bias: torch.Tensor = None,
                       topk_scales: Optional[torch.Tensor] = None,
                       with_quant: bool = False,
-                      fusion: bool = False) -> torch.Tensor:
+                      fusion: bool = False,
+                      need_trans: bool = True) -> torch.Tensor:
     if with_quant:
         return quant_apply_mlp(hidden_states=hidden_states,
                                w1=w1,
@@ -244,4 +248,5 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                                  w2=w2,
                                  group_list=group_list,
                                  group_list_type=group_list_type,
-                                 topk_scales=topk_scales)
+                                 topk_scales=topk_scales,
+                                 need_trans=need_trans)
