@@ -1,3 +1,4 @@
+import torch
 from pytest_mock import MockerFixture
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.v1.sample.logits_processor import MinPLogitsProcessor
