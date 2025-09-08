@@ -886,6 +886,9 @@ class MooncakeConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
         self.layer_wise = layer_wise
+        if self.layer_wise and vllm_config.scheduler_config.chunked_prefill_enabled:
+            logger.warning("Layer-wise KV transfer does not support chunked prefill. Disable it now.")
+            vllm_config.scheduler_config.chunked_prefill_enabled = False
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
@@ -934,7 +937,7 @@ class MooncakeConnectorScheduler:
                                              "prefill with num_computed_tokens == 0."
             # Assume that the request's KV cache is already fully prefilled and
             # can be fetched entirely from the prefill node.
-            count = max(len(request.prompt_token_ids) - 1, 0)
+            count = len(request.prompt_token_ids)
             if count > 0:
                 return count, True
 
