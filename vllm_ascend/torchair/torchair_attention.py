@@ -300,11 +300,12 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AscendTorchairMetadata,
+        attn_metadata: "AscendMetadata",
         output: Optional[torch.Tensor],
         trace_flag: bool,
         num_tokens: int,
     ) -> "ForwardAdditionalProcessResult":
+        assert output is not None
         output = output.view(-1, self.num_heads, self.head_size)
 
         if kv_cache is not None and kv_cache[0].numel() > 0:
@@ -331,7 +332,7 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        attn_metadata: AscendMetadata,
+        attn_metadata: "AscendMetadata",
         output: Optional[torch.Tensor] = None,
         num_tokens=0,
         **kwargs,
@@ -366,13 +367,14 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
                                        num_heads=self.num_heads,
                                        num_kv_heads=self.num_kv_heads,
                                        out=output)
+        assert output is not None
         output = output[:num_tokens, :, :]
         return output
 
     def _forward_prefill_cache_hit(
         self,
         query: torch.Tensor,
-        attn_metadata: AscendMetadata,
+        attn_metadata: "AscendMetadata",
         output: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -400,7 +402,7 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
     def _forward_decode_only(
         self,
         query: torch.Tensor,
-        attn_metadata: AscendMetadata,
+        attn_metadata: "AscendMetadata",
         output: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -433,7 +435,7 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
     def _forward_v1_style(
         self,
         query: torch.Tensor,
-        attn_metadata: AscendMetadata,
+        attn_metadata: "AscendMetadata",
         output: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:

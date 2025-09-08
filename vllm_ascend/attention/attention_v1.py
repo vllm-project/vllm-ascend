@@ -322,6 +322,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         trace_flag: bool,
         num_tokens: int,
     ) -> "ForwardAdditionalProcessResult":
+        assert output is not None
+
         if trace_flag:
             torch.ops.vllm.unified_ascend_attention_with_output(
                 query=query,
