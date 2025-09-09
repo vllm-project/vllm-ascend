@@ -4,13 +4,13 @@ from dataclasses import dataclass
 from typing import Optional
 
 import torch
-
-from vllm.config import CacheConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from torch import nn
 from vllm.attention import Attention, AttentionMetadata
+from vllm.config import CacheConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mla import MultiHeadLatentAttention
-from vllm.model_executor.layers.mla import MLAModules 
+from vllm.model_executor.layers.quantization import QuantizationConfig
+
 
 @dataclass
 class AscendMLAModules:
@@ -23,9 +23,11 @@ class AscendMLAModules:
     kv_b_proj: torch.nn.Module
     o_proj: torch.nn.Module
     rotary_emb: torch.nn.Module
-    fused_qkv_a_proj: Optional[torch.nn.Module] = None  
-     
+    fused_qkv_a_proj: Optional[torch.nn.Module] = None
+
+
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
+
     def __init__(
         self,
         hidden_size: int,
@@ -47,36 +49,12 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        
-        super().__init__(
-            hidden_size=hidden_size,
-            num_heads=num_local_heads,
-            scale=scaling,
-            qk_nope_head_dim=qk_nope_head_dim,
-            qk_rope_head_dim=qk_rope_head_dim,
-            v_head_dim=v_head_dim,
-            q_lora_rank=q_lora_rank,
-            kv_lora_rank=kv_lora_rank,
-            mla_modules=MLAModules(
-                fused_qkv_a_proj=None,
-                kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
-                q_a_layernorm=mla_modules.q_a_layernorm,
-                q_b_proj=mla_modules.q_b_proj,
-                q_proj=mla_modules.q_proj,
-                kv_a_layernorm=mla_modules.kv_a_layernorm,
-                kv_b_proj=mla_modules.kv_b_proj,
-                rotary_emb=mla_modules.rotary_emb,
-                o_proj=mla_modules.o_proj,
-            ),
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
-        self.hidden_size = hidden_size,
-        self.enable_shared_expert_dp = enable_shared_expert_dp,
-        self.debug_layer_idx = debug_layer_idx,
-        self.first_k_dense_replace = first_k_dense_replace,
-        self.tp_size = tp_size,
+        nn.Module.__init__(self)
+        self.hidden_size = hidden_size
+        self.enable_shared_expert_dp = enable_shared_expert_dp
+        self.debug_layer_idx = debug_layer_idx
+        self.first_k_dense_replace = first_k_dense_replace
+        self.tp_size = tp_size
         self.num_local_heads = num_local_heads
         self.q_a_proj = mla_modules.q_a_proj
         self.q_a_layernorm = mla_modules.q_a_layernorm
@@ -94,7 +72,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
-        
+
         self.mla_attn = Attention(
             num_heads=self.num_local_heads,
             head_size=self.kv_lora_rank + self.qk_rope_head_dim,
@@ -114,14 +92,14 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
             rotary_emb=self.rotary_emb,
             q_a_proj=self.q_a_proj,
             q_a_layernorm=self.q_a_layernorm,
-            q_proj=self.q_b_proj,
+            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
             o_proj=self.o_proj,
         )
 
-    def forward_oot(
+    def forward(
             self,
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
@@ -144,7 +122,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
                 rows += 1
             output_shape = (rows, hidden_states.shape[1])
         output = torch.empty(output_shape,
-                             
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
         output = self.mla_attn.impl.forward(hidden_states, kv_cache,
