@@ -1330,52 +1330,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states, attn_metadata, aux_hidden_states)
         return draft_token_ids
 
-    def _pool_v010(
-        self,
-        hidden_states: torch.Tensor,
-        num_scheduled_tokens: int,
-        num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]] = None,
-        finished_recving: Optional[set[str]] = None,
-        kv_connector_output: Optional["KVConnectorOutput"] = None,
-    ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs ==\
-            len(self.input_batch.pooling_params), \
-        "Either all or none of the requests in" \
-        " a batch must be pooling request"
-
-        extracted_hidden_states = list(
-            torch.split(hidden_states[:num_scheduled_tokens],
-                        num_scheduled_tokens_np.tolist()))
-
-        pooling_metadata = self.input_batch.pooling_metadata
-
-        raw_pooler_output = self.model.pooler(
-            hidden_states=extracted_hidden_states,
-            pooling_metadata=pooling_metadata)
-
-        pooler_output: list[Optional[torch.Tensor]] = []
-        seq_lens = self.seq_lens[:self.input_batch.num_reqs]
-        for raw_output, seq_len, prompt_len in zip(
-                raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
-
-            if seq_len == prompt_len:
-                pooler_output.append(raw_output.data.cpu())
-            else:
-                pooler_output.append(None)
-        extra_args = ({"kv_connector_output": kv_connector_output})
-        modelrunner_output = ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=[],
-            spec_token_ids=None,
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=pooler_output,
-            **extra_args,
-        )
-        return modelrunner_output
-
     def _pool(
         self,
         hidden_states: torch.Tensor,
