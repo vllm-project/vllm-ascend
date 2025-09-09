@@ -20,9 +20,10 @@ def model_name():
     return "wemaster/deepseek_mtp_main_random_bf16"
 
 
-def test_mtp_correctness(
+def mtp_correctness(
     sampling_config: SamplingParams,
     model_name: str,
+    num_speculative_tokens: int,
 ):
     example_prompts = [
         "Hello, my name is",
@@ -50,7 +51,7 @@ def test_mtp_correctness(
             enable_expert_parallel=True,
             speculative_config={
                 "method": "deepseek_mtp",
-                "num_speculative_tokens": 1,
+                "num_speculative_tokens": num_speculative_tokens,
             },
             enforce_eager=True,
             max_model_len=2000,
@@ -74,3 +75,18 @@ def test_mtp_correctness(
     # Heuristic: expect at least 66% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
+    del spec_llm
+
+
+def test_mtp1_correctness(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 1)
+
+
+def test_mtp2_correctness(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 2)

@@ -359,3 +359,27 @@ class TestAscendConfig(TestBase):
             test_vllm_config.parallel_config = ParallelConfig(
                 data_parallel_size=4, tensor_parallel_size=2)
             init_ascend_config(test_vllm_config)
+
+        with self.assertRaises(AssertionError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": True,
+                },
+                "oproj_tensor_parallel_size": 2,
+                "refresh": True
+            }
+            test_vllm_config.parallel_config = ParallelConfig(
+                data_parallel_size=4, tensor_parallel_size=2)
+            init_ascend_config(test_vllm_config)
+
+        with self.assertRaises(AssertionError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                },
+                "oproj_tensor_parallel_size": 2,
+                "refresh": True
+            }
+            test_vllm_config.parallel_config = ParallelConfig(
+                data_parallel_size=4, tensor_parallel_size=1)
+            init_ascend_config(test_vllm_config)
