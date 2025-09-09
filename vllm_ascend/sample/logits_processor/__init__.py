@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Union
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.sampel import logits_processor
+from vllm.v1.sample import logits_processor
 from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
                                                      MinTokensLogitsProcessor)
 from vllm.v1.sample.logits_processor.interface import LogitsProcessor
