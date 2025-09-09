@@ -56,15 +56,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
         self.first_k_dense_replace = first_k_dense_replace
         self.tp_size = tp_size
         self.num_local_heads = num_local_heads
-        self.q_a_proj = mla_modules.q_a_proj
-        self.q_a_layernorm = mla_modules.q_a_layernorm
-        self.q_b_proj = mla_modules.q_b_proj
-        self.q_proj = mla_modules.q_proj
-        self.kv_a_proj_with_mqa = mla_modules.kv_a_proj_with_mqa
-        self.kv_a_layernorm = mla_modules.kv_a_layernorm
-        self.kv_b_proj = mla_modules.kv_b_proj
-        self.o_proj = mla_modules.o_proj
-        self.rotary_emb = mla_modules.rotary_emb
         self.layers = layers
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
@@ -89,14 +80,15 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
             qk_rope_head_dim=self.qk_rope_head_dim,
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
-            rotary_emb=self.rotary_emb,
-            q_a_proj=self.q_a_proj,
-            q_a_layernorm=self.q_a_layernorm,
-            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
-            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-            kv_a_layernorm=self.kv_a_layernorm,
-            kv_b_proj=self.kv_b_proj,
-            o_proj=self.o_proj,
+            rotary_emb=mla_modules.rotary_emb,
+            q_a_proj=mla_modules.q_a_proj,
+            q_a_layernorm=mla_modules.q_a_layernorm,
+            q_proj=mla_modules.q_proj
+            if self.q_lora_rank is None else mla_modules.q_b_proj,
+            kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
+            kv_a_layernorm=mla_modules.kv_a_layernorm,
+            kv_b_proj=mla_modules.kv_b_proj,
+            o_proj=mla_modules.o_proj,
         )
 
     def forward(
