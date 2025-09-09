@@ -23,8 +23,6 @@ logger = init_logger(__name__)
 STR_POOLING_REJECTS_LOGITSPROCS = ("Pooling models do not support custom"
                                    " logits processors.")
 
-LOGITSPROCS_GROUP = 'vllm.logits_processors'
-
 BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
