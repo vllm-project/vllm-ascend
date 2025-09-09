@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 import torch
 import torch_npu
