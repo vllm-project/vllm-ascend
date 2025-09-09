@@ -7,11 +7,11 @@ class AscendMinPLogitsProcessor(MinPLogitsProcessor):
 
     def __init__(self, vllm_config: "VllmConfig", device: torch.device,
                  is_pin_memory: bool):
+        super().__init__(vllm_config, device, is_pin_memory)
+
         decode_max_num_seqs = getattr(vllm_config.scheduler_config,
                                       'decode_max_num_seqs', 0)
-        if decode_max_num_seqs == 0:
-            super().__init__(vllm_config, device, is_pin_memory)
-        else:
+        if decode_max_num_seqs != 0:
             max_num_reqs = max(vllm_config.scheduler_config.max_num_seqs,
                                decode_max_num_seqs)
 
