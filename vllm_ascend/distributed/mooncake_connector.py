@@ -996,7 +996,7 @@ class MooncakeConnectorScheduler:
         cached_reqs = scheduler_output.scheduled_cached_reqs
         new_reqs = scheduler_output.scheduled_new_reqs
         for req_id, new_blocks in zip(cached_reqs.req_ids, cached_reqs.new_block_ids):
-            if req_id in self._reqs_need_send_layerwise:
+            if req_id in self._reqs_need_send_layerwise and new_blocks is not None:
                 metaserver, total_tokens, block_ids = self._reqs_need_send_layerwise[req_id]
                 block_ids.extend(new_blocks)
 
