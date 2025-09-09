@@ -45,14 +45,16 @@ class TestDistributedCommunication(PytestBase):
         mocker.patch("torch.distributed.all_to_all_single",
                      return_value=mocker.MagicMock())
 
-        _, a2a_out, handle = async_all_to_all(input_tensor, output_split_sizes, input_split_sizes, mock_group)
+        _, a2a_out, handle = async_all_to_all(input_tensor, output_split_sizes,
+                                              input_split_sizes, mock_group)
 
         # Check if the output tensor is created properly
         if output_split_sizes is None:
             assert a2a_out.shape == input_tensor.shape
         else:
             total_output_size = sum(output_split_sizes)
-            expected_shape = [total_output_size] + list(input_tensor.size())[1:]
+            expected_shape = [total_output_size] + list(
+                input_tensor.size())[1:]
             assert a2a_out.shape == torch.Size(expected_shape)
 
         # Ensure handle is returned from async operation
@@ -72,21 +74,25 @@ class TestDistributedCommunication(PytestBase):
 
         assert result.shape == expected
 
-    @pytest.mark.parametrize("input_tensor, output_split_sizes", [
-        (torch.randn(8, 16), None),
-        (torch.randn(8, 16), [2, 2, 2, 2])
-    ])
-    def test_gather_from_sequence_parallel_region(self, input_tensor, output_split_sizes, mocker: MockerFixture):
+    @pytest.mark.parametrize("input_tensor, output_split_sizes",
+                             [(torch.randn(8, 16), None),
+                              (torch.randn(8, 16), [2, 2, 2, 2])])
+    def test_gather_from_sequence_parallel_region(self, input_tensor,
+                                                  output_split_sizes,
+                                                  mocker: MockerFixture):
         """Test gather_from_sequence_parallel_region"""
         mock_group = mocker.MagicMock()
 
-        result = gather_from_sequence_parallel_region(input_tensor, mock_group, output_split_sizes)
+        result = gather_from_sequence_parallel_region(input_tensor, mock_group,
+                                                      output_split_sizes)
 
         # If output_split_sizes is not provided, result should have expanded first dimension by world size
         if output_split_sizes is None:
-            expected_shape = [input_tensor.shape[0] * 4] + list(input_tensor.shape[1:])
+            expected_shape = [input_tensor.shape[0] * 4] + list(
+                input_tensor.shape[1:])
             assert result.shape == torch.Size(expected_shape)
         else:
             # If output_split_sizes is provided, result shape is dictated by sum of output_split_sizes
-            expected_shape = [sum(output_split_sizes)] + list(input_tensor.shape[1:])
+            expected_shape = [sum(output_split_sizes)] + list(
+                input_tensor.shape[1:])
             assert result.shape == torch.Size(expected_shape)
