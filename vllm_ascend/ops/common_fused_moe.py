@@ -20,7 +20,8 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 from vllm.config import CompilationLevel, get_current_vllm_config
-from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
+from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
+                              tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEParallelConfig  # isort: skip
@@ -373,6 +374,21 @@ class AscendFusedMoE(FusedMoE):
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
 
+    def maybe_all_reduce_tensor_model_parallel(
+            self, final_hidden_states: torch.Tensor):
+        """NOTE(Yizhou): This is to override the parent class method. In `mc2commimpl`,
+        and `alltoallcommimpl`, we do not need to all-reduce the final outputs since
+        the outputs are already aggregated across tensor parallel ranks in the
+        `finalize` function. In `allgathercommimpl`, we still need to all-reduce the
+        outputs since each rank only has partial outputs.
+        """
+        forward_context = get_forward_context()
+        moe_comm_method_name = forward_context.moe_comm_method_name
+        if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
+            return final_hidden_states
+        else:
+            return tensor_model_parallel_all_reduce(final_hidden_states)
+
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
@@ -413,6 +429,38 @@ class AscendFusedMoE(FusedMoE):
             reduce_results=self.reduce_results)
 
         return final_hidden_states
+
+
+class AscendSharedFusedMoE(AscendFusedMoE):
+
+    def __init__(
+        self,
+        shared_experts: torch.nn.Module,
+        use_overlapped: bool = True,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self._shared_experts = shared_experts
+        self.use_overlapped = use_overlapped
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        shared_out = self._shared_experts(hidden_states)
+
+        # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
+        forward_context = get_forward_context()
+        moe_comm_method_name = forward_context.moe_comm_method_name
+        if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
+            shared_out = tensor_model_parallel_all_reduce(shared_out)
+
+        fused_out = super().forward(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+        )
+        return shared_out, fused_out
 
 
 UnquantizedFusedMoEMethod.__init__ = unquantized_fused_moe_init_func

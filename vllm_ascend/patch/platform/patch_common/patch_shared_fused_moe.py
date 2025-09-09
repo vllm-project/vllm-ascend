@@ -1,6 +1,5 @@
-#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
 
-import vllm_ascend.patch.platform.patch_common.patch_distributed  # noqa
-import vllm_ascend.patch.platform.patch_common.patch_shared_fused_moe  # noqa
+from vllm.model_executor.models import deepseek_v2, llama4
+
+from vllm_ascend.ops.common_fused_moe import AscendSharedFusedMoE
+
+deepseek_v2.SharedFusedMoE = AscendSharedFusedMoE
+llama4.SharedFusedMoE = AscendSharedFusedMoE
