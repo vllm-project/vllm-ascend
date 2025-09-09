@@ -880,6 +880,7 @@ class TestNPUWorker(TestBase):
             mock_has_kv_transfer_group.return_value = False
 
             mock_scheduler_output = MagicMock()
+            mock_scheduler_output.total_num_scheduled_tokens = 1
 
             # Test execute_model
             result = worker.execute_model(mock_scheduler_output)
@@ -927,6 +928,7 @@ class TestNPUWorker(TestBase):
 
             # Mock return result
             mock_scheduler_output = MagicMock()
+            mock_scheduler_output.total_num_scheduled_tokens = 1
             mock_model_output = MagicMock(spec=ModelRunnerOutput)
             worker.model_runner.execute_model.return_value = mock_model_output
 
