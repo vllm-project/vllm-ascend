@@ -16,14 +16,12 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 class AscendMLAModules:
     q_a_proj: Optional[torch.nn.Module]
     q_a_layernorm: Optional[torch.nn.Module]
-    q_b_proj: Optional[torch.nn.Module]
     q_proj: Optional[torch.nn.Module]
     kv_a_proj_with_mqa: torch.nn.Module
     kv_a_layernorm: torch.nn.Module
     kv_b_proj: torch.nn.Module
     o_proj: torch.nn.Module
     rotary_emb: torch.nn.Module
-    fused_qkv_a_proj: Optional[torch.nn.Module] = None
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
@@ -83,8 +81,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
             rotary_emb=mla_modules.rotary_emb,
             q_a_proj=mla_modules.q_a_proj,
             q_a_layernorm=mla_modules.q_a_layernorm,
-            q_proj=mla_modules.q_proj
-            if self.q_lora_rank is None else mla_modules.q_b_proj,
+            q_proj=mla_modules.q_proj,
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
             kv_b_proj=mla_modules.kv_b_proj,

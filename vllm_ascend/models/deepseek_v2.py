@@ -535,8 +535,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
             q_a_layernorm=self.q_a_layernorm
             if self.q_lora_rank is not None else None,
-            q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
-            q_proj=self.q_proj if self.q_lora_rank is None else None,
+            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
