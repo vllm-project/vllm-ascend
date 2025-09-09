@@ -16,12 +16,12 @@
 # This file is a part of the vllm-ascend project.
 
 import pytest
-import torch
 from pytest_mock import MockerFixture
+import torch
 
 from tests.ut.base import PytestBase
 from vllm_ascend.ops.moe.comm_utils import (
-    async_all_to_all, _gather_along_first_dim, gather_from_sequence_parallel_region)
+    _gather_along_first_dim, async_all_to_all, gather_from_sequence_parallel_region)
 
 
 class TestDistributedCommunication(PytestBase):
