@@ -43,37 +43,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 
-def wait_for_kv_layer_from_connector(layer_name: str):
-    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
-        return
-
-    connector = get_kv_transfer_group()
-
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
-        return
-    # TODO: assert ascendMetadata
-    connector.wait_for_layer_load(layer_name)
-
-
-def maybe_save_kv_layer_to_connector(
-    layer_name: str,
-    kv_cache_layer: List[torch.Tensor],
-):
-    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
-        return
-
-    connector = get_kv_transfer_group()
-
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
-        return
-    # TODO: assert ascendMetadata
-    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
-
-
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
 

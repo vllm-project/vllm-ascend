@@ -138,10 +138,11 @@ class KVCacheTaskTracker:
                 break
         return expired_requests
 
-    def _remove_delayed_requests(self, request_id: str):
+    def remove_delayed_request(self, request_id: str):
         """Remove all delayed free requests matching the given request_id."""
-        self.delayed_free_requests = deque(
-            (r, t) for r, t in self.delayed_free_requests if r != request_id)
+        with self.done_task_lock:
+            self.delayed_free_requests = deque(
+                (r, t) for r, t in self.delayed_free_requests if r != request_id)
 
 
 class KVCacheSendingThread(threading.Thread):
@@ -212,6 +213,7 @@ class KVCacheSendingThread(threading.Thread):
                         logger.debug("Got DONE_RECVING_MSG for request %s",
                                      msg[1])
                         request_id = msg[1]
+                        self.task_tracker.remove_delayed_request(request_id)
                         self.task_tracker.update_done_task_count(request_id)
                         # Acknowledge the request completion.
                         while True:
@@ -317,6 +319,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                         f"Prefiller has received that requset {request_id} from the decoder."
                     )
                     sock.send_multipart((identity, b"", b"ACK"))
+                    self.task_tracker.remove_delayed_request(request_id)
                     with self.lock:
                         self.ready_decode[request_id] = metadata
                         pending = self.pending_decode.pop(request_id, [])
@@ -543,6 +546,7 @@ class KVCacheRecvingThread(threading.Thread):
             logger.error("Failed to transfer KV cache for request "
                          f"{request_id}: {e}")
         finally:
+            self.task_tracker.remove_delayed_request(request_id)
             self.task_tracker.update_done_task_count(request_id)
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
@@ -998,7 +1002,7 @@ class MooncakeConnectorScheduler:
         for req_id, new_blocks in zip(cached_reqs.req_ids, cached_reqs.new_block_ids):
             if req_id in self._reqs_need_send_layerwise and new_blocks is not None:
                 metaserver, total_tokens, block_ids = self._reqs_need_send_layerwise[req_id]
-                block_ids.extend(new_blocks)
+                block_ids.extend(new_blocks[0])
 
         computed_tokens = dict(list(zip(cached_reqs.req_ids, cached_reqs.num_computed_tokens)) + 
                                [(x.req_id, x.num_computed_tokens) for x in new_reqs])
@@ -1434,7 +1438,6 @@ class MooncakeConnectorWorker:
                 logger.debug(f"Add request {req_id} to kv send layer thread.")
                 self.kv_send_layer_thread.add_request(
                     request_id=req_id,
-                    layer_name=layer_name,
                     local_block_ids=request.local_block_ids,
                     layer_index=self.current_layer)
         self.current_layer += 1
