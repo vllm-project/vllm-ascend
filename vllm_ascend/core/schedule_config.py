@@ -69,9 +69,6 @@ class AscendSchedulerConfig(SchedulerConfig):
             raise NotImplementedError(
                 f"currently AscendScheduler only supports fcfs policy, got {self.policy}"
             )
-        if self.is_multimodal_model:
-            raise NotImplementedError(
-                "currently AscendScheduler only supports LLM models.")
         if self.num_scheduler_steps > 1:
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support multi-step.")
