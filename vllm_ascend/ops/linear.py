@@ -62,6 +62,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         prefix: str = "",
         *,
         return_bias: bool = True,
+        disable_tp: bool = False,
     ):
         self.comm_group = None
         if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
@@ -69,8 +70,8 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         else:
             self.comm_group = get_tp_group()
 
-        self.tp_size = self.comm_group.world_size
-        self.tp_rank = self.comm_group.rank_in_group
+        self.tp_size = self.comm_group.world_size if not disable_tp else 1
+        self.tp_rank = self.comm_group.rank_in_group if not disable_tp else 0
 
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
@@ -88,7 +89,8 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
                                   params_dtype,
                                   quant_config,
                                   prefix,
-                                  return_bias=return_bias)
+                                  return_bias=return_bias,
+                                  disable_tp=disable_tp)
 
         self.gather_output = gather_output
 
@@ -137,6 +139,7 @@ class AscendRowParallelLinear(RowParallelLinear):
         prefix: str = "",
         *,
         return_bias: bool = True,
+        disable_tp: bool = False,
     ):
         if prefix.find("down_proj") != -1 and mlp_tp_enable():
             comm_group = get_mlp_tp_group()
@@ -156,8 +159,8 @@ class AscendRowParallelLinear(RowParallelLinear):
             self.forward_type = "normal"
         self.comm_group = comm_group
 
-        self.tp_size = self.comm_group.world_size
-        self.tp_rank = self.comm_group.rank_in_group
+        self.tp_size = self.comm_group.world_size if not disable_tp else 1
+        self.tp_rank = self.comm_group.rank_in_group if not disable_tp else 0
 
         # Divide the weight matrix along the first dimension.
         self.input_size_per_partition = divide(input_size, self.tp_size)
@@ -171,7 +174,8 @@ class AscendRowParallelLinear(RowParallelLinear):
                                   params_dtype,
                                   quant_config,
                                   prefix,
-                                  return_bias=return_bias)
+                                  return_bias=return_bias,
+                                  disable_tp=disable_tp)
 
         self.input_is_parallel = input_is_parallel
         self.reduce_results = reduce_results
@@ -392,6 +396,7 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         prefix: str = "",
         *,
         return_bias: bool = True,
+        disable_tp: bool = False,
     ):
         if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
             comm_group = get_mlp_tp_group()
@@ -403,8 +408,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
             comm_group = get_tp_group()
             self.forward_type = "normal_tp"
         self.comm_group = comm_group
-        self.tp_rank = comm_group.rank_in_group
-        self.tp_size = comm_group.world_size
+        self.tp_rank = comm_group.rank_in_group if not disable_tp else 0
+        self.tp_size = comm_group.world_size if not disable_tp else 1
 
         self.output_sizes = output_sizes
         assert all(output_size % self.tp_size == 0
@@ -418,7 +423,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
                                             params_dtype=params_dtype,
                                             quant_config=quant_config,
                                             prefix=prefix,
-                                            return_bias=return_bias)
+                                            return_bias=return_bias,
+                                            disable_tp=disable_tp)
 
     def forward(
         self,
@@ -498,6 +504,7 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         prefix: str = "",
         *,
         return_bias: bool = True,
+        disable_tp: bool = False,
     ):
         if dense_optim_enable():
             self.forward_type = "dense_optim"
@@ -511,7 +518,7 @@ class AscendQKVParallelLinear(QKVParallelLinear):
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
         # Divide the weight matrix along the last dimension.
-        tp_size = self.comm_group.world_size
+        tp_size = self.comm_group.world_size if not disable_tp else 1
         self.num_heads = divide(self.total_num_heads, tp_size)
         if tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
@@ -537,7 +544,8 @@ class AscendQKVParallelLinear(QKVParallelLinear):
                                             params_dtype=params_dtype,
                                             quant_config=quant_config,
                                             prefix=prefix,
-                                            return_bias=return_bias)
+                                            return_bias=return_bias,
+                                            disable_tp=disable_tp)
 
     def forward(
         self,
