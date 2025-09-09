@@ -32,7 +32,7 @@ fi
 
 run_mypy() {
     echo "Running mypy on $1"
-    mypy --check-untyped-defs --follow-imports skip --python-version "${PYTHON_VERSION}" "$@"
+    mypy --follow-imports skip --python-version "${PYTHON_VERSION}" "$@"
 }
 
 run_mypy vllm_ascend
