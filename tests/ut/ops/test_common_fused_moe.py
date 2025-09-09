@@ -17,7 +17,7 @@ from unittest.mock import patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.common_fused_moe import fused_experts_moge
+from vllm_ascend.ops.common_fused_moe import AscendFusedMoE, fused_experts_moge
 
 
 class TestFusedExpertsMoGE(TestBase):
@@ -67,3 +67,39 @@ class TestFusedExpertsMoGE(TestBase):
             )
 
             self.assertEqual(output.shape, (4, 128))
+
+
+class TestLoadWeight(TestBase):
+
+    def test_load_w13_transpose(self):
+        with patch.object(AscendFusedMoE, "__init__",
+                          lambda self, *args, **kwargs: None):
+            moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
+            moe.hidden_size = 8
+            expert_data = torch.randn(128, 8)
+            loaded_weight = torch.randn(128, 4)
+            moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
+
+            expert_data = torch.randn(8, 128)
+            loaded_weight = torch.randn(128, 4)
+            moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
+
+            expert_data = torch.randn(128, 8)
+            loaded_weight = torch.randn(128, 4)
+            moe._load_w13(expert_data, 1, "w3", loaded_weight, 0)
+
+            expert_data = torch.randn(8, 128)
+            loaded_weight = torch.randn(128, 4)
+            moe._load_w13(expert_data, 1, "w3", loaded_weight, 0)
+
+    def test_load_w2_transpose(self):
+        with patch.object(AscendFusedMoE, "__init__",
+                          lambda self, *args, **kwargs: None):
+            moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
+            expert_data = torch.randn(128, 4)
+            loaded_weight = torch.randn(128, 8)
+            moe._load_w2(expert_data, 1, loaded_weight, 0)
+
+            expert_data = torch.randn(4, 128)
+            loaded_weight = torch.randn(128, 8)
+            moe._load_w2(expert_data, 1, loaded_weight, 0)
