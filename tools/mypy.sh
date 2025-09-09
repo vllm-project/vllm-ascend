@@ -38,3 +38,11 @@ run_mypy() {
 # run_mypy vllm_ascend
 # run_mypy examples
 # run_mypy tests
+
+CHANGED_FILES=$(git diff --name-only origin/main...HEAD -- '*.py')
+
+if [ -n "$CHANGED_FILES" ]; then
+    mypy --follow-imports skip $CHANGED_FILES "${PYTHON_VERSION}" "$@"
+else
+    echo "No Python files changed."
+fi
