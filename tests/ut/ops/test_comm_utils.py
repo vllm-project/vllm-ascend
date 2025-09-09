@@ -34,14 +34,16 @@ class TestDistributedCommunication(PytestBase):
 
         mocker.patch("torch.distributed.get_rank", return_value=0)
 
-    @pytest.mark.parametrize("input_tensor, output_split_sizes, input_split_sizes", [
-        (torch.randn(8, 16), [2, 2, 2, 2], [2, 2, 2, 2]),
-        (torch.randn(16, 32), None, None)
-    ])
-    def test_async_all_to_all(self, input_tensor, output_split_sizes, input_split_sizes, mocker: MockerFixture):
+    @pytest.mark.parametrize(
+        "input_tensor, output_split_sizes, input_split_sizes",
+        [(torch.randn(8, 16), [2, 2, 2, 2], [2, 2, 2, 2]),
+        (torch.randn(16, 32), None, None)])
+    def test_async_all_to_all(self, input_tensor, output_split_sizes,
+                              input_split_sizes, mocker: MockerFixture):
         """Test async_all_to_all"""
         mock_group = mocker.MagicMock()
-        mocker.patch("torch.distributed.all_to_all_single", return_value=mocker.MagicMock())
+        mocker.patch("torch.distributed.all_to_all_single",
+                     return_value=mocker.MagicMock())
 
         _, a2a_out, handle = async_all_to_all(input_tensor, output_split_sizes, input_split_sizes, mock_group)
 
