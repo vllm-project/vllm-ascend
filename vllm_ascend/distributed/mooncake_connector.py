@@ -274,6 +274,11 @@ class KVCacheSendingLayerThread(threading.Thread):
         # vllm won't call us if all inference is done, so we can't do step 9 here
         return self.task_tracker.get_and_clear_finished_requests()
 
+
+    def add_delayed_request(self, request_id: str, delay_start_time: float):
+        return self.task_tracker.add_delayed_request(request_id,
+                                                     delay_start_time)
+
     def run(self):
         """Run the thread to handle KV cache transfer requests."""
 
@@ -1408,6 +1413,16 @@ class MooncakeConnectorWorker:
                         if ack != b"ACK":
                             raise ValueError(
                                 f"Unexpected ACK from prefill node: {ack}")
+        
+        if self.kv_send_thread is not None:
+            for req_id, delay_start_time in metadata.requests_to_send.items():
+                if self.tp_rank in self._get_remote_tp_ranks_for_req(req_id):
+                    self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
+        elif self.kv_send_layer_thread is not None:
+            for req_id, delay_start_time in metadata.requests_to_send.items():
+                if self.tp_rank in self._get_remote_tp_ranks_for_req(req_id):
+                    self.kv_send_layer_thread.add_delayed_request(
+                        req_id, delay_start_time)
 
     def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
                       attn_metadata: "AttentionMetadata",
