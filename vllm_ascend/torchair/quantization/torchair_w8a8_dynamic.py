@@ -33,7 +33,7 @@ from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version)
 
-COMM_QUANT_MODE: int = envs_ascend.COMM_QUANT_MODE
+COMM_QUANT_MODE: bool = envs_ascend.COMM_QUANT_MODE
 
 def torchair_apply_mlp_decode(hidden_states: torch.Tensor,
                               w1: torch.Tensor,
