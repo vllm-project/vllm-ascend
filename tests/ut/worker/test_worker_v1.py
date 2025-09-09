@@ -843,9 +843,8 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker_v1.get_pp_group")
     @patch("vllm_ascend.worker.worker_v1.get_tp_group")
-    @patch("vllm_ascend.worker.worker_v1.has_kv_transfer_group")
-    def test_execute_model_middle_rank(self, mock_has_kv_transfer_group,
-                                       mock_get_tp_group, mock_get_pp_group):
+    def test_execute_model_middle_rank(self, mock_get_tp_group,
+                                       mock_get_pp_group):
         """Test execute_model method - middle rank case"""
         from vllm.sequence import IntermediateTensors
 
@@ -875,9 +874,6 @@ class TestNPUWorker(TestBase):
                 None  # Set to None to trigger return None
             )
             worker.model_runner.execute_model.return_value = mock_intermediate_output
-
-            # Set has_kv_transfer_group returns False
-            mock_has_kv_transfer_group.return_value = False
 
             mock_scheduler_output = MagicMock()
             mock_scheduler_output.total_num_scheduled_tokens = 1
