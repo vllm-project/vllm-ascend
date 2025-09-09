@@ -1351,7 +1351,7 @@ class TestNPUWorker(TestBase):
             # Setup tensor reception data
             mock_pp_group.recv_tensor_dict.return_value = {"tensor": "data"}
 
-            # Create mock kv_connector_output - both finished_sending and finished_recving are True 
+            # Create mock kv_connector_output - both finished_sending and finished_recving are True
             mock_kv_connector_output = MagicMock()
             mock_kv_connector_output.finished_sending = True
             mock_kv_connector_output.finished_recving = True
