@@ -132,7 +132,6 @@ class NPUPlatform(Platform):
             "kv_cache_dtype", None)
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
-
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
@@ -184,12 +183,6 @@ class NPUPlatform(Platform):
                     "In order to decrease torchair graph compilation time, users can enable both use_cached_graph "
                     "and use_cached_kv_cache_bytes in torchair_graph_config.")
                 delete_torchair_cache_file()
-
-        if parallel_config.distributed_executor_backend == "ray":
-            logger.warning(
-                "Ray distributed executor backend is not compatible with ACL Graph mode "
-                "right now. Setting CUDAGraphMode to NONE")
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
@@ -277,7 +270,7 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm_ascend.lora.punica_wrapper.punica_npu.PunicaWrapperNPU"
+        return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"
 
     @classmethod
     def get_current_memory_usage(cls,

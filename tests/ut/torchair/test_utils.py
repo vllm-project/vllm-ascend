@@ -6,7 +6,6 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.quantizer import SUPPORT_ASCEND_QUANTIZER_TYPE
 from vllm_ascend.torchair import utils
 
 
@@ -65,7 +64,7 @@ class TestTorchairUtils(TestBase):
         mock_model_registry.return_value = mock_registry
         utils.register_torchair_model()
 
-        self.assertEqual(mock_model_registry.register_model.call_count, 5)
+        self.assertEqual(mock_model_registry.register_model.call_count, 6)
         call_args_list = mock_model_registry.register_model.call_args_list
 
         expected_registrations = [
@@ -81,7 +80,11 @@ class TestTorchairUtils(TestBase):
             ("Qwen2ForCausalLM",
              "vllm_ascend.torchair.models.qwen2:CustomQwen2ForCausalLM"),
             ("Qwen3MoeForCausalLM",
-             "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+             "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM"
+             ),
+            ("PanguProMoEForCausalLM",
+             "vllm_ascend.torchair.models.torchair_pangu_moe:PanguProMoEForCausalLM"
+             )
         ]
 
         for i, (expected_name,
@@ -131,15 +134,3 @@ class TestTorchairUtils(TestBase):
 
         utils.converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
         mock_npu_cast.assert_not_called()
-
-    def test_torchair_quant_method_register(self):
-
-        TorchairW8A8DYNAMICQuantizer = SUPPORT_ASCEND_QUANTIZER_TYPE[
-            "W8A8_DYNAMIC"]
-        TorchairW4A8DYNAMICQuantizer = SUPPORT_ASCEND_QUANTIZER_TYPE[
-            "W4A8_DYNAMIC"]
-        utils.torchair_quant_method_register()
-        self.assertNotEqual(TorchairW8A8DYNAMICQuantizer,
-                            SUPPORT_ASCEND_QUANTIZER_TYPE["W8A8_DYNAMIC"])
-        self.assertNotEqual(TorchairW4A8DYNAMICQuantizer,
-                            SUPPORT_ASCEND_QUANTIZER_TYPE["W4A8_DYNAMIC"])

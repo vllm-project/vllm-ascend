@@ -40,12 +40,10 @@ from vllm.model_executor.layers.quantization.base_config import \
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
-from vllm_ascend.distributed.communication_op import \
-    data_parallel_reduce_scatter
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
-from vllm_ascend.ops.layers.experts_selector import select_experts
-from vllm_ascend.ops.layers.moe_mlp import unified_apply_mlp
+from vllm_ascend.ops.moe.experts_selector import select_experts
+from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, dispose_tensor,
                                get_all_reduce_merge_state,
@@ -70,7 +68,8 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
                                 shared_dequant_scale: Optional[Any] = None,
                                 mc2_mask: Optional[torch.Tensor] = None,
                                 apply_router_weight_on_input: bool = False,
-                                with_quant: bool = False):
+                                with_quant: bool = False,
+                                fusion_mlp: bool = False):
     token_dispatcher = get_forward_context().token_dispatcher
 
     results = token_dispatcher.token_dispatch(
@@ -100,7 +99,8 @@ def unified_fused_experts_eager(hidden_states: torch.Tensor,
         w1_scale_bias=w1_scale_bias,
         w2_scale_bias=w2_scale_bias,
         topk_scales=results.get("topk_scales"),
-        with_quant=with_quant)
+        with_quant=with_quant,
+        fusion=fusion_mlp)
     final_hidden_states = token_dispatcher.token_combine(expert_output)
     return final_hidden_states
 
@@ -358,7 +358,7 @@ class AscendFusedMoE(FusedMoE):
 
         ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
-        from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
+        from vllm_ascend.ops.moe.token_dispatcher import \
             setup_token_dispatchers
         setup_token_dispatchers(
             ep_size,
@@ -412,8 +412,6 @@ class AscendFusedMoE(FusedMoE):
         if shared_experts:
             # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
             shared_hidden_states = shared_experts(hidden_states)
-
-        mc2_mask = forward_context.mc2_mask
 
         enable_sp = _metadata_for_padding is not None and _metadata_for_padding.not_dummy_and_is_prefill
         tp_size = get_tensor_model_parallel_world_size()
@@ -535,8 +533,8 @@ class AscendFusedMoE(FusedMoE):
                 final_hidden_states = final_hidden_states[start:end, :]
                 dispose_tensor(e_hidden_states)
             elif fused_moe_state == FusedMoEState.AllGather:
-                final_hidden_states = data_parallel_reduce_scatter(
-                    e_hidden_states, dim=0)
+                final_hidden_states = get_dp_group().reduce_scatter(
+                    e_hidden_states, 0)
                 final_hidden_states = final_hidden_states[:num_tokens]
                 dispose_tensor(e_hidden_states)
             else:
