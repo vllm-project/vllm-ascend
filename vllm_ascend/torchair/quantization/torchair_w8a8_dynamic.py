@@ -33,7 +33,7 @@ from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version)
 
-COMM_QUANT_MODE: bool = envs_ascend.COMM_QUANT_MODE
+COMM_QUANT_MODE: bool = envs_ascend.VLLM_ASCEND_COMM_QUANT_MODE
 
 def torchair_apply_mlp_decode(hidden_states: torch.Tensor,
                               w1: torch.Tensor,
@@ -200,7 +200,7 @@ def torchair_apply_mlp(hidden_states: torch.Tensor,
 
     return hidden_states
 
-if COMM_QUANT_MODE:
+if VLLM_ASCEND_COMM_QUANT_MODE:
     os.environ["HCCL_INTRA_PCIE_ENABLE"] = "1"
     os.environ["HCCL_INTRA_ROCE_ENABLE"] = "0"
     comm_quant_mode = 2
@@ -1041,3 +1041,4 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
+
