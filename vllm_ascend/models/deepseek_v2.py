@@ -74,7 +74,7 @@ from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
-
+from vllm.model_executor.layers.mla import MultiHeadLatentAttention
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
 
@@ -544,7 +544,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             rotary_emb=self.rotary_emb,
         )
 
-        self.mla_attn = AscendMultiHeadLatentAttention(
+        self.mla_attn = MultiHeadLatentAttention(
             self.hidden_size,
             self.enable_shared_expert_dp,
             self.debug_layer_idx,
