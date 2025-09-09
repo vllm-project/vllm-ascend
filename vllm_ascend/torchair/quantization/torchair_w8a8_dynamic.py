@@ -200,13 +200,12 @@ def torchair_apply_mlp(hidden_states: torch.Tensor,
 
     return hidden_states
 
-if COMM_QUANT_MODE == 1:
+if COMM_QUANT_MODE:
     os.environ["HCCL_INTRA_PCIE_ENABLE"] = "1"
     os.environ["HCCL_INTRA_ROCE_ENABLE"] = "0"
     comm_quant_mode = 2
 else:
     comm_quant_mode = 0
-  
 def torchair_fused_experts_with_mc2(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
