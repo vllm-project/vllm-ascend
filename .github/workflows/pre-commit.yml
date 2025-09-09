@@ -8,13 +8,19 @@ permissions:
 
 jobs:
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu-0
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
     steps:
+    - name: Config mirrors
+      run: |
+        sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+        pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+        apt-get update -y
+        apt install git -y
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v4
-    - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
-      with:
-        python-version: "3.11"
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
     - name: Checkout vllm-project/vllm repo
@@ -30,8 +36,9 @@ jobs:
     - name: Install vllm-ascend dev
       run: |
         pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
-    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        git config --global --add safe.directory '*'
+    - name: Run pre-commit check
       env:
-        SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
-      with:
-        extra_args: --all-files --hook-stage manual
+        SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
+        GOPROXY: "https://goproxy.cn,direct"
+      run: pre-commit run --all-files --hook-stage manual
