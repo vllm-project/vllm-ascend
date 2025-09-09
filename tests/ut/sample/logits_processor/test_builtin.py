@@ -32,7 +32,7 @@ class TestMinPLogitsProcessorInitFunc(PytestBase):
         assert processor_cpu.use_double_tensor is False
         assert processor_cpu.min_p_cpu.shape[0] == 256
 
-        processor_cpu = AscendMinPLogitsProcessor(mock_vllm_config, device_npu,
+        processor_cpu = AscendMinPLogitsProcessor(mock_vllm_con0fig, device_npu,
                                                   is_pin_memory)
 
         assert processor_cpu.min_p is not None

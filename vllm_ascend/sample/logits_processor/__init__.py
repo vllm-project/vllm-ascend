@@ -29,6 +29,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     AscendMinPLogitsProcessor,
 ]
 
+
 def build_logitsprocs(
     vllm_config: "VllmConfig",
     device: torch.device,
@@ -42,7 +43,8 @@ def build_logitsprocs(
         logger.debug("Skipping logits processor loading because pooling models"
                      " do not support logits processors.")
         return LogitsProcessors()
-    custom_logitsprocs_classes = logits_processor._load_custom_logitsprocs(custom_logitsprocs)
+    custom_logitsprocs_classes = logits_processor._load_custom_logitsprocs(
+        custom_logitsprocs)
     return LogitsProcessors(
         ctor(vllm_config, device, is_pin_memory) for ctor in itertools.chain(
             BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes))
