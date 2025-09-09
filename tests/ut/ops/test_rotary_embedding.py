@@ -3,11 +3,17 @@ import unittest
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
+from transformers.configuration_utils import PretrainedConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.ops.rotary_embedding import _custom_rotary_embedding_enabled
+
+MODEL = "Qwen3-0.6B"
+MAX_NUM_BATCHED_TOKEND = 10000
 
 
 class TestCustomRotaryEmbeddingEnabled(unittest.TestCase):
@@ -93,6 +99,10 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=True)
     @patch('torch.ops._npu_rotary_embedding')
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_custom_kernel(self, mock_rotary_embedding,
                                             mock_custom_enabled, mock_is_310p,
                                             mock__c):
@@ -102,9 +112,15 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         # Setup mock for custom kernel path
 
         mock__c.rotary_embedding.return_value = self.query, self.key
-
-        result_q, result_k = self.layer.forward(self.positions, self.query,
-                                                self.key)
+        vllm_config = VllmConfig()
+        model_config = ModelConfig(MODEL,
+                                   tokenizer=MODEL,
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
+        model_config.hf_config = PretrainedConfig()
+        vllm_config.model_config = model_config
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward(self.positions, self.query,
+                                                    self.key)
 
         mock__c.rotary_embedding.assert_called_once()
         self.assertEqual(result_q.shape, self.query.shape)
@@ -113,6 +129,10 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_contiguous(self, mock_npu_rotary,
                                          mock_custom_enabled):
         mock_config = MagicMock()
@@ -121,15 +141,25 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         # Test contiguous path when custom is disabled
         non_contig_query = self.query.transpose(0, 1)
         non_contig_key = self.key.transpose(0, 1)
-
-        result_q, result_k = self.layer.forward(self.positions,
-                                                non_contig_query,
-                                                non_contig_key)
+        vllm_config = VllmConfig()
+        model_config = ModelConfig(MODEL,
+                                   tokenizer=MODEL,
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
+        model_config.hf_config = PretrainedConfig()
+        vllm_config.model_config = model_config
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward(self.positions,
+                                                    non_contig_query,
+                                                    non_contig_key)
 
         mock_npu_rotary.assert_called_once()
         self.assertEqual(result_q.shape, non_contig_query.shape)
         self.assertEqual(result_k.shape, non_contig_key.shape)
 
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_with_offsets(self):
         mock_config = MagicMock()
         mock_config.torchair_graph_config.enabled = False
@@ -137,22 +167,41 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         # Test that NotImplementedError is raised when offsets is provided
         offsets = torch.tensor([1, 2, 3])
         with self.assertRaises(NotImplementedError):
-            self.layer.forward(self.positions, self.query, self.key, offsets)
+            vllm_config = VllmConfig()
+            model_config = ModelConfig(MODEL,
+                                       tokenizer=MODEL,
+                                       max_model_len=MAX_NUM_BATCHED_TOKEND)
+            model_config.hf_config = PretrainedConfig()
+            vllm_config.model_config = model_config
+            with set_ascend_forward_context(None, vllm_config):
+                self.layer.forward(self.positions, self.query, self.key,
+                                   offsets)
 
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_neox_style_override(self, mock_npu_rotary,
                                                   mock_custom_enabled):
         mock_config = MagicMock()
         mock_config.torchair_graph_config.enabled = False
 
         # Test neox_style override
-        result_q, result_k = self.layer.forward(self.positions,
-                                                self.query,
-                                                self.key,
-                                                is_neox_style_override=False)
-
+        vllm_config = VllmConfig()
+        model_config = ModelConfig(MODEL,
+                                   tokenizer=MODEL,
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
+        model_config.hf_config = PretrainedConfig()
+        vllm_config.model_config = model_config
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward(
+                self.positions,
+                self.query,
+                self.key,
+                is_neox_style_override=False)
         # Check that neox_style=False was passed to the NPU function
         args, kwargs = mock_npu_rotary.call_args
         self.assertFalse(args[-1])
@@ -160,6 +209,10 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
+    @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
+    @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
+    @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
+    @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_rope_forward_oot_rotary_dim_less_than_head_size(
             self, mock_npu_rotary, mock_custom_enabled):
         mock_config = MagicMock()
@@ -169,8 +222,15 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         org_rotary_dim = self.layer.rotary_dim
         self.layer.rotary_dim = self.layer.head_size // 2
 
-        result_q, result_k = self.layer.forward(self.positions, self.query,
-                                                self.key)
+        vllm_config = VllmConfig()
+        model_config = ModelConfig(MODEL,
+                                   tokenizer=MODEL,
+                                   max_model_len=MAX_NUM_BATCHED_TOKEND)
+        model_config.hf_config = PretrainedConfig()
+        vllm_config.model_config = model_config
+        with set_ascend_forward_context(None, vllm_config):
+            result_q, result_k = self.layer.forward(self.positions, self.query,
+                                                    self.key)
 
         mock_npu_rotary.assert_called_once()
         self.assertEqual(result_q.shape, self.query.shape)
