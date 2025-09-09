@@ -33,19 +33,6 @@ class TestDistributedCommunication(PytestBase):
 
         mocker.patch("torch.distributed.get_rank", return_value=0)
 
-    @pytest.mark.parametrize("world_size, test_tensor, expected",
-                             [(1, torch.randn(8, 16), (8, 16)),
-                              (4, torch.randn(8, 16), (32, 16))])
-    def test_gather_along_first_dim(self, test_tensor, expected, world_size,
-                                    mocker: MockerFixture):
-        """Test _gather_along_first_dim"""
-        mocker.patch("torch.distributed.get_world_size",
-                     return_value=world_size)
-
-        result = _gather_along_first_dim(test_tensor, mocker.MagicMock())
-
-        assert result.shape == expected
-
     @pytest.mark.parametrize("input_tensor, output_split_sizes, input_split_sizes", [
         (torch.randn(8, 16), [2, 2, 2, 2], [2, 2, 2, 2]),
         (torch.randn(16, 32), None, None)
@@ -68,6 +55,19 @@ class TestDistributedCommunication(PytestBase):
         # Ensure handle is returned from async operation
         assert handle is not None
         assert isinstance(handle, mocker.MagicMock)
+
+    @pytest.mark.parametrize("world_size, test_tensor, expected",
+                             [(1, torch.randn(8, 16), (8, 16)),
+                              (4, torch.randn(8, 16), (32, 16))])
+    def test_gather_along_first_dim(self, test_tensor, expected, world_size,
+                                    mocker: MockerFixture):
+        """Test _gather_along_first_dim"""
+        mocker.patch("torch.distributed.get_world_size",
+                     return_value=world_size)
+
+        result = _gather_along_first_dim(test_tensor, mocker.MagicMock())
+
+        assert result.shape == expected
 
     @pytest.mark.parametrize("input_tensor, output_split_sizes", [
         (torch.randn(8, 16), None),
