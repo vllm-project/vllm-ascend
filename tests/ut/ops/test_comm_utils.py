@@ -37,7 +37,7 @@ class TestDistributedCommunication(PytestBase):
     @pytest.mark.parametrize(
         "input_tensor, output_split_sizes, input_split_sizes",
         [(torch.randn(8, 16), [2, 2, 2, 2], [2, 2, 2, 2]),
-        (torch.randn(16, 32), None, None)])
+         (torch.randn(16, 32), None, None)])
     def test_async_all_to_all(self, input_tensor, output_split_sizes,
                               input_split_sizes, mocker: MockerFixture):
         """Test async_all_to_all"""
