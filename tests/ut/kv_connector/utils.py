@@ -135,7 +135,7 @@ def create_request(
         init_none_hash(sha256)
         _none_hash_initialized = True
 
-    block_hasher = get_request_block_hasher(block_size, hash)
+    block_hasher = get_request_block_hasher(block_size, sha256)
 
     kv_transfer_params: Optional[dict[str, Any]] = None
 
