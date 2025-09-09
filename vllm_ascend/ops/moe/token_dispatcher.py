@@ -198,9 +198,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         ) if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_dispatch(
             **kwargs_mc2)
         # comm_stream.wait_stream(torch.npu.current_stream())
-        expand_x, dynamic_scale, assist_info_for_combine, expert_token_nums, \
-            ep_recv_counts, _, expand_scales = self.output[0:7]
-        self.expand_scales = expand_scales
+        expand_x, dynamic_scale, self.assist_info_for_combine, expert_token_nums, \
+            self.ep_recv_counts, _, self.expand_scales = self.output[0:7]
 
         if self.with_quant:
             if shared_experts is not None:
@@ -253,7 +252,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "group_ep": self.moe_all_to_all_group_name,
             "ep_world_size": self.ep_world_size,
             "ep_rank_id": self.ep_rank_id,
-            "expert_scales": self.expand_scales,
+            "expand_scales": self.expand_scales,
         }
         if self.enable_dispatch_v2:
             stage3_kwargs.update({

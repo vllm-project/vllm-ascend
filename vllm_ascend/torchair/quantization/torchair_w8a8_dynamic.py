@@ -336,7 +336,7 @@ def torchair_fused_experts_with_mc2(
         "group_ep": moe_all_to_all_group_name,
         "ep_world_size": ep_world_size,
         "ep_rank_id": ep_rank_id,
-        "expert_scales": expand_scales,
+        "expand_scales": expand_scales,
     }
     if enable_dispatch_v2:
         stage3_kwargs.update({
