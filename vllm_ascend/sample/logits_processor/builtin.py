@@ -27,9 +27,8 @@ class AscendMinPLogitsProcessor(MinPLogitsProcessor):
 
             if self.use_double_tensor:
                 # Pre-allocated device tensor
-                self.min_p_device: torch.Tensor = torch.empty((max_num_reqs, ),
-                                                            dtype=torch.float32,
-                                                            device=device)
+                self.min_p_device: torch.Tensor = torch.empty(
+                    (max_num_reqs, ), dtype=torch.float32, device=device)
             else:
                 self.min_p_device = self.min_p_cpu_tensor
             # Current slice of the device tensor
