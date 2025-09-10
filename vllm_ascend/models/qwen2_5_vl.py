@@ -282,6 +282,39 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
             dim=2)
         qkv_weight_final = qkv_weight_padded.reshape(-1, self.hidden_size)
         return qkv_weight_final
+    
+    def pad_qkv_common(self, data, has_hidden_size: bool = True):
+        """
+        通用 QKV pad 函数:
+        - has_hidden_size=True: 用于 qkv_weight
+        - has_hidden_size=False: 用于 qkv_weight_scale
+        """
+        if has_hidden_size:
+            # [num_heads, 3, origin_head_dim, hidden_size]
+            reshaped = data.reshape(-1, 3, self.origin_hidden_size_per_attention_head, self.hidden_size)
+            dim = 2
+            pad = (0, 0, 0, self.half_pad_hidden_size_per_attention_head)
+        else:
+            # [num_heads, 3, origin_head_dim]
+            reshaped = data.reshape(-1, 3, self.origin_hidden_size_per_attention_head)
+            dim = 2
+            pad = (0, self.half_pad_hidden_size_per_attention_head, 0, 0)
+
+        def pad_half(tensor):
+            return torch.nn.functional.pad(tensor, pad)
+
+        # 切分前后两半
+        first_half = pad_half(reshaped[:, :, :self.half_origin_hidden_size_per_attention_head])
+        second_half = pad_half(reshaped[:, :, self.half_origin_hidden_size_per_attention_head:])
+
+        # 拼接
+        padded = torch.cat([first_half, second_half], dim=dim)
+
+        # 恢复形状
+        if has_hidden_size:
+            return padded.reshape(-1, self.hidden_size)
+        else:
+            return padded.reshape(-1)
 
     def pad_proj_weight(self, data):
         out_weight = torch.nn.functional.pad(
