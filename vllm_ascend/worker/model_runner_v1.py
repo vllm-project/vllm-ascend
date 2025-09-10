@@ -63,8 +63,8 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
+                             LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -96,13 +96,8 @@ from vllm_ascend.torchair.torchair_mla import AscendMLATorchairMetadata
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                get_ascend_soc_version, is_310p,
-                               lmhead_tp_enable, vllm_version_is)
+                               lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
-
-if not (vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1")):
-    from vllm.v1.outputs import DraftTokenIds
-else:
-    DraftTokenIds = None
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -195,9 +190,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Lazy initialization, these will be set after __init__
         self.kv_caches: List[torch.Tensor] = []
-        # TODO: remove Dict[str, Dict[int, torch.Tensor]] type after 0.10.1.1
-        self.encoder_cache: Union[Dict[str, Dict[int, torch.Tensor]],
-                                  Dict[str, torch.Tensor]] = {}
+        self.encoder_cache: Dict[str, torch.Tensor] = {}
         self.attn_mask = None
         self.attn_state = None
         self.requests: Dict[str, CachedRequestState] = {}
@@ -369,8 +362,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
-            if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-                self.encoder_cache.pop(req_id, None)
+
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
         # scheduled_req_ids overlap. This happens when a request is aborted and
@@ -379,17 +371,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # and handling the second as a new request.
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
-        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-            # Free the cached encoder outputs.
-            for req_id, input_id in scheduler_output.free_encoder_input_ids:
-                encoder_outputs = self.encoder_cache.get(req_id)
-                if encoder_outputs is not None:
-                    encoder_outputs.pop(input_id, None)
-                    if not encoder_outputs:
-                        self.encoder_cache.pop(req_id, None)
-        else:
-            for mm_hash in scheduler_output.free_encoder_mm_hashes:
-                self.encoder_cache.pop(mm_hash, None)
+        for mm_hash in scheduler_output.free_encoder_mm_hashes:
+            self.encoder_cache.pop(mm_hash, None)
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
         # or running requests that are not scheduled in this step. We remove
@@ -438,12 +421,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
-                **({
-                    "mm_hashes": new_req_data.mm_hashes
-                } if not (vllm_version_is("0.10.1.1")
-                          or vllm_version_is("0.10.1")) else {
-                              "mm_hashes": None
-                          }),
+                mm_hashes=new_req_data.mm_hashes,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -750,25 +728,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Batch the multi-modal inputs.
         mm_kwargs = list[MultiModalKwargsItem]()
-        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-            req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
-        else:
-            mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
+        mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
-            if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-                for mm_input_id in encoder_input_ids:
-                    mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
-                    req_ids_pos.append((req_id, mm_input_id,
-                                        req_state.mm_positions[mm_input_id]))
-            else:
-                for mm_input_id in encoder_input_ids:
-                    # TODO remove this assert after 0.10.1.1
-                    assert req_state.mm_hashes is not None
-                    mm_hash = req_state.mm_hashes[mm_input_id]
-                    mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
-                    mm_hashes_pos.append(
-                        (mm_hash, req_state.mm_positions[mm_input_id]))
+            for mm_input_id in encoder_input_ids:
+                mm_hash = req_state.mm_hashes[mm_input_id]
+                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
+                mm_hashes_pos.append(
+                    (mm_hash, req_state.mm_positions[mm_input_id]))
         # Batch mm inputs as much as we can: if a request in the batch has
         # multiple modalities or a different modality than the previous one,
         # we process it separately to preserve item order.
@@ -799,26 +766,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             for output in curr_group_outputs:
                 encoder_outputs.append(output)
-        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-            # Cache the encoder outputs.
-            for (req_id, input_id, pos_info), output in zip(
-                    req_ids_pos,
-                    encoder_outputs,
-            ):
-                if req_id not in self.encoder_cache:
-                    self.encoder_cache[req_id] = {}
 
-                self.encoder_cache[req_id][input_id] = scatter_mm_placeholders(
-                    output,
-                    is_embed=pos_info.is_embed,
-                )
-        else:
-            for (mm_hash, pos_info), output in zip(mm_hashes_pos,
-                                                   encoder_outputs):
-                self.encoder_cache[mm_hash] = scatter_mm_placeholders(
-                    output,
-                    is_embed=pos_info.is_embed,
-                )
+        for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
+            self.encoder_cache[mm_hash] = scatter_mm_placeholders(
+                output,
+                is_embed=pos_info.is_embed,
+            )
 
     def _gather_mm_embeddings(
         self,
@@ -831,8 +784,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens
             mm_positions = req_state.mm_positions
-            if not (vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1")):
-                mm_hashes = req_state.mm_hashes
+            mm_hashes = req_state.mm_hashes
             for i, pos_info in enumerate(mm_positions):
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
@@ -850,26 +802,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     continue
 
                 start_idx = max(num_computed_tokens - start_pos, 0)
-                if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-                    end_idx = min(
-                        num_computed_tokens - start_pos + num_scheduled_tokens,
-                        num_encoder_tokens)
-                    assert start_idx < end_idx
-                    assert req_id in self.encoder_cache
-                    assert i in self.encoder_cache[req_id]
-                    encoder_output = self.encoder_cache[req_id][i]
-                else:
-                    end_idx = min(
-                        num_computed_tokens - start_pos + num_scheduled_tokens,
-                        num_encoder_tokens,
-                    )
-                    assert start_idx < end_idx
-                    # TODO remove this assert after 0.10.1.1
-                    assert mm_hashes is not None
-                    mm_hash = mm_hashes[i]
-                    encoder_output = self.encoder_cache.get(mm_hash, None)
-                    assert encoder_output is not None,\
-                        f"Encoder cache miss for {mm_hash}."
+                end_idx = min(
+                    num_computed_tokens - start_pos + num_scheduled_tokens,
+                    num_encoder_tokens,
+                )
+                assert start_idx < end_idx
+                mm_hash = mm_hashes[i]
+                encoder_output = self.encoder_cache.get(mm_hash, None)
+                assert encoder_output is not None,\
+                    f"Encoder cache miss for {mm_hash}."
 
                 if (is_embed := pos_info.is_embed) is not None:
                     is_embed = is_embed[start_idx:end_idx]
@@ -1389,52 +1330,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states, attn_metadata, aux_hidden_states)
         return draft_token_ids
 
-    def _pool_v010(
-        self,
-        hidden_states: torch.Tensor,
-        num_scheduled_tokens: int,
-        num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]] = None,
-        finished_recving: Optional[set[str]] = None,
-        kv_connector_output: Optional["KVConnectorOutput"] = None,
-    ) -> ModelRunnerOutput:
-        assert self.input_batch.num_reqs ==\
-            len(self.input_batch.pooling_params), \
-        "Either all or none of the requests in" \
-        " a batch must be pooling request"
-
-        extracted_hidden_states = list(
-            torch.split(hidden_states[:num_scheduled_tokens],
-                        num_scheduled_tokens_np.tolist()))
-
-        pooling_metadata = self.input_batch.pooling_metadata
-
-        raw_pooler_output = self.model.pooler(
-            hidden_states=extracted_hidden_states,
-            pooling_metadata=pooling_metadata)
-
-        pooler_output: list[Optional[torch.Tensor]] = []
-        seq_lens = self.seq_lens[:self.input_batch.num_reqs]
-        for raw_output, seq_len, prompt_len in zip(
-                raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
-
-            if seq_len == prompt_len:
-                pooler_output.append(raw_output.data.cpu())
-            else:
-                pooler_output.append(None)
-        extra_args = ({"kv_connector_output": kv_connector_output})
-        modelrunner_output = ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=[],
-            spec_token_ids=None,
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=pooler_output,
-            **extra_args,
-        )
-        return modelrunner_output
-
     def _pool(
         self,
         hidden_states: torch.Tensor,
@@ -1606,19 +1501,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logits = None
             else:
                 if self.input_batch.pooling_params:
-                    if vllm_version_is("0.10.1.1") or vllm_version_is(
-                            "0.10.1"):
-                        return self._pool_v010(
-                            hidden_states,
-                            scheduler_output.total_num_scheduled_tokens,
-                            num_scheduled_tokens_np, finished_sending,
-                            finished_recving, kv_connector_output)
-                    else:
-                        return self._pool(
-                            hidden_states,
-                            scheduler_output.total_num_scheduled_tokens,
-                            num_scheduled_tokens_np, finished_sending,
-                            finished_recving, kv_connector_output)
+                    return self._pool(
+                        hidden_states,
+                        scheduler_output.total_num_scheduled_tokens,
+                        num_scheduled_tokens_np, finished_sending,
+                        finished_recving, kv_connector_output)
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states, None)
             if broadcast_pp_output:
@@ -1759,27 +1646,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         extra_args = ({"kv_connector_output": kv_connector_output})
 
-        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-            model_runner_output = ModelRunnerOutput(
-                req_ids=self.input_batch.req_ids,
-                req_id_to_index=self.input_batch.req_id_to_index,
-                sampled_token_ids=valid_sampled_token_ids,
-                logprobs=logprobs_lists,
-                spec_token_ids=self._draft_token_ids,
-                prompt_logprobs_dict=prompt_logprobs_dict,
-                pooler_output=[],
-                **extra_args,
-            )
-        else:
-            model_runner_output = ModelRunnerOutput(
-                req_ids=self.input_batch.req_ids,
-                req_id_to_index=self.input_batch.req_id_to_index,
-                sampled_token_ids=valid_sampled_token_ids,
-                logprobs=logprobs_lists,
-                prompt_logprobs_dict=prompt_logprobs_dict,
-                pooler_output=[],
-                **extra_args,
-            )
+        model_runner_output = ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=valid_sampled_token_ids,
+            logprobs=logprobs_lists,
+            prompt_logprobs_dict=prompt_logprobs_dict,
+            pooler_output=[],
+            **extra_args,
+        )
 
         durations = ProfileExecuteDuration().pop_captured_sync()
         if durations:
@@ -2079,8 +1954,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
 
-        hidden_states_list = list(
-            torch.split(hidden_states, num_scheduled_tokens_list))
         req_num_tokens = num_tokens // num_reqs
 
         dummy_token_ids = torch.zeros((num_reqs, req_num_tokens),
@@ -2091,55 +1964,32 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         dummy_pooling_params = PoolingParams(task=task)
         to_update = model.pooler.get_pooling_updates(task)
         to_update.apply(dummy_pooling_params)
-        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-            dummy_prompt_lens = torch.tensor(
-                [h.shape[0] for h in hidden_states_list],
-                device=self.device,
-            )
-            dummy_metadata = PoolingMetadata(
-                prompt_lens=dummy_prompt_lens,
-                prompt_token_ids=dummy_token_ids,
-                pooling_params=[dummy_pooling_params] * num_reqs,
-            )
 
-            try:
-                return model.pooler(hidden_states=hidden_states_list,
-                                    pooling_metadata=dummy_metadata)
-            except RuntimeError as e:
-                if 'out of memory' in str(e):
-                    raise RuntimeError(
-                        "NPU out of memory occurred when warming up pooler "
-                        f"({task=}) with {num_reqs} dummy requests. Please try "
-                        "lowering `max_num_seqs` or `gpu_memory_utilization` when "
-                        "initializing the engine.") from e
-                else:
-                    raise e
-        else:
-            dummy_prompt_lens = torch.tensor(
-                num_scheduled_tokens_list,
-                device="cpu",
-            )
-            dummy_metadata = PoolingMetadata(
-                prompt_lens=dummy_prompt_lens,
-                prompt_token_ids=dummy_token_ids,
-                pooling_params=[dummy_pooling_params] * num_reqs,
-            )
+        dummy_prompt_lens = torch.tensor(
+            num_scheduled_tokens_list,
+            device="cpu",
+        )
+        dummy_metadata = PoolingMetadata(
+            prompt_lens=dummy_prompt_lens,
+            prompt_token_ids=dummy_token_ids,
+            pooling_params=[dummy_pooling_params] * num_reqs,
+        )
 
-            dummy_metadata.build_pooling_cursor(num_scheduled_tokens_list,
-                                                device=hidden_states.device)
+        dummy_metadata.build_pooling_cursor(num_scheduled_tokens_list,
+                                            device=hidden_states.device)
 
-            try:
-                return model.pooler(hidden_states=hidden_states,
-                                    pooling_metadata=dummy_metadata)
-            except RuntimeError as e:
-                if 'out of memory' in str(e):
-                    raise RuntimeError(
-                        "CUDA out of memory occurred when warming up pooler "
-                        f"({task=}) with {num_reqs} dummy requests. Please try "
-                        "lowering `max_num_seqs` or `gpu_memory_utilization` when "
-                        "initializing the engine.") from e
-                else:
-                    raise e
+        try:
+            return model.pooler(hidden_states=hidden_states,
+                                pooling_metadata=dummy_metadata)
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                raise RuntimeError(
+                    "CUDA out of memory occurred when warming up pooler "
+                    f"({task=}) with {num_reqs} dummy requests. Please try "
+                    "lowering `max_num_seqs` or `gpu_memory_utilization` when "
+                    "initializing the engine.") from e
+            else:
+                raise e
 
     @torch.inference_mode()
     def _dummy_pooler_run(
