@@ -394,6 +394,7 @@ class KVCacheRecvingThread(threading.Thread):
         logger.debug("Sending done recving signal for request %s to %s:%d",
                      request_id, remote_host, remote_handshake_port)
         sock: Optional[zmq.Socket] = None  # type: ignore
+        socket_valid =True
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             data_bytes = self.encoder.encode((DONE_RECVING_MSG, request_id))
@@ -407,14 +408,28 @@ class KVCacheRecvingThread(threading.Thread):
             if resp != b"ACK":
                 logger.error("Failed to receive ACK for request %s from %s:%d",
                              request_id, remote_host, remote_handshake_port)
+                socket_valid = False
                 raise RuntimeError(
                     f"Failed to receive ACK, resp: {resp.decode('utf-8')}")
+        except Exception as e:
+            socket_valid = False
+            logger.error(f"Error in _send_done_recv_signal for request {request_id}: {e}")
+            raise
         finally:
             if sock is not None:
-                self._return_remote_socket(sock, remote_host,
-                                           remote_handshake_port)
-                logger.debug("Returned socket to pool for %s:%d", remote_host,
-                             remote_handshake_port)
+                if socket_valid:
+                    self._return_remote_socket(sock, remote_host,
+                                               remote_handshake_port)
+                    logger.debug("Returned socket to pool for %s:%d", remote_host,
+                                 remote_handshake_port)
+                else:
+                    try:
+                        self.remote_poller.unregister(sock)  # type: ignore
+                        sock.close()
+                        logger.debug("Closed invalid socket for %s:%d", remote_host,
+                                     remote_handshake_port)
+                    except Exception as e:
+                        logger.warning(f"Error closing invalid socket: {e}")
 
     def _get_remote_socket(
             self, remote_host: str,
