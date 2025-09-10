@@ -5,8 +5,8 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.layers.experts_selector import (_native_grouped_topk,
-                                                     select_experts)
+from vllm_ascend.ops.moe.experts_selector import (_native_grouped_topk,
+                                                  select_experts)
 from vllm_ascend.quantization.w8a8 import (AscendC8KVCacheMethod,
                                            AscendW8A8FusedMoEMethod,
                                            AscendW8A8LinearMethod,
@@ -784,7 +784,7 @@ class TestSelectExperts(TestBase):
         self.assertEqual(ids.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.dtype, torch.int32)
 
-    @patch('vllm_ascend.ops.layers.experts_selector._native_grouped_topk')
+    @patch('vllm_ascend.ops.moe.experts_selector._native_grouped_topk')
     def test_grouped_topk_with_correction_bias(self, mock_grouped_topk):
         """Test grouped topk with expert score correction bias"""
         mock_grouped_topk.return_value = torch.ones(self.num_tokens,

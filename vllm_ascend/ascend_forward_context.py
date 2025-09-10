@@ -45,13 +45,12 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
 def get_dispatcher_name(ep_size: int, with_prefill: bool) -> str:
     if ep_size == 1:
         return "TokenDispatcherWithAllGather"
-
-    if ep_size < 16:
+    elif envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1:
+        return "TokenDispatcherWithAllGather"
+    elif ep_size < 16 or with_prefill:
         return "TokenDispatcherWithAll2AllV"
-
-    if with_prefill:
-        return "TokenDispatcherWithAll2AllV"
-    return "TokenDispatcherWithMC2"
+    else:
+        return "TokenDispatcherWithMC2"
 
 
 @contextmanager
@@ -84,6 +83,7 @@ def set_ascend_forward_context(
         forward_context = get_forward_context()
         forward_context.moe_comm_method_name = moe_comm_method + "commimpl"
         forward_context.with_prefill = with_prefill
+        tp_world_size = get_tensor_model_parallel_world_size()
         ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
 
@@ -95,8 +95,7 @@ def set_ascend_forward_context(
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
 
-        from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
-            get_token_dispatcher
+        from vllm_ascend.ops.moe.token_dispatcher import get_token_dispatcher
         dispatcher_name = get_dispatcher_name(ep_size, with_prefill)
         dispatcher = get_token_dispatcher(dispatcher_name)
         forward_context.token_dispatcher = dispatcher
@@ -104,6 +103,24 @@ def set_ascend_forward_context(
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
+
+        # set for flashcomm_v1, 1000 is the batchsize concurrency threshold for enabling the flashcomm_v1 feature.
+        # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
+        # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
+        # the performance may degrade due to the switching of communication methods.
+        flashcomm_v1_enabled = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM and \
+            tp_world_size > 1 and \
+            num_tokens is not None and num_tokens > 1000
+
+        if flashcomm_v1_enabled:
+            pad_size = (tp_world_size -
+                        (num_tokens % tp_world_size)) % tp_world_size
+            forward_context.pad_size = pad_size
+
+        forward_context.flashcomm_v1_enabled = flashcomm_v1_enabled
+
+        # set this for rope forward_oot using
+        forward_context.is_first_layer = True
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
@@ -120,7 +137,6 @@ def set_ascend_forward_context(
         if num_tokens is not None:
             if num_actual_tokens is None:
                 num_actual_tokens = num_tokens
-            tp_world_size = get_tensor_model_parallel_world_size()
             # NOTE: token num which need to pad to when mc2
             forward_context.padded_num_tokens = math.ceil(
                 max_tokens_across_dp / tp_world_size) * tp_world_size
