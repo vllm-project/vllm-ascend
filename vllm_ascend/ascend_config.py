@@ -49,6 +49,9 @@ class AscendConfig:
             "expert_map_record_path",
             None)  # Provide path to export expert map
         # Eplb config
+        self.init_redundancy_expert = additional_config.get(
+            "init_redundancy_expert",
+            0)
         self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
         self.num_iterations_eplb_update = additional_config.get("num_iterations_eplb_update", 400)
         self.gate_eplb = additional_config.get("gate_eplb", False)
