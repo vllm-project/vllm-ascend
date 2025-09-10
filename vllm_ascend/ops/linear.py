@@ -70,8 +70,8 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         else:
             self.comm_group = get_tp_group()
 
-        self.tp_size = self.comm_group.world_size if not disable_tp else 1
-        self.tp_rank = self.comm_group.rank_in_group if not disable_tp else 0
+        self.tp_size = self.comm_group.world_size
+        self.tp_rank = self.comm_group.rank_in_group
 
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
@@ -159,8 +159,9 @@ class AscendRowParallelLinear(RowParallelLinear):
             self.forward_type = "normal"
         self.comm_group = comm_group
 
-        self.tp_size = self.comm_group.world_size if not disable_tp else 1
-        self.tp_rank = self.comm_group.rank_in_group if not disable_tp else 0
+        # TODO: check for disable_tp
+        self.tp_size = self.comm_group.world_size
+        self.tp_rank = self.comm_group.rank_in_group
 
         # Divide the weight matrix along the first dimension.
         self.input_size_per_partition = divide(input_size, self.tp_size)
@@ -408,8 +409,9 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
             comm_group = get_tp_group()
             self.forward_type = "normal_tp"
         self.comm_group = comm_group
-        self.tp_rank = comm_group.rank_in_group if not disable_tp else 0
-        self.tp_size = comm_group.world_size if not disable_tp else 1
+        # TODO: check for disable_tp
+        self.tp_rank = comm_group.rank_in_group
+        self.tp_size = comm_group.world_size
 
         self.output_sizes = output_sizes
         assert all(output_size % self.tp_size == 0
@@ -518,7 +520,8 @@ class AscendQKVParallelLinear(QKVParallelLinear):
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
         # Divide the weight matrix along the last dimension.
-        tp_size = self.comm_group.world_size if not disable_tp else 1
+        # TODO: check for disable_tp
+        tp_size = self.comm_group.world_size
         self.num_heads = divide(self.total_num_heads, tp_size)
         if tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
