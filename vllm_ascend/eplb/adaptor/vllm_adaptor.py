@@ -158,6 +158,35 @@ class VllmEplbAdaptor(EplbAdaptor):
             return expert_map_tensor, layers_num, gpus_num
         logger.error(f"failed to read expert_map_path: {expert_map_path}")
 
+    def _export_tensor_to_file(self, expert_maps, expert_map_record_path: str):
+        num_local_experts = expert_maps.max() + 1
+        expert_maps_local = self.global2local(expert_maps, num_local_experts)
+
+        expert_maps_list = expert_maps_local.tolist()
+        record: dict[str, Any] = {
+            "moe_layer_count": len(expert_maps_list),
+            "layer_list": []
+        }
+
+        for layer_idx, layer_data in enumerate(expert_maps_list):
+            layer_record: dict[str, Any] = {
+                "layer_id": layer_idx,
+                "device_count": len(layer_data),
+                "device_list": []
+            }
+
+            for device_idx, experts in enumerate(layer_data):
+                device_record = {
+                    "device_id": device_idx,
+                    "device_expert": experts
+                }
+                layer_record["device_list"].append(device_record)
+
+            record["layer_list"].append(layer_record)
+
+        with open(expert_map_record_path, "w") as f:
+            json.dump(record, f, indent=4)
+
     def do_update_expert_map(self, layer_id, updated_expert_map):
         self.expert_map_per_layer[layer_id].copy_(updated_expert_map)
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
@@ -172,6 +201,26 @@ class VllmEplbAdaptor(EplbAdaptor):
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
         if self.log2phy_map_per_layer[layer_id] is not None:
             self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
+
+    def global2local(self, placement: torch.Tensor,
+                     E_local: int) -> torch.Tensor:
+
+        L, G, _ = placement.shape
+        device = placement.device
+
+        pt_local = torch.full((L, G, E_local),
+                              fill_value=-1,
+                              dtype=torch.long,
+                              device=device)
+
+        valid = placement >= 0
+        l_idx, g_idx, k_idx = valid.nonzero(as_tuple=True)
+
+        slot_idx = placement[l_idx, g_idx, k_idx]
+
+        pt_local[l_idx, g_idx, slot_idx] = k_idx
+
+        return pt_local
 
     def local2global(self, placement_local: torch.Tensor) -> torch.Tensor:
 

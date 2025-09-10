@@ -39,6 +39,7 @@ class EplbUpdator:
         self.periodic_load_gather = True
         self.num_iterations_eplb_update: torch.int64 = self.ascend_config.num_iterations_eplb_update
         self.expert_map_path = expert_map_path
+        self.expert_map_record_path = self.ascend_config.expert_map_record_path
 
         try:
             if not envs.VLLM_ALLOW_EXPERT_LOAD_COLLECTING:
@@ -82,6 +83,11 @@ class EplbUpdator:
         self.cur_iterations += 1
         if self.cur_iterations == (self.num_iterations_eplb_update + \
                                    self.num_wait_worker_iterations + self.num_moe_layers):
+            if self.expert_map_record_path is not None:
+                self.adaptor._export_tensor_to_file(
+                    self.shared_dict["expert_maps"],
+                    self.expert_map_record_path)
+                
             self.adaptor.model.clear_all_moe_loads()
             if not self.gate_eplb:
                 self.cur_iterations = 0

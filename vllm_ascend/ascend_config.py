@@ -45,6 +45,9 @@ class AscendConfig:
             ascend_scheduler_config)
 
         self.expert_map_path = additional_config.get("expert_map_path", None)
+        self.expert_map_record_path = additional_config.get(
+            "expert_map_record_path",
+            None)  # Provide path to export expert map
         # Eplb config
         self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
         self.num_iterations_eplb_update = additional_config.get("num_iterations_eplb_update", 400)
