@@ -283,6 +283,10 @@ class NPUPlatform(Platform):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
 
+        tmp_flag = False
+        if use_mla and tmp_flag:
+            return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
+
         use_torchair = get_ascend_config().torchair_graph_config.enabled
         # choose attention backend based on use_mla and use_torchair
         backend_map = {
