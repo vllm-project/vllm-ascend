@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
+REGISTERED_ASCEND_OPS = {}
 # NOTE: Currently, we can only capture 1920 graphs at most,
 # due to the limitation of ACL graph. This number is bounded by
 # the number of streams, which is 2048, we save 128 streams
@@ -504,6 +505,7 @@ def register_ascend_customop():
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
 
+    global REGISTERED_ASCEND_OPS
     REGISTERED_ASCEND_OPS = {
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
