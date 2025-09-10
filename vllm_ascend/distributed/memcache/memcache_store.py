@@ -79,7 +79,31 @@ class Memcachestore():
         ret_value = self.store.register_buffer(ptr, length)
         if ret_value != 0:
             raise RuntimeError("Memcache memory registration failed.")
+    
+    def get_batch(self, key: list[str], addr: list[list[int]], size: list[list[int]], block_ids: list[int]):
+        try:
+            res = self.store.batch_get_into_layers(key, addr, size, MmcDirect.COPY_G2L.value)
+            for value in res:
+                if value != 0:
+                    logger.error(
+                        f"Failed to get key {key},res:{res}"
+                    )
+        except Exception as e:
+            logger.error(f"Failed to get key {key}. {e}")
 
+    def put_batch(self, key: list[str], addr: list[list[int]], size: list[list[int]], block_ids: list[int]):
+        try:
+            res = self.store.batch_put_from_layers(key, addr, size, MmcDirect.COPY_L2G.value)
+            for value in res:
+                if value != 0:
+                    logger.error(
+                        f"Failed to get key {key},res:{res}"
+                    )
+        except Exception as e:
+            logger.error(
+                f"Failed to put key {key},error:{e}"
+            )
+    
     def get(self, key: MemcacheEngineKey, addr: list[int], size: list[int], block_id: int):
         try:
             res = self.store.get_into_layers(key.to_string(), addr, size, MmcDirect.COPY_G2L.value)
