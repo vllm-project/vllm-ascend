@@ -72,7 +72,7 @@ class AscendScheduler(Scheduler):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
-        
+
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_budget = self.max_num_encoder_input_tokens
@@ -203,10 +203,9 @@ class AscendScheduler(Scheduler):
             # Schedule encoder inputs.
             if request.has_encoder_inputs:
                 (encoder_inputs_to_schedule, num_new_tokens,
-                    new_encoder_budget
-                    ) = self._try_schedule_encoder_inputs(
-                        request, num_computed_tokens, num_new_tokens,
-                        encoder_budget)
+                 new_encoder_budget) = self._try_schedule_encoder_inputs(
+                    request, num_computed_tokens, num_new_tokens,
+                    encoder_budget)
                 if num_new_tokens == 0:
                     # The request cannot be scheduled.
                     break
@@ -274,7 +273,7 @@ class AscendScheduler(Scheduler):
             # Count the number of prefix cached tokens.
             if request.num_cached_tokens < 0:
                 request.num_cached_tokens = num_computed_tokens
-            
+
             # Encoder-related.
             if encoder_inputs_to_schedule:
                 scheduled_encoder_inputs[request.request_id] = (
@@ -315,13 +314,13 @@ class AscendScheduler(Scheduler):
                 num_new_tokens = min(
                     num_new_tokens,
                     self.max_model_len - request.num_computed_tokens)
-                                
+
                 # Schedule encoder inputs.
                 encoder_inputs_to_schedule = None
                 new_encoder_budget = encoder_budget
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
-                    new_encoder_budget) = self._try_schedule_encoder_inputs(
+                     new_encoder_budget) = self._try_schedule_encoder_inputs(
                         request, request.num_computed_tokens, num_new_tokens,
                         encoder_budget)
 
@@ -395,7 +394,7 @@ class AscendScheduler(Scheduler):
                         del request.spec_token_ids[num_scheduled_spec_tokens:]
                         scheduled_spec_decode_tokens[request.request_id] = (
                             request.spec_token_ids)
-                
+
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request.request_id] = (
