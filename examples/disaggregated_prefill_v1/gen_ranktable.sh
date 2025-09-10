@@ -63,7 +63,7 @@ if [[ $NODE_RANK == "" ]];then
 fi
 
 WORLD_SIZE=$(($NPUS_PER_NODE * $NNODES))
-RANKSTART=$(expr "$NPUS_PER_NODE" \* "$NODE_RANK")
+RANKSTART=$(( NPUS_PER_NODE * NODE_RANK ))
 
 echo "========> param:"
 echo "LOCAL_HOST: $LOCAL_HOST"

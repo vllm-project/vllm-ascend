@@ -107,9 +107,9 @@ run_tests_for_model() {
   eval "$FULL_CMD &"
 
   # Wait for all instances to start
-  echo "Waiting for prefill instance on port $PORT to start..."
+  echo "Waiting for prefill instance on port $PREFILL_PORT to start..."
   wait_for_server $PREFILL_PORT
-  echo "Waiting for decode instance on port $PORT to start..."
+  echo "Waiting for decode instance on port $DECODE_PORT to start..."
   wait_for_server $DECODE_PORT
 
   # Build the command for the proxy server with all the hosts and ports
