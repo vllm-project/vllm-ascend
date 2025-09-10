@@ -55,108 +55,78 @@ def compute_identity_kernel_npu(top_k, hidden_states, expert_scales, output, hid
     """
     使用PyTorch操作实现compute_identity_kernel的功能，适用于Ascend NPU。
     """
-    num_tokens = hidden_states.size(0)
-    # 将expert_scales扩展为与hidden_states相同的形状
-    expert_scales_expanded = expert_scales.view(num_tokens, top_k, 1).expand(-1, -1, hidden_dim)
-    # 将hidden_states扩展为与expert_scales相同的形状
-    hidden_states_expanded = hidden_states.unsqueeze(1).expand(-1, top_k, -1)
-    # 计算每个expert的贡献
-    expert_contributions = hidden_states_expanded * expert_scales_expanded
-    # 求和所有expert的贡献
-    output = expert_contributions.sum(dim=1)
-    return output
+    try:
+        num_tokens = hidden_states.size(0)
+        # 将expert_scales扩展为与hidden_states相同的形状
+        expert_scales_expanded = expert_scales.view(num_tokens, top_k, 1).expand(-1, -1, hidden_dim)
+        # 将hidden_states扩展为与expert_scales相同的形状
+        hidden_states_expanded = hidden_states.unsqueeze(1).expand(-1, top_k, -1)
+        # 计算每个expert的贡献
+        expert_contributions = hidden_states_expanded * expert_scales_expanded
+        # 求和所有expert的贡献
+        output = expert_contributions.sum(dim=1)
+        return output
+    except Exception as e:
+        # 如果出现异常，返回一个零张量作为降级处理
+        print(f"Error in compute_identity_kernel_npu: {e}")
+        return torch.zeros_like(hidden_states)
 
 def zero_experts_compute_npu(expert_indices, expert_scales, num_experts, zero_expert_type, hidden_states):
     """
     使用PyTorch操作实现zero_experts_compute_triton的功能，适用于Ascend NPU。
     """
-    N = expert_indices.numel()
-    top_k = expert_indices.size(-1)
-    
-    # 创建副本以避免修改原始张量
-    expert_indices = expert_indices.clone()
-    expert_scales = expert_scales.clone()
-    
-    if zero_expert_type == "identity":
-        zero_expert_mask = expert_indices < num_experts
-        zero_expert_scales = expert_scales.clone()
-        # 使用masked_fill避免分布式环境下的索引赋值问题
-        zero_expert_scales = zero_expert_scales.masked_fill(zero_expert_mask, 0.0)
-    else:
-        zero_expert_scales = expert_scales
+    try:
+        # 确保所有张量都在同一设备上
+        device = hidden_states.device
+        expert_indices = expert_indices.to(device)
+        expert_scales = expert_scales.to(device)
+        
+        N = expert_indices.numel()
+        top_k = expert_indices.size(-1)
+        
+        # 创建副本以避免修改原始张量
+        expert_indices = expert_indices.clone()
+        expert_scales = expert_scales.clone()
+        
+        if zero_expert_type == "identity":
+            # 创建一个掩码，标记哪些专家索引小于num_experts（即需要置零的专家）
+            zero_expert_mask = expert_indices < num_experts
+            # 将需要置零的专家对应的scale置为0，其他保持不变
+            zero_expert_scales = torch.where(zero_expert_mask, 
+                                            torch.zeros_like(expert_scales), 
+                                            expert_scales)
+        else:
+            zero_expert_scales = expert_scales
 
-    normal_expert_mask = expert_indices >= num_experts
-    expert_indices = expert_indices.masked_fill(normal_expert_mask, 0)
-    expert_scales = expert_scales.masked_fill(normal_expert_mask, 0.0)
-    
-    output = torch.zeros_like(hidden_states).to(hidden_states.device)
-    hidden_dim = hidden_states.size(-1)
-    num_tokens = hidden_states.size(0)
-    
-    # 调用NPU优化的实现
-    output = compute_identity_kernel_npu(
-        top_k,
-        hidden_states,
-        zero_expert_scales,
-        output,
-        hidden_dim,
-        zero_expert_scales.stride(0) if zero_expert_scales.stride(0) > 0 else 1
-    )
-    
-    return output
-
-#def compute_identity_npu(
-#    hidden_states: torch.Tensor,
-#    expert_scales: torch.Tensor,
-#    top_k: int,
-#) -> torch.Tensor:
-#    """
-#    在Ascend NPU上使用PyTorch实现身份映射计算
-#    Args:
-#        hidden_states: [num_tokens, hidden_dim] 输入的隐藏状态
-#        expert_scales: [num_tokens, top_k] 专家权重缩放因子
-#        top_k: 每个token选择的专家数量
-#
-#    Returns:
-#        output: [num_tokens, hidden_dim] 计算结果
-#    """
-#    # 将expert_scales扩展到hidden_dim维度: [num_tokens, top_k, 1]
-#    expert_scales_expanded = expert_scales.unsqueeze(-1)
-#    
-#    # 将hidden_states扩展到top_k维度: [num_tokens, 1, hidden_dim] -> [num_tokens, top_k, hidden_dim]
-#    hidden_states_expanded = hidden_states.unsqueeze(1).expand(-1, top_k, -1)
-#    
-#    # 逐元素相乘并在top_k维度上求和: [num_tokens, top_k, hidden_dim] -> [num_tokens, hidden_dim]
-#    result = torch.sum(hidden_states_expanded * expert_scales_expanded, dim=1)
-#    
-#    return result
-#
-#
-#def zero_experts_compute_npu(expert_indices, expert_scales, num_experts,
-#                             zero_expert_type, hidden_states):
-#    """在Ascend NPU上处理LongCat Flash模型的零专家计算逻辑"""
-#    top_k = expert_indices.size(-1)
-#    
-#    if zero_expert_type == "identity":
-#        # 创建零专家掩码：专家索引 < num_experts 的为真正的专家
-#        zero_expert_mask = expert_indices < num_experts
-#        
-#        # 复制专家权重，将真正专家的权重设为0
-#        zero_expert_scales = expert_scales.clone()
-#        zero_expert_scales[zero_expert_mask] = 0.0
-#        
-#        # 使用NPU优化的身份映射计算
-#        output = compute_identity_npu(
-#            hidden_states=hidden_states,
-#            expert_scales=zero_expert_scales,
-#            top_k=top_k
-#        )
-#        
-#        return output
-#    else:
-#        # 其他零专家类型的处理可以在这里添加
-#        raise NotImplementedError(f"Zero expert type '{zero_expert_type}' not supported on Ascend NPU")
-#
+        # 对于normal_expert_mask，我们将不在有效范围内的专家索引和scale都置为0
+        normal_expert_mask = expert_indices >= num_experts
+        expert_indices = torch.where(normal_expert_mask, 
+                                    torch.zeros_like(expert_indices), 
+                                    expert_indices)
+        expert_scales = torch.where(normal_expert_mask, 
+                                   torch.zeros_like(expert_scales), 
+                                   expert_scales)
+        
+        # 初始化输出张量
+        output = torch.zeros_like(hidden_states)
+        hidden_dim = hidden_states.size(-1)
+        num_tokens = hidden_states.size(0)
+        
+        # 调用NPU优化的实现
+        output = compute_identity_kernel_npu(
+            top_k,
+            hidden_states,
+            zero_expert_scales,
+            output,
+            hidden_dim,
+            zero_expert_scales.stride(0)
+        )
+        
+        return output
+    except Exception as e:
+        # 如果出现异常，返回一个零张量作为降级处理
+        print(f"Error in zero_experts_compute_npu: {e}")
+        return torch.zeros_like(hidden_states)
 
 def fused_topk_bias(
     hidden_states: torch.Tensor,
@@ -178,6 +148,7 @@ def fused_topk_bias(
     return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
 
 
+# 有区别，这里没有像jsb一样改造
 def unified_fused_experts_eager(hidden_states: torch.Tensor,
                                 w1: torch.Tensor,
                                 w2: torch.Tensor,
@@ -277,16 +248,16 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         use_grouped_topk: bool = False,
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
         is_prefill: bool = False,
         enable_force_load_balance: bool = False,
         shared_experts: Optional[Any] = None,
-        zero_expert_num: Optional[int] = 0,
-        zero_expert_type: Optional[str] = None,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
         **kwargs,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         # 初始化零专家输出
@@ -668,9 +639,9 @@ class AscendFusedMoE(FusedMoE):
         zero_expert_result = None
         if isinstance(moe_result, tuple) and len(moe_result) == 2:
             e_hidden_states, zero_expert_result = moe_result
-            #if zero_expert_result is not None:
-            #    e_hidden_states += (
-            #        zero_expert_result[:e_hidden_states.size(0)])
+            if zero_expert_result is not None:
+                e_hidden_states += (
+                    zero_expert_result[:e_hidden_states.size(0)])
         else:
             e_hidden_states = moe_result
 

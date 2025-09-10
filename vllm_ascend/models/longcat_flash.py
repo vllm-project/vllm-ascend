@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 """Ascend NPU优化的LongCat Flash模型，通过继承vLLM实现来减少代码重复。"""
-from typing import Optional, Union, Iterable, Callable
+from typing import Optional, Union, Iterable, Callable, List
 import typing
+
+from vllm.model_executor.layers.fused_moe.modular_kernel import TopKWeightAndReduce
+from vllm.utils import T
 import torch
 from torch import nn
 
@@ -14,13 +17,15 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     block_dequant)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.distributed import get_pp_group
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_world_size)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsLoRA
-from vllm.model_executor.models.utils import (
-    IntermediateTensors, PPMissingLayer, make_empty_intermediate_tensors_factory,
+from vllm.model_executor.models.utils import (PPMissingLayer, 
+    make_empty_intermediate_tensors_factory,
     make_layers, maybe_prefix, is_pp_missing_parameter
 )
+from vllm.sequence import IntermediateTensors
+from vllm.attention import AttentionMetadata
 
 # 继承原始的vLLM LongCat Flash实现
 from vllm.model_executor.models.longcat_flash import (
@@ -34,6 +39,7 @@ from vllm.model_executor.models.longcat_flash import (
 
 # 导入Ascend特定的实现
 from vllm_ascend.models.deepseek_v2 import CustomDeepseekV2MLAAttention
+from vllm_ascend.ops.fused_moe import AscendFusedMoE
 
 logger = init_logger(__name__)
 
@@ -60,6 +66,7 @@ class CustomLongcatMoe(nn.Module):
         self.zero_expert_type = config.zero_expert_type
         self.routed_scaling_factor = config.routed_scaling_factor
         self.enable_eplb = enable_eplb
+        self.top_k = config.num_experts_per_tok
         # Gate always runs at half / full precision for now.
         self.rounter_params_dtype = params_dtype
         if config.router_dtype == "float32":
@@ -73,7 +80,6 @@ class CustomLongcatMoe(nn.Module):
             prefix=f"{prefix}.gate")
 
         # 关键：使用vllm_ascend的AscendFusedMoE替代原始FusedMoE
-        from vllm_ascend.ops.fused_moe import AscendFusedMoE
         self.experts = AscendFusedMoE(
             num_experts=num_experts,
             top_k=top_k,
@@ -92,19 +98,16 @@ class CustomLongcatMoe(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
-
         forward_context = get_forward_context()
+        enable_force_load_balance = forward_context.in_profile_run
         is_prefill = forward_context.with_prefill
         router_logits = self.router(hidden_states.to(
             self.rounter_params_dtype))
-        final_hidden_states = self.experts(hidden_states=hidden_states,
-                                          is_prefill=is_prefill,
-                                           router_logits=router_logits)
-
-        return final_hidden_states.view(num_tokens, hidden_dim)
-
+        return self.experts(hidden_states=hidden_states,
+                                            is_prefill=is_prefill,
+                                            enable_force_load_balance=enable_force_load_balance,
+                                            top_k=self.top_k,
+                                            router_logits=router_logits)
 
 class CustomFlashDecoderLayer(FlashDecoderLayer):
     """Ascend优化的Flash decoder layer，使用CustomDeepseekV2MLAAttention和CustomLongcatMoe"""
@@ -207,11 +210,13 @@ class CustomFlashModel(FlashModel):
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        self.do_not_compile = True
+        # Temp not set self.do_not_compile
+        #self.do_not_compile = True
         self.config = config
 
         self.padding_idx = getattr(config, "pad_token_id", None)
         self.vocab_size = config.vocab_size
+        self.tp_size = get_tensor_model_parallel_world_size()
 
         # Pipeline Parallel支持：只在第一个rank创建embed_tokens
         if get_pp_group().is_first_rank:
@@ -245,7 +250,48 @@ class CustomFlashModel(FlashModel):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
     
-    # CustomFlashModel继承所有父类方法，无需重复实现
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        replace_allreduce = hidden_states.shape[0] % self.tp_size == 0
+
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
+            layer_kv_cache = kv_caches[i - self.start_layer] if kv_caches is not None else None
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                layer_kv_cache,
+                attn_metadata,
+                replace_allreduce=replace_allreduce
+            )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
+
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
 
 
 class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
@@ -288,9 +334,37 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata,
+                                   intermediate_tensors, inputs_embeds)
+        return hidden_states
+    
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return AscendFusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts if hasattr(
+                self.config, "n_routed_experts") else
+            self.config.num_experts[0],
+        )
+
+    # ToDo 这块和jsb有差异
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
+            # ToDo 临时注释掉，待确定
             #("fused_qkv_a_proj", "q_a_proj", 0),
             #("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
             (".gate_up_proj", ".gate_proj", 0),
