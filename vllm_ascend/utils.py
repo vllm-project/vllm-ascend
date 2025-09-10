@@ -40,12 +40,13 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
-# NOTE: Currently, we can only capture 1920 graphs at most,
+# NOTE: Currently, we can only capture 1800 graphs at most,
 # due to the limitation of ACL graph. This number is bounded by
-# the number of streams, which is 2048, we save 128 streams
+# the number of streams, which is 2048, we save 248 streams
 # as a buffer.
 # Maximum number of graphs that can be captured by ACL Graph
-MAX_CAPTURE_SIZE = 1920
+# TODO: Find out whether we need to solve allreduce function
+MAX_CAPTURE_SIZE = 1800
 
 ASCEND_QUANTIZATION_METHOD = "ascend"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
@@ -320,6 +321,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # TODO: Find out whether we need to take into account the pp_size
         parallel_factor = 1 + num_comm_groups + int(
             parallel_config.enable_expert_parallel)
+        if is_moe_model(vllm_config):
+            parallel_factor += (parallel_config.data_parallel_size > 1)
         # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
@@ -583,3 +586,8 @@ def matmul_allreduce_enable() -> bool:
 
 def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
+
+
+def is_moe_model(vllm_config: VllmConfig):
+    config = vllm_config.model_config.hf_config
+    return any('experts' in key.lower() for key in config.to_dict())
