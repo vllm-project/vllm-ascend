@@ -11,11 +11,13 @@ if is_310p():
                                          bgmv_shrink, sgmv_expand,
                                          sgmv_expand_slice, sgmv_shrink)
 else:
-    from vllm_ascend.lora.punica_wrapper.lora_ops import (
-        bgmv_expand, bgmv_expand_slice, bgmv_shrink, sgmv_expand,
-        sgmv_expand_slice, sgmv_shrink)
+    from vllm_ascend.lora.lora_ops import (bgmv_expand, bgmv_expand_slice,
+                                           bgmv_shrink, sgmv_expand,
+                                           sgmv_expand_slice, sgmv_shrink)
 
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
+
+from vllm_ascend.lora.utils import refresh_all_lora_classes
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -31,6 +33,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                  device: Union[torch.device, str], **kwargs):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches,
                                    device)
+        refresh_all_lora_classes()
 
     def _shrink_prefill(
         self,
