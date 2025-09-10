@@ -259,7 +259,7 @@ class TestUtils(TestBase):
         utils.update_aclgraph_sizes(test_vllm_config)
         del os.environ['HCCL_OP_EXPANSION_MODE']
         self.assertEqual(
-            147,
+            138,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
 
         test_vllm_config.speculative_config = mock.MagicMock()
@@ -272,7 +272,7 @@ class TestUtils(TestBase):
         utils.update_aclgraph_sizes(test_vllm_config)
         del os.environ['HCCL_OP_EXPANSION_MODE']
         self.assertEqual(
-            120,
+            112,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # max_num_batch_sizes >= len(original_sizes)
