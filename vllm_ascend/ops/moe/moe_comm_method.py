@@ -89,7 +89,7 @@ class MoECommMethod(ABC):
             # For load balance
             log2phy: torch.Tensor = None,
             global_redundant_expert_num: int = 0,
-            need_trans: bool = False) -> torch.Tensor:
+            need_trans: bool = False):
         # Check constraints
         assert hidden_states.shape[1] == w1.shape[1], (
             f"Hidden size mismatch {hidden_states.shape[1]} != {w1.shape[1]}")
@@ -140,7 +140,7 @@ class MoECommMethod(ABC):
         hidden_states[:] = self.token_dispatcher.token_combine(
             hidden_states=mlp_output)
 
-        return hidden_states
+        return (hidden_states, group_list_type, expert_tokens)
 
     @abstractmethod
     def _get_token_dispatcher(self):
