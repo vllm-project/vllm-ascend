@@ -526,8 +526,10 @@ def register_ascend_customop():
     CustomOp.register_oot(_decorated_op_cls=AscendLogitsProcessor,
                           name="LogitsProcessor")
 
-    from vllm_ascend.ops.layernorm import AscendRMSNorm
+    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
+    CustomOp.register_oot(_decorated_op_cls=AscendGemmaRMSNorm,
+                          name="GemmaRMSNorm")
 
     from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
     CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
