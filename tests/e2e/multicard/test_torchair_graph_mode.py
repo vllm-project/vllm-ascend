@@ -23,8 +23,8 @@ import os
 from typing import Dict
 from unittest.mock import patch
 
-from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
@@ -163,17 +163,18 @@ def test_e2e_pangu_with_torchair():
     }
     _pangu_torchair_test_fixture(additional_config)
 
+
 def _qwen_torchair_test_fixture(
     model,
     tp,
     enable_expert_parallel,
 ):
+
     def stubbed_get_state(ep_size, with_prefill, is_deepseek_v3_r1):
         return _get_fused_moe_state(16, with_prefill, is_deepseek_v3_r1)
-    
-    with patch(
-            "vllm_ascend.ascend_forward_context._get_fused_moe_state",
-            stubbed_get_state):
+
+    with patch("vllm_ascend.ascend_forward_context._get_fused_moe_state",
+               stubbed_get_state):
         # The current access control does not support 16 cards,
         # so the MC2 operator in Qwen's graph mode cannot run.
         # Once 16-card support is available,
