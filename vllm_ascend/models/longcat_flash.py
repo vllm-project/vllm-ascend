@@ -201,18 +201,16 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
     # CustomFlashDecoderLayer继承父类forward方法，无需重复实现
 
 
-class CustomFlashModel(FlashModel):
+class CustomFlashModel(nn.Module):
     """Ascend优化的Flash模型，使用CustomFlashDecoderLayer"""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         # 不调用父类初始化，直接初始化nn.Module以避免原始FlashDecoderLayer的创建
-        nn.Module.__init__(self)
+        super().__init__()
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        # Temp not set self.do_not_compile
-        #self.do_not_compile = True
-        self.config = config
+        # self.config = config
 
         self.padding_idx = getattr(config, "pad_token_id", None)
         self.vocab_size = config.vocab_size
@@ -249,6 +247,9 @@ class CustomFlashModel(FlashModel):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+    
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
     
     def forward(
         self,
