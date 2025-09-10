@@ -464,14 +464,13 @@ class MemcacheEngine:
         :return: An int indicating how many prefix tokens are cached.
         """
         end = 0
-
-        for start, end, key in self.token_database.process_tokens(tokens):
-            try:
-                if use_layerwise:
-                    keys=[]
+        keys=[]
+        if use_layerwise:
+            for start, end, key in self.token_database.process_tokens(tokens):
+                try:
                     keys_multi_layer = key.split_layers(self.num_layers)
-                    for key in keys_multi_layer:
-                        keys.append(key.to_string())
+                    for item in keys_multi_layer:
+                        keys.append(item.to_string())
                     # batch is_exists
                     ress=self.m_store.batch_exists(keys)
                     res=1
@@ -479,16 +478,22 @@ class MemcacheEngine:
                         if value != 1:
                             res=0
                             break
-                else:
-                    res=self.m_store.exists(key)
-                if res == 1:
-                    continue
-                else:
+                    if res == 1:
+                        continue
+                    else:
+                        return start
+                except Exception as e:
+                    logger.error(f"Remote connection failed in contains: {e}")
                     return start
-            except Exception as e:
-                logger.warning(f"Remote connection failed in contains: {e}")
-                return start
-
+        else:
+            starts=[]
+            for start, end, key in self.token_database.process_tokens(tokens):
+                keys.append(key.to_string())
+                starts.append(start)
+            res=self.m_store.batch_exists(keys)
+            for index, value in enumerate(res):
+                if value != 1:
+                    return starts[index]
         # all tokens where found, return the maximal end
         return end
 
