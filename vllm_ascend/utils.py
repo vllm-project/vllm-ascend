@@ -34,6 +34,35 @@ from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
+from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+from vllm_ascend.ops.layernorm import AscendRMSNorm
+from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
+                                    AscendMergedColumnParallelLinear,
+                                    AscendQKVParallelLinear,
+                                    AscendRowParallelLinear)
+from vllm_ascend.ops.rotary_embedding import (
+    AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+from vllm_ascend.ops.vocab_parallel_embedding import (
+    AscendLogitsProcessor, AscendParallelLMHead, AscendVocabParallelEmbedding)
+
+REGISTERED_ASCEND_OPS = {
+    "QuickGELU": AscendQuickGELU,
+    "SiluAndMul": AscendSiluAndMul,
+    "RotaryEmbedding": AscendRotaryEmbedding,
+    "ColumnParallelLinear": AscendColumnParallelLinear,
+    "RowParallelLinear": AscendRowParallelLinear,
+    "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
+    "QKVParallelLinear": AscendQKVParallelLinear,
+    "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
+    "VocabParallelEmbedding": AscendVocabParallelEmbedding,
+    "ParallelLMHead": AscendParallelLMHead,
+    "LogitsProcessor": AscendLogitsProcessor,
+    "RMSNorm": AscendRMSNorm,
+    "FusedMoE": AscendFusedMoE,
+    "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
+}
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -477,37 +506,6 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     elif ep_size == 1 and is_deepseek_v3_r1:
         return True
     return False
-
-
-from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
-from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
-from vllm_ascend.ops.layernorm import AscendRMSNorm
-from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
-                                    AscendMergedColumnParallelLinear,
-                                    AscendQKVParallelLinear,
-                                    AscendRowParallelLinear)
-from vllm_ascend.ops.rotary_embedding import (
-    AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
-from vllm_ascend.ops.vocab_parallel_embedding import (
-    AscendLogitsProcessor, AscendParallelLMHead, AscendVocabParallelEmbedding)
-
-REGISTERED_ASCEND_OPS = {
-    "QuickGELU": AscendQuickGELU,
-    "SiluAndMul": AscendSiluAndMul,
-    "RotaryEmbedding": AscendRotaryEmbedding,
-    "ColumnParallelLinear": AscendColumnParallelLinear,
-    "RowParallelLinear": AscendRowParallelLinear,
-    "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
-    "QKVParallelLinear": AscendQKVParallelLinear,
-    "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
-    "VocabParallelEmbedding": AscendVocabParallelEmbedding,
-    "ParallelLMHead": AscendParallelLMHead,
-    "LogitsProcessor": AscendLogitsProcessor,
-    "RMSNorm": AscendRMSNorm,
-    "FusedMoE": AscendFusedMoE,
-    "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
-}
 
 
 def register_ascend_customop():
