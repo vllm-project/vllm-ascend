@@ -92,7 +92,6 @@ repos:
     language: system
     types: [python]
     stages: [manual] # Only run in CI
-  # FIXME: enable shellcheck
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/shellcheck.sh

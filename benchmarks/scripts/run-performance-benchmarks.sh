@@ -25,7 +25,6 @@ ensure_sharegpt_downloaded() {
   if [ ! -f "$FILE" ]; then
     echo "$FILE not found, downloading from hf-mirror ..."
     mkdir -p "$DIR"
-    # shellcheck disable=SC2181
     wget -O "$FILE" https://hf-mirror.com/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
     # shellcheck disable=SC2181
     if [ $? -ne 0 ]; then
