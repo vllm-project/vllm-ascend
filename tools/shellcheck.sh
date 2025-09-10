@@ -28,6 +28,12 @@ if [ -d "shellcheck-${scversion}" ]; then
     export PATH
 fi
 
+# Optionally set SHELLCHECK_PATH to a directory containing shellcheck binary for CI use.
+if [ -d "$SHELLCHECK_PATH" ]; then
+    PATH="$PATH:$SHELLCHECK_PATH"
+    export PATH
+fi
+
 if ! [ -x "$(command -v shellcheck)" ]; then
     if [ "$(uname -s)" != "Linux" ] || [ "$(uname -m)" != "x86_64" ]; then
         echo "Please install shellcheck: https://github.com/koalaman/shellcheck?tab=readme-ov-file#installing"
@@ -36,7 +42,7 @@ if ! [ -x "$(command -v shellcheck)" ]; then
 
     # automatic local install if linux x86_64
     wget -qO- "https://github.com/koalaman/shellcheck/releases/download/${scversion?}/shellcheck-${scversion?}.linux.x86_64.tar.xz" | tar -xJv
-    PATH="$PATH:$(pwd)/shellcheck-${scversion}"
+    export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
 fi
 
 while IFS= read -r -d '' file; do

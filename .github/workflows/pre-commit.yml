@@ -41,4 +41,5 @@ jobs:
       env:
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
         GOPROXY: "https://goproxy.cn,direct"
+        SHELLCHECK_PATH: "/root/.cache/tools/shellcheck-stable"
       run: pre-commit run --all-files --hook-stage manual

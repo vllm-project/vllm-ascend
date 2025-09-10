@@ -42,6 +42,10 @@ on:
       - 'cmake/**'
       - 'CMakeLists.txt'
       - 'csrc/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
 
   build:
