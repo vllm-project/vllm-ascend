@@ -311,6 +311,90 @@ class TestUtils(TestBase):
         # should not register_oot again, thus only called three in this ut
         self.assertEqual(mock_customop.register_oot.call_count, 13)
 
+    def test_nd_to_nz_spec(self):
+        mask_tensor = torch.ones(32, 64, dtype=torch.bool)
+        output = utils.nd_to_nz_spec(mask_tensor)
+        self.assertEqual(output.shape, (1, 4, 32, 16))  # 64/16=4, 32->32
+
+        mask_tensor = torch.ones(30, 62, dtype=torch.bool)
+        output = utils.nd_to_nz_spec(mask_tensor)
+        self.assertEqual(output.shape, (1, 4, 32, 16))  # 62->64, 30->32
+
+        mask_tensor = torch.ones(16, 16, dtype=torch.bool)
+        output = utils.nd_to_nz_spec(mask_tensor)
+        self.assertTrue(torch.all(output[0, 0, :16, :16] == 1))
+        self.assertTrue(torch.all(output[0, 0, 16:, :] == 0))
+        self.assertTrue(torch.all(output[0, 1:, :, :] == 0))
+
+    def test_dispose_tensor(self):
+        x = torch.ones(10, 10)
+        original_data_ptr = x.data_ptr()
+        utils.dispose_tensor(x)
+        self.assertEqual(x.numel(), 0)
+        self.assertNotEqual(x.data_ptr(), original_data_ptr)
+
+    def test_init_ascend_soc_version(self):
+        test_cases = [
+            (220, utils.AscendSocVersion.A2),
+            (225, utils.AscendSocVersion.A2),
+            (250, utils.AscendSocVersion.A3),
+            (255, utils.AscendSocVersion.A3),
+            (202, utils.AscendSocVersion.P3),
+            (999, utils.AscendSocVersion.UNDEFINED),
+        ]
+
+        for soc_version, expected in test_cases:
+            with self.subTest(soc_version=soc_version):
+                with mock.patch('torch_npu.npu.get_soc_version',
+                                return_value=soc_version):
+                    utils._ascend_soc_version = None  # Reset
+                    utils.init_ascend_soc_version()
+                    result = utils.get_ascend_soc_version()
+                    self.assertEqual(result, expected)
+
+    def test_get_ascend_soc_version(self):
+        utils._ascend_soc_version = None
+        with self.assertRaises(AssertionError):
+            utils.get_ascend_soc_version()
+
+        utils._ascend_soc_version = utils.AscendSocVersion.A2
+        self.assertEqual(utils.get_ascend_soc_version(),
+                         utils.AscendSocVersion.A2)
+
+    def test_lmhead_tp_enable(self):
+        with mock.patch('vllm_ascend.utils.get_ascend_config') as mock_config:
+            mock_config.return_value.lmhead_tensor_parallel_size = 2
+            self.assertTrue(utils.lmhead_tp_enable())
+
+            mock_config.return_value.lmhead_tensor_parallel_size = None
+            self.assertFalse(utils.lmhead_tp_enable())
+
+    def test_oproj_tp_enable(self):
+        with mock.patch('vllm_ascend.utils.get_ascend_config') as mock_config:
+            mock_config.return_value.oproj_tensor_parallel_size = 2
+            self.assertTrue(utils.oproj_tp_enable())
+
+            mock_config.return_value.oproj_tensor_parallel_size = None
+            self.assertFalse(utils.oproj_tp_enable())
+
+    def test_mlp_tp_enable(self):
+        with mock.patch.dict(os.environ,
+                             {'VLLM_ASCEND_ENABLE_MLP_OPTIMIZE': '1'}):
+            self.assertTrue(utils.mlp_tp_enable())
+
+        with mock.patch.dict(os.environ,
+                             {'VLLM_ASCEND_ENABLE_MLP_OPTIMIZE': '0'}):
+            self.assertFalse(utils.mlp_tp_enable())
+
+    def test_matmul_allreduce_enable(self):
+        with mock.patch.dict(os.environ,
+                             {'VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE': '1'}):
+            self.assertTrue(utils.matmul_allreduce_enable())
+
+        with mock.patch.dict(os.environ,
+                             {'VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE': '0'}):
+            self.assertFalse(utils.matmul_allreduce_enable())
+
 
 class TestProfileExecuteDuration(TestBase):
 

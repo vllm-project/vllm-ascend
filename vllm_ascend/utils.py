@@ -50,6 +50,7 @@ MAX_CAPTURE_SIZE = 1800
 
 ASCEND_QUANTIZATION_METHOD = "ascend"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
+ASCEND_310P_SOC_VERSION = 202
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
@@ -545,7 +546,8 @@ def register_ascend_customop():
 class AscendSocVersion(Enum):
     A2 = 0
     A3 = 1
-    UNDEFINED = 2
+    P3 = 2
+    UNDEFINED = 3
 
 
 _ascend_soc_version = None
@@ -558,6 +560,8 @@ def init_ascend_soc_version():
         _ascend_soc_version = AscendSocVersion.A2
     elif 250 <= soc_version <= 255:
         _ascend_soc_version = AscendSocVersion.A3
+    elif soc_version == ASCEND_310P_SOC_VERSION:
+        _ascend_soc_version = AscendSocVersion.P3
     else:
         _ascend_soc_version = AscendSocVersion.UNDEFINED
 
