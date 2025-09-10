@@ -213,6 +213,10 @@ msgid "`enable_view_optimize`"
 msgstr "`enable_view_optimize` （启用视图优化）"
 
 #: ../../user_guide/configuration/additional_config.md
+msgid "`enable_frozen_parameter`"
+msgstr "是否固定权重的内存地址，以降低图执行时输入地址刷新耗时"
+
+#: ../../user_guide/configuration/additional_config.md
 msgid "`True`"
 msgstr "`True`"
 

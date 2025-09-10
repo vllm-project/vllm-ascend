@@ -47,7 +47,8 @@ The details of each config option are as follows:
 | `mode` | str | `None` | When using reduce-overhead mode for torchair, mode needs to be set |
 | `enable_multistream_mla`| bool | `False` | Whether to put vector ops of MLA to another stream. This option only takes effects on models using MLA (e.g., DeepSeek). |
 | `enable_multistream_moe`| bool | `False` | Whether to enable multistream shared expert. This option only takes effects on DeepSeek moe models. |
-| `enable_view_optimize` | bool | `True` | Whether to enable torchair view optimization |
+| `enable_view_optimize` | bool | `True` | Whether to fix the memory address of weights during inference to reduce the input address refresh time during graph execution. |
+| `enable_frozen_parameter` | bool | `True` | Whether to enable torchair frozen parameter |
 | `use_cached_graph` | bool | `False` | Whether to use cached graph |
 | `graph_batch_sizes` | list[int] | `[]` | The batch size for torchair graph cache |
 | `graph_batch_sizes_init` | bool | `False` | Init graph batch size dynamically if `graph_batch_sizes` is empty |
