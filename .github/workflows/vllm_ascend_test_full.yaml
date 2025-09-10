@@ -74,7 +74,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-1]
-        vllm_version: [v0.10.1.1, main]
+        vllm_version: [main]
     name: singlecard e2e test - full
     runs-on: ${{ matrix.os }}
     container:
@@ -158,7 +158,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-2]
-        vllm_version: [v0.10.1.1, main]
+        vllm_version: [main]
     name: multicard e2e test - full
     runs-on: ${{ matrix.os }}
     container:
