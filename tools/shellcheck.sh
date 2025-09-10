@@ -47,4 +47,7 @@ fi
 
 while IFS= read -r -d '' file; do
     git check-ignore -q "$file" || shellcheck -s bash "$file"
-done < <(find . -path ./.git -prune -o -name "*.sh" -print0)
+done < <(find . \
+    -path ./.git -prune -o \
+    -path ./vllm-empty -prune -o \
+    -name "*.sh" -print0)
