@@ -258,7 +258,7 @@ class CustomFlashModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         kv_caches: Optional[List[torch.Tensor]] = None,
-        #attn_metadata: Optional[AttentionMetadata] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
