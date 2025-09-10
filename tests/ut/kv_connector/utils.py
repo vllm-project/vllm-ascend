@@ -10,6 +10,7 @@ import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.utils import sha256
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -129,10 +130,10 @@ def create_request(
     """Make dummy request for testing."""
     global _none_hash_initialized
     if not _none_hash_initialized:
-        init_none_hash(hash)
+        init_none_hash(sha256)
         _none_hash_initialized = True
 
-    block_hasher = get_request_block_hasher(block_size, hash)
+    block_hasher = get_request_block_hasher(block_size, sha256)
 
     kv_transfer_params: Optional[dict[str, Any]] = None
 

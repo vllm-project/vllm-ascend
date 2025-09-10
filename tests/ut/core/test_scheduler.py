@@ -8,6 +8,7 @@ from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
+from vllm.utils import sha256
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -38,7 +39,7 @@ def create_requests(
     max_tokens: int = 16,
     stop_token_ids: Optional[list[int]] = None,
     block_size: int = 3,
-    hash_fn=hash,
+    hash_fn=sha256,
 ):
     init_none_hash(hash_fn)
     prompt_logprobs = PROMPT_LOGPROBS
