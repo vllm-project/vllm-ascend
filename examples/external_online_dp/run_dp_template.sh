@@ -17,12 +17,12 @@ export ASCEND_RT_VISIBLE_DEVICES=$1
 
 vllm serve model_path \
     --host 0.0.0.0 \
-    --port $2 \
-    --data-parallel-size $3 \
-    --data-parallel-rank $4 \
-    --data-parallel-address $5 \
-    --data-parallel-rpc-port $6 \
-    --tensor-parallel-size $7 \
+    --port "$2" \
+    --data-parallel-size "$3" \
+    --data-parallel-rank "$4" \
+    --data-parallel-address "$5" \
+    --data-parallel-rpc-port "$6" \
+    --tensor-parallel-size "$7" \
     --enable-expert-parallel \
     --seed 1024 \
     --served-model-name dsv3 \

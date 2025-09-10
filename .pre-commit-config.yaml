@@ -93,11 +93,11 @@ repos:
     types: [python]
     stages: [manual] # Only run in CI
   # FIXME: enable shellcheck
-  # - id: shellcheck
-  #   name: Lint shell scripts
-  #   entry: tools/shellcheck.sh
-  #   language: script
-  #   types: [shell]
+  - id: shellcheck
+    name: Lint shell scripts
+    entry: tools/shellcheck.sh
+    language: script
+    types: [shell]
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/png-lint.sh

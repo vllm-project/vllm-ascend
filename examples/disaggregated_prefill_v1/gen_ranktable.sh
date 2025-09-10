@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-LOCAL_HOSTS=($(hostname -I))
+read -ra LOCAL_HOSTS <<< "$(hostname -I)"
 LOCAL_HOST="127.0.0.1"
 MASTER_ADDR=${IPs[0]}
 MASTER_PORT=6657
@@ -63,14 +63,14 @@ if [[ $NODE_RANK == "" ]];then
 fi
 
 WORLD_SIZE=$(($NPUS_PER_NODE * $NNODES))
-RANKSTART=`expr $NPUS_PER_NODE \* $NODE_RANK`
+RANKSTART=$(expr "$NPUS_PER_NODE" \* "$NODE_RANK")
 
-echo "========>param:"
-echo "LOCAL_HOST": $LOCAL_HOST
-echo "WORLD_SIZE: " $WORLD_SIZE
-echo "RANKSTART": $RANKSTART
-echo "NNODES": $NNODES
-echo "NODE_RANK": $NODE_RANK
+echo "========> param:"
+echo "LOCAL_HOST: $LOCAL_HOST"
+echo "WORLD_SIZE: $WORLD_SIZE"
+echo "RANKSTART: $RANKSTART"
+echo "NNODES: $NNODES"
+echo "NODE_RANK: $NODE_RANK"
 echo "==============="
 
 if [ -n "$LOCAL_DEVICE_IDS" ]; then
@@ -80,9 +80,9 @@ fi
 if [[ -n "${GEN_RANKTABLE}" || ! -e ${PWD}/ranktable.json ]]; then
     GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME torchrun \
         --nproc_per_node 1 \
-        --nnodes ${NNODES} \
-        --node_rank ${NODE_RANK} \
-        --master_addr ${MASTER_ADDR} \
-        --master_port ${MASTER_PORT} \
-        gen_ranktable.py --local-host $LOCAL_HOST --prefill-device-cnt $PREFILL_DEVICE_CNT --decode-device-cnt $DECODE_DEVICE_CNT $OPTIONAL_SECTION
+        --nnodes "${NNODES}" \
+        --node_rank "${NODE_RANK}" \
+        --master_addr "${MASTER_ADDR}" \
+        --master_port "${MASTER_PORT}" \
+        gen_ranktable.py --local-host "$LOCAL_HOST" --prefill-device-cnt "$PREFILL_DEVICE_CNT" --decode-device-cnt "$DECODE_DEVICE_CNT" "$OPTIONAL_SECTION"
 fi
