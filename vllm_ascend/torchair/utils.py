@@ -208,7 +208,7 @@ def torchair_ops_patch():
     from vllm_ascend.torchair.ops.torchair_linear import (
         torchair_oproj_tp_forward)
 
-    AscendRowParallelLinear.forward = torchair_oproj_tp_forward  # type: ignore[method-assign]
+    AscendRowParallelLinear._forward_oproj_tp = torchair_oproj_tp_forward  # type: ignore[method-assign]
 
     AscendRotaryEmbedding.__init__ = qwen_rope_init_func  # type: ignore[method-assign]
     AscendRotaryEmbedding.forward_oot = rope_forward  # type: ignore[method-assign]
