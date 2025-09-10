@@ -119,6 +119,9 @@ def set_ascend_forward_context(
 
         forward_context.flashcomm_v1_enabled = flashcomm_v1_enabled
 
+        # set this for rope forward_oot using
+        forward_context.is_first_layer = True
+
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
 

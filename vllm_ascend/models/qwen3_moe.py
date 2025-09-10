@@ -20,6 +20,7 @@
 from typing import Optional, Union
 
 import torch
+import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
@@ -50,7 +51,6 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
                                                init_metadata_for_sp)
-from vllm_ascend.utils import vllm_version_is
 
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
@@ -254,11 +254,8 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         quant_config = vllm_config.quant_config
 
         parallel_config = vllm_config.parallel_config
-        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-            self.num_redundant_experts = parallel_config.num_redundant_experts
-        else:
-            eplb_config = parallel_config.eplb_config
-            self.num_redundant_experts = eplb_config.num_redundant_experts
+        eplb_config = parallel_config.eplb_config
+        self.num_redundant_experts = eplb_config.num_redundant_experts
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.config = config
@@ -280,6 +277,11 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+        # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache) may cause performance degradation at runtime.
+        x = torch.rand((2, 4), dtype=torch.float16).npu()
+        weight = torch.rand((2, 4), dtype=torch.float16).npu()
+        c = torch.rand((4, 4), dtype=torch.float32).npu()
+        torch_npu._npu_matmul_add_fp32(x, weight, c)
 
     def forward(
         self,
