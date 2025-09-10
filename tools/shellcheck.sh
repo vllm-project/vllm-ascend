@@ -39,6 +39,6 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     PATH="$PATH:$(pwd)/shellcheck-${scversion}"
 fi
 
-# should enable this
-find . -path ./.git -prune -o -name "*.sh" -print0 \
-| xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash "{}"'
+while IFS= read -r -d '' file; do
+    git check-ignore -q "$file" || shellcheck -s bash "$file"
+done < <(find . -path ./.git -prune -o -name "*.sh" -print0)
