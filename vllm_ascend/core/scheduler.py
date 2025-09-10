@@ -23,6 +23,7 @@ from vllm.distributed.kv_events import KVEventBatch
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.utils import cdiv
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs
@@ -30,13 +31,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-else:
-    KVCacheBlocks = None
 
 
 class AscendScheduler(Scheduler):
@@ -66,10 +60,7 @@ class AscendScheduler(Scheduler):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
-        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-            req_to_new_block_ids: dict[str, list[list[int]]] = {}
-        else:
-            req_to_new_blocks: dict[str, KVCacheBlocks] = {}
+        req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Spec decode-related.
@@ -227,13 +218,10 @@ class AscendScheduler(Scheduler):
 
             if self.lora_config and request.lora_request:
                 scheduled_loras.add(request.lora_request.lora_int_id)
-            if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-                req_to_new_block_ids[request.request_id] = (
-                    self.kv_cache_manager.get_block_ids(request.request_id))
-            else:
-                req_to_new_blocks[
-                    request.request_id] = self.kv_cache_manager.get_blocks(
-                        request.request_id)
+
+            req_to_new_blocks[
+                request.request_id] = self.kv_cache_manager.get_blocks(
+                    request.request_id)
             # Update request info.
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
@@ -322,11 +310,7 @@ class AscendScheduler(Scheduler):
                 # Schedule the request.
                 scheduled_running_reqs.append(request)
                 self.scheduled_req_ids.add(request.request_id)
-                if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-                    req_to_new_block_ids[request.request_id] = (
-                        new_blocks.get_block_ids())
-                else:
-                    req_to_new_blocks[request.request_id] = new_blocks
+                req_to_new_blocks[request.request_id] = new_blocks
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 req_index += 1
@@ -365,67 +349,36 @@ class AscendScheduler(Scheduler):
                     any_request, len(self.running)))
 
         # Construct the scheduler output.
-        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req, req_to_new_block_ids[req.request_id])
-                for req in scheduled_new_reqs
-            ]
-            cached_reqs_data = self._make_cached_request_data(
-                scheduled_running_reqs, scheduled_resumed_reqs,
-                num_scheduled_tokens, scheduled_spec_decode_tokens,
-                req_to_new_block_ids)
-        else:
-            new_reqs_data = [
-                NewRequestData.from_request(
-                    req, req_to_new_blocks[req.request_id].get_block_ids())
-                for req in scheduled_new_reqs
-            ]
+        new_reqs_data = [
+            NewRequestData.from_request(
+                req, req_to_new_blocks[req.request_id].get_block_ids())
+            for req in scheduled_new_reqs
+        ]
 
-            cached_reqs_data = self._make_cached_request_data(
-                scheduled_running_reqs, scheduled_resumed_reqs,
-                num_scheduled_tokens, scheduled_spec_decode_tokens,
-                req_to_new_blocks)
+        cached_reqs_data = self._make_cached_request_data(
+            scheduled_running_reqs, scheduled_resumed_reqs,
+            num_scheduled_tokens, scheduled_spec_decode_tokens,
+            req_to_new_blocks)
         scheduled_cached_reqs = cached_reqs_data
 
-        if vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1"):
-            scheduler_output = SchedulerOutput(
-                scheduled_new_reqs=new_reqs_data,
-                scheduled_cached_reqs=scheduled_cached_reqs,
-                num_scheduled_tokens=num_scheduled_tokens,
-                total_num_scheduled_tokens=total_num_scheduled_tokens,
-                scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
-                scheduled_encoder_inputs={},
-                num_common_prefix_blocks=num_common_prefix_blocks,
-                # finished_req_ids is an existing state in the scheduler,
-                # instead of being newly scheduled in this step.
-                # It contains the request IDs that are finished in between
-                # the previous and the current steps.
-                finished_req_ids=self.finished_req_ids,  # type: ignore
-                free_encoder_input_ids=self.encoder_cache_manager.
-                get_freed_ids(),
-                structured_output_request_ids={},
-                grammar_bitmask=None,
-            )
-        else:
-            scheduler_output = SchedulerOutput(
-                scheduled_new_reqs=new_reqs_data,
-                scheduled_cached_reqs=scheduled_cached_reqs,
-                num_scheduled_tokens=num_scheduled_tokens,
-                total_num_scheduled_tokens=total_num_scheduled_tokens,
-                scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
-                scheduled_encoder_inputs={},
-                num_common_prefix_blocks=num_common_prefix_blocks,
-                # finished_req_ids is an existing state in the scheduler,
-                # instead of being newly scheduled in this step.
-                # It contains the request IDs that are finished in between
-                # the previous and the current steps.
-                finished_req_ids=self.finished_req_ids,  # type: ignore
-                free_encoder_mm_hashes=self.encoder_cache_manager.
-                get_freed_mm_hashes(),
-                structured_output_request_ids={},
-                grammar_bitmask=None,
-            )
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=new_reqs_data,
+            scheduled_cached_reqs=scheduled_cached_reqs,
+            num_scheduled_tokens=num_scheduled_tokens,
+            total_num_scheduled_tokens=total_num_scheduled_tokens,
+            scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=num_common_prefix_blocks,
+            # finished_req_ids is an existing state in the scheduler,
+            # instead of being newly scheduled in this step.
+            # It contains the request IDs that are finished in between
+            # the previous and the current steps.
+            finished_req_ids=self.finished_req_ids,  # type: ignore
+            free_encoder_mm_hashes=self.encoder_cache_manager.
+            get_freed_mm_hashes(),
+            structured_output_request_ids={},
+            grammar_bitmask=None,
+        )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
