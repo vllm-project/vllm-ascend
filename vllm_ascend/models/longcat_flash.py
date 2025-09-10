@@ -258,7 +258,7 @@ class CustomFlashModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         kv_caches: Optional[List[torch.Tensor]] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
+        #attn_metadata: Optional[AttentionMetadata] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -271,18 +271,16 @@ class CustomFlashModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        replace_allreduce = hidden_states.shape[0] % self.tp_size == 0
-
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             layer_kv_cache = kv_caches[i - self.start_layer] if kv_caches is not None else None
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                residual,
-                layer_kv_cache,
-                attn_metadata,
-                replace_allreduce=replace_allreduce
+                residual
+                #residual,
+                #layer_kv_cache,
+                #attn_metadata
             )
 
         if not get_pp_group().is_last_rank:
