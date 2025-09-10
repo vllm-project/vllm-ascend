@@ -250,9 +250,18 @@ class NPUWorker(WorkerBase):
             self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
+        # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
+        # may cause performance degradation at runtime.
+        self._warm_up_atb()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         NPUPlatform.seed_everything(self.model_config.seed)
+
+    def _warm_up_atb(self):
+        x = torch.rand((2, 4), dtype=torch.float16).npu()
+        weight = torch.rand((2, 4), dtype=torch.float16).npu()
+        c = torch.rand((4, 4), dtype=torch.float32).npu()
+        torch_npu._npu_matmul_add_fp32(x, weight, c)
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
