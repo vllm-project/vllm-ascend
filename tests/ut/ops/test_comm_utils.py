@@ -40,7 +40,7 @@ class TestDistributedCommunication(PytestBase):
          (torch.randn(16, 32), None, None)])
     def test_async_all_to_all(self, input_tensor, output_split_sizes,
                               input_split_sizes, mocker: MockerFixture):
-        """test async_all_to_all"""
+        """Test async_all_to_all"""
         mock_group = mocker.MagicMock()
         mocker.patch("torch.distributed.all_to_all_single",
                      return_value=mocker.MagicMock())
@@ -66,7 +66,7 @@ class TestDistributedCommunication(PytestBase):
                               (4, torch.randn(8, 16), (32, 16))])
     def test_gather_along_first_dim(self, test_tensor, expected, world_size,
                                     mocker: MockerFixture):
-        """test _gather_along_first_dim"""
+        """Test _gather_along_first_dim"""
         mocker.patch("torch.distributed.get_world_size",
                      return_value=world_size)
 
@@ -80,7 +80,7 @@ class TestDistributedCommunication(PytestBase):
     def test_gather_from_sequence_parallel_region(self, input_tensor,
                                                   output_split_sizes,
                                                   mocker: MockerFixture):
-        """test gather_from_sequence_parallel_region"""
+        """Test gather_from_sequence_parallel_region"""
         mock_group = mocker.MagicMock()
 
         result = gather_from_sequence_parallel_region(input_tensor, mock_group,
