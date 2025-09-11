@@ -374,7 +374,7 @@ class AscendMLAMetadataBuilder:
                     prefill_input_positions].unsqueeze(  # type: ignore
                         1).unsqueeze(2)
             else:
-                cos_sin = self.cos_sin_cache.index_select(0, prefill_input_positions.flatten())
+                cos_sin = self.cos_sin_cache.index_select(0, input_positions.flatten())
                 cos, sin = cos_sin.chunk(2, dim=-1)
             prefill_metadata = AscendMLAPrefillMetadata(
                 attn_mask=common_attn_metadata.attn_mask,
