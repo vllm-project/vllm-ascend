@@ -199,6 +199,7 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
             prefix=(f"{prefix}.mlp"),
         )
 
+# 不能继承FlashModel，因为FlashModel需要支持torch_compile，在NPU中不能支持
 class CustomFlashModel(nn.Module):
     """Ascend优化的Flash模型，使用CustomFlashDecoderLayer"""
 
