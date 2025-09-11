@@ -18,7 +18,8 @@
 import importlib
 import sys
 import types
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Callable
+import contextlib
 
 from vllm.logger import logger
 
@@ -65,27 +66,72 @@ class AscendQuantizer:
 class VLLMAscendQuantizer:
     _instance: Optional[object] = None
     patched = False
+    _original_methods: List[Tuple[Any, str, Callable]] = []
+    _patch_targets = [
+        (
+            "vllm.model_executor.layers.layernorm.RMSNorm",
+            "__init__",
+            [wrapper_rmsnorm_init]
+        ),
+        (
+            "vllm.model_executor.layers.layernorm.RMSNorm",
+            "forward_oot",
+            [wrapper_rmsnorm_forward_oot]
+        ),
+        (
+            "vllm_ascend.worker.model_runner.NPUModelRunnerBase",
+            "load_model",
+            [wrapper_load_model]
+        ),
+        (
+            "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding",
+            "__init__",
+            [wrapper_vocab_parallel_embedding_init]
+        ),
+    ]
 
     def __init__(self, quant_description):
         if VLLMAscendQuantizer.patched:
             return
-        for name in quant_description.keys():
-            if "norm.bias" in name:
-                VLLMAscendQuantizer.apply_patch(
-                    "vllm.model_executor.layers.layernorm.RMSNorm", "__init__",
-                    [wrapper_rmsnorm_init])
-                VLLMAscendQuantizer.apply_patch(
-                    "vllm.model_executor.layers.layernorm.RMSNorm",
-                    "forward_oot", [wrapper_rmsnorm_forward_oot])
-                VLLMAscendQuantizer.apply_patch(
-                    "vllm_ascend.worker.model_runner.NPUModelRunnerBase",
-                    "load_model", [wrapper_load_model])
-                VLLMAscendQuantizer.apply_patch(
-                    "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding",
-                    "__init__", [wrapper_vocab_parallel_embedding_init])
-                break
+
+        if not any("norm.bias" in name for name in quant_description.keys()):
+            return
+
+        self.apply_all_patches()
+
+    @staticmethod
+    def apply_all_patches():
+        for target_module, target_func, wrapper in VLLMAscendQuantizer._patch_targets:
+            VLLMAscendQuantizer.apply_patch(target_module, target_func, wrapper)
+
         VLLMAscendQuantizer.patched = True
         logger.info("Using the vLLM Ascend Quantizer version now!")
+
+    @staticmethod
+    def remove_all_patches():
+        if not VLLMAscendQuantizer.patched:
+            logger.info("No patches to remove")
+            return
+
+        for module, func_name, original_func in VLLMAscendQuantizer._original_methods:
+            if hasattr(module, func_name) and id(getattr(module, func_name)) != id(original_func):
+                setattr(module, func_name, original_func)
+
+        VLLMAscendQuantizer._original_methods.clear()
+        VLLMAscendQuantizer.patched = False
+        logger.info("Removed all vLLM Ascend Quantizer patches")
+
+    @staticmethod
+    @contextlib.contextmanager
+    def no_patch_context(enabled: bool = True):
+        if enabled:
+            try:
+                VLLMAscendQuantizer.remove_all_patches()
+                yield
+            finally:
+                VLLMAscendQuantizer.apply_all_patches()
+        else:
+            yield
 
     @staticmethod
     def apply_patch(target_module, target_function, wrappers):
@@ -100,6 +146,9 @@ class VLLMAscendQuantizer:
             candidate = wrapper(candidate)
         if target_function is not None:
             setattr(original_module, target_function, candidate)
+            VLLMAscendQuantizer._original_methods.append(
+                (original_module, target_function, original_function)
+            )
 
         for key, value in sys.modules.copy().items():
             if (target_function is not None
@@ -107,6 +156,9 @@ class VLLMAscendQuantizer:
                     and id(getattr(value,
                                    target_function)) == original_function_id):
                 setattr(value, target_function, candidate)
+                VLLMAscendQuantizer._original_methods.append(
+                    (value, target_function, original_function)
+                )
 
     @staticmethod
     def parse_path(module_path, function_name, create_dummy):
