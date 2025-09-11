@@ -381,9 +381,9 @@ class AscendMLAMetadataBuilder:
                 print("+++++++++++input_positions.flatten().shape++++++++++++", input_positions.flatten().shape)
                 print("+++++++++++prefill_input_positions.shape++++++++++++", prefill_input_positions.shape)
                 cos_sin = self.cos_sin_cache.index_select(0, prefill_input_positions.flatten())
-                cos, sin = cos_sin.chunk(2, dim=-1)
-                cos = cos.unsqueeze(1).unsqueeze(2)
-                sin = sin.unsqueeze(1).unsqueeze(2)
+                #cos, sin = cos_sin.chunk(2, dim=-1)
+                cos = cos_sin.unsqueeze(1).unsqueeze(2)
+                sin = cos_sin.unsqueeze(1).unsqueeze(2)
             prefill_metadata = AscendMLAPrefillMetadata(
                 attn_mask=common_attn_metadata.attn_mask,
                 query_lens=query_lens[reqs_start:],
@@ -417,9 +417,11 @@ class AscendMLAMetadataBuilder:
                     1).unsqueeze(2)
             else:
                 cos_sin = self.cos_sin_cache.index_select(0, input_positions.flatten())
-                cos, sin = cos_sin.chunk(2, dim=-1)
-                cos = cos.unsqueeze(1).unsqueeze(2)
-                sin = sin.unsqueeze(1).unsqueeze(2)
+                #cos, sin = cos_sin.chunk(2, dim=-1)
+                #cos = cos.unsqueeze(1).unsqueeze(2)
+                #sin = sin.unsqueeze(1).unsqueeze(2)
+                cos = cos_sin.unsqueeze(1).unsqueeze(2)
+                sin = cos_sin.unsqueeze(1).unsqueeze(2)
 
             decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions,
