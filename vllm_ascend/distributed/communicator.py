@@ -73,3 +73,16 @@ class NPUCommunicator(DeviceCommunicatorBase):
         dist.all_to_all(output_list, input_list, group=self.device_group)
         output_tensor = torch.cat(output_list, dim=gather_dim).contiguous()
         return output_tensor
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.all2all_manager is not None
+        hidden_states, router_logits = self.all2all_manager.dispatch(
+            hidden_states, router_logits)
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.all2all_manager is not None
+        hidden_states = self.all2all_manager.combine(hidden_states)
+        return hidden_states

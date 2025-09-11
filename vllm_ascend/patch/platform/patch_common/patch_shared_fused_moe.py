@@ -14,8 +14,3 @@
 # limitations under the License.
 
 from vllm.model_executor.models import deepseek_v2, llama4
-
-from vllm_ascend.ops.common_fused_moe import AscendSharedFusedMoE
-
-deepseek_v2.SharedFusedMoE = AscendSharedFusedMoE
-llama4.SharedFusedMoE = AscendSharedFusedMoE

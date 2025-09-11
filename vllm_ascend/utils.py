@@ -496,7 +496,6 @@ def register_ascend_customop():
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
@@ -522,7 +521,6 @@ def register_ascend_customop():
         "ParallelLMHead": AscendParallelLMHead,
         "LogitsProcessor": AscendLogitsProcessor,
         "RMSNorm": AscendRMSNorm,
-        "FusedMoE": AscendFusedMoE,
         "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
 
