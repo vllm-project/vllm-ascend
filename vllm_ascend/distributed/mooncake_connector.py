@@ -401,7 +401,6 @@ class KVCacheRecvingThread(threading.Thread):
             self._cat_kv_cache(local_block_ids)
 
     def _cat_kv_cache(self, block_ids: list[list[int]]):
-        """Concatenate key-value cache blocks for efficient processing."""
         # Get necessary parameters from the first key cache
         k_cache = list(self.kv_caches.values())[0][0]
         kv_shape = k_cache.shape
