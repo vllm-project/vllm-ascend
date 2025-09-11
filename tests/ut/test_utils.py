@@ -24,6 +24,7 @@ from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
+from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 class TestUtils(TestBase):
@@ -302,14 +303,14 @@ class TestUtils(TestBase):
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        # should call register_oot three
-        self.assertEqual(mock_customop.register_oot.call_count, 13)
+        self.assertEqual(mock_customop.register_oot.call_count,
+                         len(REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        # should not register_oot again, thus only called three in this ut
-        self.assertEqual(mock_customop.register_oot.call_count, 13)
+        self.assertEqual(mock_customop.register_oot.call_count,
+                         len(REGISTERED_ASCEND_OPS))
 
 
 class TestProfileExecuteDuration(TestBase):
