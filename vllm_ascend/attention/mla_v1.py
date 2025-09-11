@@ -309,11 +309,10 @@ class AscendMLAMetadataBuilder:
                 self.sin_cache = self.sin_cache.to(  # type: ignore
                     self.model_config.dtype)  # type: ignore
         else:
-            if self.cos_sin_cache is None:
-                if isinstance(model.model.layers[0].self_attn, nn.ModuleList):
-                    self.cos_sin_cache = model.model.layers[0].self_attn[0].rotary_emb.cos_sin_cache
-                else:
-                    self.cos_sin_cache = model.model.layers[0].self_attn.rotary_emb.cos_sin_cache
+            if isinstance(model.model.layers[0].self_attn, nn.ModuleList):
+                self.cos_sin_cache = model.model.layers[0].self_attn[0].rotary_emb.cos_sin_cache
+            else:
+                self.cos_sin_cache = model.model.layers[0].self_attn.rotary_emb.cos_sin_cache
             if self.cos_sin_cache.dtype != self.model_config.dtype:  # type: ignore
                 self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
                     self.model_config.dtype)  # type: ignore
