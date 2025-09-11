@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
+from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
@@ -86,3 +87,25 @@ def test_chunked_prefill_with_ascend_scheduler(
         name_0="vllm_output",
         name_1="chunked_prefill_output",
     )
+
+
+def test_async_scheduling() -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ] * 10
+    sampling_params = SamplingParams(temperature=0.2,
+                                     max_tokens=10,
+                                     stop_token_ids=None)
+
+    with VllmRunner(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            max_model_len=4096,
+            max_num_seqs=50,
+            dtype="bfloat16",
+            gpu_memory_utilization=0.9,
+            async_scheduling=True,
+    ) as vllm_model:
+        vllm_model.generate(prompts, sampling_params=sampling_params)
