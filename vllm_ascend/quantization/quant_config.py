@@ -53,6 +53,7 @@ class AscendQuantConfig(QuantizationConfig):
     """
 
     def __init__(self, quant_config: Dict[str, Any]):
+        super().__init__()
         self.quant_description = quant_config
 
     def __repr__(self) -> str:
@@ -89,6 +90,8 @@ class AscendQuantConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention
+        if prefix.startswith("language_model"):
+            prefix = prefix.split('.', 1)[-1]
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):

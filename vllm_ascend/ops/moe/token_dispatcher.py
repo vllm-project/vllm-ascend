@@ -367,7 +367,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
 
-        sorted_hidden_states, self.expanded_row_idx, expert_tokens, _ = (
+        sorted_hidden_states, self.expanded_row_idx, expert_tokens, pertoken_scale = (
             torch_npu.npu_moe_init_routing_v2(
                 hidden_states,
                 topk_ids,
@@ -376,7 +376,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                 expert_tokens_num_type=1,
                 expert_tokens_num_flag=True,
                 active_expert_range=[first_expert_idx, last_expert_idx],
-                quant_mode=-1,
+                quant_mode=1 if self.with_quant else -1,
             ))
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
@@ -384,6 +384,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             "group_list_type": group_list_type,
             "hidden_states": sorted_hidden_states,
             "group_list": expert_tokens,
+            "dynamic_scale": pertoken_scale if self.with_quant else None,
         }
 
     def token_combine(self,

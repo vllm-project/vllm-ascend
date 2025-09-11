@@ -18,7 +18,7 @@
 #
 
 import copy
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -37,8 +37,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
+                             DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.ascend_config import init_ascend_config
@@ -190,7 +190,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
+    ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
