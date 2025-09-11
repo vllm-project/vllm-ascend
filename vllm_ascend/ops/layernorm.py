@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, cast
 
 import torch
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -89,3 +89,28 @@ class AscendRMSNorm(RMSNorm):
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
                                              self.variance_epsilon)
         return x
+
+
+class AscendQuantRMSNorm(AscendRMSNorm):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        var_hidden_size: Optional[int] = None,
+        has_weight: bool = True,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+        self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
+                                       requires_grad=False)
+
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if residual is not None:
+            x, residual = super().forward_oot(x, residual)
+            return x.add_(self.bias), residual
+        return cast(torch.Tensor, super().forward_oot(x)).add_(self.bias)
