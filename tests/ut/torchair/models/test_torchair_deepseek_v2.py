@@ -256,7 +256,7 @@ def test_torchair_deepseek_v2_mla_attention(mock_rms_norm, mock_distributed,
     x = torch.randn(2, 4, 128)
     positions = torch.arange(4).repeat(2, 1)
     with patch.object(attn.mla_attn,
-                      "__call__",
+                      "forward",
                       return_value=torch.randn(2, 4, 128)):
         with pytest.raises(AssertionError):
             attn(positions, x)
