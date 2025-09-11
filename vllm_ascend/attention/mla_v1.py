@@ -293,6 +293,8 @@ class AscendMLAMetadataBuilder:
         input_positions = common_attn_metadata.positions[:
                                                          num_actual_tokens].long(
                                                          )
+        # 需要针对longcat flash模型进行特殊处理，longcat flash模型使用Deepseek MLA，
+        # 但不支持DeepseekScalingRotaryEmbedding
         is_deepseek_scaling_rotary_embedding = hasattr(
             model.model.layers[0].self_attn,"rotary_emb") and isinstance(
             model.model.layers[0].self_attn.rotary_emb,
@@ -305,6 +307,15 @@ class AscendMLAMetadataBuilder:
                 self.cos_cache = self.cos_cache.to(  # type: ignore
                     self.model_config.dtype)  # type: ignore
                 self.sin_cache = self.sin_cache.to(  # type: ignore
+                    self.model_config.dtype)  # type: ignore
+        else:
+            if self.cos_sin_cache is None:
+                if isinstance(model.model.layers[0].self_attn, nn.ModuleList):
+                    self.cos_sin_cache = model.model.layers[0].self_attn[0].rotary_emb.cos_sin_cache
+                else:
+                    self.cos_sin_cache = model.model.layers[0].self_attn.rotary_emb.cos_sin_cache
+            if self.cos_sin_cache.dtype != self.model_config.dtype:  # type: ignore
+                self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
                     self.model_config.dtype)  # type: ignore
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
@@ -356,8 +367,6 @@ class AscendMLAMetadataBuilder:
                     workspace=self.chunked_prefill_workspace,
                 )
             prefill_input_positions = input_positions[tokens_start:]
-            cos = None
-            sin = None
             if is_deepseek_scaling_rotary_embedding:
                 cos = self.cos_cache[
                     prefill_input_positions].unsqueeze(  # type: ignore
@@ -365,6 +374,9 @@ class AscendMLAMetadataBuilder:
                 sin = self.sin_cache[
                     prefill_input_positions].unsqueeze(  # type: ignore
                         1).unsqueeze(2)
+            else:
+                cos_sin = self.cos_sin_cache.index_select(0, prefill_input_positions)
+                cos, sin = cos_sin.chunk(2, dim=-1)
             prefill_metadata = AscendMLAPrefillMetadata(
                 attn_mask=common_attn_metadata.attn_mask,
                 query_lens=query_lens[reqs_start:],
@@ -396,6 +408,9 @@ class AscendMLAMetadataBuilder:
                     1).unsqueeze(2)
                 sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
                     1).unsqueeze(2)
+            else:
+                cos_sin = self.cos_sin_cache.index_select(0, input_positions)
+                cos, sin = cos_sin.chunk(2, dim=-1)
 
             decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions,
