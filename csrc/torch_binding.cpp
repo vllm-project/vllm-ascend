@@ -20,7 +20,6 @@
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
-#include <pybind11/pybind11.h>
 #include "acl/acl.h"
 #include "ops.h"
 #include "utils.h"
@@ -424,5 +423,3 @@ TORCH_LIBRARY_EXPAND(_C, ops)
         "            int slice_offset, int slice_size) -> Tensor");
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
 }
-
-REGISTER_EXTENSION(_C)

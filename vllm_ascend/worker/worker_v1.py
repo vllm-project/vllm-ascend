@@ -18,7 +18,7 @@
 #
 
 import copy
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -38,7 +38,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
+                             DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.ascend_config import init_ascend_config
@@ -47,13 +48,8 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (init_ascend_soc_version,
                                register_ascend_customop, sleep_mode_enabled,
-                               try_register_lib, vllm_version_is)
+                               try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-if not (vllm_version_is("0.10.1.1") or vllm_version_is("0.10.1")):
-    from vllm.v1.outputs import DraftTokenIds
-else:
-    DraftTokenIds = None
 
 
 class NPUWorker(WorkerBase):
@@ -195,7 +191,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
+    ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
@@ -224,7 +220,7 @@ class NPUWorker(WorkerBase):
             new_output.kv_connector_output = kv_connector_output
             return new_output
 
-        assert isinstance(output, ModelRunnerOutput)
+        assert isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput))
         return output
 
     def load_model(self) -> None:
@@ -254,9 +250,18 @@ class NPUWorker(WorkerBase):
             self.model_runner._dummy_run(size)
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
+        # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
+        # may cause performance degradation at runtime.
+        self._warm_up_atb()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         NPUPlatform.seed_everything(self.model_config.seed)
+
+    def _warm_up_atb(self):
+        x = torch.rand((2, 4), dtype=torch.float16).npu()
+        weight = torch.rand((2, 4), dtype=torch.float16).npu()
+        c = torch.rand((4, 4), dtype=torch.float32).npu()
+        torch_npu._npu_matmul_add_fp32(x, weight, c)
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()

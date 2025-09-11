@@ -40,15 +40,17 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
-# NOTE: Currently, we can only capture 1920 graphs at most,
+# NOTE: Currently, we can only capture 1800 graphs at most,
 # due to the limitation of ACL graph. This number is bounded by
-# the number of streams, which is 2048, we save 128 streams
+# the number of streams, which is 2048, we save 248 streams
 # as a buffer.
 # Maximum number of graphs that can be captured by ACL Graph
-MAX_CAPTURE_SIZE = 1920
+# TODO: Find out whether we need to solve allreduce function
+MAX_CAPTURE_SIZE = 1800
 
 ASCEND_QUANTIZATION_METHOD = "ascend"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
+REGISTERED_ASCEND_OPS = {}
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
@@ -320,6 +322,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # TODO: Find out whether we need to take into account the pp_size
         parallel_factor = 1 + num_comm_groups + int(
             parallel_config.enable_expert_parallel)
+        if is_moe_model(vllm_config):
+            parallel_factor += (parallel_config.data_parallel_size > 1)
         # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
@@ -490,43 +494,40 @@ def register_ascend_customop():
         return
     from vllm.model_executor.custom_op import CustomOp
 
+    from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
-                                        AscendMlpMergedColumnParallelLinear,
-                                        AscendMlpRowParallelLinear)
+    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+    from vllm_ascend.ops.layernorm import AscendRMSNorm
+    from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
+                                        AscendMergedColumnParallelLinear,
+                                        AscendQKVParallelLinear,
+                                        AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
-    CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
-    CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
-                          name="SiluAndMul")
-    CustomOp.register_oot(_decorated_op_cls=AscendRotaryEmbedding,
-                          name="RotaryEmbedding")
-    CustomOp.register_oot(
-        _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
-        name="DeepseekScalingRotaryEmbedding")
-    CustomOp.register_oot(_decorated_op_cls=AscendVocabParallelEmbedding,
-                          name="VocabParallelEmbedding")
-    CustomOp.register_oot(_decorated_op_cls=AscendParallelLMHead,
-                          name="ParallelLMHead")
-    CustomOp.register_oot(_decorated_op_cls=AscendLogitsProcessor,
-                          name="LogitsProcessor")
-    if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
-                              name="ColumnParallelLinear")
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpRowParallelLinear,
-                              name="RowParallelLinear")
-        CustomOp.register_oot(
-            _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
-            name="MergedColumnParallelLinear")
 
-    from vllm_ascend.ops.layernorm import AscendRMSNorm
-    CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
+    global REGISTERED_ASCEND_OPS
+    REGISTERED_ASCEND_OPS = {
+        "QuickGELU": AscendQuickGELU,
+        "SiluAndMul": AscendSiluAndMul,
+        "RotaryEmbedding": AscendRotaryEmbedding,
+        "ColumnParallelLinear": AscendColumnParallelLinear,
+        "RowParallelLinear": AscendRowParallelLinear,
+        "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
+        "QKVParallelLinear": AscendQKVParallelLinear,
+        "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
+        "VocabParallelEmbedding": AscendVocabParallelEmbedding,
+        "ParallelLMHead": AscendParallelLMHead,
+        "LogitsProcessor": AscendLogitsProcessor,
+        "RMSNorm": AscendRMSNorm,
+        "FusedMoE": AscendFusedMoE,
+        "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
+    }
 
-    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
-    CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
+    for name, op_cls in REGISTERED_ASCEND_OPS.items():
+        CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
@@ -562,3 +563,24 @@ def get_ascend_soc_version():
 
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().lmhead_tensor_parallel_size is not None
+
+
+def oproj_tp_enable() -> bool:
+    return get_ascend_config().oproj_tensor_parallel_size is not None
+
+
+def mlp_tp_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE
+
+
+def matmul_allreduce_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
+
+
+def dense_optim_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
+
+
+def is_moe_model(vllm_config: VllmConfig):
+    config = vllm_config.model_config.hf_config
+    return any('experts' in key.lower() for key in config.to_dict())

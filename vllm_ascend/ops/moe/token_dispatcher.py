@@ -28,6 +28,7 @@ import torch
 import torch_npu
 from vllm.distributed.parallel_state import get_ep_group
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.distributed.tensor_parallel import \
     gather_from_sequence_parallel_region
@@ -49,6 +50,9 @@ def setup_token_dispatchers(ep_size: int, **kwargs):
     existing_dispatchers = set(_Dispatchers.keys())
 
     if ep_size == 1 and "TokenDispatcherWithAllGather" not in existing_dispatchers:
+        _register_token_dispatcher(TokenDispatcherWithAllGather(**kwargs))
+    elif envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1 \
+        and "TokenDispatcherWithAllGather" not in existing_dispatchers:
         _register_token_dispatcher(TokenDispatcherWithAllGather(**kwargs))
     elif ep_size < 16 and "TokenDispatcherWithAll2AllV" not in existing_dispatchers:
         _register_token_dispatcher(TokenDispatcherWithAll2AllV(**kwargs))
@@ -363,7 +367,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             last_expert_idx = self.num_experts_local
             global_num_experts = self.num_experts_local
 
-        sorted_hidden_states, self.expanded_row_idx, expert_tokens, _ = (
+        sorted_hidden_states, self.expanded_row_idx, expert_tokens, pertoken_scale = (
             torch_npu.npu_moe_init_routing_v2(
                 hidden_states,
                 topk_ids,
@@ -372,7 +376,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                 expert_tokens_num_type=1,
                 expert_tokens_num_flag=True,
                 active_expert_range=[first_expert_idx, last_expert_idx],
-                quant_mode=-1,
+                quant_mode=1 if self.with_quant else -1,
             ))
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 1  # `count` mode
@@ -380,6 +384,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             "group_list_type": group_list_type,
             "hidden_states": sorted_hidden_states,
             "group_list": expert_tokens,
+            "dynamic_scale": pertoken_scale if self.with_quant else None,
         }
 
     def token_combine(self,

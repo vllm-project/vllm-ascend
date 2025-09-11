@@ -23,8 +23,7 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               RowParallelLinear,
-                                               UnquantizedLinearMethod)
+                                               RowParallelLinear)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
@@ -35,8 +34,12 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
+from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
+                                                    get_otp_group)
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, mlp_tp_enable,
+                               oproj_tp_enable)
 
 from .utils import get_quant_method
 
@@ -50,6 +53,7 @@ class AscendQuantConfig(QuantizationConfig):
     """
 
     def __init__(self, quant_config: Dict[str, Any]):
+        super().__init__()
         self.quant_description = quant_config
 
     def __repr__(self) -> str:
@@ -86,10 +90,12 @@ class AscendQuantConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention
+        if prefix.startswith("language_model"):
+            prefix = prefix.split('.', 1)[-1]
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
-                return UnquantizedLinearMethod()
+                return AscendUnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping)
         elif isinstance(layer, Attention) and \
@@ -220,9 +226,15 @@ class AscendLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if isinstance(layer, RowParallelLinear):
-            tp_rank = get_tensor_model_parallel_rank()
-            return self.quant_method.apply(layer, x, bias, tp_rank)
-        return self.quant_method.apply(layer, x, bias)
+            if layer.prefix.find("o_proj") != -1 and oproj_tp_enable():
+                tp_rank = get_otp_group().rank_in_group
+            elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
+                tp_rank = get_mlp_tp_group().rank_in_group
+            else:
+                tp_rank = get_tensor_model_parallel_rank()
+        else:
+            tp_rank = 0
+        return self.quant_method.apply(layer, x, bias, tp_rank)
 
 
 class AscendKVCacheMethod(BaseKVCacheMethod):
