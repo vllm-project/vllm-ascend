@@ -25,3 +25,15 @@ def register():
 def register_model():
     from .models import register_model
     register_model()
+
+
+def register_kvconnector():
+    from vllm.distributed.kv_transfer.kv_connector.factory import \
+        KVConnectorFactory
+    if "P2pHcclConnector" in KVConnectorFactory._registry:
+        return
+
+    KVConnectorFactory.register_connector(
+        "P2pHcclConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_connector.v1.p2p.p2p_hccl_connector",
+        "P2pHcclConnector")
