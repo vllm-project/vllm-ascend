@@ -294,10 +294,12 @@ class AscendMLAMetadataBuilder:
                                                          )
 
         if self.cos_cache is None:
-            self.cos_cache = model.model.layers[
-                0].self_attn.rotary_emb.cos_cached
-            self.sin_cache = model.model.layers[
-                0].self_attn.rotary_emb.sin_cached
+            # longcat-flash模型比较特殊，self_attn类型为nn.ModuleList，需要特殊处理
+            self_attn = model.model.layers[0].self_attn
+            if isinstance(model.model.layers[0].self_attn, nn.ModuleList):
+                self_attn = self_attn[0]
+            self.cos_cache = self_attn.rotary_emb.cos_cached
+            self.sin_cache = self_attn.rotary_emb.sin_cached
         if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
             self.cos_cache = self.cos_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
