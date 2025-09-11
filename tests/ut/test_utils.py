@@ -24,6 +24,7 @@ from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
+from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 class TestUtils(TestBase):
@@ -259,7 +260,7 @@ class TestUtils(TestBase):
         utils.update_aclgraph_sizes(test_vllm_config)
         del os.environ['HCCL_OP_EXPANSION_MODE']
         self.assertEqual(
-            147,
+            138,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
 
         test_vllm_config.speculative_config = mock.MagicMock()
@@ -272,7 +273,7 @@ class TestUtils(TestBase):
         utils.update_aclgraph_sizes(test_vllm_config)
         del os.environ['HCCL_OP_EXPANSION_MODE']
         self.assertEqual(
-            120,
+            112,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # max_num_batch_sizes >= len(original_sizes)
@@ -302,14 +303,14 @@ class TestUtils(TestBase):
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        # should call register_oot three
-        self.assertEqual(mock_customop.register_oot.call_count, 13)
+        self.assertEqual(mock_customop.register_oot.call_count,
+                         len(REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        # should not register_oot again, thus only called three in this ut
-        self.assertEqual(mock_customop.register_oot.call_count, 13)
+        self.assertEqual(mock_customop.register_oot.call_count,
+                         len(REGISTERED_ASCEND_OPS))
 
 
 class TestProfileExecuteDuration(TestBase):

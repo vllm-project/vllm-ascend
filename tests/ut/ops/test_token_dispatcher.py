@@ -221,7 +221,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
 
         self.assertEqual(results["group_list_type"], 1)
 
-    def test_token_dispatch_with_quant(self):
+    def test_token_dispatch_without_quant(self):
         kwargs = {
             "apply_router_weight_on_input": False,
             "top_k": 2,
@@ -239,6 +239,32 @@ class TestTokenDispatcherWithAllGather(TestBase):
                                                        topk_weights, topk_ids,
                                                        self.row_idx, None)
 
+        self.assertEqual(results["group_list_type"], 1)
+
+    def test_token_dispatch_with_quant(self):
+        kwargs = {
+            "apply_router_weight_on_input": False,
+            "top_k": 2,
+            "max_num_tokens": 100,
+            "ep_size": 2,
+            "num_experts": 128,
+        }
+        self.dispatcher_quant = TokenDispatcherWithAllGather(**kwargs)
+
+        hidden_states = torch.randn(3, 128)
+        topk_weights = torch.tensor([[0.7, 0.3], [0.6, 0.4], [0.5, 0.5]])
+        topk_ids = torch.tensor([[0, 1], [1, 2], [2, 3]])
+
+        results = self.dispatcher_quant.token_dispatch(hidden_states,
+                                                       topk_weights,
+                                                       topk_ids,
+                                                       self.row_idx,
+                                                       None,
+                                                       with_quant=True)
+
+        self.assertIsNotNone(results["hidden_states"])
+        self.assertIsNotNone(results["group_list"])
+        self.assertIsNotNone(results["dynamic_scale"])
         self.assertEqual(results["group_list_type"], 1)
 
     def test_token_combine_with_expert_map(self):
@@ -322,7 +348,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(8, 16)
 
         # Mock async_all_to_all
-        patcher6 = patch('vllm_ascend.ops.comm_utils.async_all_to_all')
+        patcher6 = patch('vllm_ascend.ops.moe.comm_utils.async_all_to_all')
         self.mock_async_all_to_all = patcher6.start()
         self.addCleanup(patcher6.stop)
         self.mock_async_all_to_all.return_value = (None, torch.randn(16, 16),
