@@ -51,6 +51,18 @@ from vllm_ascend.utils import (init_ascend_soc_version,
                                try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
+torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
+from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
+
+torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
+    ["torch.npu.current_stream"],
+    TorchInGraphFunctionVariable,
+)  # noqa: E402
+torch_non_c_binding_in_graph_functions_npu[
+    "torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
+torch._dynamo.trace_rules.torch_name_rule_map.append(
+    torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
+
 
 class NPUWorker(WorkerBase):
 

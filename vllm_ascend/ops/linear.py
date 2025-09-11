@@ -390,6 +390,7 @@ class AscendRowParallelLinear(RowParallelLinear):
                                                       input_parallel,
                                                       bias=bias_)
             output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+            torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
 
         output_bias = self.bias if self.skip_bias_add else None
 
