@@ -108,4 +108,5 @@ jobs:
 
       - name: Run vllm-project/vllm-ascend PD Disaggregation edge test
         run: |
+          git config --global --add safe.directory/__w/vllm-ascend/vllm-ascend
           bash tests/e2e/pd_disaggreate/run_edge_case_test.sh
