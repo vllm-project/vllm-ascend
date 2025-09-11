@@ -365,3 +365,7 @@ class NPUPlatform(Platform):
 
         pg._register_backend(device, backend_type, backend_class)
         return pg
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
