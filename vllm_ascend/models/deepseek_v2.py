@@ -444,6 +444,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        layer_idx: Optional[int] = None,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -467,7 +468,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.max_position_embeddings = max_position_embeddings
 
         self.prefix = prefix
-        self.debug_layer_idx = int(self.prefix.split(".")[-2])
+        self.debug_layer_idx = layer_idx if layer_idx is not None else int(self.prefix.split(".")[-2])
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp

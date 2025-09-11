@@ -157,7 +157,8 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
                 cache_config=cache_config,
                 quant_config=None if "self_attn" in getattr(
                     config, "disable_quant_module", []) else quant_config,
-                prefix=f"{prefix}.self_attn_{i}",
+                prefix=f"{prefix}.self_attn.{i}",
+                layer_idx=self.layer_idx,
             ) for i in range(2)
         ])
         
