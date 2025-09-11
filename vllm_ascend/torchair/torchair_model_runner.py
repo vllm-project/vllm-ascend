@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 # isort: skip_file
 
+import math
 import types
 from typing import Optional
 
@@ -35,11 +36,13 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.torchair.utils import (
-    TorchairCommonAttentionMetadata, check_torchair_cache_exist,
-    converting_weight_acl_format, register_torchair_model, torchair_ops_patch,
+    TORCHAIR_CACHE_DIR, TorchairCommonAttentionMetadata,
+    check_torchair_cache_exist, converting_weight_acl_format,
+    register_torchair_model, torchair_ops_patch,
     torchair_quant_method_register, write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_310p)
+                               is_310p, get_ascend_soc_version,
+                               AscendSocVersion)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -52,11 +55,12 @@ class NPUTorchairModelRunner(NPUModelRunner):
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore
         self.use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
+        self.use_cached_kv_cache_bytes = ascend_config.torchair_graph_config.use_cached_kv_cache_bytes
         self.torchair_graph_batch_sizes = ascend_config.torchair_graph_config.graph_batch_sizes
         if ascend_config.torchair_graph_config.graph_batch_sizes_init:
             self.init_torchair_graph_batch_sizes()
 
-        self.check_torchair_graph_batch_sizes()
+        self.update_torchair_graph_batch_sizes()
 
         torch._dynamo.cache_size.config.cache_size_limit += len(
             self.torchair_graph_batch_sizes)
@@ -194,14 +198,20 @@ class NPUTorchairModelRunner(NPUModelRunner):
         graph_num = len(torchair_graph_batch_sizes)
 
         if self.use_cached_npu_graph and not check_torchair_cache_exist():
-            # If caching is enabled but does not exist, we will compile the model twice. The first
-            # time is used to generate the cache, and the second time is used to load the cache to
-            # skip the overhead caused by Dynamo guard mechanism.
+            # If caching is enabled but does not exist (either
+            # use_cached_kv_cache_bytes is disabled or kv_cache_bytes are
+            # different), we will compile the model twice. The first time is
+            # used to generate the cache, and the second time is used to load the
+            # cache to skip the overhead caused by Dynamo guard mechanism.
             logger.info(
-                "Use cached npu graph but cache doesn't exist! Now we compile graph to genetate torchair cache, this usually takes %.1f~%.1f mins.",
+                "Cache compilation for torchair graph is enabled. Now we compile graph to genetate"
+                " torchair cache, this usually takes %.1f~%.1f mins.",
                 0.5 * graph_num, 1.5 * graph_num)
             self._compile_torchair_graph(torchair_graph_batch_sizes)
             NPUPlatform.synchronize()
+            # Note: We reset dynamo and reload the compiled torchair cached computation graph below
+            # that was compiled above. This operation reduces graph launch time by 2-4ms and avoids
+            # runtime errors caused by configuration mismatches in graph mode.
             torch._dynamo.reset()
             self.torchair_compiled_models.clear()
         if self.use_cached_npu_graph:
@@ -215,7 +225,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 0.5 * graph_num, 1.5 * graph_num)
             self._compile_torchair_graph(torchair_graph_batch_sizes)
 
-        if self.new_kv_cache_bytes > 0:
+        if self.use_cached_kv_cache_bytes and self.new_kv_cache_bytes > 0:
             write_kv_cache_bytes_to_file(torch.distributed.get_rank(),
                                          self.new_kv_cache_bytes)
 
@@ -362,6 +372,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                     self.model.__dict__[forward_proxy_name],
                     dynamic=True,
                     fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
                     ge_cache=False)
             return self.torchair_compiled_models[batch_size]
@@ -387,7 +398,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             f"{self.torchair_graph_batch_sizes}, but cur batch_size is {batch_size}."
         )
 
-    def check_torchair_graph_batch_sizes(self):
+    def update_torchair_graph_batch_sizes(self):
         # return graph_batch_sizes according to the max number of tokens
         # first pad according to the number of requests
         if len(self.torchair_graph_batch_sizes) == 0:
@@ -411,22 +422,43 @@ class NPUTorchairModelRunner(NPUModelRunner):
             for graph_batch_size in self.torchair_graph_batch_sizes
         ]
 
-        # NOTE: when enable_expert_parallel, we need to check if `graph_batch_size` is divisible by `tp_size`
+        # NOTE: when enable_expert_parallel on A3, we need to check if `graph_batch_size` is divisible by `tp_size`
+        # Because we use x_active_mask for dispatch/combine op on A3, which requires that input shape should be same
+        # on all EP ranks
+        if get_ascend_soc_version(
+        ) == AscendSocVersion.A3 and self.parallel_config.enable_expert_parallel:
+            self._align_graph_size_divisible_by_tp_size()
+
+    def _align_graph_size_divisible_by_tp_size(self):
         tp_size = self.parallel_config.tensor_parallel_size
-        if self.parallel_config.enable_expert_parallel:
-            new_graph_batch_sizes = []
-            for graph_batch_size in self.torchair_graph_batch_sizes:
-                cur_graph_batch_size = (graph_batch_size + tp_size -
-                                        1) // tp_size * tp_size
-                if cur_graph_batch_size not in new_graph_batch_sizes and \
-                    cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
-                    new_graph_batch_sizes.append(cur_graph_batch_size)
-                elif cur_graph_batch_size > self.scheduler_config.max_num_batched_tokens \
-                        and self.decode_token_per_req > 1:
-                    logger.warning(
-                        f"torchair_graph_batch_sizes {cur_graph_batch_size} is bigger than max_num_batched_tokens",
-                        f"{self.scheduler_config.max_num_batched_tokens} will skip this batch size."
-                    )
+        new_graph_batch_sizes = []
+        for graph_batch_size in self.torchair_graph_batch_sizes:
+            cur_graph_batch_size = (graph_batch_size + tp_size -
+                                    1) // tp_size * tp_size
+            # MTP > 1: Cal LCMLeast Common Multiple with graph_batch_size and tp_size,
+            # Both adapter multi-dp and FIA operator
+            if self.speculative_config is not None and self.speculative_config.num_speculative_tokens > 1:
+                cur_graph_batch_size = (tp_size * graph_batch_size) \
+                                       // math.gcd(tp_size, graph_batch_size)
+            if cur_graph_batch_size not in new_graph_batch_sizes and \
+                cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
+                new_graph_batch_sizes.append(cur_graph_batch_size)
+            elif cur_graph_batch_size > self.scheduler_config.max_num_batched_tokens \
+                    and self.decode_token_per_req > 1:
+                logger.warning(
+                    f"torchair_graph_batch_sizes {cur_graph_batch_size} is bigger than max_num_batched_tokens",
+                    f"{self.scheduler_config.max_num_batched_tokens} will skip this batch size."
+                )
+        new_max_num_reqs = max(new_graph_batch_sizes)
+        if self.max_num_reqs != new_max_num_reqs:
+            logger.warning(f"max_num_reqs is updated to {new_max_num_reqs}")
+            self.max_num_reqs = new_max_num_reqs
+            self.scheduler_config.max_num_seqs = new_max_num_reqs
+
+        if new_graph_batch_sizes != self.torchair_graph_batch_sizes:
+            logger.warning(
+                f"torchair_graph_batch_sizes are updated to {new_graph_batch_sizes}."
+            )
             self.torchair_graph_batch_sizes = new_graph_batch_sizes
 
     def _build_drafter_prepare_inputs_torchair_param(self):

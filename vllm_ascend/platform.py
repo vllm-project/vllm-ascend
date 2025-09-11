@@ -28,6 +28,8 @@ from vllm.platforms import Platform, PlatformEnum
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
+from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
+                                        delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, is_310p,
                                update_aclgraph_sizes)
 
@@ -130,7 +132,6 @@ class NPUPlatform(Platform):
             "kv_cache_dtype", None)
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
-
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
@@ -170,12 +171,18 @@ class NPUPlatform(Platform):
                 "Torchair compilation enabled on NPU. Setting CUDAGraphMode to NONE"
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
-        if parallel_config.distributed_executor_backend == "ray":
-            logger.warning(
-                "Ray distributed executor backend is not compatible with ACL Graph mode "
-                "right now. Setting CUDAGraphMode to NONE")
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            # Note: We delete the torchair cache folder here to prevent runtime issues caused by dimension
+            # mismatches or configuration inconsistencies when users reuse cached computation graphs. Though
+            # this will increase graph compilation duration, it significantly enhances robustness and decreases
+            # graph launching time during inference.
+            if check_torchair_cache_exist(
+            ) and not ascend_config.torchair_graph_config.use_cached_kv_cache_bytes:
+                logger.warning(
+                    "Torchair cache folder is deleted here to prevent runtime issues caused by dimension "
+                    "mismatches or configuration inconsistencies when users reuse cached computation graphs. "
+                    "In order to decrease torchair graph compilation time, users can enable both use_cached_graph "
+                    "and use_cached_kv_cache_bytes in torchair_graph_config.")
+                delete_torchair_cache_file()
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
@@ -263,7 +270,7 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm_ascend.lora.punica_wrapper.punica_npu.PunicaWrapperNPU"
+        return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"
 
     @classmethod
     def get_current_memory_usage(cls,

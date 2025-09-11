@@ -628,6 +628,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self.running_in_graph = False
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -1019,7 +1020,6 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                 input_layout = "BNSD"
 
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
-                assert num_tokens % self.spec_token_num == 0
                 input_layout = "TND"
                 # [bs * q_seq_len, num_heads_per_rank, dim]
                 q_nope = q_nope.view(num_tokens, self.num_heads, -1)
@@ -1198,9 +1198,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
             else:
                 decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
                     attn_metadata.decode.input_positions,
-                    decode_q_pe.contiguous(),
-                    decode_k_pe,
-                    max_seq_len=attn_metadata.decode.max_seq_lens)
+                    decode_q_pe.contiguous(), decode_k_pe)
         if has_prefill:
             assert attn_metadata.prefill is not None
             prefill_q = self.q_proj(prefill_hs_or_q_c)[0]\
@@ -1225,9 +1223,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
             else:
                 prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
                     attn_metadata.prefill.input_positions,
-                    prefill_q_pe.contiguous(),
-                    prefill_k_pe,
-                    max_seq_len=attn_metadata.prefill.max_seq_lens)
+                    prefill_q_pe.contiguous(), prefill_k_pe)
 
         assert len(
             kv_cache

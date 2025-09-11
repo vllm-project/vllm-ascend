@@ -131,12 +131,31 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
+    # Whether to enable FlashComm optimization when tensor parallel is enabled.
+    # This feature will get better performance when concurrency is large.
+    "VLLM_ASCEND_ENABLE_FLASHCOMM":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))),
+    # Whether to enable dense model and general optimizations for better performance.
+    # Since we modified the base parent class `linear`, this optimization is also applicable to other model types.
+    # However, there might be hidden issues, and it is currently recommended to prioritize its use with dense models.
+    "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE", '0'))),
     # Whether to enable mlp optimize when tensor parallel is enabled.
     # this feature in eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLP_OPTIMIZE", '0'))),
+    # Determine the number of physical devices in a non-full-use scenario
+    # caused by the initialization of the Mooncake connector.
+    "PHYSICAL_DEVICES":
+    lambda: os.getenv("PHYSICAL_DEVICES", None),
+    # Timeout (in seconds) for delayed KVCache block release. In the prefill
+    # node, if a request is marked for delayed KV block release and the blocks
+    # are not freed within this timeout, they will be forcibly released.
+    "VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT":
+    lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
     "VLLM_ASCEND_COMM_QUANT_MODE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_COMM_QUANT_MODE", '1'))),
+
 }
 
 # end-env-vars-definition

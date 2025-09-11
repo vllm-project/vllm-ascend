@@ -23,7 +23,6 @@ import os
 from typing import Dict
 
 from tests.e2e.conftest import VllmRunner
-from vllm_ascend.ascend_config import clear_ascend_config
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
@@ -85,8 +84,6 @@ def test_e2e_deepseekv3_with_torchair():
     }
     _deepseek_torchair_test_fixture(additional_config)
 
-    clear_ascend_config()
-
 
 def test_e2e_deepseekv3_with_torchair_ms_mla():
     additional_config = {
@@ -97,8 +94,6 @@ def test_e2e_deepseekv3_with_torchair_ms_mla():
     }
     _deepseek_torchair_test_fixture(additional_config)
 
-    clear_ascend_config()
-
 
 def test_e2e_deepseekv3_with_torchair_v1scheduler():
     additional_config = {
@@ -107,8 +102,6 @@ def test_e2e_deepseekv3_with_torchair_v1scheduler():
         },
     }
     _deepseek_torchair_test_fixture(additional_config, use_v1_schduler=True)
-
-    clear_ascend_config()
 
 
 def _pangu_torchair_test_fixture(
@@ -168,8 +161,6 @@ def test_e2e_pangu_with_torchair():
     }
     _pangu_torchair_test_fixture(additional_config)
 
-    clear_ascend_config()
-
 
 def _qwen_torchair_test_fixture(
     model,
@@ -228,9 +219,6 @@ def _qwen_torchair_test_fixture(
 def test_e2e_qwen2_with_torchair():
     _qwen_torchair_test_fixture("Qwen/Qwen2.5-0.5B-Instruct", 2, False)
 
-    clear_ascend_config()
-
 
 def test_e2e_qwen3_moe_with_torchair():
     _qwen_torchair_test_fixture("Qwen/Qwen3-30B-A3B", 2, True)
-    clear_ascend_config()

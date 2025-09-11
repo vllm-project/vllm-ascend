@@ -1,5 +1,5 @@
-#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,14 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
 
-import torch
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.model_executor.models import deepseek_v2, llama4
 
+from vllm_ascend.ops.common_fused_moe import AscendSharedFusedMoE
 
-def data_parallel_reduce_scatter(input_: torch.Tensor,
-                                 dim: int = -1) -> torch.Tensor:
-    """Reduce-Scatter the input tensor across data parallel group."""
-    return get_dp_group().reduce_scatter(input_, dim)
+deepseek_v2.SharedFusedMoE = AscendSharedFusedMoE
+llama4.SharedFusedMoE = AscendSharedFusedMoE
