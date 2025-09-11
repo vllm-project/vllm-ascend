@@ -348,7 +348,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(8, 16)
 
         # Mock async_all_to_all
-        patcher6 = patch('vllm_ascend.ops.comm_utils.async_all_to_all')
+        patcher6 = patch('vllm_ascend.ops.moe.comm_utils.async_all_to_all')
         self.mock_async_all_to_all = patcher6.start()
         self.addCleanup(patcher6.stop)
         self.mock_async_all_to_all.return_value = (None, torch.randn(16, 16),

@@ -30,9 +30,8 @@ from vllm.distributed.parallel_state import get_ep_group
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.distributed.tensor_parallel import \
-    gather_from_sequence_parallel_region
-from vllm_ascend.ops.comm_utils import async_all_to_all
+from vllm_ascend.ops.moe.comm_utils import (
+    async_all_to_all, gather_from_sequence_parallel_region)
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
 _Dispatchers: Dict[str, Any] = {}
