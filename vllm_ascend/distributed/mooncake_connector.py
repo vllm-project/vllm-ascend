@@ -934,7 +934,7 @@ class MooncakeConnectorScheduler:
                                              "prefill with num_computed_tokens == 0."
             # Assume that the request's KV cache is already fully prefilled and
             # can be fetched entirely from the prefill node.
-            count = len(request.prompt_token_ids) - 1
+            count = len(request.prompt_token_ids)
             if count > 0:
                 return count, True
 
@@ -1436,6 +1436,7 @@ class MooncakeConnectorWorker:
                       **kwargs) -> None:
         """MooncakeConnector does not save explicitly."""
         if self.layer_wise and self.kv_role == 'kv_producer':
+            torch.npu.synchronize()
             for req_id, request in connector_metadata.requests.items():
                 logger.debug(f"Add request {req_id} to kv send layer thread.")
                 self.kv_send_layer_thread.add_request(

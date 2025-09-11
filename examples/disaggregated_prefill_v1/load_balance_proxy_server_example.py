@@ -382,6 +382,7 @@ async def send_request_to_service(client: httpx.AsyncClient,
             if request_id in proxy_state.req_id_future:
                 result_future = proxy_state.req_id_future[request_id]
                 result_future.set_result(response.json())
+            return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             logger.warning(
                 f"Attempt {attempt} failed for {endpoint}: {str(e)}")
