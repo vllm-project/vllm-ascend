@@ -324,7 +324,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             param = torch.nn.Parameter(param_value, requires_grad=False)
             layer.register_parameter(param_key, param)
             set_weight_attrs(param, extra_weight_attrs)
-            if "weight_scale_second" in param_key or "weight_offset_second" in param_key:
+            if "weight_scale_second" in param_key or "weight_offset_second" in param_key or "scale_bias" in param_key:
                 setattr(param, "quant_method",
                         FusedMoeWeightScaleSupported.GROUP.value)
                 param.quant_method = FusedMoeWeightScaleSupported.GROUP.value
