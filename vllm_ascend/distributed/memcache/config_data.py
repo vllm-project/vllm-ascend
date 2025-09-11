@@ -340,6 +340,8 @@ class ReqMeta:
     # load_spec
     load_spec: Optional[LoadSpec] = None
 
+    is_last_chunk: Optional[bool] = None
+
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
