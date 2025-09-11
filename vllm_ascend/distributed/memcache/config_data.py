@@ -348,6 +348,7 @@ class ReqMeta:
         block_size: int,
         load_spec: Optional[LoadSpec] = None,
         skip_save: bool = False,
+        is_last_chunk: Optional[bool] = None
         discard_partial_chunks: bool = True,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
@@ -414,6 +415,7 @@ class ReqMeta:
             block_ids=tracker.allocated_block_ids,
             save_spec=save_spec,
             load_spec=load_spec,
+            is_last_chunk=is_last_chunk,
         )
 
 
