@@ -303,6 +303,7 @@ class MemcacheConnectorV1Scheduler:
                 self._block_size,
                 load_spec=load_spec,
                 skip_save=force_skip_save,
+                is_last_chunk=len(request_tracker.token_ids)>=len(request.prompt_token_ids),
                 discard_partial_chunks=self._discard_partial_chunks,
             )
             if req_meta is not None:
@@ -319,6 +320,7 @@ class MemcacheConnectorV1Scheduler:
                     self._block_size,
                     load_spec=None,
                     skip_save=force_skip_save,
+                    is_last_chunk=len(request_tracker.token_ids)>=len(req.prompt_token_ids),
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
@@ -348,6 +350,7 @@ class MemcacheConnectorV1Scheduler:
                     self._block_size,
                     load_spec=None,
                     skip_save=force_skip_save,
+                    is_last_chunk=len(request_tracker.token_ids)>=len(request.prompt_token_ids),
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:
