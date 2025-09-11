@@ -198,58 +198,58 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
             prefix=(f"{prefix}.mlp"),
         )
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        kv_cache: Optional[torch.Tensor] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    #def forward(
+    #    self,
+    #    positions: torch.Tensor,
+    #    hidden_states: torch.Tensor,
+    #    residual: Optional[torch.Tensor],
+    #    kv_cache: Optional[torch.Tensor] = None,
+    #    attn_metadata: Optional[AttentionMetadata] = None,
+    #) -> tuple[torch.Tensor, torch.Tensor]:
 
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm[0](hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm[0](hidden_states,
-                                                              residual)
+    #    if residual is None:
+    #        residual = hidden_states
+    #        hidden_states = self.input_layernorm[0](hidden_states)
+    #    else:
+    #        hidden_states, residual = self.input_layernorm[0](hidden_states,
+    #                                                          residual)
 
-        hidden_states = self.self_attn[0](
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
+    #    hidden_states = self.self_attn[0](
+    #        positions=positions,
+    #        hidden_states=hidden_states,
+    #        kv_cache=kv_cache,
+    #        attn_metadata=attn_metadata,
+    #    )
 
-        hidden_states, residual = self.post_attention_layernorm[0](
-            hidden_states, residual)
+    #    hidden_states, residual = self.post_attention_layernorm[0](
+    #        hidden_states, residual)
 
-        # moe
-        hidden_states_copy = hidden_states.clone()
-        moe_hidden_states = self.mlp(hidden_states_copy)
+    #    # moe
+    #    hidden_states_copy = hidden_states.clone()
+    #    moe_hidden_states = self.mlp(hidden_states_copy)
 
-        # first mlp
-        hidden_states = self.mlps[0](hidden_states)
+    #    # first mlp
+    #    hidden_states = self.mlps[0](hidden_states)
 
-        hidden_states, residual = self.input_layernorm[1](hidden_states,
-                                                          residual)
+    #    hidden_states, residual = self.input_layernorm[1](hidden_states,
+    #                                                      residual)
 
-        # second_attn
-        hidden_states = self.self_attn[1](
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
-        hidden_states, residual = self.post_attention_layernorm[1](
-            hidden_states, residual)
+    #    # second_attn
+    #    hidden_states = self.self_attn[1](
+    #        positions=positions,
+    #        hidden_states=hidden_states,
+    #        kv_cache=kv_cache,
+    #        attn_metadata=attn_metadata,
+    #    )
+    #    hidden_states, residual = self.post_attention_layernorm[1](
+    #        hidden_states, residual)
 
-        # second_mlp
-        hidden_states = self.mlps[1](hidden_states)
+    #    # second_mlp
+    #    hidden_states = self.mlps[1](hidden_states)
 
-        hidden_states = hidden_states + moe_hidden_states
+    #    hidden_states = hidden_states + moe_hidden_states
 
-        return hidden_states, residual
+    #    return hidden_states, residual
 
 
 class CustomFlashModel(nn.Module):
@@ -328,9 +328,10 @@ class CustomFlashModel(nn.Module):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
-                residual,
-                layer_kv_cache,
-                attn_metadata
+                residual
+                #residual,
+                #layer_kv_cache,
+                #attn_metadata
             )
 
         if not get_pp_group().is_last_rank:
