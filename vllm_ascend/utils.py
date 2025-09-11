@@ -50,6 +50,7 @@ MAX_CAPTURE_SIZE = 1800
 
 ASCEND_QUANTIZATION_METHOD = "ascend"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
+REGISTERED_ASCEND_OPS = {}
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
@@ -493,7 +494,10 @@ def register_ascend_customop():
         return
     from vllm.model_executor.custom_op import CustomOp
 
+    from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+    from vllm_ascend.ops.layernorm import AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
@@ -503,38 +507,27 @@ def register_ascend_customop():
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
-    CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
-    CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
-                          name="SiluAndMul")
-    CustomOp.register_oot(_decorated_op_cls=AscendRotaryEmbedding,
-                          name="RotaryEmbedding")
-    CustomOp.register_oot(_decorated_op_cls=AscendColumnParallelLinear,
-                          name="ColumnParallelLinear")
-    CustomOp.register_oot(_decorated_op_cls=AscendRowParallelLinear,
-                          name="RowParallelLinear")
-    CustomOp.register_oot(_decorated_op_cls=AscendMergedColumnParallelLinear,
-                          name="MergedColumnParallelLinear")
-    CustomOp.register_oot(_decorated_op_cls=AscendQKVParallelLinear,
-                          name="QKVParallelLinear")
-    CustomOp.register_oot(
-        _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
-        name="DeepseekScalingRotaryEmbedding")
-    CustomOp.register_oot(_decorated_op_cls=AscendVocabParallelEmbedding,
-                          name="VocabParallelEmbedding")
-    CustomOp.register_oot(_decorated_op_cls=AscendParallelLMHead,
-                          name="ParallelLMHead")
-    CustomOp.register_oot(_decorated_op_cls=AscendLogitsProcessor,
-                          name="LogitsProcessor")
 
-    from vllm_ascend.ops.layernorm import AscendRMSNorm
-    CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
+    global REGISTERED_ASCEND_OPS
+    REGISTERED_ASCEND_OPS = {
+        "QuickGELU": AscendQuickGELU,
+        "SiluAndMul": AscendSiluAndMul,
+        "RotaryEmbedding": AscendRotaryEmbedding,
+        "ColumnParallelLinear": AscendColumnParallelLinear,
+        "RowParallelLinear": AscendRowParallelLinear,
+        "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
+        "QKVParallelLinear": AscendQKVParallelLinear,
+        "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
+        "VocabParallelEmbedding": AscendVocabParallelEmbedding,
+        "ParallelLMHead": AscendParallelLMHead,
+        "LogitsProcessor": AscendLogitsProcessor,
+        "RMSNorm": AscendRMSNorm,
+        "FusedMoE": AscendFusedMoE,
+        "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
+    }
 
-    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
-    CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
-
-    from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
-    CustomOp.register_oot(_decorated_op_cls=AscendMultiHeadLatentAttention,
-                          name="MultiHeadLatentAttention")
+    for name, op_cls in REGISTERED_ASCEND_OPS.items():
+        CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
