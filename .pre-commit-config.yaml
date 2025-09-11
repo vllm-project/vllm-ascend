@@ -57,13 +57,12 @@ repos:
   - id: actionlint
 - repo: local
   hooks:
-  # For local development, you can run mypy using tools/mypy.sh script if needed.
-  # - id: mypy-local
-  #   name: Run mypy for local Python installation
-  #   entry: tools/mypy.sh 0 "local"
-  #   language: system
-  #   types: [python]
-  #   stages: [pre-commit] # Don't run in CI
+  - id: lf-lint
+    name: Lint with end of lines
+    entry: python tools/line-end-lint.py
+    language: system
+    types: [python]
+    pass_filenames: false
   - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.9
     entry: tools/mypy.sh 1 "3.9"
