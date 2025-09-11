@@ -21,7 +21,6 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
-
 from vllm.distributed import split_tensor_along_last_dim
 from vllm.forward_context import get_forward_context
 

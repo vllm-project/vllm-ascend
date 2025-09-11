@@ -22,19 +22,16 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-
 from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
-
 from vllm.distributed import divide, split_tensor_along_last_dim
-from vllm.distributed.parallel_state import get_tp_group, get_dp_group
+from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.lora.utils import LinearBase
 from vllm.model_executor.layers.linear import (  # noqa
-    ColumnParallelLinear, MergedColumnParallelLinear,
-    QKVParallelLinear, QuantizeMethodBase,
-    RowParallelLinear, UnquantizedLinearMethod,
-    WEIGHT_LOADER_V2_SUPPORTED,)
+    WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear,
+    MergedColumnParallelLinear, QKVParallelLinear, QuantizeMethodBase,
+    RowParallelLinear, UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
@@ -43,7 +40,6 @@ from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.utils import (dense_optim_enable, matmul_allreduce_enable,
                                mlp_tp_enable, oproj_tp_enable)
-
 
 _HCOMM_INFO = None
 
