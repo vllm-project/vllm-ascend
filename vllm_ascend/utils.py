@@ -24,7 +24,7 @@ import os
 from contextlib import contextmanager
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 import torch_npu  # noqa: F401  # noqa: F401
@@ -483,7 +483,7 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     return False
 
 
-def register_ascend_customop():
+def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
     NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`, 
@@ -497,7 +497,7 @@ def register_ascend_customop():
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
-    from vllm_ascend.ops.layernorm import AscendRMSNorm
+    from vllm_ascend.ops.layernorm import AscendQuantRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
@@ -525,6 +525,11 @@ def register_ascend_customop():
         "FusedMoE": AscendFusedMoE,
         "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
+
+    if vllm_config is not None and \
+        vllm_config.quant_config is not None and \
+        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
+        REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
