@@ -13,10 +13,13 @@ from vllm_ascend.models.deepseek_mtp import (
 class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
 
     @pytest.fixture
-    def setup_mtp_layer(self, mocker: MockerFixture):
+    def setup_mtp_layer(self, mocker: MockerFixture, vllm_config: VllmConfig,
+                        mock_distributed):
         config = PretrainedConfig(vocab_size=1000,
                                   hidden_size=768,
                                   rms_norm_eps=1e-5)
+        mocker.patch("vllm_ascend.models.deepseek_mtp.get_current_vllm_config",
+                     return_value=vllm_config)
         mocker.patch(
             "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding.__init__",
             return_value=None)
@@ -29,15 +32,15 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekShareHead.__init__",
             return_value=None)
         mocker_deepseek_v2_decode_layer = mocker.patch(
-            "vllm_ascend.models.deepseek_v2.CustomDeepseekV2DecoderLayer.__init__",
+            "vllm.model_executor.models.deepseek_v2.DeepseekV2DecoderLayer.__init__",
             return_value=None)
         mocker.patch(
             "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
             return_value=None)
-        mocker.patch("vllm_ascend.utils.get_ascend_config",
+        mocker.patch("vllm_ascend.models.deepseek_v2.get_ascend_config",
                      return_value=mocker.Mock())
 
-        mtp_layer = CustomDeepSeekMultiTokenPredictorLayer(config, "", None)
+        mtp_layer = CustomDeepSeekMultiTokenPredictorLayer(config, "0", None)
         mocker_deepseek_v2_decode_layer.assert_called_once()
         return mtp_layer
 
