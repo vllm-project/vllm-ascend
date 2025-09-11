@@ -296,6 +296,7 @@ class MemcacheEngine:
                     token_ids,
                     request.block_ids,
                     store_mask,
+                    request.is_last_chunk,
                 )
 
     def retrieve_layer(
@@ -348,7 +349,7 @@ class MemcacheEngine:
                     is_finish=self.get_event.wait(timeout=3)   #try---cache
                     if not is_finish:
                         raise SystemError("Layerwise get failed")
-                    self.get_event.clear()
+                self.get_event.clear()
                 req_meta=LasyerMultiBlockReqMeta(
                         req_id,
                         keys_multi_chunk,
