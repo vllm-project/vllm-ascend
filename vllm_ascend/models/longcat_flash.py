@@ -198,7 +198,6 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
             prefix=(f"{prefix}.mlp"),
         )
 
-    # CustomFlashDecoderLayer继承父类forward方法，无需重复实现
     def forward(
         self,
         positions: torch.Tensor,

@@ -688,8 +688,6 @@ class AscendFusedMoE(FusedMoE):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
-        if zero_expert_result is not None:
-            final_hidden_states += zero_expert_result[:final_hidden_states.size(0)]
         if shared_experts:
             return final_hidden_states, shared_hidden_states
         else:
