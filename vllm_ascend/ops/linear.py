@@ -164,7 +164,8 @@ class AscendRowParallelLinear(RowParallelLinear):
         # TODO: check for disable_tp
         self.tp_size = self.comm_group.world_size
         self.tp_rank = self.comm_group.rank_in_group
-        self.dp_rank = get_dp_group().rank_in_group
+        if self.forward_type == "oproj_tp":
+            self.dp_rank = get_dp_group().rank_in_group
 
         # Divide the weight matrix along the first dimension.
         self.input_size_per_partition = divide(input_size, self.tp_size)
