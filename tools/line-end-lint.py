@@ -17,8 +17,6 @@
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
 # This script checks that all the lines end with LF in the repository.
-#!/usr/bin/env python3
-import os
 import subprocess
 import sys
 
@@ -33,7 +31,6 @@ def convert_to_lf(filepath: str):
         if new_content != content:
             with open(filepath, "wb") as f:
                 f.write(new_content)
-            modified_files.append(filepath)
             print(f"[FIXED] {filepath}")
     except Exception as e:
         print(f"[SKIP] {filepath} ({e})")
