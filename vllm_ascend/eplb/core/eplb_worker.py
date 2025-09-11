@@ -14,8 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from multiprocessing import Process, Manager
-from queue import Queue
+from multiprocessing import Process, Manager, Queue
 from typing import Any
 
 import networkx as nx  # type: ignore
@@ -387,6 +386,7 @@ class EplbWorker:
 class EplbProcess:
 
     def __init__(self,
+                 shared_dict,
                  policy_type: int = 0,
                  enable_d2d: bool = True):
         """
@@ -395,12 +395,7 @@ class EplbProcess:
             policy_type: Integer passed to PolicyFactory.generate_policy
             enable_d2d: Whether to enable D2D loading
         """
-        self.manager = Manager()
-        self.shared_dict = self.manager.dict({
-            "expert_map": None,
-            "moe_load": None,
-            "expert_maps": None
-        })
+        self.shared_dict = shared_dict
         self.policy_type = policy_type
         self.enable_d2d = enable_d2d
         self.planner_q = Queue()

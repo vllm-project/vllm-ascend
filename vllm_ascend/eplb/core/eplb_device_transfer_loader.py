@@ -28,16 +28,17 @@ class ExpertWeightUpdateState(Enum):
 
 class D2DExpertWeightLoader:
 
-    def __init__(self, eplb_adaptor):
+    def __init__(self):
         self.comm_op_list = None
-        self.eplb_adaptor = eplb_adaptor
-
         self.updated_expert_map = None
         self.updated_log2phy_map = None
         self.layer_id = -1  # layer id to be updated
         self.state = ExpertWeightUpdateState.WAITING
         self.recv_expert_list = []
         self.mock_flag = True
+
+    def set_adator(self, eplb_adaptor):
+        self.eplb_adaptor = eplb_adaptor
 
     def generate_expert_d2d_transfer_task(self, expert_send_info,
                                           expert_recv_info, updated_expert_map,

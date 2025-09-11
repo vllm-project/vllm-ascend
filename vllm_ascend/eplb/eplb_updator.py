@@ -25,11 +25,13 @@ from vllm.logger import logger
 
 class EplbUpdator:
 
-    def __init__(self, ascend_config, adaptor, loader, process):
+    def __init__(self, ascend_config, loader, process):
         self.ascend_config = ascend_config
         self.init_eplb(self.ascend_config.expert_map_path, process)
-        self.adaptor = adaptor
         self.eplb_loader = loader
+
+    def set_adaptor(self, adaptor):
+        self.adaptor = adaptor
         self.num_moe_layers = self.adaptor.num_moe_layers
         self.global_expert_num = self.adaptor.global_expert_num
 
@@ -72,8 +74,7 @@ class EplbUpdator:
             "expert_maps": None,
         })
 
-        self.eplb = process
-        self.eplb_process = self.eplb._launch_process()
+        self.eplb_process = process
 
         logger.info(
             f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})"
