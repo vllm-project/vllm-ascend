@@ -31,7 +31,9 @@ from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
-QWEN_DENSE_MODELS = ["Qwen/QwQ-32B", "Qwen/Qwen-32B"]
+QWEN_DENSE_MODELS = [
+    "vllm-ascend/Qwen3-8B-W8A8", "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8"
+]
 
 
 def test_models_distributed_QwQ():
@@ -170,6 +172,29 @@ def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model, enforce_eager):
             max_model_len=8192,
             enforce_eager=enforce_eager,
             dtype="auto",
-            tensor_parallel_size=4,
+            tensor_parallel_size=2,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"})
+def test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight(
+        model, enforce_eager):
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download(model),
+            max_model_len=8192,
+            enforce_eager=enforce_eager,
+            dtype="auto",
+            tensor_parallel_size=2,
+            quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

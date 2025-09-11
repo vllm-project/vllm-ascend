@@ -135,6 +135,15 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # This feature will get better performance when concurrency is large.
     "VLLM_ASCEND_ENABLE_FLASHCOMM":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))),
+    # Whether to enable MLP weight prefetch, only used in small concurrency.
+    "VLLM_ASCEND_ENABLE_PREFETCH_MLP":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", '0'))),
+    # buffer size for gate up prefetch
+    "MLP_GATE_UP_PREFETCH_SIZE":
+    lambda: int(os.getenv("MLP_GATE_UP_PREFETCH_SIZE", 18 * 1024 * 1024)),
+    # buffer size for down proj prefetch
+    "MLP_DOWN_PREFETCH_SIZE":
+    lambda: int(os.getenv("MLP_DOWN_PREFETCH_SIZE", 18 * 1024 * 1024)),
     # Whether to enable dense model and general optimizations for better performance.
     # Since we modified the base parent class `linear`, this optimization is also applicable to other model types.
     # However, there might be hidden issues, and it is currently recommended to prioritize its use with dense models.
