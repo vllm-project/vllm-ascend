@@ -71,12 +71,14 @@ class KVTransferThread(threading.Thread):
         tokens: torch.Tensor,
         block_ids: list[int],
         mask: Optional[torch.Tensor] = None,
+        is_last_chunk: Optional[bool] = None,
     ) -> torch.Tensor:
         req=({
             "req_id": req_id,
             "tokens": tokens,
             "block_ids": block_ids,
             "mask": mask,
+            "is_last_chunk":is_last_chunk,
         })
         self.request_queue.put(req)
 
@@ -128,7 +130,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         mask=req_meta["mask"]
         block_ids=req_meta["block_ids"]
         req_id=req_meta["req_id"]
-        torch.npu.current_stream().synchronize()
+        is_last_chunk = req_meta["is_last_chunk"]
         addr_list=[]
         size_list=[]
         key_list=[]
@@ -138,9 +140,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
             key_list.append(key.to_string())
             addr_list.append(addr)
             size_list.append(size)
-            blockIds.append(block_id)   
+            blockIds.append(block_id)
+        torch.npu.current_stream().synchronize()
         self.m_store.put_batch(key_list, addr_list, size_list, blockIds)
-        self.set_finished_request(req_id)
+        if is_last_chunk:
+            self.set_finished_request(req_id)
         self.request_queue.task_done()
         
       
