@@ -198,60 +198,6 @@ class CustomFlashDecoderLayer(FlashDecoderLayer):
             prefix=(f"{prefix}.mlp"),
         )
 
-    #def forward(
-    #    self,
-    #    positions: torch.Tensor,
-    #    hidden_states: torch.Tensor,
-    #    residual: Optional[torch.Tensor],
-    #    kv_cache: Optional[torch.Tensor] = None,
-    #    attn_metadata: Optional[AttentionMetadata] = None,
-    #) -> tuple[torch.Tensor, torch.Tensor]:
-
-    #    if residual is None:
-    #        residual = hidden_states
-    #        hidden_states = self.input_layernorm[0](hidden_states)
-    #    else:
-    #        hidden_states, residual = self.input_layernorm[0](hidden_states,
-    #                                                          residual)
-
-    #    hidden_states = self.self_attn[0](
-    #        positions=positions,
-    #        hidden_states=hidden_states,
-    #        kv_cache=kv_cache,
-    #        attn_metadata=attn_metadata,
-    #    )
-
-    #    hidden_states, residual = self.post_attention_layernorm[0](
-    #        hidden_states, residual)
-
-    #    # moe
-    #    hidden_states_copy = hidden_states.clone()
-    #    moe_hidden_states = self.mlp(hidden_states_copy)
-
-    #    # first mlp
-    #    hidden_states = self.mlps[0](hidden_states)
-
-    #    hidden_states, residual = self.input_layernorm[1](hidden_states,
-    #                                                      residual)
-
-    #    # second_attn
-    #    hidden_states = self.self_attn[1](
-    #        positions=positions,
-    #        hidden_states=hidden_states,
-    #        kv_cache=kv_cache,
-    #        attn_metadata=attn_metadata,
-    #    )
-    #    hidden_states, residual = self.post_attention_layernorm[1](
-    #        hidden_states, residual)
-
-    #    # second_mlp
-    #    hidden_states = self.mlps[1](hidden_states)
-
-    #    hidden_states = hidden_states + moe_hidden_states
-
-    #    return hidden_states, residual
-
-
 class CustomFlashModel(nn.Module):
     """Ascend优化的Flash模型，使用CustomFlashDecoderLayer"""
 
@@ -261,11 +207,9 @@ class CustomFlashModel(nn.Module):
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        # self.config = config
 
         self.padding_idx = getattr(config, "pad_token_id", None)
         self.vocab_size = config.vocab_size
-        self.tp_size = get_tensor_model_parallel_world_size()
 
         # Pipeline Parallel支持：只在第一个rank创建embed_tokens
         if get_pp_group().is_first_rank:
@@ -308,8 +252,6 @@ class CustomFlashModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        kv_caches: Optional[List[torch.Tensor]] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -324,14 +266,10 @@ class CustomFlashModel(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            layer_kv_cache = kv_caches[i - self.start_layer] if kv_caches is not None else None
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual
-                #residual,
-                #layer_kv_cache,
-                #attn_metadata
             )
 
         if not get_pp_group().is_last_rank:
@@ -383,32 +321,6 @@ class CustomLongcatFlashForCausalLM(LongcatFlashForCausalLM):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-        kv_caches: Optional[List[torch.Tensor]] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, kv_caches, attn_metadata,
-                                   intermediate_tensors, inputs_embeds)
-        return hidden_states
-    
-
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        return AscendFusedMoE.make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts if hasattr(
-                self.config, "n_routed_experts") else
-            self.config.num_experts[0],
-        )
 
     # ToDo 这块和jsb有差异
     def load_weights(self, weights: Iterable[tuple[str,
