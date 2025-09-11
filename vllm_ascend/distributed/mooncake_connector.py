@@ -401,31 +401,37 @@ class KVCacheRecvingThread(threading.Thread):
             self._cat_kv_cache(local_block_ids)
 
     def _cat_kv_cache(self, block_ids: list[list[int]]):
-        # get necessary params from config
-        head_dim = self.model_config.hf_config.head_dim
-        block_size = self.vllm_config.cache_config.block_size
-        num_kv_head = self.model_config.hf_config.num_key_value_heads
-
-        dtype = list(self.kv_caches.values())[0][0].dtype
-        block_ids = [item for sublist in block_ids for item in sublist]
-        block_ids_tensor = torch.tensor(block_ids, dtype=torch.int32)
-        num_blocks = len(block_ids)
+        """Concatenate key-value cache blocks for efficient processing."""
+        # Get necessary parameters from the first key cache
+        k_cache = list(self.kv_caches.values())[0][0]
+        kv_shape = k_cache.shape
+        block_size, num_kv_head, head_dim = kv_shape[1:]
+        dtype = k_cache.dtype
+        device = k_cache.device
+        
+        flat_block_ids = [item for sublist in block_ids for item in sublist]
+        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32)
+        num_blocks = len(flat_block_ids)
         block_len = num_blocks * block_size
-        block_table = block_ids_tensor.view(1, -1).npu()
-        block_len_tensor = torch.tensor([block_len], dtype=torch.int32).npu()
-        seq_start_tensor = torch.tensor([0], dtype=torch.int32).npu()
+        
+        # Create device tensors for copy operations
+        block_table = block_ids_tensor.view(1, -1).to(device=device)
+        block_len_tensor = torch.tensor([block_len], dtype=torch.int32).to(device=device)
+        seq_start_tensor = torch.tensor([0], dtype=torch.int32).to(device=device)
 
-        k_buffer = torch.empty(block_len, num_kv_head, head_dim, dtype=dtype).npu()
-        v_buffer = torch.empty(block_len, num_kv_head, head_dim, dtype=dtype).npu()
+        # Initialize buffers
+        k_buffer = torch.empty(block_len, num_kv_head, head_dim, dtype=dtype, device=device)
+        v_buffer = torch.empty(block_len, num_kv_head, head_dim, dtype=dtype, device=device)
 
+        # Create slot mapping for reshape operations
         block_offsets = torch.arange(0, block_size, dtype=torch.int32)
-        slot_mapping = block_offsets.reshape(
-            (1, block_size)) + block_ids_tensor.reshape(
-            (num_blocks, 1)) * block_size
-        slot_mapping = slot_mapping.flatten().npu()
+        slot_mapping = (block_offsets.reshape((1, block_size)) + 
+                    block_ids_tensor.reshape((num_blocks, 1)) * block_size)
+        slot_mapping = slot_mapping.flatten().to(device=device)
 
-        for kv_cache_layer in self.kv_caches.values():
-            k_cache_layer, v_cache_layer = kv_cache_layer
+        # Process each layer in the KV cache
+        for layer, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
+            # Load cache data into buffers
             torch_npu.atb.npu_paged_cache_load(
                 k_cache_layer,
                 v_cache_layer,
@@ -436,9 +442,15 @@ class KVCacheRecvingThread(threading.Thread):
                 value=v_buffer,
             )
 
-            k_buffer = self._transpose_kv_cache_between_head(k_buffer, num_blocks, block_size, block_len, num_kv_head)
-            v_buffer = self._transpose_kv_cache_between_head(v_buffer, num_blocks, block_size, block_len, num_kv_head)
+            # Transpose KV cache
+            k_buffer = self._transpose_kv_cache_between_head(
+                k_buffer, num_blocks, block_size, block_len, num_kv_head
+            )
+            v_buffer = self._transpose_kv_cache_between_head(
+                v_buffer, num_blocks, block_size, block_len, num_kv_head
+            )
 
+            # Reshape and cache the processed buffers
             torch_npu._npu_reshape_and_cache(
                 key=k_buffer,
                 value=v_buffer,
@@ -446,16 +458,21 @@ class KVCacheRecvingThread(threading.Thread):
                 value_cache=v_cache_layer,
                 slot_indices=slot_mapping,
             )
-        del k_buffer
-        del v_buffer
 
-    def _transpose_kv_cache_between_head(self, buffer: torch.Tensor, num_blocks: int,
-                                         block_size: int, block_len: int, num_kv_head: int) -> torch.Tensor:
+        # Clean up buffers
+        del k_buffer, v_buffer
+
+    def _transpose_kv_cache_between_head(
+        self, 
+        buffer: torch.Tensor, 
+        num_blocks: int,
+        block_size: int, 
+        block_len: int, 
+        num_kv_head: int
+    ) -> torch.Tensor:
         buffer = buffer.view(num_blocks, self.num_need_pulls, block_size, -1)
         buffer.transpose_(1, 2)
-        buffer = buffer.contiguous().view(block_len, num_kv_head, -1)
-
-        return buffer
+        return buffer.contiguous().view(block_len, num_kv_head, -1)
 
     def _get_remote_metadata(self, remote_host: str,
                              remote_handshake_port: int) -> None:
