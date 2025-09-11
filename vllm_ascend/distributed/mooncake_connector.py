@@ -1053,10 +1053,10 @@ class MooncakeConnectorScheduler:
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
-            remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
+            remote_block_ids=computed_block_ids,
         )
 
     def get_finished_count(self) -> Optional[int]:
@@ -1367,14 +1367,16 @@ class MooncakeConnectorWorker:
                         f"Send requset: {req_id} to proxy metaserver: {meta.metaserver}"
                     )
                     if self.tp_rank == 0:
-                        kv_transfer_params = {
-                            "do_remote_prefill": True,
-                            "do_remote_decode": False,
-                            "remote_engine_id": self.engine_id,
-                            "request_id": req_id,
-                            "remote_host": self.side_channel_host,
-                            "remote_port": self.side_channel_port
-                        }
+                        # All parameters here should appear in the returned dict of
+                        # request_finished in the scheduler side except "request_id".
+                        kv_transfer_params = dict( 
+                            request_id=req_id,
+                            do_remote_prefill=True,
+                            do_remote_decode=False,
+                            remote_engine_id=self.engine_id,
+                            remote_host=self.side_channel_host,
+                            remote_port=self.side_channel_port
+                        )
 
                         future = self.executor.submit(
                             self._access_metaserver,

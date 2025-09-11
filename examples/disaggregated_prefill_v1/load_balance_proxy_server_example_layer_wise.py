@@ -151,7 +151,7 @@ class ProxyState:
                              for i, server in enumerate(self.decoders)]
         heapq.heapify(self.prefiller_heap)
         heapq.heapify(self.decoder_heap)
-        self.req_id_queue = {}
+        self.req_id_future = {}
 
     def _update_prefiller_priority(self, server_idx: int):
         """Update the priority of a prefiller server in the heap."""
@@ -379,7 +379,9 @@ async def send_request_to_service(client: httpx.AsyncClient,
                                          json=req_data,
                                          headers=headers)
             response.raise_for_status()
-            return response
+            if request_id in proxy_state.req_id_future:
+                result_future = proxy_state.req_id_future[request_id]
+                result_future.set_result(response.json())
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             logger.warning(
                 f"Attempt {attempt} failed for {endpoint}: {str(e)}")
@@ -465,36 +467,23 @@ async def _handle_completions(api: str, request: Request):
         # Select prefiller
         prefiller_idx = proxy_state.select_prefiller(prefiller_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
-        result_queue = asyncio.Queue()
+        result_future = asyncio.Future()
         request_id_api = get_api_request_id(api, request_id)
-        proxy_state.req_id_queue[request_id_api] = result_queue
+        proxy_state.req_id_future[request_id_api] = result_future
         # Send request to prefiller
-        response = await send_request_to_service(
+        asyncio.get_running_loop().create_task(send_request_to_service(
             prefiller.client,
             prefiller_idx,
             api,
             req_data,
             request_id,
             max_retries=global_args.max_retries,
-            base_delay=global_args.retry_delay)
+            base_delay=global_args.retry_delay))
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        response_json = response.json()
-        # kv_transfer_params = response_json.get('kv_transfer_params', {})
-        # if kv_transfer_params:
-        #     req_data["kv_transfer_params"] = kv_transfer_params
         
-        try:
-            is_layer_wise, response_json = await result_queue.get()
-            del proxy_state.req_id_queue[request_id_api]
-            if not is_layer_wise:
-                kv_transfer_params = response_json.get("kv_transfer_params", {})
-                if kv_transfer_params:
-                    req_data["kv_transfer_params"] = kv_transfer_params
-            else:
-                req_data["kv_transfer_params"] = response_json
-        except Exception as e:
-            logger.error(f"Error during get response from metaserver")
-            return
+        response = await result_future
+        del proxy_state.req_id_future[request_id_api]
+        req_data["kv_transfer_params"] = response
 
         # Select decoder
         decoder_score = proxy_state.calculate_decode_scores(request_length)
@@ -569,13 +558,10 @@ async def healthcheck():
 async def metaserver(request: Request):
     try:
         req_data = await request.json()
-        request_id = req_data.get("request_id", "")
-        if not request_id:
-            return
-        if request_id in proxy_state.req_id_queue:
-            assert request_id in proxy_state.req_id_queue.keys()
-            result_queue = proxy_state.req_id_queue[request_id]
-            await result_queue.put((True, req_data))
+        request_id = req_data.pop("request_id", None)
+        if request_id in proxy_state.req_id_future:
+            result_future = proxy_state.req_id_future[request_id]
+            result_future.set_result(req_data)
     except Exception as e:
         logger.error(
             f"Post metaserver failed with: {str(e)}"
