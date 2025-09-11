@@ -19,11 +19,8 @@
 # This script checks that all the lines end with LF in the repository.
 #!/usr/bin/env python3
 import os
+import subprocess
 import sys
-
-SKIP_DIRS = {'.git', '.venv', 'venv', '__pycache__'}
-
-modified_files = []
 
 
 def convert_to_lf(filepath: str):
@@ -42,22 +39,21 @@ def convert_to_lf(filepath: str):
         print(f"[SKIP] {filepath} ({e})")
 
 
-def check_and_fix_repo(root: str):
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
-
-        for filename in filenames:
-            filepath = os.path.join(dirpath, filename)
-            convert_to_lf(filepath)
+def find_crlf_files():
+    result = subprocess.run(["git", "grep", "-I", "-l", "\r", "."],
+                            capture_output=True,
+                            text=True,
+                            check=False)
+    files = result.stdout.strip().splitlines()
+    if files:
+        print("Files with CRLF line endings:")
+        for file in files:
+            print(f"- {file}")
+            convert_to_lf(file)
+        sys.exit(1)
+    print("✅ all files have LF line endings.")
+    sys.exit(0)
 
 
 if __name__ == "__main__":
-    repo_root = os.getcwd()
-    check_and_fix_repo(repo_root)
-
-    if modified_files:
-        print("❌ some files were reformatted.")
-        sys.exit(1)
-    else:
-        print("✅ all files already use LF, lint passed.")
-        sys.exit(0)
+    find_crlf_files()
