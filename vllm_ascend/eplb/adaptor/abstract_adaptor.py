@@ -14,10 +14,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+# Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this adaptor.
 from abc import abstractmethod
 from typing import Any
-
 
 class EplbAdaptor():
 

@@ -1,9 +1,9 @@
 # Copyright # Copyright Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
+# Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this policy.
 import copy
 import random
 
 from .policy_abstract import DynamicConfig, EplbPolicy
-
 random.seed(42)
 
 

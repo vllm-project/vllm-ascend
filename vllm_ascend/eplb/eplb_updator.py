@@ -14,9 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
-from multiprocessing import Manager, Queue
-
+# Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this updator.
 import numpy
 import torch
 import torch.distributed as dist

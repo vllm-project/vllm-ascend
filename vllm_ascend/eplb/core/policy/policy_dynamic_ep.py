@@ -1,11 +1,11 @@
 # Copyright Huawei Technologies Co., Ltd. 2024-2025. All rights reserved.
+# Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this policy.
 from collections import defaultdict
 from typing import cast
 
 import numpy as np
 
 from .policy_abstract import DynamicConfig, EplbPolicy
-
 
 class DynamicTable:
     # workload_table:

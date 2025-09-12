@@ -14,10 +14,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+# Todo: Once https://github.com/vllm-project/vllm/pull/23553 is merged in vllm. Remove this model register.
 import types
 
 import torch
-
 
 def get_expert_map(self, layer_id):
     return self.model.layers[layer_id].mlp.experts.get_map()

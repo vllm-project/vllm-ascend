@@ -1,6 +1,6 @@
 # Copyright Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
+# Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this policy.
 from abc import abstractmethod
-
 
 class DynamicConfig:
     placement_policy = None
