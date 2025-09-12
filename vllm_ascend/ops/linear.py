@@ -36,34 +36,10 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, dense_optim_enable,
-                               matmul_allreduce_enable, mlp_tp_enable,
-                               oproj_tp_enable)
+from vllm_ascend.utils import (dense_optim_enable, matmul_allreduce_enable,
+                               mlp_tp_enable, oproj_tp_enable)
 
 _HCOMM_INFO = None
-
-
-class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
-    """Linear method without quantization."""
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
-        if torch.version.cann.startswith("8.3"):
-            layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-            layer.weight.data = torch_npu.npu_format_cast(
-                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
-
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if torch.version.cann.startswith("8.3"):
-            if bias is None:
-                return torch.matmul(x, layer.weight)
-            else:
-                return torch.matmul(x, layer.weight) + bias
-        else:
-            return torch.nn.functional.linear(x, layer.weight, bias)
 
 
 class AscendColumnParallelLinear(ColumnParallelLinear):
@@ -642,7 +618,7 @@ class AscendLinearBase(LinearBase):
         self.prefix = prefix
         if quant_config is None:
             self.quant_method: Optional[
-                QuantizeMethodBase] = AscendUnquantizedLinearMethod()
+                QuantizeMethodBase] = UnquantizedLinearMethod()
         else:
             self.quant_method = quant_config.get_quant_method(self,
                                                               prefix=prefix)
