@@ -12,7 +12,7 @@ from vllm.config import KVTransferConfig, VllmConfig
 from vllm.utils import get_dtype_size, logger, make_zmq_socket
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.worker.cpu_kv_cache_manager import CPUKVCacheManager
+from vllm_ascend.distributed.cpu_offload_manager.cpu_kv_cache_manager import CPUKVCacheManager
 
 
 @dataclass
