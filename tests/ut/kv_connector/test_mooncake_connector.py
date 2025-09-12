@@ -979,8 +979,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                             "dp_size": 1
                         },
                         "use_ascend_direct": use_ascend_direct,
-                    }.get(k, d)
-                )
+                    }.get(k, d))
 
                 config.parallel_config = MagicMock()
                 config.parallel_config.tensor_parallel_size = 2
@@ -989,10 +988,17 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 config.kv_transfer_config.kv_port = 8000
                 config.kv_transfer_config.kv_role = 'worker'
 
-                with patch("vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank", return_value=0):
-                    with patch("vllm_ascend.distributed.mooncake_connector.get_tp_group", return_value=None):
-                        with patch("vllm_ascend.distributed.mooncake_connector.get_ip", return_value="127..0.1"):
-                            worker = MooncakeConnectorWorker(config, self.engine_id)
+                with patch(
+                        "vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank",
+                        return_value=0):
+                    with patch(
+                            "vllm_ascend.distributed.mooncake_connector.get_tp_group",
+                            return_value=None):
+                        with patch(
+                                "vllm_ascend.distributed.mooncake_connector.get_ip",
+                                return_value="127.0.0.1"):
+                            worker = MooncakeConnectorWorker(
+                                config, self.engine_id)
                             self.assertIsNotNone(worker)
 
     def test_register_kv_caches_producer(self):
