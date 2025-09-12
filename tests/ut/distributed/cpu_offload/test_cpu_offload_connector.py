@@ -699,9 +699,9 @@ class TestCPUOffloadingConnectorWorker(unittest.TestCase):
     def test_start_load_kv(self):
         self.worker.load_kv_layer = MagicMock()
         self.worker.gpu_kv_caches = {"layer1": "data1", "layer2": "data2"}
-        
+
         self.worker.start_load_kv()
-        
+
         self.assertEqual(self.worker.current_layer, 0)
         self.assertTrue(hasattr(self.worker, 'gpu_kv_caches_load_iter'))
         self.worker.load_kv_layer.assert_called_once_with(0)
