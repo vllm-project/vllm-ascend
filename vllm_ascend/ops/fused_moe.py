@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from torch import nn
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -115,9 +115,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
         get_ascend_config()
-        self.use_aclgraph = (vllm_config.compilation_config.level
-                             == CompilationLevel.PIECEWISE
-                             and not vllm_config.model_config.enforce_eager)
+
         try:
             device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
