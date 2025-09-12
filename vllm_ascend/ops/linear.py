@@ -34,7 +34,6 @@ from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.utils import (dense_optim_enable, matmul_allreduce_enable,

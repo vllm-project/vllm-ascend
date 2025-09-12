@@ -164,11 +164,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # are not freed within this timeout, they will be forcibly released.
     "VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT":
     lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
-    # NZ format is not compatible with MLA, so we have to disable it by default.
-    # If you are not using MLA, you can enable it to get better performance.
-    # FIXME(anon189Ty): Remove this once MLA supports NZ format
-    "VLLM_ASCEND_ENABLE_LINEAR_NZ_FORMAT":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_LINEAR_NZ_FORMAT", "0"))),
 }
 
 # end-env-vars-definition
