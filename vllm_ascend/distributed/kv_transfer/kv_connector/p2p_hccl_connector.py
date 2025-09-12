@@ -41,7 +41,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
             if role == KVConnectorRole.WORKER else 0
         self._local_rank = self.config.kv_rank + (get_world_group().local_rank \
             if role == KVConnectorRole.WORKER else 0)
-        
+
         self.p2p_hccl_engine = P2pHcclEngine(
             local_rank=self._local_rank,
             config=self.config,
@@ -109,8 +109,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
                 if len(slot_mapping) == num_token:
                     dst_kv_cache_layer[block_ids, ...] = src_kv_cache
                 else:
-                    dst_kv_cache_layer[block_ids,
-                                       ...] = src_kv_cache
+                    dst_kv_cache_layer[block_ids, ...] = src_kv_cache
                     logger.warning(
                         "🚧src_kv_cache does not match, num_slot:%d, "
                         "num_token:%d, request_id:%s", len(slot_mapping),
@@ -157,7 +156,8 @@ class P2pHcclConnector(KVConnectorBase_V1):
                     continue
 
                 for i in range(len(kv_cache)):
-                    inject_kv_into_layer(kv_cache_layer[i], kv_cache[i], request.block_ids,
+                    inject_kv_into_layer(kv_cache_layer[i], kv_cache[i],
+                                         request.block_ids,
                                          request.slot_mapping,
                                          request.request_id)
 
@@ -185,11 +185,9 @@ class P2pHcclConnector(KVConnectorBase_V1):
             **kwargs: additional arguments for the save operation.
         """
 
-        def extract_kv_from_layer(
-            layer: torch.Tensor,
-            block_ids: torch.Tensor
-        ) -> torch.Tensor:
-            return (layer[0][block_ids, ...], layer[1][block_ids, ...])        
+        def extract_kv_from_layer(layer: torch.Tensor,
+                                  block_ids: torch.Tensor) -> torch.Tensor:
+            return (layer[0][block_ids, ...], layer[1][block_ids, ...])
 
         # Only producer/prefill saves KV Cache
         if not self.is_producer:

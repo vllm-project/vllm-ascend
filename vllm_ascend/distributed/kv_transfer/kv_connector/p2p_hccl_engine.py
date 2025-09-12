@@ -474,7 +474,8 @@ class P2pHcclEngine:
         for request_id in finished_req_ids:
             for layer_name in no_compile_layers:
                 for idx in range(0, 2):
-                    tensor_id = request_id + "#" + layer_name + "_idx_" + str(idx)
+                    tensor_id = request_id + "#" + layer_name + "_idx_" + str(
+                        idx)
                     if tensor_id in self.recv_store:
                         with self.recv_store_cv:
                             tensor = self.recv_store.pop(tensor_id, None)
