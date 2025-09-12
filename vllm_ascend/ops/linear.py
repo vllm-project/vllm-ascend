@@ -25,9 +25,8 @@ from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
 from vllm.distributed import divide, split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.lora.utils import LinearBase
 from vllm.model_executor.layers.linear import (  # noqa
-    WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear,
+    WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear, LinearBase,
     MergedColumnParallelLinear, QKVParallelLinear, QuantizeMethodBase,
     RowParallelLinear, UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import \
@@ -40,6 +39,380 @@ from vllm_ascend.utils import (dense_optim_enable, matmul_allreduce_enable,
                                mlp_tp_enable, oproj_tp_enable)
 
 _HCOMM_INFO = None
+
+
+class CustomTensorParallelBase:
+
+    def __init__(self, layer):
+        self.layer = layer
+        self.bias = None
+        self.skip_bias_add = None
+        self.return_bias = None
+        self.quant_method = None
+
+    @property
+    def comm_group(self):
+        return get_tp_group()
+
+    @property
+    def tp_rank(self):
+        return self.comm_group.rank_in_group
+
+    @property
+    def tp_size(self):
+        return self.comm_group.world_size
+
+    def after_create_weights_hook(self):
+        if hasattr(self.layer, "bias"):
+            self.bias = self.layer.bias
+        self.skip_bias_add = self.layer.skip_bias_add
+        self.return_bias = self.layer.return_bias
+        self.quant_method = self.layer.quant_method
+
+
+class CustomColumnParallel(CustomTensorParallelBase):
+
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.gather_output = None
+
+    def after_create_weights_hook(self):
+        super().after_create_weights_hook()
+        self.gather_output = self.layer.gather_output
+
+
+class CustomRowParallel(CustomTensorParallelBase):
+
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.reduce_results = None
+        self.input_is_parallel = None
+        self.input_size_per_partition = None
+
+    def after_create_weights_hook(self):
+        super().after_create_weights_hook()
+        self.input_is_parallel = self.layer.input_is_parallel
+        self.reduce_results = self.layer.reduce_results
+        self.input_size_per_partition = self.layer.input_size_per_partition
+
+
+class MLPCustomColumnParallel(CustomColumnParallel):
+
+    def __init__(self, layer):
+        super().__init__(layer)
+
+    @property
+    def comm_group(self):
+        return get_mlp_tp_group()
+
+    def apply(
+        self,
+        input_: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        bias = self.bias if not self.skip_bias_add else None
+        # Matrix multiply.
+        assert self.quant_method is not None
+        input_parallel = self.comm_group.all_gather(input_, 0)
+        output = self.quant_method.apply(self.layer, input_parallel, bias)
+
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+
+class DenseOptimColumnParallel(CustomColumnParallel):
+
+    def __init__(self, layer):
+        super().__init__(layer)
+
+    def apply(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        """Linear layer with column parallelism.
+
+        Implemented multiple optimization projects for dense models, such as FlashComm and
+        communication-computation fusion.
+        """
+
+        bias = self.bias if not self.skip_bias_add else None
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+
+        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = self.comm_group.all_gather(output_parallel)
+        else:
+            output = output_parallel
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+
+def get_custom_tp_group_column(disable_tp, prefix, layer):
+    if disable_tp:
+        return None, 0, 1
+
+    if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
+        custom_tp_group = MLPCustomColumnParallel(layer)
+    elif dense_optim_enable():
+        custom_tp_group = DenseOptimColumnParallel(layer)
+    else:
+        custom_tp_group = None
+
+    if custom_tp_group is not None:
+        return custom_tp_group, custom_tp_group.tp_rank, custom_tp_group.tp_size
+
+    return None, get_tp_group().rank_in_group, get_tp_group().world_size
+
+
+class MLPCustomRowParallel(CustomRowParallel):
+
+    def __init__(self, layer):
+        super().__init__(layer)
+
+    @property
+    def comm_group(self):
+        return get_mlp_tp_group()
+
+    def apply(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        assert self.quant_method is not None
+        bias_ = None if (self.tp_rank > 0
+                         or self.skip_bias_add) else self.layer.bias
+        output_parallel = self.quant_method.apply(self.layer,
+                                                  input_parallel,
+                                                  bias=bias_)
+        output = self.comm_group.reduce_scatter(output_parallel, 0)
+
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+
+class OProjCustomRowParallel(CustomRowParallel):
+
+    def __init__(self, layer):
+        super().__init__(layer)
+
+    @property
+    def comm_group(self):
+        return get_otp_group()
+
+    def apply(
+        self,
+        input_: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        # Prepare tensors for all-to-all communication
+        local_batch_size = input_parallel.size(0)
+        chunk_size = self.input_size_per_partition
+        total_batch_size = local_batch_size * self.tp_size
+
+        # Reshape tensor for efficient cross-device transfer:
+        # [batch, dim] -> [tp_size, batch, chunk] -> flattened
+        send_buf = (input_parallel.reshape(-1,
+                                           self.tp_size, chunk_size).transpose(
+                                               0, 1).contiguous().view(-1))
+
+        # Create receive buffer
+        recv_buf = torch.empty(total_batch_size * chunk_size,
+                               dtype=input_parallel.dtype,
+                               device=input_parallel.device)
+
+        # Perform all-to-all communication
+        dist.all_to_all_single(recv_buf,
+                               send_buf,
+                               group=self.comm_group.device_group)
+        input_parallel = recv_buf.view(total_batch_size, chunk_size)
+
+        # Only fuse bias add for rank 0 to avoid duplicate bias addition in TP>1
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self.layer,
+                                                  input_parallel,
+                                                  bias=bias_)
+
+        # otp-specific: Combine partial results across devices
+        output = self.comm_group.reduce_scatter(output_parallel, dim=0)
+
+        # Handle bias return based on configuration
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+    def after_create_weights_hook(self):
+        super().after_create_weights_hook()
+        self.input_is_parallel = self.layer.input_is_parallel
+        self.input_size_per_partition = self.layer.input_is_parallel
+
+
+class MatmulAllreduceCustomRowParallel(CustomTensorParallelBase):
+
+    def __init__(self, layer):
+        super().__init__(layer)
+        self.hcomm_info = self.get_hcomm_info(self.comm_group.device_group)
+
+    def apply(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+        """Calculate the output tensor of forward by considering
+        fusing communication and computation."""
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        if self.reduce_results and self.tp_size > 1:
+            output = torch_npu.npu_mm_all_reduce_base(input_parallel,
+                                                      self.weight_t,
+                                                      self.hcomm_info,
+                                                      bias=bias_)
+        else:
+            output = self.quant_method.apply(self.layer,
+                                             input_parallel,
+                                             bias=bias_)
+
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+    @staticmethod
+    def get_hcomm_info(group: ProcessGroup) -> str:
+        """Get the HCCL communication information for the given group."""
+        global _HCOMM_INFO
+        if _HCOMM_INFO is not None:
+            return _HCOMM_INFO
+
+        rank = torch.distributed.get_rank(group)
+        if torch.__version__ > "2.0":
+            global_rank = torch.distributed.get_global_rank(group, rank)
+            _HCOMM_INFO = group._get_backend(
+                torch.device("npu")).get_hccl_comm_name(global_rank)
+        else:
+            _HCOMM_INFO = group.get_hccl_comm_name(rank)
+        return _HCOMM_INFO
+
+    def after_create_weights_hook(self):
+        super().after_create_weights_hook()
+        self.input_is_parallel = self.layer.input_is_parallel
+        self.reduce_results = self.layer.reduce_results
+        self.weight_t = self.layer.weight.t()
+
+
+class DenseOptimCustomRowParallel(CustomRowParallel):
+
+    def __init__(self, layer, prefix):
+        super().__init__(layer)
+        self.prefix = prefix
+
+    def apply(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        """Linear layer with column parallelism.
+
+        Implemented multiple optimization projects for dense models, such as FlashComm and
+        communication-computation fusion.
+        """
+
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        assert self.quant_method is not None
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+
+        if self.tp_size == 1 or not self.reduce_results:
+            output = self.quant_method.apply(self, input_parallel, bias=bias_)
+        else:
+            output_parallel = self.quant_method.apply(self.layer,
+                                                      input_parallel,
+                                                      bias=bias_)
+            output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+            torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
+
+        output_bias = self.bias if self.skip_bias_add else None
+
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+    def after_create_weights_hook(self):
+        super().after_create_weights_hook()
+        self.input_is_parallel = self.layer.input_is_parallel
+        self.reduce_results = self.layer.reduce_results
+
+
+def get_custom_tp_group_row(disable_tp, prefix, layer):
+    if disable_tp:
+        return None, 0, 1
+
+    if prefix.find("down_proj") != -1 and mlp_tp_enable():
+        custom_tp_group = MLPCustomRowParallel(layer)
+    elif prefix.find("o_proj") != -1 and oproj_tp_enable():
+        custom_tp_group = OProjCustomRowParallel(layer)
+    elif matmul_allreduce_enable():
+        custom_tp_group = MatmulAllreduceCustomRowParallel(layer)
+    elif dense_optim_enable():
+        custom_tp_group = DenseOptimCustomRowParallel(layer, prefix)
+    else:
+        custom_tp_group = None
+
+    if custom_tp_group is not None:
+        return custom_tp_group, custom_tp_group.tp_rank, custom_tp_group.tp_size
+
+    return None, get_tp_group().tp_rank, get_tp_group().tp_size
+
+
+class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+    """Linear method without quantization."""
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        if torch.version.cann.startswith("8.3"):
+            layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
+
+    def apply(self,
+              layer: torch.nn.Module,
+              x: torch.Tensor,
+              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if torch.version.cann.startswith("8.3"):
+            if bias is None:
+                return torch.matmul(x, layer.weight)
+            else:
+                return torch.matmul(x, layer.weight) + bias
+        else:
+            return torch.nn.functional.linear(x, layer.weight, bias)
 
 
 class AscendColumnParallelLinear(ColumnParallelLinear):
@@ -64,14 +437,8 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.comm_group = None
-        if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
-            self.comm_group = get_mlp_tp_group()
-        else:
-            self.comm_group = get_tp_group()
-
-        self.tp_size = self.comm_group.world_size
-        self.tp_rank = self.comm_group.rank_in_group
+        self.custom_group, self.tp_rank, self.tp_size = get_custom_tp_group_column(
+            disable_tp, prefix, self)
 
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
@@ -119,6 +486,18 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         else:
             self.register_parameter("bias", None)
 
+        if self.custom_group is not None:
+            self.custom_group.after_create_weights_hook()
+
+    def forward(
+        self,
+        input_,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        if self.custom_group is not None:
+            return self.custom_group.apply(input_)
+
+        return super().forward(input_)
+
 
 class AscendRowParallelLinear(RowParallelLinear):
     """Linear layer with row parallelism.
@@ -141,27 +520,8 @@ class AscendRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        if prefix.find("down_proj") != -1 and mlp_tp_enable():
-            comm_group = get_mlp_tp_group()
-            self.forward_type = "mlp_tp"
-        elif prefix.find("o_proj") != -1 and oproj_tp_enable():
-            comm_group = get_otp_group()
-            self.forward_type = "oproj_tp"
-        elif matmul_allreduce_enable():
-            comm_group = get_tp_group()
-            self.forward_type = "matmul_allreduce"
-            self.hcomm_info = self.get_hcomm_info(comm_group.device_group)
-        elif dense_optim_enable():
-            comm_group = get_tp_group()
-            self.forward_type = "dense_optim"
-        else:
-            comm_group = get_tp_group()
-            self.forward_type = "normal"
-        self.comm_group = comm_group
-
-        # TODO: check for disable_tp
-        self.tp_size = self.comm_group.world_size
-        self.tp_rank = self.comm_group.rank_in_group
+        self.custom_group, self.tp_rank, self.tp_size = get_custom_tp_group_row(
+            disable_tp, prefix, self)
 
         # Divide the weight matrix along the first dimension.
         self.input_size_per_partition = divide(input_size, self.tp_size)
@@ -206,173 +566,18 @@ class AscendRowParallelLinear(RowParallelLinear):
         else:
             self.register_parameter("bias", None)
 
-        if matmul_allreduce_enable():
-            self.weight_t = self.weight.t()
-
-    @staticmethod
-    def get_hcomm_info(group: ProcessGroup) -> str:
-        """Get the HCCL communication information for the given group."""
-        global _HCOMM_INFO
-        if _HCOMM_INFO is not None:
-            return _HCOMM_INFO
-
-        rank = torch.distributed.get_rank(group)
-        if torch.__version__ > "2.0":
-            global_rank = torch.distributed.get_global_rank(group, rank)
-            _HCOMM_INFO = group._get_backend(
-                torch.device("npu")).get_hccl_comm_name(global_rank)
-        else:
-            _HCOMM_INFO = group.get_hccl_comm_name(rank)
-        return _HCOMM_INFO
+        if self.custom_group is not None:
+            self.custom_group.after_create_weights_hook()
 
     def forward(
         self,
         input_,
         is_prefill: bool = True,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        # Choose different forward function according to the type of TP group
-        if self.forward_type == "oproj_tp":
-            return self._forward_oproj_tp(input_)
-        elif self.forward_type == "mlp_tp":
-            return self._forward_mlp_tp(input_)
-        elif self.forward_type == "matmul_allreduce":
-            return self._forward_matmul_allreduce(input_)
-        elif self.forward_type == "dense_optim":
-            return self._forward_dense_optim(input_)
-        else:
-            return super().forward(input_)
+        if self.custom_group is not None:
+            return self.custom_group.apply(input_)
 
-    # enable custom MLP tensor parallel
-    def _forward_mlp_tp(self, input_: torch.Tensor) -> torch.Tensor:
-
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
-
-        assert self.quant_method is not None
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self,
-                                                  input_parallel,
-                                                  bias=bias_)
-        output = self.comm_group.reduce_scatter(output_parallel, 0)
-
-        output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
-        return output, output_bias
-
-    # enable custom Oproj tensor parallel
-    def _forward_oproj_tp(
-        self,
-        input_: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
-
-        # Prepare tensors for all-to-all communication
-        local_batch_size = input_parallel.size(0)
-        chunk_size = self.input_size_per_partition
-        total_batch_size = local_batch_size * self.tp_size
-
-        # Reshape tensor for efficient cross-device transfer:
-        # [batch, dim] -> [tp_size, batch, chunk] -> flattened
-        send_buf = (input_parallel.reshape(-1,
-                                           self.tp_size, chunk_size).transpose(
-                                               0, 1).contiguous().view(-1))
-
-        # Create receive buffer
-        recv_buf = torch.empty(total_batch_size * chunk_size,
-                               dtype=input_parallel.dtype,
-                               device=input_parallel.device)
-
-        # Perform all-to-all communication
-        dist.all_to_all_single(recv_buf,
-                               send_buf,
-                               group=self.comm_group.device_group)
-        input_parallel = recv_buf.view(total_batch_size, chunk_size)
-
-        # Only fuse bias add for rank 0 to avoid duplicate bias addition in TP>1
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self,
-                                                  input_parallel,
-                                                  bias=bias_)
-
-        # otp-specific: Combine partial results across devices
-        output = self.comm_group.reduce_scatter(output_parallel, dim=0)
-
-        # Handle bias return based on configuration
-        output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
-        return output, output_bias
-
-    def _forward_matmul_allreduce(
-        self, input_: torch.Tensor
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
-        """Calculate the output tensor of forward by considering
-        fusing communication and computation."""
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        if self.reduce_results and self.tp_size > 1:
-            output = torch_npu.npu_mm_all_reduce_base(input_parallel,
-                                                      self.weight_t,
-                                                      self.hcomm_info,
-                                                      bias=bias_)
-        else:
-            output = self.quant_method.apply(self, input_parallel, bias=bias_)
-
-        output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
-        return output, output_bias
-
-    def _forward_dense_optim(
-        self, input_: torch.Tensor
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        """Linear layer with column parallelism.
-
-        Implemented multiple optimization projects for dense models, such as FlashComm and
-        communication-computation fusion.
-        """
-
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[self.tp_rank].contiguous()
-
-        assert self.quant_method is not None
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-
-        if self.tp_size == 1 or not self.reduce_results:
-            output = self.quant_method.apply(self, input_parallel, bias=bias_)
-        else:
-            output_parallel = self.quant_method.apply(self,
-                                                      input_parallel,
-                                                      bias=bias_)
-            output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
-            torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
-
-        output_bias = self.bias if self.skip_bias_add else None
-
-        if not self.return_bias:
-            return output
-        return output, output_bias
+        return super().forward(input_)
 
 
 class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -400,19 +605,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
-            comm_group = get_mlp_tp_group()
-            self.forward_type = "mlp_tp"
-        elif dense_optim_enable():
-            comm_group = get_tp_group()
-            self.forward_type = "dense_optim"
-        else:
-            comm_group = get_tp_group()
-            self.forward_type = "normal_tp"
-        self.comm_group = comm_group
-        # TODO: check for disable_tp
-        self.tp_rank = comm_group.rank_in_group
-        self.tp_size = comm_group.world_size
+        self.custom_group, self.tp_rank, self.tp_size = get_custom_tp_group_column(
+            disable_tp, prefix, self)
 
         self.output_sizes = output_sizes
         assert all(output_size % self.tp_size == 0
@@ -433,54 +627,10 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         self,
         input_,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        if self.forward_type == "mlp_tp":
-            return self._forward_mlp_tp(input_)
-        elif self.forward_type == "dense_optim":
-            return self._forward_dense_optim(input_)
-        else:
-            return super().forward(input_)
+        if self.custom_group is not None:
+            return self.custom_group.apply(input_)
 
-    def _forward_mlp_tp(
-        self,
-        input_: torch.Tensor,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        bias = self.bias if not self.skip_bias_add else None
-        # Matrix multiply.
-        assert self.quant_method is not None
-        input_parallel = get_mlp_tp_group().all_gather(input_, 0)
-        output = self.quant_method.apply(self, input_parallel, bias)
-
-        output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
-        return output, output_bias
-
-    def _forward_dense_optim(
-        self, input_: torch.Tensor
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        """Linear layer with column parallelism.
-
-        Implemented multiple optimization projects for dense models, such as FlashComm and
-        communication-computation fusion.
-        """
-
-        bias = self.bias if not self.skip_bias_add else None
-
-        # Matrix multiply.
-        assert self.quant_method is not None
-
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
-        output_parallel = self.quant_method.apply(self, input_, bias)
-
-        if self.gather_output:
-            # All-gather across the partitions.
-            output = self.comm_group.all_gather(output_parallel)
-        else:
-            output = output_parallel
-        output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
-        return output, output_bias
+        return super().forward(input_)
 
 
 class AscendQKVParallelLinear(QKVParallelLinear):
