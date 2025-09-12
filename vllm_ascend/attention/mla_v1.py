@@ -1056,5 +1056,5 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         has_prefill = attn_metadata.num_prefills > 0
         if has_prefill:
-            maybe_save_kv_layer_to_connector(layer_name, List(kv_cache))
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
         return output_padded

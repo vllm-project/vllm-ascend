@@ -109,6 +109,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is None:
         return
+    # TODO: assert ascendMetadata
     connector.wait_for_layer_load(layer_name)
 
 
@@ -125,5 +126,5 @@ def maybe_save_kv_layer_to_connector(
     attn_metadata = forward_context.attn_metadata
     if attn_metadata is None:
         return
-    connector.save_kv_layer(layer_name, kv_cache_layer,
-                            attn_metadata[layer_name])
+    # TODO: assert ascendMetadata
+    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
