@@ -309,7 +309,8 @@ class CPUOffloadingConnectorWorker:
                 self.load_block_mapping.append(
                     (req.cpu_block_ids[i], req.gpu_block_ids[i]))
         for req_id in connector_metadata.finished_req_ids:
-            self.save_input_queue.put((req_id, self.requests[req_id]))
+            if req_id in self.requests:
+                self.save_input_queue.put((req_id, self.requests[req_id]))
 
     def clear_connector_metadata(self) -> None:
         self.load_block_mapping.clear()
