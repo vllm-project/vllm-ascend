@@ -51,9 +51,6 @@ def test_multimodal_vl(prompt_template):
                         "fps": 1,
                     },
                     enforce_eager=True) as vllm_model:
-        vllm_model.generate_greedy(prompts=prompts,
-                                   images=images,
-                                   max_tokens=64)
         outputs = vllm_model.generate_greedy(prompts=prompts,
                                              images=images,
                                              max_tokens=64)
