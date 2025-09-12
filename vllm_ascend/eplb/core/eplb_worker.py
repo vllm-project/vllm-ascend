@@ -237,7 +237,6 @@ class EplbWorker:
     def compose_expert_update_info_greedy(self, updated_expert_maps,
                                           current_expert_maps):
         num_layers = current_expert_maps.shape[0]
-
         for layer_id in range(num_layers):
             updated_expert_maps_this_layer = updated_expert_maps[layer_id]
             current_expert_maps_this_layer = current_expert_maps[layer_id]

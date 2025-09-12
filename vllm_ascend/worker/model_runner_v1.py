@@ -1820,7 +1820,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         " ".join(dr_str))
         if self.dynamic_eplb:
             self.eplb_updator.forward_end()
-        logger.info("++++++++++++++++++++++++++return model_runner_output++++++++++++++++++++++++++")
         return model_runner_output
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:

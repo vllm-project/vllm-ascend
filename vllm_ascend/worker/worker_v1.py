@@ -204,11 +204,9 @@ class NPUWorker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-        logger.info("++++++++++++++++output+++++++++++++++++++")
         parallel_config = self.vllm_config.parallel_config
         if parallel_config.distributed_executor_backend != "external_launcher" \
             and not get_pp_group().is_last_rank:
-            logger.info("++++++++++++++++send_tensor_dict+++++++++++++++++++")
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
@@ -224,11 +222,9 @@ class NPUWorker(WorkerBase):
 
             new_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
             new_output.kv_connector_output = kv_connector_output
-            logger.info("++++++++++++++++new_output+++++++++++++++++++")
             return new_output
 
         assert isinstance(output, ModelRunnerOutput)
-        logger.info("++++++++++++++++final output+++++++++++++++++++")
         return output
 
     def load_model(self) -> None:
