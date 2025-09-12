@@ -428,29 +428,6 @@ def get_custom_tp_group_row(disable_tp, prefix, layer):
     return None, get_tp_group().tp_rank, get_tp_group().tp_size
 
 
-class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
-    """Linear method without quantization."""
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
-        if torch.version.cann.startswith("8.3"):
-            layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-            layer.weight.data = torch_npu.npu_format_cast(
-                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
-
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if torch.version.cann.startswith("8.3"):
-            if bias is None:
-                return torch.matmul(x, layer.weight)
-            else:
-                return torch.matmul(x, layer.weight) + bias
-        else:
-            return torch.nn.functional.linear(x, layer.weight, bias)
-
-
 class AscendColumnParallelLinear(ColumnParallelLinear):
     """Linear layer with column parallelism.
 
