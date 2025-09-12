@@ -18,7 +18,7 @@ jobs:
         pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
         pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
         apt-get update -y
-        apt install git -y
+        apt install git wget -y
     - name: Checkout vllm-project/vllm-ascend repo
       uses: actions/checkout@v4
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
@@ -41,4 +41,5 @@ jobs:
       env:
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086"
         GOPROXY: "https://goproxy.cn,direct"
+        SHELLCHECK_PATH: "/root/.cache/tools/shellcheck-stable"
       run: pre-commit run --all-files --hook-stage manual

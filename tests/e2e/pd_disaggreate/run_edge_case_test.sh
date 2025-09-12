@@ -22,9 +22,9 @@ RANKTABLE_PATH=${GIT_ROOT}/examples/disaggregate_prefill_v1/ranktable.json
 if [ -f "$RANKTABLE_PATH" ]; then
     rm "$RANKTABLE_PATH"
 fi
-cd ${GIT_ROOT}/examples/disaggregate_prefill_v1
-LOCAL_HOST=`hostname -I|awk -F " " '{print$1}'`
-bash gen_ranktable.sh --ips $LOCAL_HOST  --network-card-name enp189s0f0 --prefill-device-cnt 1 --decode-device-cnt 1
+cd "${GIT_ROOT}"/examples/disaggregate_prefill_v1
+LOCAL_HOST=$(hostname -I | awk '{print $1}')
+bash gen_ranktable.sh --ips "$LOCAL_HOST"  --network-card-name enp189s0f0 --prefill-device-cnt 1 --decode-device-cnt 1
 cd -
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH="$RANKTABLE_PATH"
 
@@ -107,9 +107,9 @@ run_tests_for_model() {
   eval "$FULL_CMD &"
 
   # Wait for all instances to start
-  echo "Waiting for prefill instance on port $PORT to start..."
+  echo "Waiting for prefill instance on port $PREFILL_PORT to start..."
   wait_for_server $PREFILL_PORT
-  echo "Waiting for decode instance on port $PORT to start..."
+  echo "Waiting for decode instance on port $DECODE_PORT to start..."
   wait_for_server $DECODE_PORT
 
   # Build the command for the proxy server with all the hosts and ports
@@ -126,7 +126,7 @@ run_tests_for_model() {
 
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  PREFILL_PORT=$PREFILL_PORT DECODE_PORT=$DECODE_PORT PROXY_PORT=$PROXY_PORT python -m pytest -s -v ${GIT_ROOT}/tests/e2e/pd_disaggreate/test_edge_cases.py
+  PREFILL_PORT=$PREFILL_PORT DECODE_PORT=$DECODE_PORT PROXY_PORT=$PROXY_PORT python -m pytest -s -v "${GIT_ROOT}"/tests/e2e/pd_disaggreate/test_edge_cases.py
 
   # Clean up before running next model
   cleanup_instances

@@ -19,7 +19,7 @@
 
 set -eo errexit
 
-. $(dirname "$0")/common.sh
+. "$(dirname "$0")"/common.sh
 
 export VLLM_USE_MODELSCOPE=true
 export VLLM_LOGGING_LEVEL=ERROR
