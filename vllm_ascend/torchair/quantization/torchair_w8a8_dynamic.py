@@ -23,7 +23,7 @@ import torch_npu
 import os
 from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
-
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -1039,5 +1039,6 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
+
 
 
