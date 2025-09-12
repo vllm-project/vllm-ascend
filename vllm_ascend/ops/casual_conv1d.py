@@ -33,8 +33,6 @@ def causal_conv1d_ref(
     seqlen = x.shape[-1]
     dim, width = weight.shape
 
-    print(f"initial_states.shape: {initial_states.shape}, x.shape: {x.shape}")
-
     if initial_states is None:
         out = F.conv1d(x,
                        weight.unsqueeze(1),

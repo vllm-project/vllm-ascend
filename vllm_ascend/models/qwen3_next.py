@@ -249,7 +249,6 @@ def torch_chunk_gated_delta_rule(
     scale = 1 / (query.shape[-1]**0.5)
     query = query * scale
 
-    print(f"value.shape: {value.shape}, key.shape: {key.shape}")
     v_beta = value * beta.unsqueeze(-1)
     k_beta = key * beta.unsqueeze(-1)
     # reshape to chunks
@@ -604,10 +603,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
-
-        print(
-            f"conv_state.shape: {conv_state.shape}, ssm_state.shape: {ssm_state.shape}, hidden_states.shape: {hidden_states.shape}"
-        )
 
         num_actual_tokens = (attn_metadata.num_prefill_tokens +
                              attn_metadata.num_decode_tokens +
