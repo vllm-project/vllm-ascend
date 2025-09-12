@@ -721,6 +721,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states = get_tp_group().all_gather(hidden_states, 0)
             residual = get_tp_group().all_gather(residual, 0)
 
+            attn_metadata = get_forward_context().attn_metadata
             if attn_metadata is not None:
                 num_tokens = attn_metadata.num_actual_tokens
             else:
