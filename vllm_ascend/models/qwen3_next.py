@@ -321,6 +321,8 @@ def torch_recurrent_gated_delta_rule(query,
                                      output_final_state,
                                      use_qk_l2norm_in_kernel=False):
     initial_dtype = query.dtype
+    query = query.repeat_interleave(2, dim=2)
+    key = key.repeat_interleave(2, dim=2)
     if use_qk_l2norm_in_kernel:
         query = F.normalize(query, p=2, dim=-1)
         key = F.normalize(key, p=2, dim=-1)
@@ -684,7 +686,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 self.activation,
                 conv_state_indices=non_spec_state_indices_tensor[:attn_metadata
                                                                  .num_decodes],
-                validate_data=True,
             )
         else:
             mixed_qkv_non_spec = None
@@ -796,16 +797,14 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
             core_attn_out_non_spec, last_recurrent_state = (
                 torch_recurrent_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
+                    query=query_non_spec,
+                    key=key_non_spec,
+                    value=value_non_spec,
                     g=g_non_spec,
                     beta=beta_non_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[:attn_metadata.
-                                                        num_decodes + 1],
-                    ssm_state_indices=non_spec_state_indices_tensor,
+                    output_final_state=False,
                     use_qk_l2norm_in_kernel=True,
                 ))
         else:
