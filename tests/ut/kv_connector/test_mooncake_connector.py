@@ -962,7 +962,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             p.stop()  # type: ignore
 
     @pytest.mark.parametrize("use_ascend_direct", [True, False])
-    def test_worker_use_ascend_direct(self):
+    def test_worker_use_ascend_direct(self, use_ascend_direct):
         config = MockVllmConfig()
         config.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: {
             "prefill": {
