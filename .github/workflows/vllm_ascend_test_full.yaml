@@ -38,10 +38,8 @@ concurrency:
 
 jobs:
   changes:
-    runs-on: linux-amd64-cpu-0
+    runs-on: ubuntu-latest
     if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}

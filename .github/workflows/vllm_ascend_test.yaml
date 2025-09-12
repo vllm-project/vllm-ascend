@@ -43,9 +43,8 @@ jobs:
     uses: ./.github/workflows/pre-commit.yml
 
   changes:
-    runs-on: linux-amd64-cpu-0
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
