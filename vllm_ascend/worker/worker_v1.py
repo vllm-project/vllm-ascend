@@ -83,6 +83,13 @@ class NPUWorker(WorkerBase):
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
 
+        if vllm_config.kv_transfer_config is not None:                                 
+            self.kv_rank = vllm_config.kv_transfer_config.kv_rank
+            self.kv_parallel_size = vllm_config.kv_transfer_config.kv_parallel_size
+        else:
+            self.kv_rank = 0
+            self.kv_parallel_size = 0
+
         # Try to import mindie_turbo to accelerate vLLM inference.
         try_register_lib(
             "mindie_turbo",
