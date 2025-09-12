@@ -20,8 +20,8 @@ from vllm.utils import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
 
-from vllm_ascend.distributed.cpu_offload_manager.metadata import (MetadataServer, MetadataServerProc,
-                                         MLAConfig)
+from vllm_ascend.distributed.cpu_offload_manager.metadata import (
+    MetadataServer, MetadataServerProc, MLAConfig)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata

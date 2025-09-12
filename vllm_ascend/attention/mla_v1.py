@@ -1,6 +1,5 @@
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, List, NamedTuple, Optional, Tuple, Type,
-                    TypeVar)
+from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Type, TypeVar
 
 import torch
 import torch_npu
