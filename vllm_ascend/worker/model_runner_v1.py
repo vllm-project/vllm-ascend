@@ -380,7 +380,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.eplb_process = EplbProcess(shared_dict=self.shared_dict, policy_type=1, enable_d2d=True)
             self.process = self.eplb_process._launch_process()
             ascend_config = get_ascend_config()
-            self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader, self.process)
+            self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader, self.eplb_process, self.process)
 
     def _use_aclgraph(self) -> bool:
         return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.level == CompilationLevel.PIECEWISE and not self.model_config.enforce_eager
@@ -1820,7 +1820,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         " ".join(dr_str))
         if self.dynamic_eplb:
             self.eplb_updator.forward_end()
-
+        logger.info("++++++++++++++++++++++++++return model_runner_output++++++++++++++++++++++++++")
         return model_runner_output
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:

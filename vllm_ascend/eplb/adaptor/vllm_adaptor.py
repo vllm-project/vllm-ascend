@@ -161,44 +161,54 @@ class VllmEplbAdaptor(EplbAdaptor):
         logger.error(f"failed to read expert_map_path: {expert_map_path}")
 
     def _export_tensor_to_file(self, expert_maps, expert_map_record_path: str):
-        num_local_experts = expert_maps.max() + 1
-        expert_maps_local = self.global2local(expert_maps, num_local_experts)
+        if self.rank_id == 0:
+            num_local_experts = expert_maps.max() + 1
+            expert_maps_local = self.global2local(expert_maps, num_local_experts)
 
-        expert_maps_list = expert_maps_local.tolist()
-        record: dict[str, Any] = {
-            "moe_layer_count": len(expert_maps_list),
-            "layer_list": []
-        }
-
-        for layer_idx, layer_data in enumerate(expert_maps_list):
-            layer_record: dict[str, Any] = {
-                "layer_id": layer_idx,
-                "device_count": len(layer_data),
-                "device_list": []
+            expert_maps_list = expert_maps_local.tolist()
+            record: dict[str, Any] = {
+                "moe_layer_count": len(expert_maps_list),
+                "layer_list": []
             }
 
-            for device_idx, experts in enumerate(layer_data):
-                device_record = {
-                    "device_id": device_idx,
-                    "device_expert": experts
+            for layer_idx, layer_data in enumerate(expert_maps_list):
+                layer_record: dict[str, Any] = {
+                    "layer_id": layer_idx,
+                    "device_count": len(layer_data),
+                    "device_list": []
                 }
-                layer_record["device_list"].append(device_record)
 
-            record["layer_list"].append(layer_record)
+                for device_idx, experts in enumerate(layer_data):
+                    device_record = {
+                        "device_id": device_idx,
+                        "device_expert": experts
+                    }
+                    layer_record["device_list"].append(device_record)
 
-        with open(expert_map_record_path, "w") as f:
-            json.dump(record, f, indent=4)
+                record["layer_list"].append(layer_record)
+
+            print("++++++++++++_export_tensor_to_file++++++++++++++")
+
+            print(record)
+
+            with open(expert_map_record_path, "w") as f:
+                json.dump(record, f, indent=4)
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
-        self.expert_map_per_layer[layer_id].copy_(updated_expert_map)
-        self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
+        # logger.info("+++++++++++++++++expert_map_per_layer[layer_id].copy_(updated_expert_map)++++++++++++++++++++++")
+        # self.expert_map_per_layer[layer_id].copy_(updated_expert_map)
+        self.expert_map_per_layer[layer_id] = updated_expert_map.clone()
+        logger.info("+++++++++++++++++expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)++++++++++++++++++++++")
+        # self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
+        self.expert_map_per_layer_cpu[layer_id]= updated_expert_map.clone()
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace,
                                 buffer_tensor_id):
         for expert_tensor, buffer_tensor in zip(
                 self.expert_param_per_layer[layer_id][local_expert_to_replace],
                 self.buffer_tensor_list[buffer_tensor_id]):
-            expert_tensor.copy_(buffer_tensor)
+            # expert_tensor.copy_(buffer_tensor)
+            expert_tensor = buffer_tensor.clone()
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
         if self.log2phy_map_per_layer[layer_id] is not None:

@@ -396,6 +396,7 @@ class EplbProcess:
             enable_d2d: Whether to enable D2D loading
         """
         self.shared_dict = shared_dict
+        print(self.shared_dict)
         self.policy_type = policy_type
         self.enable_d2d = enable_d2d
         self.planner_q = Queue()
@@ -411,7 +412,6 @@ class EplbProcess:
         """
         while True:
             try:
-
                 planner_q.get()
 
                 packed_update_info = self.worker.do_update()

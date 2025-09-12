@@ -376,16 +376,26 @@ class AscendFusedMoE(FusedMoE):
         ascend_config = get_ascend_config()
         self.dynamic_eplb = ascend_config.dynamic_eplb
         self.expert_map_path = ascend_config.expert_map_path
-        # if self.expert_map_path and os.path.exists(self.expert_map_path):
-        #     self.expert_load_balancer = ExpertLoadBalancer(self.expert_map_path, self.global_num_experts)
-        #     self.local_num_experts, self.expert_map = (self.expert_load_balancer.get_rank_placement_map(self.moe_instance_id, self.ep_rank))
-        #     self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(self.moe_instance_id, self.ep_rank).npu()
-        #     self.global_redundant_expert_num = (self.expert_load_balancer.get_global_redundant_expert_num())
-        # else:
-        #     self.local_num_experts, self.expert_map = determine_expert_map(self.ep_size, self.ep_rank, self.global_num_experts)
-        #     if self.dynamic_eplb:
-        #         from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
-        #         self.log2phy = determine_default_log2phy_map(self.global_num_experts, self.ep_size, self.ep_rank)
+        self.global_redundant_expert_num = ascend_config.init_redundancy_expert
+        self.global_num_experts = num_experts + self.global_redundant_expert_num
+        if self.expert_map_path and os.path.exists(self.expert_map_path):
+            self.expert_load_balancer = ExpertLoadBalancer(self.expert_map_path, self.global_num_experts)
+            self.local_num_experts, self.expert_map = (self.expert_load_balancer.get_rank_placement_map(self.moe_instance_id, self.ep_rank))
+            self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(self.moe_instance_id, self.ep_rank).npu()
+            self.global_redundant_expert_num = (self.expert_load_balancer.get_global_redundant_expert_num())
+        else:
+            self.local_num_experts, self.expert_map = determine_expert_map(self.ep_size, self.ep_rank, self.global_num_experts)
+            if self.dynamic_eplb:
+                self.global_redundant_expert_num = ascend_config.init_redundancy_expert
+                from vllm_ascend.eplb.core.eplb_utils import (
+                    determine_default_expert_map,
+                    determine_default_log2phy_map)
+                self.local_num_experts, self.expert_map = determine_default_expert_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank,
+                    self.global_redundant_expert_num)
+                self.log2phy = determine_default_log2phy_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank,
+                    self.global_redundant_expert_num)
 
         self.moe_load = None
         local_num_experts = (torch.sum(self.expert_map != -1) if self.expert_map is not None else num_experts)

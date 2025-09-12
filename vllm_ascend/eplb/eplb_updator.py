@@ -22,13 +22,17 @@ import torch
 import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
+from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+
 
 class EplbUpdator:
 
-    def __init__(self, ascend_config, loader, process):
+    def __init__(self, ascend_config, loader, eplb_process:EplbProcess,  process):
         self.ascend_config = ascend_config
         self.init_eplb(self.ascend_config.expert_map_path, process)
         self.eplb_loader = loader
+        self.eplb_process = eplb_process
+        self.shared_dict = self.eplb_process.shared_dict
 
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
@@ -61,34 +65,23 @@ class EplbUpdator:
 
         self.num_wait_worker_iterations: torch.int64 = self.ascend_config.num_wait_worker_iterations
 
-        self.planner_block_queue: Queue = Queue()
-        self.block_update_queue: Queue = Queue(maxsize=1)
-
-        self.manager = Manager()
-        self.shared_dict = self.manager.dict({
-            # 当前rank_id的专家表[num_layers,num_experts]
-            "expert_map": None,
-            # 热度负载信息 [num_layers, world_size, num_experts]
-            "moe_load": None,
-            # 所有的专家表[num_layers, world_size, num_experts]
-            "expert_maps": None,
-        })
-
-        self.eplb_process = process
+        self.process = process
 
         logger.info(
-            f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})"
+            f"[ModelRunner] Launched EPLB process (pid={self.process.pid})"
         )
 
     def update_iteration(self):
         self.cur_iterations += 1
+        print(self.cur_iterations)
         if self.cur_iterations == (self.num_iterations_eplb_update + \
                                    self.num_wait_worker_iterations + self.num_moe_layers):
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(
                     self.shared_dict["expert_maps"],
                     self.expert_map_record_path)
-                
+
+            logger.info("++++++++++++++++clear_all_moe_loads++++++++++++++++++++")
             self.adaptor.model.clear_all_moe_loads()
             if not self.gate_eplb:
                 self.cur_iterations = 0
@@ -109,6 +102,7 @@ class EplbUpdator:
     def get_init_expert_map(self):
         try:
             if not self.expert_map_initialized:
+                logger.info("++++++++++++++++get_init_expert_map++++++++++++++++")
                 self.shared_dict[
                     "expert_maps"] = self.adaptor.get_init_expert_map_from_file(
                         self.num_moe_layers, self.expert_map_path)
@@ -118,17 +112,21 @@ class EplbUpdator:
                            exc_info=True)
 
     def wakeup_eplb_worker(self):
-        self.planner_block_queue.put(1)
+        logger.info("++++++++++++++++++planner_q.put++++++++++++++++++++++")
+        self.eplb_process.planner_q.put(1)
 
     def forward_before(self):
         if self.update_expert_weight_flag():
+            logger.info(f"+++++++++++++++++{self.cur_iterations}update_expert_weight_flag++++++++++++++++++")
             (expert_send_info, expert_recv_info, updated_expert_map,
              log2phy_map, layer_id) = self.update_info_all.pop(0)
+            logger.info(f"++++++++++++++++++{self.cur_iterations}update_info_all+++++++++++++++++++++")
             log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
             self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
             updated_expert_map_this_rank = torch.from_numpy(
                 numpy.array(updated_expert_map))
             # logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
+            logger.info(f"++++++++++++++++++{self.cur_iterations}generate_expert_d2d_transfer_task+++++++++++++++++++++")
             self.eplb_loader.generate_expert_d2d_transfer_task(
                 expert_send_info, expert_recv_info,
                 updated_expert_map_this_rank,
@@ -136,19 +134,23 @@ class EplbUpdator:
 
             # set asynchronous stream for d2d expert weight update
             self.reqs = []
+            logger.info(f"++++++++++++++++++{self.cur_iterations}asyn_expert_weight_transfer+++++++++++++++++++++")
             self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def take_update_info_from_eplb_process(self):
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.get_update_info_flag():
-            self.update_info_all = self.block_update_queue.get()
+            logger.info(f"+++++++++++++++{self.cur_iterations}take_update_info_from_eplb_processr+++++++++++++++++++")
+            self.update_info_all = self.eplb_process.block_update_q.get()
 
     def forward_end(self):
         if self.wakeup_eplb_worker_flag():
             self.compute_and_set_moe_load(is_clear=True)
+            logger.info(f"+++++++++++++++{self.cur_iterations}wakeup_eplb_worker+++++++++++++++++++")
             self.wakeup_eplb_worker()
 
         if self.update_expert_weight_flag():
+            logger.info(f"+++++++++++++++{self.cur_iterations}update_expert_map_and_weight+++++++++++++++++++")
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
         self.update_iteration()
@@ -210,7 +212,7 @@ class EplbUpdator:
         """
         Clean up the EPLB process.
         """
-        if self.eplb_process.is_alive():
-            self.eplb_process.terminate()
-            self.eplb_process.join()
+        if self.process.is_alive():
+            self.process.terminate()
+            self.process.join()
             logger.info("[ModelRunner] EPLB process terminated")
