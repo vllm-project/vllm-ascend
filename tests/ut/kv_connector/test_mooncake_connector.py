@@ -961,6 +961,25 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for p in self.patches:
             p.stop()  # type: ignore
 
+    @pytest.mark.parametrize("use_ascend_direct", [True, False])
+    def test_worker_use_ascend_direct(self):
+        config = MockVllmConfig()
+        config.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: {
+            "prefill": {
+                "tp_size": 2,
+                "dp_size": 1
+            },
+            "decode": {
+                "tp_size": 2,
+                "dp_size": 1
+            },
+            "use_ascend_direct": use_ascend_direct
+        }.get(k, d)
+        if use_ascend_direct:
+            worker = MooncakeConnectorWorker(config, self.engine_id)
+        else:
+            worker = MooncakeConnectorWorker(config, self.engine_id)
+
     def test_register_kv_caches_producer(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
         worker.register_kv_caches(self.kv_caches)
