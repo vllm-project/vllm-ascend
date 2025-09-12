@@ -20,7 +20,8 @@ from vllm_ascend.distributed.cpu_offload_connector import (
     CPUOffloadingConnector, CPUOffloadingConnectorMetadata,
     CPUOffloadingConnectorScheduler, CPUOffloadingConnectorWorker, ReqMeta,
     get_kv_cache_spec)
-from vllm_ascend.distributed.cpu_offload_manager.metadata import MetadataServerProc
+from vllm_ascend.distributed.cpu_offload_manager.metadata import \
+    MetadataServerProc
 
 
 class TestReqMeta(unittest.TestCase):
