@@ -1242,9 +1242,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self._update_graph_pad_size(with_prefill, maybe_padded_num_tokens)
         attn_metadata: dict[str, Any] = {}
 
-        use_spec_decode = len(
-            scheduler_output.scheduled_spec_decode_tokens) > 0
-
         # Prepare input_ids
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
@@ -1345,13 +1342,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
             blk_table = self.input_batch.block_table[kv_cache_group_id]
-            blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
-            slot_mapping = blk_table.slot_mapping[:
+            blk_table_tensor = blk_table.get_device_tensor()
+            slot_mapping = blk_table.slot_mapping_cpu[:
                                                     total_num_scheduled_tokens]
             self.slot_mapping_cpu[:total_num_scheduled_tokens].copy_(slot_mapping)
-            # Fill unused with -1. Needed for reshape_and_cache in full cuda
-            # graph mode.
-            blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
+            # # Fill unused with -1. Needed for reshape_and_cache in full cuda
+            # # graph mode.
+            # blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
 
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
@@ -1361,7 +1358,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
-                # TODO: change this to the right block table
+                # TODO: change this to the right block table for linear attn
                 block_table_tensor=blk_table_tensor,
                 slot_mapping_cpu=self.slot_mapping_cpu,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
@@ -1401,6 +1398,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         common_attn_metadata=common_attn_metadata,
                         model=self.model,
                         **extra_attn_metadata_args)
+
                 if self.vllm_config.model_config.use_mla:
                     attn_metadata_i.num_input_tokens = num_input_tokens
                 for layer_name in attn_group.layer_names:
@@ -2725,9 +2723,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
 
-        print(60*"=", type(kv_caches), kv_cache_spec)
-        if has_attn and has_mamba:
-            self._update_hybrid_attention_mamba_layout(kv_caches)
+        # if has_attn and has_mamba:
+        #     self._update_hybrid_attention_mamba_layout(kv_caches)
 
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
