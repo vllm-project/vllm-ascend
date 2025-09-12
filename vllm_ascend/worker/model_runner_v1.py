@@ -19,17 +19,15 @@
 
 import copy
 import gc
+import itertools
 import math
 import time
-from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast, Any
-from copy import deepcopy
-import itertools
-
 from collections import defaultdict
 from collections.abc import Iterator
-from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from contextlib import contextmanager, nullcontext
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -38,26 +36,13 @@ import torch._dynamo.cache_size
 import torch.distributed as dist
 import torch.nn as nn
 from tqdm import tqdm  # type: ignore
-from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-
 from vllm.attention import AttentionType, get_attn_backend
-from vllm.v1.worker.utils import (AttentionGroup, MultiModalBudget,
-                    add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
-                    gather_mm_placeholders, sanity_check_mm_encoder_outputs,
-                    scatter_mm_placeholders)
-from vllm.v1.attention.backends.utils import (
-    AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
-    create_fast_prefill_custom_backend,
-    reorder_batch_to_split_decodes_and_prefills)
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
-from vllm.attention.backends.abstract import AttentionBackend
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-
-from vllm.model_executor.layers.mamba.abstract import MambaBase
-
+from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config)
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -67,7 +52,8 @@ from vllm.distributed.parallel_state import (get_dp_group, get_pp_group,
                                              is_global_first_rank)
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import supports_transcription
@@ -80,19 +66,25 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LazyLoader, cdiv, is_pin_memory_available, get_dtype_size)
+                        LazyLoader, cdiv, get_dtype_size,
+                        is_pin_memory_available)
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import \
+    reorder_batch_to_split_decodes_and_prefills
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec, MambaSpec, EncoderOnlyAttentionSpec, AttentionSpec, KVCacheGroupSpec)
+from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
+                                        KVCacheConfig, KVCacheSpec, MambaSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import (bind_kv_cache, gather_mm_placeholders,
+from vllm.v1.worker.utils import (AttentionGroup, bind_kv_cache,
+                                  gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
 
@@ -463,6 +455,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                      dtype=torch.int64)
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs,
                                                   dtype=torch.int32)
+
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
                      dtype: torch.dtype,
@@ -1200,7 +1193,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
 
-
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
         self.query_start_loc[:num_reqs + 1].copy_(
@@ -1344,8 +1336,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             blk_table = self.input_batch.block_table[kv_cache_group_id]
             blk_table_tensor = blk_table.get_device_tensor()
             slot_mapping = blk_table.slot_mapping_cpu[:
-                                                    total_num_scheduled_tokens]
-            self.slot_mapping_cpu[:total_num_scheduled_tokens].copy_(slot_mapping)
+                                                      total_num_scheduled_tokens]
+            self.slot_mapping_cpu[:total_num_scheduled_tokens].copy_(
+                slot_mapping)
             # # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # # graph mode.
             # blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
@@ -1386,7 +1379,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         extra_attn_metadata_args = dict(
                             num_accepted_tokens=self.num_accepted_tokens.
                             gpu[:num_reqs],
-                            num_draft_tokens=self.num_draft_tokens.gpu[:num_reqs],
+                            num_draft_tokens=self.num_draft_tokens.
+                            gpu[:num_reqs],
                         )
                     attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
@@ -2584,7 +2578,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert layer_names == set(kv_cache_raw_tensors.keys(
         )), "Some layers are not correctly initialized"
 
-
         def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
             data_ptr = tensor.data_ptr()
             aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
@@ -2593,14 +2586,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         kv_caches: Dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
-        for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator():
+        for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
+        ):
             attn_backend = kv_cache_group.backend
             for layer_name in kv_cache_group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                num_blocks = raw_tensor.numel(
+                ) // kv_cache_spec.page_size_bytes
 
                 # `num_blocks` is the number of blocks the model runner can use.
                 # `kv_cache_config.num_blocks` is the number of blocks that
@@ -2678,7 +2673,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         # kv_cache_list = []
                         # for i in range(num_caches):
                         #     cache_shape = kv_cache_shape[1:]
-                        #     if self.vllm_config.kv_transfer_config is None:                        
+                        #     if self.vllm_config.kv_transfer_config is None:
                         #         kv_cache = raw_tensor.view(dtype).view(kv_cache_shape)
                         #         kv_cache = self._convert_torch_format(kv_cache)
                         #     else:
@@ -2745,7 +2740,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
             for layer_name in group.layer_names:
                 kv_cache = kv_caches[layer_name]
-                print(60*"*", type(kv_cache), kv_cache_spec)
+                print(60 * "*", type(kv_cache), kv_cache_spec)
                 if (isinstance(kv_cache_spec, AttentionSpec)
                         and kv_cache.shape[0] == 2):
                     assert kv_cache.shape[1] != 2, \
