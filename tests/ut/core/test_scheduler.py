@@ -268,7 +268,6 @@ class TestAscendScheduler(TestBase):
         for req_id, num_tokens in output.num_scheduled_tokens.items():
             self.assertEqual(num_tokens,
                              len(requests[int(req_id)].prompt_token_ids))
-        self.assertIsNone(output.scheduled_encoder_inputs)
         self.assertEqual(len(output.scheduled_encoder_inputs), 10)
         for req_id, encoder_input in output.scheduled_encoder_inputs.items():
             assert len(encoder_input) == 1
