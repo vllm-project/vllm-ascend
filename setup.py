@@ -393,7 +393,6 @@ setup(
         "vllm.platform_plugins": ["ascend = vllm_ascend:register"],
         "vllm.general_plugins": [
             "ascend_enhanced_model = vllm_ascend:register_model",
-            "ascend_kvconnector = vllm_ascend:register_kvconnector"
         ],
     },
 )
