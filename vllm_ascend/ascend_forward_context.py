@@ -41,16 +41,11 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
     else:
         return FusedMoEState.MC2
 
-
-def get_dispatcher_name(ep_size: int, with_prefill: bool) -> str:
-    if ep_size == 1:
-        return "TokenDispatcherWithAllGather"
-    elif envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1:
-        return "TokenDispatcherWithAllGather"
-    elif ep_size < 16 or with_prefill:
-        return "TokenDispatcherWithAll2AllV"
-    else:
-        return "TokenDispatcherWithMC2"
+_moe_method_to_dispatcher = {
+    "allgather": "TokenDispatcherWithAllGather",
+    "alltoall": "TokenDispatcherWithAll2AllV",
+    "mc2": "TokenDispatcherWithMC2",
+}
 
 
 @contextmanager
@@ -98,7 +93,7 @@ def set_ascend_forward_context(
         forward_context.in_profile_run = in_profile_run
 
         from vllm_ascend.ops.moe.token_dispatcher import get_token_dispatcher
-        dispatcher_name = get_dispatcher_name(ep_size, with_prefill)
+        dispatcher_name = _moe_method_to_dispatcher[moe_comm_method]
         dispatcher = get_token_dispatcher(dispatcher_name)
         forward_context.token_dispatcher = dispatcher
 

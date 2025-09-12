@@ -46,20 +46,9 @@ def get_token_dispatcher(name: str):
 
 
 def setup_token_dispatchers(ep_size: int, **kwargs):
-    existing_dispatchers = set(_Dispatchers.keys())
-
-    if ep_size == 1 and "TokenDispatcherWithAllGather" not in existing_dispatchers:
-        _register_token_dispatcher(TokenDispatcherWithAllGather(**kwargs))
-    elif envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1 \
-        and "TokenDispatcherWithAllGather" not in existing_dispatchers:
-        _register_token_dispatcher(TokenDispatcherWithAllGather(**kwargs))
-    elif ep_size < 16 and "TokenDispatcherWithAll2AllV" not in existing_dispatchers:
-        _register_token_dispatcher(TokenDispatcherWithAll2AllV(**kwargs))
-    elif ep_size >= 16:
-        if "TokenDispatcherWithAll2AllV" not in existing_dispatchers:
-            _register_token_dispatcher(TokenDispatcherWithAll2AllV(**kwargs))
-        if "TokenDispatcherWithMC2" not in existing_dispatchers:
-            _register_token_dispatcher(TokenDispatcherWithMC2(**kwargs))
+    _register_token_dispatcher(TokenDispatcherWithAllGather(**kwargs))
+    _register_token_dispatcher(TokenDispatcherWithAll2AllV(**kwargs))
+    _register_token_dispatcher(TokenDispatcherWithMC2(**kwargs))
 
 
 class MoETokenDispatcher(ABC):
