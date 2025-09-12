@@ -411,8 +411,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             dtype=torch.bool,
             device=self.device,
         )
-        tmp_flag = False
-        if tmp_flag:
+
+        if ascend_config.enable_shared_expert_dp:
             register_torchair_model()
             torchair_ops_patch()
             torchair_quant_method_register()

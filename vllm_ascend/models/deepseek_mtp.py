@@ -102,8 +102,6 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
 
         hidden_states, residual = self.mtp_block(positions=positions,
                                                  hidden_states=hidden_states,
-                                                 kv_cache=kv_cache,
-                                                 attn_metadata=attn_metadata,
                                                  residual=None)
         hidden_states = residual + hidden_states
         return hidden_states
