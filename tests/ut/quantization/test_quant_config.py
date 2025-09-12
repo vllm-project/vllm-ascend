@@ -4,10 +4,10 @@ import torch
 from vllm.attention.layer import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
-from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.linear import (LinearBase,
+                                               UnquantizedLinearMethod)
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.quant_config import (AscendKVCacheMethod,
                                                    AscendQuantConfig)
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
@@ -79,7 +79,7 @@ class TestAscendQuantConfig(TestBase):
                           'is_layer_skipped_ascend',
                           return_value=True):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
-            self.assertIsInstance(method, AscendUnquantizedLinearMethod)
+            self.assertIsInstance(method, UnquantizedLinearMethod)
 
         # Test quantized layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
