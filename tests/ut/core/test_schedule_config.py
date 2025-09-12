@@ -113,7 +113,7 @@ class TestAscendSchedulerConfig(TestBase):
 
     def test_valid_config_with_multimodal(self):
         config = AscendSchedulerConfig.initialize_from_config(
-                SchedulerConfig(is_multimodal_model=True), {})
+            SchedulerConfig(is_multimodal_model=True), {})
         self.assertTrue(config.is_multimodal_model)
 
     def test_valid_config_with_chunked_prefill(self):
