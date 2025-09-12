@@ -32,7 +32,6 @@ from tests.e2e.conftest import VllmRunner
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
-@pytest.mark.skip(reason="fix me")
 def test_multimodal_vl(prompt_template):
     image = ImageAsset("cherry_blossom") \
         .pil_image.convert("RGB")
