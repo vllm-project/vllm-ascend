@@ -5,13 +5,11 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                     AscendMergedColumnParallelLinear,
-                                    AscendRowParallelLinear,
-                                    AscendUnquantizedLinearMethod)
+                                    AscendRowParallelLinear)
 
 
 class BaseLinearTest(unittest.TestCase):
@@ -46,81 +44,6 @@ class BaseLinearTest(unittest.TestCase):
     def tearDown(self):
         for p in self.patches:
             p.stop()
-
-
-class TestAscendUnquantizedLinearMethod(TestBase):
-
-    def setUp(self):
-        self.method = AscendUnquantizedLinearMethod()
-
-    @mock.patch("torch_npu.npu_format_cast")
-    @mock.patch("torch.version")
-    def test_process_weights_after_loading_is_cann_8_3(self, mock_version,
-                                                       mock_format_cast):
-        layer = mock.MagicMock()
-
-        mock_version.cann = "8.3.RC1"
-        self.method.process_weights_after_loading(layer)
-        mock_format_cast.assert_called_once()
-
-    @mock.patch("torch.version")
-    def test_process_weights_after_loading_not_cann_8_3(self, mock_version):
-        layer = mock.MagicMock()
-
-        mock_version.cann = "8.2.RC1"
-        # Should not raise exception
-        self.method.process_weights_after_loading(layer)
-
-    @mock.patch("torch.matmul")
-    @mock.patch("torch.version")
-    def test_apply_with_bias_is_cann_8_3(self, mock_version, mock_npu_matmul):
-        layer = mock.MagicMock()
-        layer.weight = torch.randn(128, 256)
-
-        x = torch.randn(32, 128)
-        bias = torch.randn(256)
-
-        expected_y_output = torch.randn(32, 256)
-        mock_npu_matmul.return_value = expected_y_output
-
-        mock_version.cann = "8.3.RC1"
-        output = self.method.apply(layer, x, bias)
-
-        expected_y_output += bias
-        self.assertTrue(torch.equal(output, expected_y_output))
-
-    @mock.patch("torch.matmul")
-    @mock.patch("torch.version")
-    def test_apply_without_bias_is_cann_8_3(self, mock_version,
-                                            mock_npu_matmul):
-        layer = mock.MagicMock()
-        layer.weight = torch.randn(128, 256)
-
-        x = torch.randn(32, 128)
-
-        expected_y_output = torch.randn(32, 256)
-        mock_npu_matmul.return_value = expected_y_output
-
-        mock_version.cann = "8.3.RC1"
-        output = self.method.apply(layer, x)
-
-        self.assertTrue(torch.equal(output, expected_y_output))
-
-    @mock.patch("torch.nn.functional.linear")
-    @mock.patch("torch.version")
-    def test_apply_not_cann_8_3(self, mock_version, mock_npu_linear):
-        layer = mock.MagicMock()
-        layer.weight = torch.randn(128, 256)
-
-        x = torch.randn(32, 128)
-
-        expected_y_output = torch.randn(32, 256)
-        mock_npu_linear.return_value = expected_y_output
-
-        mock_version.cann = "8.2.RC1"
-        output = self.method.apply(layer, x)
-
-        self.assertTrue(torch.equal(output, expected_y_output))
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):
