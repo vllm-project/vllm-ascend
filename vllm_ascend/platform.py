@@ -237,7 +237,7 @@ class NPUPlatform(Platform):
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
         if parallel_config and parallel_config.worker_cls == "auto":
-            if ascend_config.torchair_graph_config.enabled:
+            if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"

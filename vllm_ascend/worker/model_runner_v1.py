@@ -93,9 +93,6 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.torchair.torchair_attention import AscendTorchairMetadata
 from vllm_ascend.torchair.torchair_mla import AscendMLATorchairMetadata
-from vllm_ascend.torchair.utils import (register_torchair_model,
-                                        torchair_ops_patch,
-                                        torchair_quant_method_register)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                get_ascend_soc_version, is_310p,
@@ -411,11 +408,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             dtype=torch.bool,
             device=self.device,
         )
-
-        if ascend_config.enable_shared_expert_dp:
-            register_torchair_model()
-            torchair_ops_patch()
-            torchair_quant_method_register()
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.async_output_copy_stream = torch.npu.Stream() if \
