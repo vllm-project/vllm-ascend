@@ -287,14 +287,13 @@ def _native_select_experts(
         # 应用 routed_scaling_factor
         if routed_scaling_factor is not None and routed_scaling_factor != 1.0:
             topk_weights *= routed_scaling_factor
-        # 没有和jsb一样
-        #topk_ids = topk_ids.to(torch.int32)
-        #topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        topk_ids = topk_ids.to(torch.int32)
+        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
-        #if global_num_experts is not None:
-        #    invalid_mask = topk_ids >= global_num_experts
-        #    topk_ids = topk_ids.masked_fill(invalid_mask, 0)
-        #    topk_weights = topk_weights.masked_fill(invalid_mask, 0)
+        if global_num_experts is not None:
+            invalid_mask = topk_ids >= global_num_experts
+            topk_ids = topk_ids.masked_fill(invalid_mask, 0)
+            topk_weights = topk_weights.masked_fill(invalid_mask, 0)
         return topk_weights, topk_ids
 
     topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
