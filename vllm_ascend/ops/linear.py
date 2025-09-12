@@ -121,10 +121,7 @@ class MLPCustomColumnParallel(CustomColumnParallel):
         return output, output_bias
 
 
-class DenseOptimColumnParallel(CustomColumnParallel):
-
-    def __init__(self, layer):
-        super().__init__(layer)
+class DenseOptimMergedColumnParallel(CustomColumnParallel):
 
     def apply(
         self, input_: torch.Tensor
@@ -154,14 +151,53 @@ class DenseOptimColumnParallel(CustomColumnParallel):
         return output, output_bias
 
 
+class DenseOptimQKVParallelLinear(CustomColumnParallel):
+
+    def __init__(self, layer, prefix):
+        super().__init__(layer)
+        self.prefix = prefix
+
+    def apply(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        """Linear layer with column parallelism.
+
+        Implemented multiple optimization projects for dense models, such as FlashComm and
+        communication-computation fusion.
+        """
+
+        bias = self.bias if not self.skip_bias_add else None
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+
+        layer_num = self.prefix.split('.')[2]
+
+        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            input_, layer_num != '0')
+        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = self.comm_group.all_gather(output_parallel)
+        else:
+            output = output_parallel
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+
+
 def get_custom_tp_group_column(disable_tp, prefix, layer):
     if disable_tp:
         return None, 0, 1
 
-    if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
+    if "gate_up_proj" in prefix and mlp_tp_enable():
         custom_tp_group = MLPCustomColumnParallel(layer)
+    elif "gate_up_proj" in prefix and dense_optim_enable():
+        custom_tp_group = DenseOptimMergedColumnParallel(layer)
     elif dense_optim_enable():
-        custom_tp_group = DenseOptimColumnParallel(layer)
+        custom_tp_group = DenseOptimQKVParallelLinear(layer, prefix)
     else:
         custom_tp_group = None
 
@@ -659,11 +695,8 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        if dense_optim_enable():
-            self.forward_type = "dense_optim"
-        else:
-            self.forward_type = "normal_tp"
-        self.comm_group = get_tp_group()
+        self.custom_group, _, tp_size = get_custom_tp_group_column(
+            disable_tp, prefix, self)
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
@@ -671,8 +704,6 @@ class AscendQKVParallelLinear(QKVParallelLinear):
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
         # Divide the weight matrix along the last dimension.
-        # TODO: check for disable_tp
-        tp_size = self.comm_group.world_size
         self.num_heads = divide(self.total_num_heads, tp_size)
         if tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
@@ -687,7 +718,7 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         self.output_sizes = [
             self.num_heads * self.head_size * tp_size,  # q_proj
             self.num_kv_heads * self.head_size * tp_size,  # k_proj
-            self.num_kv_heads * self.head_size * tp_size,  # v_proj 
+            self.num_kv_heads * self.head_size * tp_size,  # v_proj
         ]
         AscendColumnParallelLinear.__init__(self,
                                             input_size=input_size,
@@ -705,40 +736,10 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         self,
         input_,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        if self.forward_type == "dense_optim":
-            return self._forward_dense_optim(input_)
-        else:
-            return super().forward(input_)
+        if self.custom_group is not None:
+            return self.custom_group.apply(input_)
 
-    def _forward_dense_optim(
-        self, input_: torch.Tensor
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        """Linear layer with column parallelism.
-
-        Implemented multiple optimization projects for dense models, such as FlashComm and
-        communication-computation fusion.
-        """
-
-        bias = self.bias if not self.skip_bias_add else None
-
-        # Matrix multiply.
-        assert self.quant_method is not None
-
-        layer_num = self.prefix.split('.')[2]
-
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            input_, layer_num != '0')
-        output_parallel = self.quant_method.apply(self, input_, bias)
-
-        if self.gather_output:
-            # All-gather across the partitions.
-            output = self.comm_group.all_gather(output_parallel)
-        else:
-            output = output_parallel
-        output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
-        return output, output_bias
+        return super().forward(input_)
 
 
 class AscendLinearBase(LinearBase):
