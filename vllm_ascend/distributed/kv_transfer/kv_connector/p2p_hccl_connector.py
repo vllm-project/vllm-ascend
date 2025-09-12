@@ -15,7 +15,7 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
-from vllm_ascend.distributed.kv_transfer.kv_connector.v1.p2p.p2p_hccl_engine import \
+from vllm_ascend.distributed.kv_transfer.kv_connector.p2p_hccl_engine import \
     P2pHcclEngine
 
 if TYPE_CHECKING:
@@ -39,8 +39,9 @@ class P2pHcclConnector(KVConnectorBase_V1):
 
         self._rank = get_world_group().rank \
             if role == KVConnectorRole.WORKER else 0
-        self._local_rank = self.config.kv_rank
-
+        self._local_rank = self.config.kv_rank + (get_world_group().local_rank \
+            if role == KVConnectorRole.WORKER else 0)
+        
         self.p2p_hccl_engine = P2pHcclEngine(
             local_rank=self._local_rank,
             config=self.config,
@@ -79,6 +80,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
         def inject_kv_into_layer(
             dst_kv_cache_layer: torch.Tensor,
             src_kv_cache: torch.Tensor,
+            block_ids: torch.Tensor,
             slot_mapping: torch.Tensor,
             request_id: str,
         ) -> None:
@@ -105,9 +107,9 @@ class P2pHcclConnector(KVConnectorBase_V1):
                                               0)
                 num_token = src_kv_cache[0].shape[0]
                 if len(slot_mapping) == num_token:
-                    dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
+                    dst_kv_cache_layer[block_ids, ...] = src_kv_cache
                 else:
-                    dst_kv_cache_layer[slot_mapping[:num_token],
+                    dst_kv_cache_layer[block_ids,
                                        ...] = src_kv_cache
                     logger.warning(
                         "🚧src_kv_cache does not match, num_slot:%d, "
@@ -118,28 +120,13 @@ class P2pHcclConnector(KVConnectorBase_V1):
             else:
                 num_pages = dst_kv_cache_layer_shape[0]
                 page_size = dst_kv_cache_layer_shape[1]
-                # dst_kv_cache_layer = dst_kv_cache_layer.reshape(
-                # num_pages * page_size, -1)
                 self.check_tensors_except_dim(dst_kv_cache_layer, src_kv_cache,
                                               0)
                 num_token = src_kv_cache[0].shape[0]
-                logger.info("src_kv_cache.shape", src_kv_cache.shape)
                 if len(slot_mapping) == num_token:
-                    logger.info("dst_kv_cache_layer[slot_mapping, ...].shape",
-                                dst_kv_cache_layer[slot_mapping, ...].shape)
-                    dst_kv_cache_layer[...] = src_kv_cache
-                    # dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
+                    dst_kv_cache_layer[block_ids, ...] = src_kv_cache
                 else:
-                    logger.info(
-                        "dst_kv_cache_layer[slot_mapping[:num_token].shape",
-                        dst_kv_cache_layer[slot_mapping[:num_token],
-                                           ...].shape)
-                    # dst_kv_cache_layer[slot_mapping[:num_token], ...] = src_kv_cache[:len(slot_mapping),...]
-                    dst_kv_cache_layer[...] = src_kv_cache[...]
-                    logger.warning(
-                        "🚧src_kv_cache does not match, num_slot:%d, "
-                        "num_token:%d, request_id:%s", len(slot_mapping),
-                        num_token, request_id)
+                    dst_kv_cache_layer[block_ids, ...] = src_kv_cache[...]
 
                 dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
@@ -170,7 +157,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
                     continue
 
                 for i in range(len(kv_cache)):
-                    inject_kv_into_layer(kv_cache_layer[i], kv_cache[i],
+                    inject_kv_into_layer(kv_cache_layer[i], kv_cache[i], request.block_ids,
                                          request.slot_mapping,
                                          request.request_id)
 
@@ -198,22 +185,27 @@ class P2pHcclConnector(KVConnectorBase_V1):
             **kwargs: additional arguments for the save operation.
         """
 
+        def extract_kv_from_layer(
+            layer: torch.Tensor,
+            block_ids: torch.Tensor
+        ) -> torch.Tensor:
+            return (layer[0][block_ids, ...], layer[1][block_ids, ...])        
+
         # Only producer/prefill saves KV Cache
         if not self.is_producer:
-            logger.info("not self.is_producer")
             return
 
         assert self.p2p_hccl_engine is not None
 
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
-        # logger.info("connector_metadata.requests: ", connector_metadata.requests) # 好像会导致报错，先注释掉
         for request in connector_metadata.requests:
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, True)
             remote_address = ip + ":" + str(port + self._rank)
+            kv_cache = extract_kv_from_layer(kv_layer, request.block_ids)
             self.p2p_hccl_engine.send_tensor(
-                request_id + "#" + layer_name, kv_layer, remote_address,
+                request_id + "#" + layer_name, kv_cache, remote_address,
                 request.slot_mapping,
                 isinstance(attn_metadata, MLACommonMetadata))
 
