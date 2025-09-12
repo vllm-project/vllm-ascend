@@ -244,7 +244,7 @@ class TestAscendScheduler(TestBase):
         self.assertEqual(len(scheduler.running), len(requests))
         for i, request in enumerate(requests):
             self.assertEqual(scheduler.running[i], request)
- 
+
     def test_schedule_multimodal_requests(self):
         scheduler = self.create_scheduler()
         mm_positions = [[PlaceholderRange(offset=i, length=100)]
@@ -263,7 +263,7 @@ class TestAscendScheduler(TestBase):
         self.assertEqual(len(output.finished_req_ids), 0)
         for req_id, num_tokens in output.num_scheduled_tokens.items():
             assert num_tokens == len(requests[int(req_id)].prompt_token_ids)
-        
+
         # Verify all requests are scheduled.
         for req_id, num_tokens in output.num_scheduled_tokens.items():
             self.assertEqual(num_tokens,
@@ -271,7 +271,7 @@ class TestAscendScheduler(TestBase):
         self.assertEqual(len(output.scheduled_encoder_inputs), 10)
         for req_id, encoder_input in output.scheduled_encoder_inputs.items():
             assert len(encoder_input) == 1
-        
+
         # Verify requests moved from waiting to running
         self.assertEqual(len(scheduler.waiting), 0)
         self.assertEqual(len(scheduler.running), len(requests))
