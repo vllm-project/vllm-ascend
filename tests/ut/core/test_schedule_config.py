@@ -36,7 +36,6 @@ class TestAscendSchedulerConfig(TestBase):
             self.basic_scheduler_config, {})
         self.assertEqual(ascend_config.enable_chunked_prefill, False)
         self.assertEqual(ascend_config.policy, "fcfs")
-        self.assertEqual(ascend_config.num_scheduler_steps, 1)
         self.assertEqual(ascend_config.scheduler_cls,
                          "vllm_ascend.core.scheduler.AscendScheduler")
         self.assertEqual(ascend_config.max_num_encoder_input_tokens, 8192)
@@ -49,7 +48,6 @@ class TestAscendSchedulerConfig(TestBase):
             AscendSchedulerConfig(
                 enable_chunked_prefill=False,
                 policy="fcfs",
-                num_scheduler_steps=1,
                 scheduler_cls="vllm_ascend.core.scheduler.AscendScheduler",
                 max_num_batched_tokens=2048,
                 max_model_len=2048,
@@ -57,7 +55,6 @@ class TestAscendSchedulerConfig(TestBase):
         )
         self.assertEqual(ascend_config.enable_chunked_prefill, False)
         self.assertEqual(ascend_config.policy, "fcfs")
-        self.assertEqual(ascend_config.num_scheduler_steps, 1)
         self.assertEqual(ascend_config.scheduler_cls,
                          "vllm_ascend.core.scheduler.AscendScheduler")
         self.assertEqual(ascend_config.max_num_batched_tokens, 2048)
@@ -84,21 +81,6 @@ class TestAscendSchedulerConfig(TestBase):
                 SchedulerConfig(is_multimodal_model=True), {})
         self.assertIn("currently AscendScheduler only supports LLM models",
                       str(context.exception))
-
-    def test_not_implemented_multi_step(self):
-        with self.assertRaises(NotImplementedError) as context:
-            AscendSchedulerConfig.initialize_from_config(
-                self.basic_scheduler_config,
-                AscendSchedulerConfig(
-                    num_scheduler_steps=2,
-                    max_num_batched_tokens=2048,
-                    max_model_len=2048,
-                ),
-            )
-        self.assertIn(
-            "currently AscendScheduler doesn't support multi-step",
-            str(context.exception),
-        )
 
     def test_not_implemented_send_delta_data(self):
         with self.assertRaises(NotImplementedError) as context:
