@@ -240,8 +240,8 @@ def torch_chunk_gated_delta_rule(
     batch_size, sequence_length, num_heads, k_head_dim = key.shape
     v_head_dim = value.shape[-1]
     pad_size = (chunk_size - num_heads % chunk_size) % chunk_size
-    query = F.pad(query, (0, 0, 0, pad_size))
-    key = F.pad(key, (0, 0, 0, pad_size))
+    query = F.pad(query, (0, 0, 0, pad_size)).repeat_interleave(2, dim=1)
+    key = F.pad(key, (0, 0, 0, pad_size)).repeat_interleave(2, dim=1)
     value = F.pad(value, (0, 0, 0, pad_size))
     beta = F.pad(beta, (0, pad_size))
     g = F.pad(g, (0, pad_size))
