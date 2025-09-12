@@ -26,3 +26,8 @@ KVConnectorFactory.register_connector(
 KVConnectorFactory.register_connector(
     "MooncakeConnectorV1", "vllm_ascend.distributed.mooncake_connector",
     "MooncakeConnector")
+
+KVConnectorFactory.register_connector(
+    "P2pHcclConnector",
+    "vllm_ascend.distributed.kv_transfer.kv_connector.v1.p2p.p2p_hccl_connector",
+    "P2pHcclConnector")
