@@ -91,7 +91,11 @@ class KVCacheTaskTracker:
         # intentionally delayed. Each entry is a tuple of (request_id,
         # timestamp). If a request remains in this queue for too long, it will
         # be force-freed.
-        self.delayed_free_requests: deque[Tuple[str, float]] = deque()
+        # Notice: In layer-wise mode, the transfer may complete before it is
+        # added to delayed_free_requests when prefill node finishes forwarding.
+        # Therefore we need to track requests that are removed before being added.
+        self.delayed_free_requests: dict[str, float] = {}
+        self.removed_delayed_free_requests: set[str] = set()
         self.on_done = on_done
         self.on_timeout = on_timeout
 
@@ -118,9 +122,12 @@ class KVCacheTaskTracker:
         return finished_requests
 
     def add_delayed_request(self, request_id: str, delay_start_time: float):
-        """Add a delayed free request."""
+        """Add a delayed free request, where delay_start_time is monotonic increasing."""
         with self.done_task_lock:
-            self.delayed_free_requests.append((request_id, delay_start_time))
+            if request_id in self.removed_delayed_free_requests:
+                self.removed_delayed_free_requests.remove(request_id)
+            else:
+                self.delayed_free_requests[request_id] = delay_start_time
 
     def _retrieve_expired_requests(self):
         """Retrieve all expired delayed requests."""
@@ -128,10 +135,10 @@ class KVCacheTaskTracker:
         # Free delayed requests if they exceed the timeout
         current_time = time.time()
         while self.delayed_free_requests:
-            request_id, delay_start_time = self.delayed_free_requests[0]
+            request_id, delay_start_time = next(iter(self.delayed_free_requests.items()))
             if (current_time - delay_start_time
                     > envs_ascend.VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT):
-                self.delayed_free_requests.popleft()
+                self.delayed_free_requests.pop(request_id)
                 expired_requests.add(request_id)
                 logger.info("Force freed request: %s", request_id)
             else:
@@ -141,8 +148,8 @@ class KVCacheTaskTracker:
     def remove_delayed_request(self, request_id: str):
         """Remove all delayed free requests matching the given request_id."""
         with self.done_task_lock:
-            self.delayed_free_requests = deque(
-                (r, t) for r, t in self.delayed_free_requests if r != request_id)
+            if self.delayed_free_requests.pop(request_id, None) is None:
+                self.removed_delayed_free_requests.add(request_id)
 
 
 class KVCacheSendingThread(threading.Thread):
@@ -546,7 +553,6 @@ class KVCacheRecvingThread(threading.Thread):
             logger.error("Failed to transfer KV cache for request "
                          f"{request_id}: {e}")
         finally:
-            self.task_tracker.remove_delayed_request(request_id)
             self.task_tracker.update_done_task_count(request_id)
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
