@@ -381,7 +381,7 @@ async def send_request_to_service(client: httpx.AsyncClient,
             response.raise_for_status()
             if request_id in proxy_state.req_id_future:
                 result_future = proxy_state.req_id_future[request_id]
-                result_future.set_result(response.json())
+                result_future.set_result(response.json()["kv_transfer_params"])
             return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             logger.warning(
