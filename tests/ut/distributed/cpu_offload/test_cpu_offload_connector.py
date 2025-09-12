@@ -116,9 +116,12 @@ class TestCPUOffloadingConnector(unittest.TestCase):
             patch('vllm.distributed.parallel_state._PP', MagicMock()),
             patch('vllm.distributed.parallel_state._TP', MagicMock()),
             patch('torch.npu.Stream', MagicMock()),
-            patch('vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServer.ZMQRPCClient',
-                  MagicMock()),
-            patch('vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServer', MagicMock()),
+            patch(
+                'vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServer.ZMQRPCClient',
+                MagicMock()),
+            patch(
+                'vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServer',
+                MagicMock()),
             patch('vllm.utils.logger', MagicMock()),
             patch('vllm.distributed.parallel_state.get_pp_group', MagicMock()),
             patch('vllm.distributed.parallel_state.get_pp_group', MagicMock()),
@@ -400,8 +403,9 @@ class TestCPUOffloadingConnectorScheduler(unittest.TestCase):
         self.mock_vllm_config.kv_transfer_config = MagicMock()
 
         self.patches = [
-            patch('vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServer.ZMQRPCClient',
-                  MagicMock()),
+            patch(
+                'vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServer.ZMQRPCClient',
+                MagicMock()),
             patch('vllm.utils.logger', MagicMock()),
         ]
 
@@ -558,9 +562,12 @@ class TestCPUOffloadingConnectorWorker(unittest.TestCase):
             patch('vllm.distributed.parallel_state._PP', MagicMock()),
             patch('vllm.distributed.parallel_state._TP', MagicMock()),
             patch('torch.npu.Stream', MagicMock()),
-            patch('vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServer.ZMQRPCClient',
-                  MagicMock()),
-            patch('vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServer', MagicMock()),
+            patch(
+                'vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServer.ZMQRPCClient',
+                MagicMock()),
+            patch(
+                'vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServer',
+                MagicMock()),
             patch('vllm.utils.logger', MagicMock()),
             patch('vllm.distributed.parallel_state.get_pp_group', MagicMock()),
             patch('vllm.distributed.parallel_state.get_pp_group', MagicMock()),
@@ -583,7 +590,8 @@ class TestCPUOffloadingConnectorWorker(unittest.TestCase):
 
     @patch('threading.Thread')
     @patch(
-        'vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServerProc.run_metadata_server')
+        'vllm_ascend.distributed.cpu_offload_manager.metadata.MetadataServerProc.run_metadata_server'
+    )
     def test_init_metadata_server(self, mock_run_server, mock_thread_class):
         mock_thread = MagicMock()
         mock_thread_class.return_value = mock_thread
