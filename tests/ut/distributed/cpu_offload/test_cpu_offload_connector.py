@@ -696,16 +696,17 @@ class TestCPUOffloadingConnectorWorker(unittest.TestCase):
             self.assertEqual(self.worker.cpu_kv_caches,
                              list(mock_rpc_result.values()))
 
-    def test_wait_for_layer_load(self):
-        self.worker.current_layer = 3
-        self.worker.load_stream = MagicMock()
+    def test_start_load_kv(self):
         self.worker.load_kv_layer = MagicMock()
-
-        self.worker.wait_for_layer_load()
-        self.worker.load_stream.synchronize.assert_called_once()
-
-        self.assertEqual(self.worker.current_layer, 4)
-        self.worker.load_kv_layer.assert_called_once_with(4)
+        self.worker.gpu_kv_caches = {"layer1": "data1", "layer2": "data2"}
+        
+        self.worker.start_load_kv()
+        
+        self.assertEqual(self.worker.current_layer, 0)
+        self.assertTrue(hasattr(self.worker, 'gpu_kv_caches_load_iter'))
+        self.worker.load_kv_layer.assert_called_once_with(0)
+        iter_values = list(self.worker.gpu_kv_caches_load_iter)
+        self.assertEqual(iter_values, ["data1", "data2"])
 
     @patch('torch.npu.stream')
     def test_load_kv_layer(self, mock_npu_stream):
