@@ -247,6 +247,7 @@ class TestAscendScheduler(TestBase):
 
     def test_schedule_multimodal_requests(self):
         scheduler = self.create_scheduler()
+        scheduler.scheduler_config.chunked_prefill_enabled = False
         mm_positions = [[PlaceholderRange(offset=i, length=100)]
                         for i in range(10)]
         requests = create_requests(
