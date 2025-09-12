@@ -803,7 +803,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     g=g_non_spec,
                     beta=beta_non_spec,
                     initial_state=ssm_state,
-                    inplace_final_state=True,
                     output_final_state=False,
                     use_qk_l2norm_in_kernel=True,
                 ))
