@@ -38,7 +38,12 @@ def test_QuickGELU_forward(mock_gelu, dummy_tensor):
 
 @pytest.mark.parametrize("is_310p_return", [True, False])
 @patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
-def test_SiluAndMul_forward(mock_swiglu, is_310p_return, dummy_tensor):
+@patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
+@patch("torch.ops.vllm.maybe_prefetch_mlp_down_proj",
+       side_effect=lambda x: None)
+def test_SiluAndMul_forward(mock_maybe_prefetch_mlp_down_proj,
+                            mock_maybe_wait_prefetch_done, mock_swiglu,
+                            is_310p_return, dummy_tensor):
 
     with patch("vllm_ascend.utils.is_310p", return_value=is_310p_return):
         layer = SiluAndMul()
@@ -49,8 +54,14 @@ def test_SiluAndMul_forward(mock_swiglu, is_310p_return, dummy_tensor):
         else:
             expected_arg = dummy_tensor
 
+        # assert mock_maybe_prefetch_mlp_down_proj.call_count == 1
+        mock_maybe_prefetch_mlp_down_proj.assert_called_once()
+
         # assert mock_swiglu.call_count == 1
         mock_swiglu.assert_called_once()
+
+        # assert mock_maybe_wait_prefetch_done.call_count == 1
+        mock_maybe_wait_prefetch_done.assert_called_once()
 
         actual_arg = mock_swiglu.call_args[0][0]
         assert torch.allclose(

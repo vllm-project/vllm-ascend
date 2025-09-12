@@ -18,7 +18,7 @@
 #
 
 import copy
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -38,8 +38,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
+                             DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.ascend_config import init_ascend_config
@@ -50,6 +50,18 @@ from vllm_ascend.utils import (init_ascend_soc_version,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
+from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
+
+torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
+    ["torch.npu.current_stream"],
+    TorchInGraphFunctionVariable,
+)  # noqa: E402
+torch_non_c_binding_in_graph_functions_npu[
+    "torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
+torch._dynamo.trace_rules.torch_name_rule_map.append(
+    torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
 
 
 class NPUWorker(WorkerBase):
@@ -71,7 +83,7 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
         _register_atb_extensions()
-        register_ascend_customop()
+        register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         init_ascend_soc_version()
@@ -191,7 +203,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
+    ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
@@ -220,7 +232,7 @@ class NPUWorker(WorkerBase):
             new_output.kv_connector_output = kv_connector_output
             return new_output
 
-        assert isinstance(output, ModelRunnerOutput)
+        assert isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput))
         return output
 
     def load_model(self) -> None:
