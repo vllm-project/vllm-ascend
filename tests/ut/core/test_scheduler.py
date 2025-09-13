@@ -66,6 +66,7 @@ def create_requests(
                           sampling_params=sampling_params,
                           eos_token_id=EOS_TOKEN_ID,
                           pooling_params=None,
+                          mm_features=mm_features if mm_features else None,
                           block_hasher=get_request_block_hasher(
                               block_size, hash_fn))
         requests.append(request)
@@ -98,7 +99,7 @@ class TestAscendScheduler(TestBase):
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch('vllm.v1.core.sched.scheduler.compute_encoder_budget')
     def create_scheduler(self, mock_compute_encoder_budget):
-        mock_compute_encoder_budget.return_value = [10, 20]
+        mock_compute_encoder_budget.return_value = [100, 100]
         use_kv_connector = False
         block_size = 16
 
@@ -248,11 +249,10 @@ class TestAscendScheduler(TestBase):
     def test_schedule_multimodal_requests(self):
         scheduler = self.create_scheduler()
         scheduler.scheduler_config.chunked_prefill_enabled = False
-        mm_positions = [[PlaceholderRange(offset=i, length=100)]
+        mm_positions = [[PlaceholderRange(offset=i, length=10)]
                         for i in range(10)]
         requests = create_requests(
             num_requests=10,
-            num_tokens=200,
             mm_positions=mm_positions,
         )
         for request in requests:
@@ -269,7 +269,7 @@ class TestAscendScheduler(TestBase):
         for req_id, num_tokens in output.num_scheduled_tokens.items():
             self.assertEqual(num_tokens,
                              len(requests[int(req_id)].prompt_token_ids))
-        self.assertEqual(len(output.scheduled_encoder_inputs), 10)
+        self.assertEqual(len(output.scheduled_encoder_inputs), len(requests))
         for req_id, encoder_input in output.scheduled_encoder_inputs.items():
             assert len(encoder_input) == 1
 
