@@ -23,6 +23,7 @@ import math
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from multiprocessing import Manager
 from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
 
 import numpy as np
@@ -83,6 +84,11 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.eplb.utils import model_register
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.logits_processor import build_logitsprocs
@@ -408,6 +414,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             dtype=torch.bool,
             device=self.device,
         )
+        self.dynamic_eplb = ascend_config.dynamic_eplb
+        if self.dynamic_eplb:
+            self.is_eplb_warmuped = False
+            self.eplb_loader = D2DExpertWeightLoader()
+            self.manager = Manager()
+            self.shared_dict = self.manager.dict({
+                "expert_map": None,
+                "moe_load": None,
+                "expert_maps": None
+            })
+            self.eplb_process = EplbProcess(shared_dict=self.shared_dict, policy_type=1, enable_d2d=True)
+            self.process = self.eplb_process._launch_process()
+            ascend_config = get_ascend_config()
+            self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader, self.eplb_process, self.process)
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.async_output_copy_stream = torch.npu.Stream() if \
@@ -1570,11 +1590,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # Return empty ModelRunnerOuptut if there's no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output)
+
+            if self.dynamic_eplb:
+                self.eplb_updator.forward_before()
+
             (attn_metadata, positions, num_scheduled_tokens_np,
              num_input_tokens, num_tokens_across_dp, maybe_padded_num_tokens,
              logits_indices, spec_decode_metadata, input_ids, inputs_embeds,
              intermediate_tensors) = (self._prepare_inputs(
                  scheduler_output, intermediate_tensors))
+
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
+
 
         moe_comm_method = self._select_moe_comm_method(num_input_tokens)
 
@@ -1836,7 +1864,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             captured_name = "Decode" if self.attn_state == AscendAttentionState.DecodeOnly else "Prefill"
             logger.info("Profile execute duration [%s]:%s", captured_name,
                         " ".join(dr_str))
-
+        if self.dynamic_eplb:
+            self.eplb_updator.forward_end()
         if not self.use_async_scheduling:
             return model_runner_output
 
@@ -2000,6 +2029,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                        num_reqs,
                                                        skip_attn=True)
 
+        if not self.in_profile_run and self.dynamic_eplb:
+            self.eplb_updator.forward_before()
+
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             if self.is_multimodal_model:
@@ -2082,6 +2114,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens_across_dp=num_tokens_across_dp)
                 if need_dummy_logits:
                     dummy_compute_logits(hidden_states)
+            if self.in_profile_run and self.dynamic_eplb:
+                self.model.clear_all_moe_loads()
+            if not self.in_profile_run and self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
+                self.eplb_updator.forward_end()
             return hidden_states
 
     @contextmanager
@@ -2188,12 +2225,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
+    def eplb_warmup(self):
+        if self.dynamic_eplb and not self.is_eplb_warmuped:
+            self.is_eplb_warmuped = True
+            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            self.eplb_loader.set_adator(self.eplb_adaptor)
+            self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.warm_up_eplb()
+
+
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
-
+            if self.dynamic_eplb:
+                model_register(self.model, self.model_config)
             if is_310p():
                 from vllm.model_executor.layers.linear import (
                     MergedColumnParallelLinear, QKVParallelLinear,
