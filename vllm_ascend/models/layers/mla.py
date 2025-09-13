@@ -132,7 +132,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
-        output = self.mla_attn.impl.forward(hidden_states, kv_cache,
+        output = self.mla_attn.impl.forward(self.mla_attn.layer_name,
+                                            hidden_states, kv_cache,
                                             forward_context.attn_metadata,
                                             need_gather_q_kv, output)
         output = output.view(-1, output_shape[-1])
