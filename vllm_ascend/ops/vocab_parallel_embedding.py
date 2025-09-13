@@ -29,6 +29,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, UnquantizedEmbeddingMethod,
     VocabParallelEmbedding, pad_vocab_size)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.utils import lmhead_tp_enable
@@ -146,6 +147,9 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return input_, ~vocab_mask
 
     def forward(self, input_):
+        forward_context = get_forward_context()
+        self.enable_sp = forward_context.enable_sp
+
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = self._get_masked_input_and_mask(
@@ -153,7 +157,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
                 self.shard_indices.org_vocab_end_index,
                 self.shard_indices.num_org_vocab_padding,
                 self.shard_indices.added_vocab_start_index,
-                self.shard_indices.added_vocab_end_index)
+                self.shard_indices.added_vocab_end_index
+            )
         else:
             masked_input = input_
         # Get the embeddings.
@@ -163,6 +168,22 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
         # Reduce across all the model parallel GPUs.
+        from vllm.distributed import (get_tensor_model_parallel_world_size,
+                                      tensor_model_parallel_reduce_scatter)
+        is_prefill = False
+        if forward_context.attn_metadata:
+            is_prefill = forward_context.attn_metadata.num_prefills
+        if self.enable_sp and is_prefill:
+            sp_size = get_tensor_model_parallel_world_size()
+            original_len = input_.shape[0]
+
+            reminder = original_len % sp_size
+            if reminder != 0:
+                padding_len = sp_size - reminder
+                output_parallel = nn.functional.pad(output_parallel, (0, 0, 0, padding_len), mode='constant', value=0)
+
+            output = tensor_model_parallel_reduce_scatter(output_parallel.movedim(0, -1)).movedim(-1, 0)
+            return output
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
 

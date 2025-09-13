@@ -303,7 +303,7 @@ class CustomDeepseekV2MoE(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
+        prefix: str = ""
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -364,7 +364,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 reduce_results=reduce_results,
                 force_replicate=self.enable_multistream_moe
                 or enable_shared_expert_dp,
-                prefix=f"{prefix}.shared_experts",
+                prefix=f"{prefix}.shared_experts"
             )
         else:
             self.shared_experts = None  # type: ignore
@@ -499,6 +499,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
+
         if (config.n_routed_experts is not None
                 and self.debug_layer_idx >= config.first_k_dense_replace
                 and self.debug_layer_idx % config.moe_layer_freq == 0
@@ -510,7 +511,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.o_proj")
         else:
-            self.o_proj = CustomDeepseekV2RowParallelLinear(
+            self.o_proj = RowParallelLinear(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
                 bias=False,
@@ -581,7 +582,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         prefix: str,
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
@@ -634,7 +635,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
+                prefix=f"{prefix}.mlp"
             )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -766,7 +767,7 @@ class CustomDeepseekV2Model(nn.Module):
                 prefix,
                 model_config=model_config,
                 cache_config=cache_config,
-                quant_config=quant_config,
+                quant_config=quant_config
             ),
             prefix=f"{prefix}.layers")
 
@@ -809,8 +810,7 @@ class CustomDeepseekV2Model(nn.Module):
                 positions,
                 hidden_states,
                 residual,
-                kv_caches[i -
-                          self.start_layer] if kv_caches is not None else None,
+                kv_caches[i - self.start_layer] if kv_caches is not None else None,
                 attn_metadata,
                 replace_allreduce=replace_allreduce)
 

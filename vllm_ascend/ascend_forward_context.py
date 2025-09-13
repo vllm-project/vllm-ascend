@@ -145,6 +145,8 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
 
+        forward_context.enable_sp = vllm_config.parallel_config.enable_sequence_parallel
+
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
 
