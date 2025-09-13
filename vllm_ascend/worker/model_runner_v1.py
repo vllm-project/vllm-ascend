@@ -1027,18 +1027,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     ) -> list[torch.Tensor]:
 
         def _iter_mm_features(req_state: CachedRequestState):
-            if hasattr(req_state, "mm_features"):
-                for mm_feature in req_state.mm_features:
-                    pos_info = mm_feature.mm_position
-                    mm_hash = mm_feature.identifier
-                    is_embed = getattr(pos_info, "is_embed", None)
-                    yield mm_hash, pos_info, is_embed
-            else:
-                # TODO: remove this once we drop support for vLLM 0.10.2
+            if vllm_version_is("0.10.2"):
+                # legacy path (to be removed later)
+                assert req_state.mm_hashes is not None
+                assert req_state.mm_positions is not None
                 for mm_hash, pos_info in zip(req_state.mm_hashes,
                                              req_state.mm_positions):
-                    is_embed = getattr(pos_info, "is_embed", None)
-                    yield mm_hash, pos_info, is_embed
+                    yield mm_hash, pos_info, getattr(pos_info, "is_embed",
+                                                     None)
+            else:
+                assert req_state.mm_features is not None
+                for mm_feature in req_state.mm_features:
+                    pos_info = mm_feature.mm_position
+                    yield mm_feature.identifier, pos_info, getattr(
+                        pos_info, "is_embed", None)
 
         mm_embeds: list[torch.Tensor] = []
 
