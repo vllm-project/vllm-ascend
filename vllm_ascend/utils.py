@@ -24,7 +24,7 @@ import os
 from contextlib import contextmanager
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
 import torch_npu  # noqa: F401  # noqa: F401
@@ -188,7 +188,7 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
 
 def enable_custom_op():
     """
-    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component. 
+    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
     global _CUSTOM_OP_ENABLED
@@ -486,7 +486,7 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
 def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
-    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`, 
+    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
     and ensure this will execute after model config is initilazed.
     """
     global _ASCEND_CUSTOMOP_IS_REIGISTERED
@@ -589,3 +589,31 @@ def dense_optim_enable() -> bool:
 def is_moe_model(vllm_config: VllmConfig):
     config = vllm_config.model_config.hf_config
     return any('experts' in key.lower() for key in config.to_dict())
+
+
+def weak_ref_tensor(tensor: Any) -> Any:
+    """
+    Create a weak reference to a tensor.
+    The new tensor will share the same data as the original tensor,
+    but will not keep the original tensor alive.
+    """
+    if isinstance(tensor, torch.Tensor):
+        return torch.ops._C_ascend.weak_ref_tensor(tensor)
+    else:
+        return tensor
+
+
+def weak_ref_tensors(
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
+    """
+    Convenience function to create weak references to tensors,
+    for single tensor, list of tensors or tuple of tensors.
+    """
+    if isinstance(tensors, torch.Tensor):
+        return weak_ref_tensor(tensors)
+    if isinstance(tensors, list):
+        return [weak_ref_tensor(t) for t in tensors]
+    if isinstance(tensors, tuple):
+        return tuple(weak_ref_tensor(t) for t in tensors)
+    raise ValueError("Invalid type for tensors")
