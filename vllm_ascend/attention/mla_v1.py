@@ -189,6 +189,10 @@ class AscendMLAMetadataBuilder:
                            self.block_size - 1) // self.block_size
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
         if self.chunked_prefill_enabled:
+            if vllm_config.kv_transfer_config.is_kv_consumer:
+                max_chunked_size = scheduler_config.max_num_seqs * self.block_size
+            else:
+                max_chunked_size = 128 * 1024
             self.chunked_prefill_workspace_size = min(
                 # Max sure there is enough for 8 full length request or at least
                 # 4 pages of cache per request
@@ -202,7 +206,7 @@ class AscendMLAMetadataBuilder:
                 # which would result in up-projected context being
                 #   2*(192*128)*(64*1024) = 3gb
                 # (assuming 192 QK head dim, 128 heads, and fp16)
-                128 * 1024)
+                max_chunked_size)
             assert self.chunked_prefill_workspace_size >= \
                 scheduler_config.max_num_seqs * self.block_size
             self.chunked_prefill_workspace = torch.empty(
