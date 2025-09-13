@@ -51,13 +51,15 @@ concurrency:
 jobs:
   build:
     name: vllm-ascend image build
+    # Only arm64 build on openEuler arm64, only amd64 build on Ubuntu amd64
+    # Push event or PR with both 'ready' and 'ready-for-test' labels
     runs-on: >-
       ${{
           github.event_name == 'push' && github.repository_owner == 'vllm-project' &&
           'ubuntu-latest' ||
           'ubuntu-24.04-arm'
       }}
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
+    if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     steps:
     - uses: actions/checkout@v4
       with:
