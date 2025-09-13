@@ -19,7 +19,7 @@ from vllm.distributed import (divide, get_ep_group, get_pp_group,
                               get_tensor_model_parallel_world_size)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-#from vllm.model_executor.layers.fla.ops import fused_recurrent_gated_delta_rule
+# from vllm.model_executor.layers.fla.ops import fused_recurrent_gated_delta_rule
 from vllm.model_executor.layers.fused_moe import FusedMoE
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -66,6 +66,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.casual_conv1d import (causal_conv1d_fn,
                                            causal_conv1d_update)
+from vllm_ascend.ops.sigmoid_gating import (fused_recurrent_gated_delta_rule)
 
 logger = init_logger(__name__)
 
@@ -228,6 +229,7 @@ def torch_chunk_gated_delta_rule(
     output_final_state=False,
     use_qk_l2norm_in_kernel=False,
 ):
+    print(f"query.shape: {query.shape}, key.shape: {key.shape}, value.shape: {value.shape}")
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
         query = F.normalize(query, p=2, dim=-1)
@@ -276,9 +278,13 @@ def torch_chunk_gated_delta_rule(
     attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
     value = attn @ v_beta
     k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
+
     last_recurrent_state = (torch.zeros(batch_size, sequence_length,
                                         k_head_dim, v_head_dim).to(value) if
                             initial_state is None else initial_state.to(value))
+
+    print(f"initial_state is None: {initial_state is None}, last_recurrent_state.shape: {last_recurrent_state.shape}")
+
     core_attn_out = torch.zeros_like(value)
     mask = torch.triu(torch.ones(chunk_size,
                                  chunk_size,
@@ -294,6 +300,7 @@ def torch_chunk_gated_delta_rule(
         v_prime = (k_cumdecay[:, :, i]) @ last_recurrent_state
         v_new = v_i - v_prime
         attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
+        print(f"core_attn_out.shape: {core_attn_out.shape}, attn_inter.shape: {attn_inter.shape}, attn.shape: {attn.shape}, v_new.shape: {v_new.shape}")
         core_attn_out[:, :, i] = attn_inter + attn @ v_new
         last_recurrent_state = (
             last_recurrent_state * g[:, :, i, -1, None, None].exp() +
@@ -630,7 +637,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         mixed_qkv = torch.cat((query, key, value), dim=-1)
 
         # 2. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0),
+        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(1),
                                                self.conv1d.weight.size(2))
 
         if spec_sequence_masks is not None:
@@ -644,6 +651,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
+
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"self.layer_idx: {self.layer_idx}, 111 mixed_qkv_non_spec: {mixed_qkv_non_spec}")
 
         # 2.1: process the mutli-query part
         if spec_sequence_masks is not None:
@@ -678,6 +688,19 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 query_start_loc=non_spec_query_start_loc,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
+            # if torch.distributed.get_rank() == 0:
+            #     torch.save(mixed_qkv_non_spec, "/home/zyj/dump/mixed_qkv_non_spec.pt")
+            #     torch.save(conv_state, "/home/zyj/dump/conv_state.pt")
+            #     torch.save(conv_weights, "/home/zyj/dump/conv_weights.pt")
+            #     torch.save(self.conv1d.bias, "/home/zyj/dump/conv1d_bias.pt")
+            #     print(f"self.activation: {self.activation}")
+            #     torch.save(non_spec_state_indices_tensor[:attn_metadata.num_decodes], "/home/zyj/dump/non_spec_state_indices_tensor.pt")
+
+            #     exit()
+
+            if torch.distributed.get_rank() == 0:
+                print(f"mixed_qkv_non_spec.shape: {mixed_qkv_non_spec.shape}")
+
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
@@ -689,12 +712,16 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             )
         else:
             mixed_qkv_non_spec = None
+        
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"self.layer_idx: {self.layer_idx}, 222 mixed_qkv_non_spec: {mixed_qkv_non_spec}")
 
         query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(
             mixed_qkv_spec)
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
             mixed_qkv_non_spec)
 
+        # if attn_metadata.num_prefills > 0:
         beta = b.sigmoid()
         # g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
         # g = fused_gdn_gating(self.A_log, a, self.dt_bias)
@@ -716,8 +743,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         else:
             g_spec = None
             beta_spec = None
+            # if attn_metadata.num_prefills > 0:
             g_non_spec = g
             beta_non_spec = beta
+
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"self.layer_idx: {self.layer_idx}, 333 query_non_spec: {query_non_spec}")
 
         # 3. Recurrent attention
 
@@ -780,34 +811,62 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
                 ssm_state.dtype)
         elif attn_metadata.num_decodes > 0:
-            # core_attn_out_non_spec, last_recurrent_state = (
-            #     fused_recurrent_gated_delta_rule(
-            #         q=query_non_spec,
-            #         k=key_non_spec,
-            #         v=value_non_spec,
-            #         g=g_non_spec,
-            #         beta=beta_non_spec,
-            #         initial_state=ssm_state,
-            #         inplace_final_state=True,
-            #         cu_seqlens=non_spec_query_start_loc[:attn_metadata.
-            #                                             num_decodes + 1],
-            #         ssm_state_indices=non_spec_state_indices_tensor,
-            #         use_qk_l2norm_in_kernel=True,
-            #     ))
+            # if torch.distributed.get_rank() == 0:
+            #     print("===================================="
+            #           f"self.layer_idx: {self.layer_idx}, g_non_spec: {g_non_spec}\n"
+            #           f"non_spec_query_start_loc: {non_spec_query_start_loc}\n"
+            #           f"attn_metadata.num_decodes: {attn_metadata.num_decodes}\n"
+            #           f"non_spec_state_indices_tensor: {non_spec_state_indices_tensor}")
 
             core_attn_out_non_spec, last_recurrent_state = (
-                torch_recurrent_gated_delta_rule(
-                    query=query_non_spec,
-                    key=key_non_spec,
-                    value=value_non_spec,
+                fused_recurrent_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
                     g=g_non_spec,
                     beta=beta_non_spec,
                     initial_state=ssm_state,
-                    output_final_state=False,
+                    inplace_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc[:attn_metadata.
+                                                        num_decodes + 1],
+                    ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
                 ))
+            
+            # core_attn_out_non_spec = fused_sigmoid_gating_delta_rule_update(
+            #     A_log=self.A_log,
+            #     dt_bias=self.dt_bias,
+            #     q=query_non_spec,
+            #     k=key_non_spec,
+            #     v=value_non_spec,
+            #     a=a,
+            #     b=b,
+            #     initial_state_source=ssm_state,
+            #     initial_state_indices=non_spec_state_indices_tensor,
+            #     cu_seqlens=non_spec_query_start_loc[:attn_metadata.
+            #                                             num_decodes + 1],
+            #     use_qk_l2norm_in_kernel=True,
+            #     softplus_beta=1.0,
+            #     softplus_threshold=20.0,
+            # )
+            # last_recurrent_state = None
+
+            # core_attn_out_non_spec, last_recurrent_state = (
+            #     torch_recurrent_gated_delta_rule(
+            #         query=query_non_spec,
+            #         key=key_non_spec,
+            #         value=value_non_spec,
+            #         g=g_non_spec,
+            #         beta=beta_non_spec,
+            #         initial_state=ssm_state,
+            #         output_final_state=False,
+            #         use_qk_l2norm_in_kernel=True,
+            #     ))
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
+
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"self.layer_idx: {self.layer_idx}, 444 core_attn_out_non_spec: {core_attn_out_non_spec}")
 
         # Merge core attention output
         if (spec_sequence_masks is not None
@@ -833,6 +892,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         core_attn_out = rearrange(core_attn_out, '... h d -> ... (h d)')
 
         output[:num_actual_tokens], _ = self.out_proj(core_attn_out)
+
+        # if torch.distributed.get_rank() == 0:
+        #     print(f"self.layer_idx: {self.layer_idx}, 555 output: {output}")
 
 
 class Qwen3NextAttention(nn.Module):
