@@ -81,10 +81,12 @@ class CachedRequestState:
                 "removed in v0.13. Please use `mm_kwargs` instead.")
     def mm_inputs(self) -> list[MultiModalKwargsItems]:
         if vllm_version_is("0.10.2"):
+            assert self.mm_kwargs is not None
             return [
                 MultiModalKwargsItems.from_seq([item])
                 for item in self.mm_kwargs
             ]
+        assert self.mm_features is not None
         return [
             MultiModalKwargsItems.from_seq([f.data]) for f in self.mm_features
             if f.data is not None
