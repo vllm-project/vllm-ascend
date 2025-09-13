@@ -75,13 +75,6 @@ class TestAscendSchedulerConfig(TestBase):
             str(context.exception),
         )
 
-    def test_not_implemented_multimodal(self):
-        with self.assertRaises(NotImplementedError) as context:
-            AscendSchedulerConfig.initialize_from_config(
-                SchedulerConfig(is_multimodal_model=True), {})
-        self.assertIn("currently AscendScheduler only supports LLM models",
-                      str(context.exception))
-
     def test_not_implemented_send_delta_data(self):
         with self.assertRaises(NotImplementedError) as context:
             AscendSchedulerConfig.initialize_from_config(
@@ -117,6 +110,11 @@ class TestAscendSchedulerConfig(TestBase):
             self.basic_scheduler_config, {})
         self.assertEqual(ascend_config.max_num_encoder_input_tokens, 8192)
         self.assertEqual(ascend_config.encoder_cache_size, 8192)
+
+    def test_valid_config_with_multimodal(self):
+        config = AscendSchedulerConfig.initialize_from_config(
+            SchedulerConfig(is_multimodal_model=True), {})
+        self.assertTrue(config.is_multimodal_model)
 
     def test_valid_config_with_chunked_prefill(self):
         ascend_config = AscendSchedulerConfig.initialize_from_config(

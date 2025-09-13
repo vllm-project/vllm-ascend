@@ -71,9 +71,6 @@ class AscendSchedulerConfig(SchedulerConfig):
             raise NotImplementedError(
                 f"currently AscendScheduler only supports fcfs policy, got {self.policy}"
             )
-        if self.is_multimodal_model:
-            raise NotImplementedError(
-                "currently AscendScheduler only supports LLM models.")
         if self.send_delta_data:
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support send_delta_data.")
