@@ -1,4 +1,6 @@
 model_name: "Qwen/Qwen2.5-VL-7B-Instruct"
+runner: "linux-aarch64-a2-1"
+hardware: "Atlas A2 Series"
 model: "vllm-vlm"
 tasks:
 - name: "mmmu_val"
