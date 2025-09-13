@@ -32,9 +32,10 @@ class NPUTorchairWorker(NPUWorker):
         """Override determine_available_memory to use cached torchair kv_cache_bytes."""
 
         available_kv_cache_memory = super().determine_available_memory()
-
-        if get_ascend_config(
-        ).torchair_graph_config.use_cached_kv_cache_bytes and check_kv_cache_bytes_cache_exist(
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_shared_expert_dp:
+            return available_kv_cache_memory
+        if ascend_config.torchair_graph_config.use_cached_kv_cache_bytes and check_kv_cache_bytes_cache_exist(
         ):
             old_kv_cache_bytes = read_kv_cache_bytes_from_file(
                 torch.distributed.get_rank())
