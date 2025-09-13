@@ -49,7 +49,7 @@ def _rope_forward_oot(
     # adopt custom kernel path for rotary_embedding
     if _custom_rotary_embedding_enabled(query, is_neox_style,
                                         self.head_size) and not is_310p():
-        query, key = torch.ops._C.rotary_embedding(
+        query, key = torch.ops._C_ascend.rotary_embedding(
             positions,
             query,
             key,

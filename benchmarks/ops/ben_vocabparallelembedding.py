@@ -112,7 +112,7 @@ def test_get_masked_input_and_mask(
 
     # Define custom function
     def custom_fn():
-        return torch.ops._C.get_masked_input_and_mask(
+        return torch.ops._C_ascend.get_masked_input_and_mask(
             input_tensor,
             test_case["org_start"],
             test_case["org_end"],
