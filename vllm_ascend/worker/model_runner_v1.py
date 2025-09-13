@@ -98,6 +98,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                get_ascend_soc_version, is_310p,
                                lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
+from vllm.model_executor.model_loader import get_model_loader
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -2192,7 +2193,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Starting to load model %s...", self.model_config.model)
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
-            self.model = get_model(vllm_config=self.vllm_config)
+            # model = get_model(vllm_config=self.vllm_config)
+            model_loader = get_model_loader(self.vllm_config.load_config)
+            if not hasattr(self, "model"):
+                logger.info("Loading model from scratch...")
+                model = model_loader.load_model(vllm_config=self.vllm_config,
+                                                model_config=self.model_config)
+            else:
+                logger.info(
+                    "Model was already initialized. Loading weights inplace..."
+                )
+                model_loader.load_weights(self.model,
+                                          model_config=self.model_config)
 
             if is_310p():
                 from vllm.model_executor.layers.linear import (
