@@ -699,6 +699,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         second_per_grid_ts = []
         audio_feature_lengths = []
         use_audio_in_video = False
+        assert req_state.mm_features is not None
         for mm_feature in req_state.mm_features:
             mm_item = mm_feature.data
             if mm_item is None:
@@ -732,6 +733,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         second_per_grid_ts = []
         audio_feature_lengths = []
         use_audio_in_video = False
+        assert req_state.mm_kwargs is not None
         for mm_item in req_state.mm_kwargs:
             mm_input = mm_item.get_data()
             if mm_input.get("image_grid_thw") is not None:
@@ -979,7 +981,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
-
+            assert req_state.mm_hashes is not None
+            assert req_state.mm_kwargs is not None
+            assert req_state.mm_positions is not None
             for mm_input_id in encoder_input_ids:
                 mm_hash = req_state.mm_hashes[mm_input_id]
                 mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
@@ -1012,7 +1016,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
-
+            assert req_state.mm_features is not None
             for mm_input_id in encoder_input_ids:
                 mm_feature = req_state.mm_features[mm_input_id]
                 mm_hash = mm_feature.identifier
