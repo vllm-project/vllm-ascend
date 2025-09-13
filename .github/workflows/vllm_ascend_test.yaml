@@ -191,6 +191,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
+          HCCL_BUFFSIZE: 500
         run: |
           pytest -sv tests/e2e/singlecard/test_aclgraph.py
           pytest -sv tests/e2e/singlecard/test_quantization.py
@@ -256,5 +257,6 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
+          HCCL_BUFFSIZE: 500
         run: |
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
