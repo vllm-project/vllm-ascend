@@ -78,8 +78,12 @@ class TorchairDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer
                                                      prefix=maybe_prefix(
                                                          prefix,
                                                          "shared_head"))
-        self.mtp_block = TorchairDeepseekV2DecoderLayer(
-            config, prefix, model_config, cache_config, quant_config)
+        self.mtp_block = TorchairDeepseekV2DecoderLayer(config,
+                                                        prefix,
+                                                        model_config,
+                                                        cache_config,
+                                                        quant_config,
+                                                        is_mtp_block=True)
 
     def forward(
         self,
@@ -101,6 +105,7 @@ class TorchairDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer
 
         hidden_states = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
+        del inputs_embeds, previous_hidden_states
 
         hidden_states, residual = self.mtp_block(positions=positions,
                                                  hidden_states=hidden_states,
