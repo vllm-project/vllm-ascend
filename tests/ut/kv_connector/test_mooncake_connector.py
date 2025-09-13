@@ -5,9 +5,9 @@ import sys
 import threading
 import time
 import types
-from typing import OrderedDict
 import unittest
 from collections import defaultdict, deque
+from typing import OrderedDict
 from unittest.mock import MagicMock, patch
 
 import msgspec
