@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Union
 
 import torch
 
@@ -56,6 +56,7 @@ class AscendCommonAttentionMetadata:
 def split_decodes_and_prefills(
     common_attn_metadata: AscendCommonAttentionMetadata,
     decode_threshold: int = 1,
+    is_kv_producer: Union[bool, None] = None,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -81,7 +82,8 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    is_prefill = query_lens > decode_threshold
+    is_prefill = (torch.ones(query_lens.size(0), dtype=torch.bool)
+                  if is_kv_producer else query_lens > decode_threshold)
     if not torch.any(is_prefill):
         return num_reqs, 0, num_tokens, 0
 
