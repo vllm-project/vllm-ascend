@@ -468,7 +468,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 to_update.apply(pooling_params)
 
             backward_kwargs = {}
-            if vllm_version_is("0.10.2"):
+            if vllm_version_is("0.10.2rc2"):
                 backward_kwargs["mm_kwargs"] = new_req_data.mm_kwargs
                 backward_kwargs["mm_hashes"] = new_req_data.mm_hashes
                 backward_kwargs["mm_positions"] = new_req_data.mm_positions
@@ -490,7 +490,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
-                if vllm_version_is("0.10.2"):
+                if vllm_version_is("0.10.2rc2"):
                     self._init_mrope_positions_0102(self.requests[req_id])
                 else:
                     self._init_mrope_positions(self.requests[req_id])
@@ -827,7 +827,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return
 
         # Batch the multi-modal inputs.
-        if vllm_version_is("0.10.2"):
+        if vllm_version_is("0.10.2rc2"):
             mm_kwargs, mm_hashes_pos = self._batch_mm_kwargs_from_scheduler_0102(
                 scheduler_output)
         else:
@@ -928,7 +928,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     ) -> list[torch.Tensor]:
 
         def _iter_mm_features(req_state: CachedRequestState):
-            if vllm_version_is("0.10.2"):
+            if vllm_version_is("0.10.2rc2"):
                 # legacy path (to be removed later)
                 assert req_state.mm_hashes is not None
                 assert req_state.mm_positions is not None
