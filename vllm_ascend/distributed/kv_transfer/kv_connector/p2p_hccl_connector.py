@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import regex as re
@@ -8,8 +9,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_connector import \
-    P2pNcclConnectorMetadata
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
@@ -25,6 +24,53 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+@dataclass
+class ReqMeta:
+    # Request Id
+    request_id: str
+    # Request tokens
+    token_ids: torch.Tensor
+    # Slot mappings, should have the same length as token_ids
+    slot_mapping: torch.Tensor
+    
+    block_ids: torch.Tensor
+
+    @staticmethod
+    def make_meta(request_id: str, token_ids: list[int], block_ids: list[int],
+                  block_size: int) -> "ReqMeta":
+        valid_num_tokens = len(token_ids)
+        token_ids_tensor = torch.tensor(token_ids)
+        block_ids_tensor = torch.tensor(block_ids)
+        num_blocks = block_ids_tensor.shape[0]
+        block_offsets = torch.arange(0, block_size)
+        slot_mapping = block_offsets.reshape((1, block_size)) + \
+                block_ids_tensor.reshape((num_blocks, 1)) * block_size
+        slot_mapping = slot_mapping.flatten()[:valid_num_tokens]
+
+        return ReqMeta(
+            request_id=request_id,
+            token_ids=token_ids_tensor,
+            slot_mapping=slot_mapping,
+            block_ids=block_ids_tensor
+        )
+
+
+@dataclass
+class P2pHcclConnectorMetadata(KVConnectorMetadata):
+    requests: list[ReqMeta]
+
+    def __init__(self):
+        self.requests = []
+
+    def add_request(
+        self,
+        request_id: str,
+        token_ids: list[int],
+        block_ids: list[int],
+        block_size: int,
+    ) -> None:
+        self.requests.append(
+            ReqMeta.make_meta(request_id, token_ids, block_ids, block_size))
 
 
 class P2pHcclConnector(KVConnectorBase_V1):
@@ -132,7 +178,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
         # Get the metadata
         metadata: KVConnectorMetadata = \
             self._get_connector_metadata()
-        assert isinstance(metadata, P2pNcclConnectorMetadata)
+        assert isinstance(metadata, P2pHcclConnectorMetadata)
 
         if metadata is None:
             return
@@ -196,7 +242,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
         assert self.p2p_hccl_engine is not None
 
         connector_metadata = self._get_connector_metadata()
-        assert isinstance(connector_metadata, P2pNcclConnectorMetadata)
+        assert isinstance(connector_metadata, P2pHcclConnectorMetadata)
         for request in connector_metadata.requests:
             request_id = request.request_id
             ip, port = self.parse_request_id(request_id, True)
@@ -289,7 +335,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        meta = P2pNcclConnectorMetadata()
+        meta = P2pHcclConnectorMetadata()
 
         for new_req in scheduler_output.scheduled_new_reqs:
             if self.is_producer:

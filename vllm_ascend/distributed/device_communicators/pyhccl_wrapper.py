@@ -17,6 +17,7 @@
 
 import ctypes
 import platform
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -223,10 +224,28 @@ class HCCLLibrary:
             HCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = HCCLLibrary.path_to_dict_mapping[so_file]
 
+        cann_version = ""
+        cann_version_file = "/usr/local/Ascend/ascend-toolkit/latest/aarch64-linux/include/version/cann_version.h"
         try:
-            aclLib = ctypes.CDLL("libgert.so")
+            content = ""
+            with open(cann_version_file, "r") as f:
+                content = '\n'.join(f.readlines())
+                print("content: ", content)
+            if m := re.search(r'CANN_VERSION_STR "([^"]+)"', content):
+                cann_version = m.group(1)
+                print("cann_version: ", cann_version)
         except Exception as e:
-            logger.error("Failed to load libgert.so")
+            logger.info("cannot find cann version file %s: %s", cann_version_file, e)
+
+        acl_so = ""
+        try:
+            if cann_version == "8.1.RC1":
+                acl_so = "libascendcl.so"
+            else:
+                acl_so = "libgert.so"
+            aclLib = ctypes.CDLL(acl_so)                
+        except Exception as e:
+            logger.error("Failed to load %s", acl_so)
             raise e
         for func in HCCLLibrary.acl_exported_functions:
             f = getattr(aclLib, func.name)
