@@ -75,7 +75,7 @@ myst_substitutions = {
     'pip_vllm_ascend_version': "0.10.1rc1",
     'pip_vllm_version': "0.10.1.1",
     # CANN image tag
-    'cann_image_tag': "8.3.rc1.alpha001-910b-ubuntu22.04-py3.11",
+    'cann_image_tag': "8.2.rc1-910b-ubuntu22.04-py3.11",
     # vllm version in ci
     'ci_vllm_version': 'v0.10.2rc2',
 }
