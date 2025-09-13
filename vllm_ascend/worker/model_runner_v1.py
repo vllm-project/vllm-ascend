@@ -93,7 +93,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
-from vllm_ascend.models.deepseek_v2 import CustomDeepseekV2MLAAttention
+from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.logits_processor import build_logitsprocs
@@ -2815,7 +2815,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # or enable more requests to be processed simultaneously.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
-            if isinstance(attn_module, CustomDeepseekV2MLAAttention):
+            if isinstance(attn_module, AscendMultiHeadLatentAttention):
                 continue
 
             # TODO: Support other attention modules, e.g., cross-attention

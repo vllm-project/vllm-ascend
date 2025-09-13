@@ -31,12 +31,11 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
                               tensor_model_parallel_all_reduce)
-from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -58,7 +57,6 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import (PPMissingLayer,
                                               is_pp_missing_parameter,
                                               maybe_prefix)
-from vllm.utils import direct_register_custom_op
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.mla import AscendMLAModules
@@ -237,39 +235,13 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             prefix,
         )
 
-        compilation_config = get_current_vllm_config().compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
-
     def forward(
             self,
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        # return self.mla_attn(positions, hidden_states, kv_cache, attn_metadata)
-        num_tokens = hidden_states.shape[0]
-        need_gather_q_kv = False
-        if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
-            # Simulate all gather to calculate output shape
-            num_tokens = num_tokens * self.tp_size
-            need_gather_q_kv = True
-        if not self.enable_shared_expert_dp or self.debug_layer_idx < self.first_k_dense_replace:
-            output_shape = hidden_states.shape
-        else:
-            rows = num_tokens // self.tp_size
-            if num_tokens % self.tp_size:
-                rows += 1
-            output_shape = (rows, hidden_states.shape[1])
-        # FIXME: This does not seem right, should make sure the buffer is fixed
-        output = torch.empty(output_shape,
-                             dtype=hidden_states.dtype,
-                             device=hidden_states.device)
-        torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output,
-                                   self.prefix)
-        output = output.view(-1, output_shape[-1])
-        return output
+        return self.mla_attn(positions, hidden_states, kv_cache, attn_metadata)
 
 
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
@@ -514,36 +486,3 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
 
 DeepseekV2DecoderLayer.__init__ = CustomDeepseekV2DecoderLayer.__init__
-
-
-def mla_forward(
-    hidden_states: torch.Tensor,
-    need_gather_q_kv: bool,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
-    self.mla_attn.impl.forward(hidden_states, kv_cache, attn_metadata,
-                               need_gather_q_kv, output)
-    return
-
-
-def mla_forward_fake(
-    hidden_states: torch.Tensor,
-    need_gather_q_kv: bool,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="mla_forward",
-    op_func=mla_forward,
-    mutates_args=["output"],
-    fake_impl=mla_forward_fake,
-    dispatch_key="PrivateUse1",
-)
