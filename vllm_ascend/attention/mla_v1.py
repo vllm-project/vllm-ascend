@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Type, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Type, TypeVar, List
 
 import torch
 import torch_npu
@@ -12,6 +12,10 @@ from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group,
+                                          is_v1_kv_transfer_group)
+from vllm.forward_context import ForwardContext, get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -976,6 +980,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert attn_metadata.num_decodes is not None and \
         attn_metadata.num_prefills is not None and \
         attn_metadata.num_decode_tokens is not None
+        self.wait_for_kv_layer_from_connector(layer.layer_name)
         num_decode_tokens = attn_metadata.num_decode_tokens
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
@@ -1046,4 +1051,36 @@ class AscendMLAImpl(MLAAttentionImpl):
                     is_force_scatter=self.enable_shared_expert_dp)[0]
                 current_ms_metadata.after_comm_event.record()
         del o_proj_input
+        self.maybe_save_kv_layer_to_connector(layer_name=layer.layer_name, kv_cache_layer=kv_cache)
         return output_padded
+
+    def wait_for_kv_layer_from_connector(self, layer_name: str):
+        if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+            return
+
+        connector = get_kv_transfer_group()
+
+        forward_context: ForwardContext = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if attn_metadata is None:
+            return
+        assert isinstance(attn_metadata, AscendMLAMetadata)
+        connector.wait_for_layer_load(layer_name)
+
+    def maybe_save_kv_layer_to_connector(
+        self,
+        layer_name: str,
+        kv_cache_layer: List[torch.Tensor],
+    ):
+        if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
+            return
+
+        connector = get_kv_transfer_group()
+
+        forward_context: ForwardContext = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if attn_metadata is None:
+            return
+        assert isinstance(attn_metadata, AscendMLAMetadata)
+        connector.save_kv_layer(layer_name, kv_cache_layer,
+                                attn_metadata)
