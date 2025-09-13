@@ -182,7 +182,7 @@ def test_rotary_embedding_quant_with_leading_dim(
     )
 
     ref_query, ref_key = rope.forward_native(positions, query, key)
-    query, key = torch.ops._C.rotary_embedding(
+    query, key = torch.ops._C_ascend.rotary_embedding(
         positions,
         query,
         key,
@@ -239,7 +239,7 @@ class ModelwithRotaryEmbedding(nn.Module):
         # we simulated a simple attention layer to test if it can be seamlessly captured into aclgraph
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(3, dim=-1)
-        query, key = torch.ops._C.rotary_embedding(
+        query, key = torch.ops._C_ascend.rotary_embedding(
             positions,
             q,
             k,
@@ -299,7 +299,7 @@ def test_capture_rotary_embedding_in_aclgraph(
         # Validate if the rotary_embedding custom kernel is indeed inside the graph by
         # string match
         graph = str(gm.graph)
-        assert "_C.rotary_embedding" in graph
+        assert "_C_ascend.rotary_embedding" in graph
         return gm
 
     static_positions = torch.randint(0, max_position_embeddings,
