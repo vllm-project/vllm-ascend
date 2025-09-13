@@ -18,6 +18,7 @@
 from typing import Optional, Tuple, Union, cast
 
 import torch
+import torch_npu
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 
@@ -33,7 +34,11 @@ class AddRMSNormW8A8Quant(RMSNorm):
         has_weight: bool = True,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
-        super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+        super().__init__(hidden_size=hidden_size,
+                         eps=eps,
+                         var_hidden_size=var_hidden_size,
+                         has_weight=has_weight,
+                         dtype=dtype)
         self.layer = layer
 
     def forward(
@@ -41,8 +46,6 @@ class AddRMSNormW8A8Quant(RMSNorm):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        import torch_npu
-
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             assert x.size(0) == residual.size(0)
@@ -68,8 +71,6 @@ class AscendRMSNorm(RMSNorm):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        import torch_npu
-
         from vllm_ascend.utils import is_310p
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
