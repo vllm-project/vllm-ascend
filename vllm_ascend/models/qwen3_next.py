@@ -229,7 +229,6 @@ def torch_chunk_gated_delta_rule(
     output_final_state=False,
     use_qk_l2norm_in_kernel=False,
 ):
-    print(f"query.shape: {query.shape}, key.shape: {key.shape}, value.shape: {value.shape}")
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
         query = F.normalize(query, p=2, dim=-1)
@@ -283,8 +282,6 @@ def torch_chunk_gated_delta_rule(
                                         k_head_dim, v_head_dim).to(value) if
                             initial_state is None else initial_state.to(value))
 
-    print(f"initial_state is None: {initial_state is None}, last_recurrent_state.shape: {last_recurrent_state.shape}")
-
     core_attn_out = torch.zeros_like(value)
     mask = torch.triu(torch.ones(chunk_size,
                                  chunk_size,
@@ -300,7 +297,6 @@ def torch_chunk_gated_delta_rule(
         v_prime = (k_cumdecay[:, :, i]) @ last_recurrent_state
         v_new = v_i - v_prime
         attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
-        print(f"core_attn_out.shape: {core_attn_out.shape}, attn_inter.shape: {attn_inter.shape}, attn.shape: {attn.shape}, v_new.shape: {v_new.shape}")
         core_attn_out[:, :, i] = attn_inter + attn @ v_new
         last_recurrent_state = (
             last_recurrent_state * g[:, :, i, -1, None, None].exp() +
@@ -698,8 +694,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
             #     exit()
 
-            if torch.distributed.get_rank() == 0:
-                print(f"mixed_qkv_non_spec.shape: {mixed_qkv_non_spec.shape}")
+            # if torch.distributed.get_rank() == 0:
+            #     print(f"mixed_qkv_non_spec.shape: {mixed_qkv_non_spec.shape}")
 
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
@@ -793,19 +789,69 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             #     use_qk_l2norm_in_kernel=True,
             # )
 
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = torch_chunk_gated_delta_rule(
-                query=query_non_spec,
-                key=key_non_spec,
-                value=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                use_qk_l2norm_in_kernel=True,
-            )
+            batch_size = initial_state.shape[0]
+            core_attn_out = []
+            last_recurrent_state = []
+            if torch.distributed.get_rank() == 0:
+                print("===================================="
+                        f"self.layer_idx: {self.layer_idx}\n"
+                        f"query_non_spec.shape: {query_non_spec.shape}\n"
+                        f"g_non_spec.shape: {g_non_spec.shape}\n"
+                        f"beta_non_spec.shape: {beta_non_spec.shape}\n"
+                        f"initial_state.shape: {initial_state.shape}\n")
+                
+            for b_idx in range(batch_size):
+                start, end = non_spec_query_start_loc[b_idx], non_spec_query_start_loc[b_idx+1]
+                cur_q = query_non_spec[:, start:end, ...]
+                cur_k = key_non_spec[:, start:end, ...]
+                cur_v = value_non_spec[:, start:end, ...]
+                cur_g = g_non_spec[:, start:end, ...]
+                cur_b = beta_non_spec[:, start:end, ...]
+                cur_state = initial_state[b_idx].unsqueeze(0)
+
+                if torch.distributed.get_rank() == 0:
+                    print("===================================="
+                          f"self.layer_idx: {self.layer_idx}, start: {start}, end: {end}\n"
+                          f"cur_q.shape: {cur_q.shape}\n"
+                          f"cur_k.shape: {cur_k.shape}\n"
+                          f"cur_v.shape: {cur_v.shape}\n"
+                          f"cur_g.shape: {cur_g.shape}\n"
+                          f"cur_b.shape: {cur_b.shape}\n"
+                          f"cur_state.shape: {cur_state.shape}\n")
+
+                (
+                    cur_core_attn_out_non_spec,
+                    cur_last_recurrent_state,
+                ) = torch_chunk_gated_delta_rule(
+                    query=cur_q,
+                    key=cur_k,
+                    value=cur_v,
+                    g=cur_g,
+                    beta=cur_b,
+                    initial_state=cur_state,
+                    output_final_state=True,
+                    use_qk_l2norm_in_kernel=True,
+                )
+
+                if torch.distributed.get_rank() == 0:
+                    print("===================================="
+                          f"self.layer_idx: {self.layer_idx}, start: {start}, end: {end}\n"
+                          f"cur_core_attn_out_non_spec.shape: {cur_core_attn_out_non_spec.shape}\n"
+                          f"cur_last_recurrent_state.shape: {cur_last_recurrent_state.shape}\n")
+
+                core_attn_out.append(cur_core_attn_out_non_spec)
+                last_recurrent_state.append(cur_last_recurrent_state)
+            
+            tar_dtype = core_attn_out[0].dtype
+            tar_device = core_attn_out[0].device
+            tar_shape = list(core_attn_out[0].shape)
+            tar_shape[1] = non_spec_query_start_loc[-1]
+            core_attn_out_non_spec= torch.empty(tar_shape, dtype=tar_dtype, device=tar_device)
+            for b_idx in range(batch_size):
+                cur_core_attn_out = core_attn_out[b_idx]
+                start, end = non_spec_query_start_loc[b_idx], non_spec_query_start_loc[b_idx + 1]
+                core_attn_out_non_spec[:, start:end, ...] = cur_core_attn_out
+            last_recurrent_state = torch.cat(last_recurrent_state, dim=0)
 
             # Init cache
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(

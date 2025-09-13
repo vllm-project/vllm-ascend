@@ -145,6 +145,10 @@ class AscendAttentionBackend(AttentionBackend):
             key_caches[dst_indices] = key_caches[src_indices]
             value_caches[dst_indices] = value_caches[src_indices]
 
+    @staticmethod
+    def get_supported_block_size() -> list[int]:
+        return [64]
+
 
 class AscendAttentionState(Enum):
     PrefillNoCache = 0
@@ -206,7 +210,7 @@ class AscendAttentionMetadataBuilder:
         self.model_config = vllm_config.model_config
         self.device = device
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
-                                           vllm_config.cache_config.block_size)
+                                           AscendAttentionBackend.get_supported_block_size()[0])
 
     def reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
         return False
@@ -224,8 +228,8 @@ class AscendAttentionMetadataBuilder:
                                                                        + 1]
 
         block_table = common_attn_metadata.block_table_tensor
-        block_table[:num_reqs, :self.max_num_blocks_per_req] = (
-            block_table[:num_reqs])
+        # block_table[:num_reqs, :self.max_num_blocks_per_req] = (
+        #     block_table[:num_reqs])
 
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
