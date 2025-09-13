@@ -31,15 +31,13 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
-from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
-                         get_current_vllm_config)
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
@@ -54,16 +52,15 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.deepseek_v2 import \
     yarn_get_mscale  # noqa: E501
 from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2MLAAttention,
-    DeepseekV2MLP, DeepseekV2MoE, get_spec_layer_idx_from_weight_name)
-from vllm.model_executor.models.utils import (
-    PPMissingLayer, is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
-from vllm.sequence import IntermediateTensors
+    DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2ForCausalLM,
+    DeepseekV2MLAAttention, DeepseekV2MLP, DeepseekV2Model, DeepseekV2MoE,
+    get_spec_layer_idx_from_weight_name)
+from vllm.model_executor.models.utils import (PPMissingLayer,
+                                              is_pp_missing_parameter,
+                                              maybe_prefix)
 from vllm.utils import direct_register_custom_op
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.common_fused_moe import AscendSharedFusedMoE
 from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 
