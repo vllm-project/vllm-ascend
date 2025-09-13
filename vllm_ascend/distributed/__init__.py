@@ -28,6 +28,6 @@ KVConnectorFactory.register_connector(
     "MooncakeConnector")
 
 KVConnectorFactory.register_connector(
-    "MemcacheConnectorStoreV1",
-    "vllm_ascend.distributed.memcache.memcache_store_connector_v1",
-    "MemcacheConnectorV1")
+    "MooncakeConnectorStoreV1",
+    "vllm_ascend.distributed.mooncake.mooncake_store_connector_v1",
+    "MooncakeConnectorV1")
