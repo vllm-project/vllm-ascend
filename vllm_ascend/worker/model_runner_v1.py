@@ -2436,6 +2436,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in kv_cache_group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
+                num_blocks = None
                 if not self.model_config.is_deepseek_mla:
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor.numel(
