@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# mypy: ignore-errors
+
 """Inference-only Qwen3Next model."""
 from collections.abc import Iterable
 from typing import Optional
@@ -309,61 +311,6 @@ def torch_chunk_gated_delta_rule(
                                           core_attn_out.shape[1], -1,
                                           core_attn_out.shape[-1])
     core_attn_out = core_attn_out[:, :, :num_heads]
-    core_attn_out = core_attn_out.transpose(1,
-                                            2).contiguous().to(initial_dtype)
-    return core_attn_out, last_recurrent_state
-
-
-def torch_recurrent_gated_delta_rule(query,
-                                     key,
-                                     value,
-                                     g,
-                                     beta,
-                                     initial_state,
-                                     output_final_state,
-                                     use_qk_l2norm_in_kernel=False):
-    initial_dtype = query.dtype
-    query = query.repeat_interleave(2, dim=2)
-    key = key.repeat_interleave(2, dim=2)
-    if use_qk_l2norm_in_kernel:
-        query = F.normalize(query, p=2, dim=-1)
-        key = F.normalize(key, p=2, dim=-1)
-
-    g = g.unsqueeze(0)
-    beta = beta.unsqueeze(0)
-    query, key, value, beta, g = [
-        x.transpose(1, 2).contiguous().to(torch.float32)
-        for x in (query, key, value, beta, g)
-    ]
-
-    batch_size, sequence_length, num_heads, k_head_dim = key.shape
-    v_head_dim = value.shape[-1]
-    scale = 1 / (query.shape[-1]**0.5)
-    query = query * scale
-
-    core_attn_out = torch.zeros(batch_size, sequence_length, num_heads,
-                                v_head_dim).to(value)
-    last_recurrent_state = (torch.zeros(batch_size, sequence_length,
-                                        k_head_dim, v_head_dim).to(value) if
-                            initial_state is None else initial_state.to(value))
-
-    for i in range(num_heads):
-        #q_t = query[:, :, i]
-        k_t = key[:, :, i]
-        v_t = value[:, :, i]
-        g_t = g[:, :, i].exp().unsqueeze(-1).unsqueeze(-1)
-        beta_t = beta[:, :, i].unsqueeze(-1)
-
-        last_recurrent_state = last_recurrent_state * g_t
-        kv_mem = (last_recurrent_state * k_t.unsqueeze(-1)).sum(dim=-2)
-        delta = (v_t - kv_mem) * beta_t
-        last_recurrent_state = last_recurrent_state + k_t.unsqueeze(
-            -1) * delta.unsqueeze(-2)
-        # TODO: check shape
-        # core_attn_out[:, :, i] = (last_recurrent_state * q_t.unsqueeze(-1)).sum(dim=1)
-
-    if not output_final_state:
-        last_recurrent_state = None
     core_attn_out = core_attn_out.transpose(1,
                                             2).contiguous().to(initial_dtype)
     return core_attn_out, last_recurrent_state

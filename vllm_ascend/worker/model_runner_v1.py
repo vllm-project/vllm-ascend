@@ -2437,7 +2437,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return tensor[int(offset):]
 
         kv_caches: Dict[str, torch.Tensor] = {}
-        #has_attn, has_mamba = False, False
         for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
         ):
             attn_backend = kv_cache_group.backend
@@ -2461,7 +2460,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
-                    #has_attn = True
                     if self.vllm_config.additional_config.get(
                             "kv_cache_dtype", None) == 'int8':
                         kv_cache_shape = attn_backend.get_bsh_kv_cache_shape(
@@ -2531,7 +2529,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         kv_cache = self._convert_torch_format(kv_cache)
                         kv_caches[layer_name] = kv_cache
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    #has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
                     storage_offset_bytes = 0
@@ -2559,39 +2556,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
 
-        # if has_attn and has_mamba:
-        #     self._update_hybrid_attention_mamba_layout(kv_caches)
-
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
                       self.kv_caches)
 
         return kv_caches
-
-    def _update_hybrid_attention_mamba_layout(
-            self, kv_caches: dict[str, torch.Tensor]) -> None:
-        """
-        Update the layout of attention layers from (2, num_blocks, ...) to
-        (num_blocks, 2, ...).
-
-        Args:
-            kv_caches: The KV cache buffer of each layer.
-        """
-
-        for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
-            for layer_name in group.layer_names:
-                kv_cache = kv_caches[layer_name]
-                print(60 * "*", type(kv_cache), kv_cache_spec)
-                if (isinstance(kv_cache_spec, AttentionSpec)
-                        and kv_cache.shape[0] == 2):
-                    assert kv_cache.shape[1] != 2, \
-                        "Fail to determine whether the layout is " \
-                        "(2, num_blocks, ...) or (num_blocks, 2, ...) for " \
-                        f"a tensor of shape {kv_cache.shape}"
-                    hidden_size = kv_cache.shape[2:].numel()
-                    kv_cache.as_strided_(size=kv_cache.shape,
-                                         stride=(hidden_size, 2 * hidden_size,
-                                                 *kv_cache.stride()[2:]))
 
     def _kv_cache_spec_attn_group_iterator(
             self) -> Iterator[tuple[KVCacheSpec, AttentionGroup]]:

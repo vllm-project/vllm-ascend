@@ -227,11 +227,7 @@ class AscendAttentionMetadataBuilder:
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
                                                                        num_reqs
                                                                        + 1]
-
         block_table = common_attn_metadata.block_table_tensor
-        # block_table[:num_reqs, :self.max_num_blocks_per_req] = (
-        #     block_table[:num_reqs])
-
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         slot_mapping = common_attn_metadata.slot_mapping_cpu[:
