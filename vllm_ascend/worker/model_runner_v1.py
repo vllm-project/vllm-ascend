@@ -2406,12 +2406,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
-        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            tensor = torch.zeros(kv_cache_tensor.size,
-                                 dtype=torch.int8,
-                                 device=self.device)
-            for layer_name in kv_cache_tensor.shared_by:
-                kv_cache_raw_tensors[layer_name] = tensor
+        if not self.model_config.is_deepseek_mla:
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                tensor = torch.zeros(kv_cache_tensor.size,
+                                     dtype=torch.int8,
+                                     device=self.device)
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_cache_raw_tensors[layer_name] = tensor
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
@@ -2435,20 +2436,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in kv_cache_group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                raw_tensor = kv_cache_raw_tensors[layer_name]
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel(
-                ) // kv_cache_spec.page_size_bytes
+                if not self.model_config.is_deepseek_mla:
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    assert raw_tensor.numel(
+                    ) % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel(
+                    ) // kv_cache_spec.page_size_bytes
 
-                # `num_blocks` is the number of blocks the model runner can use.
-                # `kv_cache_config.num_blocks` is the number of blocks that
-                # KVCacheManager may allocate.
-                # Since different GPUs may have different number of layers and
-                # different memory capacities, `num_blocks` can be different on
-                # different GPUs, and `kv_cache_config.num_blocks` is set to
-                # the min of all `num_blocks`. Verify it here.
-                assert num_blocks >= kv_cache_config.num_blocks
-                alignment = 2 * 1024 * 1024
+                    # `num_blocks` is the number of blocks the model runner can use.
+                    # `kv_cache_config.num_blocks` is the number of blocks that
+                    # KVCacheManager may allocate.
+                    # Since different GPUs may have different number of layers and
+                    # different memory capacities, `num_blocks` can be different on
+                    # different GPUs, and `kv_cache_config.num_blocks` is set to
+                    # the min of all `num_blocks`. Verify it here.
+                    assert num_blocks >= kv_cache_config.num_blocks
+
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
@@ -2473,6 +2476,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
                     if self.model_config.is_deepseek_mla:
+                        alignment = 2 * 1024 * 1024
                         num_blocks, block_size, num_kv_heads, head_size = kv_cache_shape
                         rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
                         nope_dim = head_size - rope_dim
