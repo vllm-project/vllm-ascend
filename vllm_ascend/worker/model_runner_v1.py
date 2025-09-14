@@ -2700,22 +2700,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         for group in self._attn_group_iterator():
             attn_metadata_builder_i = group.metadata_builder
-
-            # check that if any backends reorder batches; that the reordering
-            # is compatible (e.g., decode threshold is the same)
-            reorder_batch_threshold_i = (
-                attn_metadata_builder_i.reorder_batch_threshold)
-            if reorder_batch_threshold_i is not None:
-                if self.reorder_batch_threshold is not None:
-                    if reorder_batch_threshold_i != \
-                        self.reorder_batch_threshold:
-                        raise ValueError(
-                            f"Attention backend reorders decodes with "
-                            f"threshold {reorder_batch_threshold_i} but other "
-                            f"backend uses threshold "
-                            f"{self.reorder_batch_threshold}")
-                else:
-                    self.reorder_batch_threshold = reorder_batch_threshold_i
+            if getattr(attn_metadata_builder_i, "reorder_batch_threshold"):
+                # check that if any backends reorder batches; that the reordering
+                # is compatible (e.g., decode threshold is the same)
+                reorder_batch_threshold_i = (
+                    attn_metadata_builder_i.reorder_batch_threshold)
+                if reorder_batch_threshold_i is not None:
+                    if self.reorder_batch_threshold is not None:
+                        if reorder_batch_threshold_i != \
+                            self.reorder_batch_threshold:
+                            raise ValueError(
+                                f"Attention backend reorders decodes with "
+                                f"threshold {reorder_batch_threshold_i} but other "
+                                f"backend uses threshold "
+                                f"{self.reorder_batch_threshold}")
+                    else:
+                        self.reorder_batch_threshold = reorder_batch_threshold_i
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

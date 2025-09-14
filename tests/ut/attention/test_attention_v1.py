@@ -72,7 +72,8 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_vllm_config.model_config.max_model_len = 640
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_device = 'cpu:0'
-        self.builder = AscendAttentionMetadataBuilder(self.mock_vllm_config,
+        self.builder = AscendAttentionMetadataBuilder(None, None,
+                                                      self.mock_vllm_config,
                                                       self.mock_device)
 
     def test_reorder_batch(self):
