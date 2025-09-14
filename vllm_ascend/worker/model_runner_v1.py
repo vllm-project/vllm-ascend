@@ -1080,11 +1080,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> tuple[Union[AscendMetadata, AscendMLAMetadata, AscendTorchairMetadata,
-                     AscendMLATorchairMetadata], torch.Tensor, np.ndarray, int,
-               torch.Tensor, int, torch.Tensor, SpecDecodeMetadata,
-               Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> tuple[dict[str, Any], torch.Tensor, np.ndarray, int, torch.Tensor,
+               int, torch.Tensor, SpecDecodeMetadata, Optional[torch.Tensor],
+               Optional[torch.Tensor], Optional[torch.Tensor]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs

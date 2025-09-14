@@ -173,6 +173,7 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
 
     def build(
         self,
+        common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         model: nn.Module,
     ):

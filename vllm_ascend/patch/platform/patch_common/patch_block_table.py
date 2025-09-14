@@ -90,7 +90,7 @@ class BlockTable:
 
     def append_row(
         self,
-        block_ids: list[int],
+        block_ids,
         row_idx: int,
     ) -> None:
         if not block_ids:
