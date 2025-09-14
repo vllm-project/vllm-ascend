@@ -2437,7 +2437,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return tensor[int(offset):]
 
         kv_caches: Dict[str, torch.Tensor] = {}
-        has_attn, has_mamba = False, False
+        #has_attn, has_mamba = False, False
         for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
         ):
             attn_backend = kv_cache_group.backend
@@ -2461,7 +2461,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
-                    has_attn = True
+                    #has_attn = True
                     if self.vllm_config.additional_config.get(
                             "kv_cache_dtype", None) == 'int8':
                         kv_cache_shape = attn_backend.get_bsh_kv_cache_shape(
@@ -2527,28 +2527,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                     rope_cache_shape)
                         kv_caches[layer_name] = (nope_cache, rope_cache)
                     else:
-                        # num_caches = kv_cache_shape[0]
-                        # kv_cache_list = []
-                        # for i in range(num_caches):
-                        #     cache_shape = kv_cache_shape[1:]
-                        #     if self.vllm_config.kv_transfer_config is None:
-                        #         kv_cache = raw_tensor.view(dtype).view(kv_cache_shape)
-                        #         kv_cache = self._convert_torch_format(kv_cache)
-                        #     else:
-                        #         cache_size = math.prod(cache_shape)
-                        #         cache_size_aligned = cache_size + alignment
-                        #         kv_cache = torch.zeros(cache_size_aligned,
-                        #                                dtype=dtype,
-                        #                                device=self.device)
-                        #         kv_cache = align_memory(
-                        #             kv_cache,
-                        #             alignment)[:cache_size].view(cache_shape)
-                        #     kv_cache_list.append(kv_cache)
                         kv_cache = raw_tensor.view(dtype).view(kv_cache_shape)
                         kv_cache = self._convert_torch_format(kv_cache)
                         kv_caches[layer_name] = kv_cache
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    has_mamba = True
+                    #has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
                     storage_offset_bytes = 0

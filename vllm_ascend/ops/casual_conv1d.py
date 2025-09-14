@@ -1,9 +1,17 @@
 # adapted from vllm/model_executor/layers/mamba/ops/casual_conv1d.py
+# Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
+# SPDX-License-Identifier: Apache-2.0
 
-from typing import Optional
+# Copyright (c) 2024, Tri Dao.
+# Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
+# and https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
+
+from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
+import triton
+import triton.language as tl
 
 PAD_SLOT_ID = -1
 
@@ -99,14 +107,6 @@ def causal_conv1d_fn(
     if x.stride(-1) != 1:
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
-    # out_ref, final_states_ref = causal_conv1d_ref2(
-    #     x,
-    #     weight,
-    #     bias,
-    #     initial_states=conv_states,
-    #     return_final_states=True,
-    #     activation=activation,
-    # )
 
     out_ref = []
     out_ref_b = []
@@ -114,23 +114,6 @@ def causal_conv1d_fn(
     seqlens = seqlens.tolist()
     splits = torch.split(x, seqlens, dim=-1)
 
-    # if torch.distributed.get_rank() == 0:
-    #     print(f"x: {x}")
-    # out_ref_b.append(
-    #     causal_conv1d_ref(
-    #         x,
-    #         weight,
-    #         bias,
-    #         activation=activation,
-    #         return_final_states=True,
-    #         final_states_out=conv_states[cache_indices[0]].unsqueeze(0),
-    #         initial_states=conv_states[cache_indices[0]]
-    #         if has_initial_state[0] else None))
-
-    # out_ref.append(torch.cat([t[0] for t in out_ref_b], dim=-1))
-    # out_ref_tensor = torch.cat(out_ref, dim=0)
-
-    # print(f"seqlens: {seqlens}")
     for i in range(len(seqlens)):
         x_s = splits[i]
         if cache_indices[i] == PAD_SLOT_ID:
@@ -203,73 +186,6 @@ def causal_conv1d_update_ref(x,
     if unsqueeze:
         out = out.squeeze(-1)
     return (out if activation is None else F.silu(out)).to(dtype=dtype_in)
-
-
-def causal_conv1d_update_native(
-    x: torch.Tensor,
-    conv_state: torch.Tensor,
-    weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    activation: Optional[str] = None,
-    cache_seqlens: Optional[torch.Tensor] = None,
-    conv_state_indices: Optional[torch.Tensor] = None,
-    pad_slot_id: int = PAD_SLOT_ID,
-):
-    """
-    x: (batch, dim) or (batch, dim, seqlen)
-    conv_state: (batch, dim, state_len), where state_len >= width - 1
-    weight: (dim, width)
-    bias: (dim,)
-    cache_seqlens: (batch,), dtype int32.
-        If not None, the conv_state is treated as a circular buffer.
-        The conv_state will be updated by copying x to the conv_state
-        starting at the index
-        @cache_seqlens % state_len.
-    conv_state_indices: (batch,), dtype int32
-        If not None, the conv_state is a larger tensor along the batch dim,
-        and we are selecting the batch coords specified by conv_state_indices.
-        Useful for a continuous batching scenario.
-    pad_slot_id: int
-            if cache_indices is passed, lets the kernel identify padded
-            entries that will not be processed,
-            for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
-            in this case, the kernel will not process entries at
-            indices 0 and 3
-    out: (batch, dim) or (batch, dim, seqlen)
-    """
-    if activation not in [None, "silu", "swish"]:
-        raise NotImplementedError(
-            f"activation must be None, silu, or swish, actual: {activation}")
-    activation_val = activation in ["silu", "swish"]
-    unsqueeze = x.dim() == 2
-    if unsqueeze:
-        x = x.unsqueeze(-1)
-
-    x = causal_conv1d_update_ref(x,
-                                 conv_state,
-                                 weight,
-                                 bias,
-                                 activation=activation,
-                                 conv_state_indices=conv_state_indices)
-    if unsqueeze:
-        x = x.squeeze(-1)
-    return x
-
-
-# Adapted from https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
-# SPDX-License-Identifier: Apache-2.0
-
-# Copyright (c) 2024, Tri Dao.
-# Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
-# and https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/ops/causal_conv1d.py
-
-from typing import Optional, Union
-
-import torch
-import triton
-import triton.language as tl
-
-PAD_SLOT_ID = -1
 
 
 @triton.jit()
@@ -377,7 +293,7 @@ def _causal_conv1d_update_kernel(
         col2 = tl.load(conv_states_ptrs, mask_w, 0.0)
     if KERNEL_WIDTH == 5:
         conv_states_ptrs = prior_tokens + 3 * stride_conv_state_tok  # [BLOCK_N]
-        col3 = tl.load(conv_states_ptrs, mask_w, 0.0)
+        #col3 = tl.load(conv_states_ptrs, mask_w, 0.0)
 
     # STEP 2: assume state_len > seqlen
     idx_tokens = tl.arange(0, NP2_STATELEN)  # [BLOCK_M]
