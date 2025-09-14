@@ -2458,7 +2458,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             num_blocks, kv_cache_spec.block_size,
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
-                    else:
+                    elif hasattr(attn_backend, "get_supported_block_size"):
                         # kv_cache_shape = attn_backend.get_kv_cache_shape(
                         #     num_blocks, kv_cache_spec.block_size,
                         #     kv_cache_spec.num_kv_heads,
