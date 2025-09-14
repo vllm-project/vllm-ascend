@@ -209,8 +209,9 @@ class AscendAttentionMetadataBuilder:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
-        self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
-                                           AscendAttentionBackend.get_supported_block_size()[0])
+        self.max_num_blocks_per_req = cdiv(
+            self.model_config.max_model_len,
+            AscendAttentionBackend.get_supported_block_size()[0])
 
     def reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
         return False
@@ -585,7 +586,6 @@ def unified_ascend_attention_with_output(
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    # print(100 * "^", f"layer_name: {layer_name}")
     self.impl.forward(self,
                       query,
                       key,

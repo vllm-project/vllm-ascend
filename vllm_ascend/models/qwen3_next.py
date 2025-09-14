@@ -65,8 +65,8 @@ from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.casual_conv1d import (causal_conv1d_fn,
-                                           causal_conv1d_update_native, causal_conv1d_update_npu)
-from vllm_ascend.ops.sigmoid_gating import (fused_recurrent_gated_delta_rule)
+                                           causal_conv1d_update_npu)
+from vllm_ascend.ops.sigmoid_gating import fused_recurrent_gated_delta_rule
 
 logger = init_logger(__name__)
 
@@ -686,7 +686,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         elif attn_metadata.num_decodes > 0:
             # if torch.distributed.get_rank() == 0:
             #     print("====================================\n"
-            #           f"self.layer_idx: {self.layer_idx}, mixed_qkv_non_spec: {mixed_qkv_non_spec}\n" 
+            #           f"self.layer_idx: {self.layer_idx}, mixed_qkv_non_spec: {mixed_qkv_non_spec}\n"
             #           f"conv_state: {conv_state}\n",
             #           f"conv_weights: {conv_weights}\n"
             #           f"self.conv1d.bias: {self.conv1d.bias}\n",
@@ -707,7 +707,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             #     print(f"self.layer_idx: {self.layer_idx}, output mixed_qkv_non_spec: {mixed_qkv_non_spec}\n")
         else:
             mixed_qkv_non_spec = None
-        
+
         # if torch.distributed.get_rank() == 0:
         #     print(f"self.layer_idx: {self.layer_idx}, 222 mixed_qkv_non_spec: {mixed_qkv_non_spec}")
 
@@ -798,9 +798,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             #             f"g_non_spec.shape: {g_non_spec.shape}\n"
             #             f"beta_non_spec.shape: {beta_non_spec.shape}\n"
             #             f"initial_state.shape: {initial_state.shape}\n")
-                
+
             for b_idx in range(batch_size):
-                start, end = non_spec_query_start_loc[b_idx], non_spec_query_start_loc[b_idx+1]
+                start, end = non_spec_query_start_loc[
+                    b_idx], non_spec_query_start_loc[b_idx + 1]
                 cur_q = query_non_spec[:, start:end, ...]
                 cur_k = key_non_spec[:, start:end, ...]
                 cur_v = value_non_spec[:, start:end, ...]
@@ -840,15 +841,18 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
                 core_attn_out.append(cur_core_attn_out_non_spec)
                 last_recurrent_state.append(cur_last_recurrent_state)
-            
+
             tar_dtype = core_attn_out[0].dtype
             tar_device = core_attn_out[0].device
             tar_shape = list(core_attn_out[0].shape)
             tar_shape[1] = non_spec_query_start_loc[-1]
-            core_attn_out_non_spec= torch.empty(tar_shape, dtype=tar_dtype, device=tar_device)
+            core_attn_out_non_spec = torch.empty(tar_shape,
+                                                 dtype=tar_dtype,
+                                                 device=tar_device)
             for b_idx in range(batch_size):
                 cur_core_attn_out = core_attn_out[b_idx]
-                start, end = non_spec_query_start_loc[b_idx], non_spec_query_start_loc[b_idx + 1]
+                start, end = non_spec_query_start_loc[
+                    b_idx], non_spec_query_start_loc[b_idx + 1]
                 core_attn_out_non_spec[:, start:end, ...] = cur_core_attn_out
             last_recurrent_state = torch.cat(last_recurrent_state, dim=0)
 
@@ -877,7 +881,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     ssm_state_indices=non_spec_state_indices_tensor,
                     use_qk_l2norm_in_kernel=True,
                 ))
-            
+
             # core_attn_out_non_spec = fused_sigmoid_gating_delta_rule_update(
             #     A_log=self.A_log,
             #     dt_bias=self.dt_bias,

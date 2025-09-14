@@ -7,12 +7,11 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 # ruff: noqa: E501
-from typing import Optional
 import os
+from typing import Optional
 
 import torch
-
-from vllm.triton_utils import tl, triton, tldevice
+from vllm.triton_utils import tl, tldevice, triton
 
 if os.environ.get('FLA_USE_FAST_OPS', '0') == '1':
     div = tldevice.fast_dividef
@@ -29,6 +28,7 @@ else:
     exp = tl.exp
     log = tl.log
     log2 = tl.log2
+
 
 @triton.heuristics({
     'USE_INITIAL_STATE':
