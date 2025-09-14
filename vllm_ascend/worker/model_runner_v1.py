@@ -2458,7 +2458,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             num_blocks, kv_cache_spec.block_size,
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
-                    elif hasattr(attn_backend, "get_supported_block_size"):
+                    elif hasattr(attn_backend, "get_supported_block_size"
+                                 ) and not self.model_config.is_deepseek_mla:
                         block_size = attn_backend.get_supported_block_size()[0]
                         block_size_chunk = kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
@@ -2605,7 +2606,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                               [self.cache_config.block_size])
                 else:
                     # Fallback to cache config block_size if no backend found
-                    kernel_block_size_list = [64]
+                    kernel_block_size_list = [
+                        64
+                    ] if not self.model_config.is_deepseek_mla else [0]
                 kernel_block_sizes.append(kernel_block_size_list)
             else:
                 # This is likely Mamba or other non-attention cache,

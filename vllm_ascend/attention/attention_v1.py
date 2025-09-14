@@ -213,7 +213,8 @@ class AscendAttentionMetadataBuilder:
             self.model_config.max_model_len,
             AscendAttentionBackend.get_supported_block_size()[0])
 
-    def reorder_batch(self, scheduler_output: "SchedulerOutput") -> bool:
+    def reorder_batch(self, input_batch,
+                      scheduler_output: "SchedulerOutput") -> bool:
         return False
 
     def build(
