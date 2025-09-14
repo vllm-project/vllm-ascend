@@ -66,50 +66,12 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from vllm_ascend.ops.casual_conv1d import (causal_conv1d_fn,
                                            causal_conv1d_update_npu)
+from vllm_ascend.ops.fla import RMSNormGated, fused_gdn_gating
 from vllm_ascend.ops.sigmoid_gating import fused_recurrent_gated_delta_rule
 
 logger = init_logger(__name__)
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
-
-
-class RMSNormGated(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size,
-        eps: float = 1e-5,
-        group_size: Optional[int] = None,
-        norm_before_gate: bool = False,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
-    ):
-        """If group_size is not None, we do GroupNorm with each group having group_size elements.
-        group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
-        """
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
-        self.eps = eps
-        self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
-        self.register_parameter("bias", None)
-        self.group_size = group_size
-        self.norm_before_gate = norm_before_gate
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        torch.nn.init.ones_(self.weight)
-
-    def forward(self, x, z=None):
-        """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
-        input_dtype = x.dtype
-        hidden_states = x.to(torch.float32)
-        variance = x.pow(2).mean(-1, keepdim=True)
-        # Norm before gate
-        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
-        hidden_states = self.weight * hidden_states.to(input_dtype)
-        hidden_states = hidden_states * F.silu(z.to(torch.float32))
-
-        return hidden_states.to(input_dtype)
 
 
 class Qwen3NextSparseMoeBlock(nn.Module):
@@ -641,7 +603,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec)
 
         beta = b.sigmoid()
-        g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+        g = fused_gdn_gating(self.A_log, a, self.dt_bias)
         g, beta = map(lambda x: rearrange(x, 'l d -> 1 l d'), (g, beta))
 
         if spec_sequence_masks is not None:
