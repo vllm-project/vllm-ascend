@@ -379,7 +379,8 @@ class MtpProposer(Proposer):
             attn_state=self.runner.attn_state,
             graph_pad_size=self.runner.graph_pad_size,
             decode_token_per_req=self.runner.decode_token_per_req,
-        )
+            num_computed_tokens_cpu=None,
+            seq_lens=None)
         attn_metadata = self.runner.attn_metadata_builder.build(
             common_attn_metadata, self.runner.get_model())
 
