@@ -2700,7 +2700,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         for group in self._attn_group_iterator():
             attn_metadata_builder_i = group.metadata_builder
-            if getattr(attn_metadata_builder_i, "reorder_batch_threshold"):
+            if hasattr(attn_metadata_builder_i, "reorder_batch_threshold"):
                 # check that if any backends reorder batches; that the reordering
                 # is compatible (e.g., decode threshold is the same)
                 reorder_batch_threshold_i = (

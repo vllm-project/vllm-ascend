@@ -452,7 +452,9 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
                 positions=torch.tensor([1, 1]),
                 attn_mask=torch.ones((15, 15)),
                 spec_attn_mask=None,
-                attn_state=AscendAttentionState.ChunkedPrefill)
+                attn_state=AscendAttentionState.ChunkedPrefill,
+                num_computed_tokens_cpu=None,
+                seq_lens=None)
 
             metadata = builder.build(common_attn_metadata, model)
 

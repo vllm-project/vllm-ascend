@@ -106,7 +106,9 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((10, 10)),
             spec_attn_mask=None,
-            attn_state=AscendAttentionState.PrefillNoCache)
+            attn_state=AscendAttentionState.PrefillNoCache,
+            num_computed_tokens_cpu=None,
+            seq_lens=None)
 
         mock_nz_tensor = MagicMock()
         mock_model = MagicMock()
@@ -137,7 +139,9 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((15, 15)),
             spec_attn_mask=None,
-            attn_state=AscendAttentionState.ChunkedPrefill)
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            num_computed_tokens_cpu=None,
+            seq_lens=None)
 
         mock_ascend_attention_state = MagicMock()
         mock_ascend_attention_state.PrefillNoCache = 0
@@ -166,7 +170,9 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((15, 15)),
             spec_attn_mask=None,
-            attn_state=AscendAttentionState.ChunkedPrefill)
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            num_computed_tokens_cpu=None,
+            seq_lens=None)
         mock_model = MagicMock()
 
         self.builder.build(common_attn_metadata, mock_model)
