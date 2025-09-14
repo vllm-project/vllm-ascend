@@ -1,4 +1,3 @@
-
 # Adapt from https://github.com/fla-org/flash-linear-attention/blob/main/fla/modules/layernorm_gated.py
 # Copyright (c) 2024, Tri Dao.
 # Based on the Triton LayerNorm tutorial: https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html
@@ -38,7 +37,7 @@ def rms_norm_ref(
                                                                    weight)
     else:
         x_group = rearrange(x, "... (g d) -> ... g d", d=group_size)
-        rstd = 1 / torch.sqrt((x_group.square()).mean(dim=-1, keepdim=True) + 
+        rstd = 1 / torch.sqrt((x_group.square()).mean(dim=-1, keepdim=True) +
                               eps)
         out = rearrange(x_group * rstd, "... g d -> ... (g d)") * weight
         if bias is not None:
@@ -146,8 +145,8 @@ def _layer_norm_fwd(
         out = torch.empty_like(x)
     assert out.stride(-1) == 1
     mean = (torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
-        if not is_rms_norm else None)
-    rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
+            if not is_rms_norm else None)
+    rstd = torch.empty((ngroups * M, ), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(group_size))
@@ -232,9 +231,8 @@ def layernorm_fn(
     norm_before_gate=True,
     is_rms_norm=False,
 ):
-    return LayerNormFn.apply(
-        x, weight, bias, z, eps, group_size, norm_before_gate, is_rms_norm
-    )
+    return LayerNormFn.apply(x, weight, bias, z, eps, group_size,
+                             norm_before_gate, is_rms_norm)
 
 
 def rmsnorm_fn(x,
@@ -379,5 +377,5 @@ def fused_gdn_gating(
                                   threshold,
                                   8,
                                   num_warps=1)
-    
+
     return g
