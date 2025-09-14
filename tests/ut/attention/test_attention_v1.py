@@ -115,7 +115,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         mock_nd_to_nz_2d.return_value = mock_nz_tensor
         mock_npu_format_cast.return_value = mock_nz_tensor
 
-        self.builder.build(common_attn_metadata, mock_model)
+        self.builder.build(1, common_attn_metadata, mock_model)
 
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
     @patch('torch_npu.npu_format_cast')
@@ -151,7 +151,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         mock_nd_to_nz_spec.return_value = mock_nz_tensor
         mock_npu_format_cast.return_value = mock_nz_tensor
 
-        self.builder.build(common_attn_metadata, mock_model)
+        self.builder.build(1, common_attn_metadata, mock_model)
 
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
     @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
@@ -175,7 +175,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             seq_lens=None)
         mock_model = MagicMock()
 
-        self.builder.build(common_attn_metadata, mock_model)
+        self.builder.build(1, common_attn_metadata, mock_model)
 
 
 class TestAscendAttentionBackendImpl(TestBase):

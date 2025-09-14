@@ -2459,14 +2459,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     elif hasattr(attn_backend, "get_supported_block_size"):
-                        # kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        #     num_blocks, kv_cache_spec.block_size,
-                        #     kv_cache_spec.num_kv_heads,
-                        #     kv_cache_spec.head_size)
                         block_size = attn_backend.get_supported_block_size()[0]
                         block_size_chunk = kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks * block_size_chunk, block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size)
+                    else:
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                            num_blocks, kv_cache_spec.block_size,
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype

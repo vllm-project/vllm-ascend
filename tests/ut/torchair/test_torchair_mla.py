@@ -456,7 +456,7 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
                 num_computed_tokens_cpu=None,
                 seq_lens=None)
 
-            metadata = builder.build(common_attn_metadata, model)
+            metadata = builder.build(1, common_attn_metadata, model)
 
         self.assertIsInstance(metadata, AscendMLATorchairMetadata)
         self.assertEqual(metadata.num_input_tokens, 0)
