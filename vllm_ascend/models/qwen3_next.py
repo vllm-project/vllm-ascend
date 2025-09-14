@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # mypy: ignore-errors
-
 """Inference-only Qwen3Next model."""
 from collections.abc import Iterable
 from typing import Optional
