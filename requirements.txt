@@ -10,7 +10,7 @@ pyyaml
 scipy
 setuptools>=64
 setuptools-scm>=8
-torch==2.7.1
+torch>=2.7.1
 torchvision
 wheel
 
@@ -21,3 +21,7 @@ quart
 # Required for N-gram speculative decoding
 numba
 
+# Install torch_npu
+--pre
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+torch-npu==2.7.1.dev20250724
