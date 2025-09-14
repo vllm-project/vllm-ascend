@@ -2413,6 +2413,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                      device=self.device)
                 for layer_name in kv_cache_tensor.shared_by:
                     kv_cache_raw_tensors[layer_name] = tensor
+        else:
+            kv_cache_sizes = {}
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                assert len(kv_cache_tensor.shared_by) == 1, (
+                    "KV cache tensor shared by multiple layers is not supported in "
+                    "NPU.")
+                kv_cache_sizes[
+                    kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
@@ -2436,7 +2444,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in kv_cache_group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                num_blocks = None
                 if not self.model_config.is_deepseek_mla:
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor.numel(
@@ -2452,7 +2459,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # different GPUs, and `kv_cache_config.num_blocks` is set to
                     # the min of all `num_blocks`. Verify it here.
                     assert num_blocks >= kv_cache_config.num_blocks
-
+                else:
+                    tensor_size = kv_cache_sizes[layer_name]
+                    num_blocks = tensor_size // kv_cache_spec.page_size_bytes
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
