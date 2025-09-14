@@ -37,7 +37,6 @@ from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
-from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 
 @dataclass
@@ -132,6 +131,8 @@ class InputBatch:
         )
         self.num_computed_tokens_cpu = \
             self.num_computed_tokens_cpu_tensor.numpy()
+        from vllm_ascend.patch.worker.patch_common.patch_block_table import \
+            MultiGroupBlockTable
 
         # Block table.
         self.block_table = MultiGroupBlockTable(
