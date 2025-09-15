@@ -198,6 +198,12 @@ def torchair_apply_mlp(hidden_states: torch.Tensor,
 
     return hidden_states
 
+if VLLM_ASCEND_COMM_QUANT_MODE:
+    os.environ["HCCL_INTRA_PCIE_ENABLE"] = "1"
+    os.environ["HCCL_INTRA_ROCE_ENABLE"] = "0"
+    comm_quant_mode = 2
+else:
+    comm_quant_mode = 0
 
 def torchair_fused_experts_with_mc2(
     hidden_states: torch.Tensor,
@@ -318,6 +324,7 @@ def torchair_fused_experts_with_mc2(
         "shared_expert_rank_num": 0,
         "moe_expert_num": moe_expert_num,
         "global_bs": 0,
+        "comm_quant_mode": comm_quant_mode,
     }
     tp_recv_counts = torch.empty(1,
                                  dtype=torch.int32,
@@ -1032,4 +1039,5 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
+
 
