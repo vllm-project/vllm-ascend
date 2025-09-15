@@ -247,8 +247,9 @@ class NPUPlatform(Platform):
             if cache_config.block_size is None:
                 cache_config.block_size = 128
             else:
-                cache_config.block_size = cdiv(cache_config.block_size,
-                                               64) * 64
+                if not vllm_config.model_config.is_deepseek_mla:
+                    cache_config.block_size = cdiv(cache_config.block_size,
+                                                   64) * 64
 
             if cache_config.enable_prefix_caching and cache_config.block_size != 128:
                 logger.warning(
