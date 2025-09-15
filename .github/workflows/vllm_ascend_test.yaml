@@ -70,10 +70,10 @@ jobs:
               - 'tests/ut/**'
 
   ut:
-    needs: [lint, changes]
+    needs: [changes]
     name: unit test
     # only trigger unit test after lint passed and the change is e2e and ut related.
-    if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
+    if: ${{ (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     runs-on: ubuntu-latest
     container:
       image: quay.io/ascend/cann:8.2.rc1-910b-ubuntu22.04-py3.11
@@ -131,9 +131,9 @@ jobs:
           verbose: true
 
   e2e-light:
-    needs: [lint, changes]
+    needs: [changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       max-parallel: 2
       matrix:
