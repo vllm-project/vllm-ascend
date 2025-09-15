@@ -28,7 +28,6 @@ class MemcacheEngine:
         self,
         vllm_config: VllmConfig,
         use_layerwize: bool,
-        skip_last_n_tokens: int,
     ):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -40,7 +39,6 @@ class MemcacheEngine:
         ):
             self.use_mla = True
         self.use_layerwise=use_layerwize
-        self.skip_last_n_tokens = skip_last_n_tokens
         self.tp_rank = parallel_config.rank
         self.tp_size = parallel_config.tensor_parallel_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
@@ -261,7 +259,6 @@ class MemcacheEngine:
                 continue
 
             token_ids = request.token_ids
-            # token_ids = token_ids[: -self.skip_last_n_tokens]
             req_id = request.req_id
             assert isinstance(token_ids, torch.Tensor)
             assert token_ids.is_cpu
@@ -271,6 +268,8 @@ class MemcacheEngine:
                 save_spec.skip_leading_tokens,
             )
             if skip_leading_tokens == len(token_ids):
+                if request.is_last_chunk:
+                    self.kv_send_thread.set_finished_request(req_id)
                 continue  # skip this request
 
             skip_leading_tokens = (
