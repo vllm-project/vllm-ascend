@@ -94,7 +94,7 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         self.mock_self.cos_sin_cache = self.cos_sin_cache
         self.mock_self.is_neox_style = self.is_neox_style
 
-    @patch('torch.ops._C')
+    @patch('torch.ops._C_ascend')
     @patch('vllm_ascend.ops.rotary_embedding.is_310p', return_value=False)
     @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
            return_value=True)
