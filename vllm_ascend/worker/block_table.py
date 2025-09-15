@@ -89,15 +89,14 @@ class BlockTable:
 
     def append_row(
         self,
-        block_ids: list[int],
+        block_ids,
         row_idx: int,
     ) -> None:
         if not block_ids:
             return
-
+        block_ids = np.array(block_ids)
         if self.use_hybrid_blocks:
-            block_ids = self._convert_physical_to_logical_blocks(
-                np.array(block_ids))
+            block_ids = self._convert_physical_to_logical_blocks(block_ids)
 
         num_blocks = len(block_ids)
         start = self.num_blocks_per_row[row_idx]

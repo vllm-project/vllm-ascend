@@ -2388,48 +2388,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.may_reinitialize_input_batch(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
-        kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
+
+        if self.model_config.is_deepseek_mla:
+            kv_caches = self.initialize_kv_cache_tensors_deepseek(
+                kv_cache_config)
+        else:
+            kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
-    def initialize_kv_cache_tensors(
+    def initialize_kv_cache_tensors_deepseek(
             self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
-        """
-        Initialize the memory buffer for KV cache.
-
-        Args:
-            kv_cache_config: The KV cache config
-        Returns:
-            Dict[str, torch.Tensor]: A map between layer names to their
-            corresponding memory buffer for KV cache.
-        """
-        # init kv cache tensors
-        kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
-        if not self.model_config.is_deepseek_mla:
-            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                tensor = torch.zeros(kv_cache_tensor.size,
-                                     dtype=torch.int8,
-                                     device=self.device)
-                for layer_name in kv_cache_tensor.shared_by:
-                    kv_cache_raw_tensors[layer_name] = tensor
-        else:
-            kv_cache_sizes = {}
-            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                assert len(kv_cache_tensor.shared_by) == 1, (
-                    "KV cache tensor shared by multiple layers is not supported in "
-                    "NPU.")
-                kv_cache_sizes[
-                    kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
-
-        layer_names = set()
-        for group in kv_cache_config.kv_cache_groups:
-            for layer_name in group.layer_names:
-                if layer_name in self.runner_only_attn_layers:
-                    continue
-                layer_names.add(layer_name)
-        # assert layer_names == set(kv_cache_raw_tensors.keys(
-        # )), "Some layers are not correctly initialized"
+        kv_cache_sizes = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            assert len(kv_cache_tensor.shared_by) == 1, (
+                "KV cache tensor shared by multiple layers is not supported in "
+                "NPU.")
+            kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
         def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
             data_ptr = tensor.data_ptr()
@@ -2444,24 +2420,125 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in kv_cache_group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                if not self.model_config.is_deepseek_mla:
-                    raw_tensor = kv_cache_raw_tensors[layer_name]
-                    assert raw_tensor.numel(
-                    ) % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = raw_tensor.numel(
-                    ) // kv_cache_spec.page_size_bytes
-
-                    # `num_blocks` is the number of blocks the model runner can use.
-                    # `kv_cache_config.num_blocks` is the number of blocks that
-                    # KVCacheManager may allocate.
-                    # Since different GPUs may have different number of layers and
-                    # different memory capacities, `num_blocks` can be different on
-                    # different GPUs, and `kv_cache_config.num_blocks` is set to
-                    # the min of all `num_blocks`. Verify it here.
-                    assert num_blocks >= kv_cache_config.num_blocks
+                tensor_size = kv_cache_sizes[layer_name]
+                num_blocks = tensor_size // kv_cache_spec.page_size_bytes
+                if self.vllm_config.additional_config.get(
+                        "kv_cache_dtype", None) == 'int8':
+                    kv_cache_shape = attn_backend.get_bsh_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                elif hasattr(attn_backend, "get_supported_block_size"
+                             ) and not self.model_config.is_deepseek_mla:
+                    block_size = attn_backend.get_supported_block_size()[0]
+                    block_size_chunk = kv_cache_spec.block_size // block_size
+                    kv_cache_shape = attn_backend.get_kv_cache_shape(
+                        num_blocks * block_size_chunk, block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                 else:
-                    tensor_size = kv_cache_sizes[layer_name]
-                    num_blocks = tensor_size // kv_cache_spec.page_size_bytes
+                    kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                        num_blocks, kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
+                dtype = kv_cache_spec.dtype
+
+                alignment = 2 * 1024 * 1024
+                num_blocks, block_size, num_kv_heads, head_size = kv_cache_shape
+                rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
+                nope_dim = head_size - rope_dim
+                nope_cache_shape = (num_blocks, block_size, num_kv_heads,
+                                    nope_dim)
+                rope_cache_shape = (num_blocks, block_size, num_kv_heads,
+                                    rope_dim)
+                if self.vllm_config.kv_transfer_config is None:
+                    # For no disaggregate pd scenario, allocate kv cache in normal way
+                    rope_cache = torch.zeros(rope_cache_shape,
+                                             dtype=dtype,
+                                             device=self.device)
+                    nope_cache = torch.zeros(nope_cache_shape,
+                                             dtype=dtype,
+                                             device=self.device)
+                    rope_cache = self._convert_torch_format(rope_cache)
+                    nope_cache = self._convert_torch_format(nope_cache)
+                else:
+
+                    # In order to transfer kv cache through the reigster_memory api from llmdatadist, the memory
+                    # address should be aligned by 2M. In most case, torch_npu can allocate 2M aligned memory, but
+                    # we found there are also some exceptions during test, so we manual align those memory here, this part
+                    # of code may consume 2M * 2 * elem_size memory every layer.
+                    nope_allocate_shape = num_blocks * block_size * num_kv_heads * nope_dim
+                    nope_allocate_shape_alignment = nope_allocate_shape + alignment
+                    rope_allocate_shape = num_blocks * block_size * num_kv_heads * rope_dim
+                    rope_allocate_shape_alignment = rope_allocate_shape + alignment
+
+                    nope_cache = torch.zeros(nope_allocate_shape_alignment,
+                                             dtype=dtype,
+                                             device=self.device)
+                    rope_cache = torch.zeros(rope_allocate_shape_alignment,
+                                             dtype=dtype,
+                                             device=self.device)
+                    nope_cache = align_memory(
+                        nope_cache,
+                        alignment)[:nope_allocate_shape].view(nope_cache_shape)
+                    rope_cache = align_memory(
+                        rope_cache,
+                        alignment)[:rope_allocate_shape].view(rope_cache_shape)
+                kv_caches[layer_name] = (nope_cache, rope_cache)
+
+        bind_kv_cache(kv_caches,
+                      self.compilation_config.static_forward_context,
+                      self.kv_caches)
+
+        return kv_caches
+
+    def initialize_kv_cache_tensors(
+            self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+        """
+        Initialize the memory buffer for KV cache.
+
+        Args:
+            kv_cache_config: The KV cache config
+        Returns:
+            Dict[str, torch.Tensor]: A map between layer names to their
+            corresponding memory buffer for KV cache.
+        """
+        # init kv cache tensors
+        kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            tensor = torch.zeros(kv_cache_tensor.size,
+                                 dtype=torch.int8,
+                                 device=self.device)
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_cache_raw_tensors[layer_name] = tensor
+        layer_names = set()
+        for group in kv_cache_config.kv_cache_groups:
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                layer_names.add(layer_name)
+        assert layer_names == set(kv_cache_raw_tensors.keys(
+        )), "Some layers are not correctly initialized"
+
+        kv_caches: Dict[str, torch.Tensor] = {}
+        for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
+        ):
+            attn_backend = kv_cache_group.backend
+            for layer_name in kv_cache_group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                raw_tensor = kv_cache_raw_tensors[layer_name]
+
+                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                num_blocks = raw_tensor.numel(
+                ) // kv_cache_spec.page_size_bytes
+
+                # `num_blocks` is the number of blocks the model runner can use.
+                # `kv_cache_config.num_blocks` is the number of blocks that
+                # KVCacheManager may allocate.
+                # Since different GPUs may have different number of layers and
+                # different memory capacities, `num_blocks` can be different on
+                # different GPUs, and `kv_cache_config.num_blocks` is set to
+                # the min of all `num_blocks`. Verify it here.
+                assert num_blocks >= kv_cache_config.num_blocks
+
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
@@ -2485,57 +2562,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
-                    if self.model_config.is_deepseek_mla:
-                        alignment = 2 * 1024 * 1024
-                        num_blocks, block_size, num_kv_heads, head_size = kv_cache_shape
-                        rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
-                        nope_dim = head_size - rope_dim
-                        nope_cache_shape = (num_blocks, block_size,
-                                            num_kv_heads, nope_dim)
-                        rope_cache_shape = (num_blocks, block_size,
-                                            num_kv_heads, rope_dim)
-                        if self.vllm_config.kv_transfer_config is None:
-                            # For no disaggregate pd scenario, allocate kv cache in normal way
-                            rope_cache = torch.zeros(rope_cache_shape,
-                                                     dtype=dtype,
-                                                     device=self.device)
-                            nope_cache = torch.zeros(nope_cache_shape,
-                                                     dtype=dtype,
-                                                     device=self.device)
-                            rope_cache = self._convert_torch_format(rope_cache)
-                            nope_cache = self._convert_torch_format(nope_cache)
-                        else:
-
-                            # In order to transfer kv cache through the reigster_memory api from llmdatadist, the memory
-                            # address should be aligned by 2M. In most case, torch_npu can allocate 2M aligned memory, but
-                            # we found there are also some exceptions during test, so we manual align those memory here, this part
-                            # of code may consume 2M * 2 * elem_size memory every layer.
-                            nope_allocate_shape = num_blocks * block_size * num_kv_heads * nope_dim
-                            nope_allocate_shape_alignment = nope_allocate_shape + alignment
-                            rope_allocate_shape = num_blocks * block_size * num_kv_heads * rope_dim
-                            rope_allocate_shape_alignment = rope_allocate_shape + alignment
-
-                            nope_cache = torch.zeros(
-                                nope_allocate_shape_alignment,
-                                dtype=dtype,
-                                device=self.device)
-                            rope_cache = torch.zeros(
-                                rope_allocate_shape_alignment,
-                                dtype=dtype,
-                                device=self.device)
-                            nope_cache = align_memory(
-                                nope_cache,
-                                alignment)[:nope_allocate_shape].view(
-                                    nope_cache_shape)
-                            rope_cache = align_memory(
-                                rope_cache,
-                                alignment)[:rope_allocate_shape].view(
-                                    rope_cache_shape)
-                        kv_caches[layer_name] = (nope_cache, rope_cache)
-                    else:
-                        kv_cache = raw_tensor.view(dtype).view(kv_cache_shape)
-                        kv_cache = self._convert_torch_format(kv_cache)
-                        kv_caches[layer_name] = kv_cache
+                    kv_cache = raw_tensor.view(dtype).view(kv_cache_shape)
+                    kv_cache = self._convert_torch_format(kv_cache)
+                    kv_caches[layer_name] = kv_cache
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
@@ -2557,11 +2586,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         )
                         state_tensors.append(tensor)
                         storage_offset_bytes += stride[0] * dtype_size
-
                     kv_caches[layer_name] = state_tensors
                 else:
-                    # TODO: add new branches when introducing more types of
-                    # KV cache specs.
                     raise ValueError("Unknown KV cache spec type.")
 
         bind_kv_cache(kv_caches,
