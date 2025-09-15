@@ -98,10 +98,12 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
 
     def __init__(
         self,
+        kv_cache_spec,
+        layer_names,
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        super().__init__(vllm_config, device)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.max_num_blocks_per_req = cdiv(
             self.model_config.max_model_len,
             self.vllm_config.cache_config.block_size)
@@ -171,6 +173,7 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
 
     def build(
         self,
+        common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         model: nn.Module,
     ):
