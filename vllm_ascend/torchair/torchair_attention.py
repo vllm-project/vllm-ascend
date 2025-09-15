@@ -405,7 +405,7 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
     def _forward_decode_only(
         self,
         query: torch.Tensor,
-        attn_metadata: "AscendMetadata",
+        attn_metadata,
         output: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
