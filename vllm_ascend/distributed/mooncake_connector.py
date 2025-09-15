@@ -782,10 +782,12 @@ class MooncakeConnectorWorker:
         assert len(device_ids) > self.tp_rank  # type: ignore
         self.device_id = device_ids[self.tp_rank]  # type: ignore
 
-        self._initialize(
-            hostname=self.side_channel_host + ':' + '0' + ':' + 'npu_' \
-                     + str(self.device_id),
-            device_name=None)
+        if vllm_config.kv_transfer_config.get_from_extra_config(
+                'use_ascend_direct', False):
+            hostname = self.side_channel_host
+        else:
+            hostname = f"{self.side_channel_host}:0:npu_{self.device_id}"
+        self._initialize(hostname=hostname, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.

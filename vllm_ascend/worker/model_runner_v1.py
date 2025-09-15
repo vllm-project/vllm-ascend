@@ -1539,7 +1539,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if not self.parallel_config.enable_expert_parallel:
             moe_comm_method = "allgather"
         elif soc_version in {AscendSocVersion.A2}:
-            if num_tokens <= self.mc2_tokens_capacity and self.parallel_config.world_size >= 16:
+            if num_tokens <= self.mc2_tokens_capacity and self.parallel_config.world_size_across_dp >= 16:
                 moe_comm_method = "mc2"
             else:
                 moe_comm_method = "allgather"
