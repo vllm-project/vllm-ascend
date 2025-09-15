@@ -62,7 +62,13 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         return logits
 
     def forward_native(self, logits, generators, k, p):
+        """Override pytorch native implementation to torch_npu"""
         logits = apply_top_k_top_p_tpu(logits, k, p)
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators)
+        logits_to_return = None
+        if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
+            logits_to_return = logits
+        elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
+            logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
+        probs = logits.softmax(dim=-1, dtype=torch.float32)
+        return random_sample(probs, generators), logits_to_return
