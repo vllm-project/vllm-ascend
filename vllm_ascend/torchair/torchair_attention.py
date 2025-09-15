@@ -319,6 +319,9 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
             indices = torch.cat((block_indices, slots_indices), dim=1)
             torch_npu.npu_scatter_nd_update_(key_cache, indices, key)
             torch_npu.npu_scatter_nd_update_(value_cache, indices, value)
+            if attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
+                self.key_cache = key_cache
+                self.value_cache = value_cache
 
         return ForwardAdditionalProcessResult(is_return=False,
                                               output=None,
