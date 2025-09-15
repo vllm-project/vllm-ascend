@@ -19,8 +19,20 @@ import torch
 import torch.distributed
 import torch.distributed as dist
 import torch_npu
+from vllm.forward_context import get_forward_context
 
 COMM_STREAM = None
+
+
+def get_sp_metadata_context():
+    attn_metadata = get_forward_context().attn_metadata
+    sp_metadata = None
+    enable_sp = False
+    if attn_metadata is not None and attn_metadata.prefill is not None:
+        if hasattr(attn_metadata.prefill, 'sp_metadata'):
+            sp_metadata = attn_metadata.prefill.sp_metadata if attn_metadata.prefill.sp_metadata is not None else None
+            enable_sp = sp_metadata.enable_sp if sp_metadata is not None else False
+    return sp_metadata, enable_sp
 
 
 def async_all_to_all(input_,

@@ -23,11 +23,16 @@ import torch.nn as nn
 import torch_npu
 from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
-from vllm.distributed import divide, split_tensor_along_last_dim
+from vllm.distributed import (divide, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              split_tensor_along_last_dim,
+                              tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_reduce_scatter)
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.lora.utils import LinearBase
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import (  # noqa
-    WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear,
+    WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear, LinearBase,
     MergedColumnParallelLinear, QKVParallelLinear, QuantizeMethodBase,
     RowParallelLinear, UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import \
@@ -35,7 +40,8 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
-                                                    get_otp_group)
+                                                    get_otp_group,
+                                                    is_sp_enabled)
 from vllm_ascend.utils import (dense_optim_enable, matmul_allreduce_enable,
                                mlp_tp_enable, oproj_tp_enable)
 
@@ -65,7 +71,9 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         disable_tp: bool = False,
     ):
         self.comm_group = None
-        if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
+        self.enable_sp = is_sp_enabled()
+        if prefix.find("gate_up_proj") != -1 and mlp_tp_enable(
+        ) and not self.enable_sp:
             self.comm_group = get_mlp_tp_group()
         else:
             self.comm_group = get_tp_group()
@@ -141,7 +149,9 @@ class AscendRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        if prefix.find("down_proj") != -1 and mlp_tp_enable():
+        self.enable_sp = is_sp_enabled()
+        if prefix.find(
+                "down_proj") != -1 and mlp_tp_enable() and not self.enable_sp:
             comm_group = get_mlp_tp_group()
             self.forward_type = "mlp_tp"
         elif prefix.find("o_proj") != -1 and oproj_tp_enable():
@@ -154,6 +164,9 @@ class AscendRowParallelLinear(RowParallelLinear):
         elif dense_optim_enable():
             comm_group = get_tp_group()
             self.forward_type = "dense_optim"
+        elif self.enable_sp:
+            comm_group = get_tp_group()
+            self.forward_type = "mlp_sp"
         else:
             comm_group = get_tp_group()
             self.forward_type = "normal"
@@ -239,8 +252,54 @@ class AscendRowParallelLinear(RowParallelLinear):
             return self._forward_matmul_allreduce(input_)
         elif self.forward_type == "dense_optim":
             return self._forward_dense_optim(input_)
+        elif self.forward_type == "mlp_sp":
+            return self._forward_mlp_sp(input_)
         else:
             return super().forward(input_)
+
+    # enable sp tensor parallel
+    def _forward_mlp_sp(self, input_: torch.Tensor) -> torch.Tensor:
+        forward_context = get_forward_context()
+        self.enable_sp = is_sp_enabled()
+        attn_metadata = forward_context.attn_metadata
+        is_prefill = attn_metadata.num_prefills if attn_metadata else False
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            tp_rank = get_tensor_model_parallel_rank()
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[tp_rank].contiguous()
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        # Only fuse bias add into GEMM for rank 0 (this ensures that
+        # bias will not get added more than once in TP>1 case)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self,
+                                                  input_parallel,
+                                                  bias=bias_)
+        if self.reduce_results and self.enable_sp and is_prefill:
+            sp_size = get_tensor_model_parallel_world_size()
+            original_len = input_.shape[0]
+            reminder = original_len % sp_size
+            if reminder != 0:
+                padding_len = sp_size - reminder
+                output_parallel = nn.functional.pad(output_parallel,
+                                                    (0, 0, 0, padding_len),
+                                                    mode='constant',
+                                                    value=0)
+            output = tensor_model_parallel_reduce_scatter(
+                output_parallel.movedim(0, -1)).movedim(-1, 0)
+        elif self.reduce_results and self.tp_size > 1:
+            output = tensor_model_parallel_all_reduce(output_parallel)
+        else:
+            output = output_parallel
+        output_bias = self.bias if self.skip_bias_add else None
+
+        if not self.return_bias:
+            return output
+        return output, output_bias
 
     # enable custom MLP tensor parallel
     def _forward_mlp_tp(self, input_: torch.Tensor) -> torch.Tensor:
@@ -400,12 +459,17 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
+        self.enable_sp = is_sp_enabled()
+        if prefix.find("gate_up_proj") != -1 and mlp_tp_enable(
+        ) and not self.enable_sp:
             comm_group = get_mlp_tp_group()
             self.forward_type = "mlp_tp"
         elif dense_optim_enable():
             comm_group = get_tp_group()
             self.forward_type = "dense_optim"
+        elif self.enable_sp:
+            comm_group = get_tp_group()
+            self.forward_type = "mlp_sp"
         else:
             comm_group = get_tp_group()
             self.forward_type = "normal_tp"
@@ -437,8 +501,37 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
             return self._forward_mlp_tp(input_)
         elif self.forward_type == "dense_optim":
             return self._forward_dense_optim(input_)
+        elif self.forward_type == "mlp_sp":
+            return self._forward_mlp_sp(input_)
         else:
             return super().forward(input_)
+
+    def _forward_mlp_sp(
+        self,
+        input_: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        forward_context = get_forward_context()
+        self.enable_sp = is_sp_enabled()
+        attn_metadata = forward_context.attn_metadata
+        is_prefill = attn_metadata.num_prefills if attn_metadata else False
+        if self.enable_sp and is_prefill:
+            input_ = get_tp_group().all_gather(input_, 0)
+            input_ = input_[:attn_metadata.num_input_tokens]
+        bias = self.bias if not self.skip_bias_add else None
+        # self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
+        # Matrix multiply.
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self, input_, bias)
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = tensor_model_parallel_all_gather(output_parallel)
+        else:
+            output = output_parallel
+
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
 
     def _forward_mlp_tp(
         self,
@@ -537,7 +630,7 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         self.output_sizes = [
             self.num_heads * self.head_size * tp_size,  # q_proj
             self.num_kv_heads * self.head_size * tp_size,  # k_proj
-            self.num_kv_heads * self.head_size * tp_size,  # v_proj 
+            self.num_kv_heads * self.head_size * tp_size,  # v_proj
         ]
         AscendColumnParallelLinear.__init__(self,
                                             input_size=input_size,

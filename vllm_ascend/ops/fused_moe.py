@@ -23,7 +23,8 @@ import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_context_model_parallel_world_size,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
@@ -40,7 +41,7 @@ from vllm.model_executor.layers.quantization.base_config import \
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
-from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.distributed.parallel_state import get_mc2_group, is_sp_enabled
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
@@ -202,28 +203,28 @@ class AscendFusedMoE(FusedMoE):
     moe_counter = -1
 
     def __init__(
-        self,
-        num_experts: int,  # Global number of experts
-        top_k: int,
-        hidden_size: int,
-        intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
-        reduce_results: bool = False,
-        renormalize: bool = True,
-        use_grouped_topk: bool = False,
-        num_expert_group: Optional[int] = None,
-        topk_group: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        tp_size: Optional[int] = None,
-        ep_size: Optional[int] = None,
-        dp_size: Optional[int] = None,
-        prefix: str = "",
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        activation: str = "silu",
-        apply_router_weight_on_input: bool = False,
-    ):
+            self,
+            num_experts: int,  # Global number of experts
+            top_k: int,
+            hidden_size: int,
+            intermediate_size: int,
+            params_dtype: Optional[torch.dtype] = None,
+            reduce_results: bool = False,
+            renormalize: bool = True,
+            use_grouped_topk: bool = False,
+            num_expert_group: Optional[int] = None,
+            topk_group: Optional[int] = None,
+            quant_config: Optional[QuantizationConfig] = None,
+            tp_size: Optional[int] = None,
+            ep_size: Optional[int] = None,
+            dp_size: Optional[int] = None,
+            cp_size: Optional[int] = None,
+            prefix: str = "",
+            custom_routing_function: Optional[Callable] = None,
+            scoring_func: str = "softmax",
+            e_score_correction_bias: Optional[torch.Tensor] = None,
+            activation: str = "silu",
+            apply_router_weight_on_input: bool = False):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
         super().__init__(
@@ -261,6 +262,8 @@ class AscendFusedMoE(FusedMoE):
                       get_tensor_model_parallel_world_size()),
             dp_size_=(dp_size
                       if dp_size is not None else get_dp_group().world_size),
+            cp_size_=(cp_size if cp_size is not None else
+                      get_context_model_parallel_world_size()),
             vllm_parallel_config=vllm_config.parallel_config)
 
         self.top_k = top_k
@@ -405,6 +408,7 @@ class AscendFusedMoE(FusedMoE):
 
         forward_context = get_forward_context()
         fused_moe_state = forward_context.fused_moe_state
+        self.enable_sp = is_sp_enabled()
         mc2_mask = forward_context.mc2_mask
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
         quantized_x_for_share, dynamic_scale_for_share = None, None
@@ -415,11 +419,9 @@ class AscendFusedMoE(FusedMoE):
 
         enable_sp = _metadata_for_padding is not None and _metadata_for_padding.not_dummy_and_is_prefill
         tp_size = get_tensor_model_parallel_world_size()
-        if enable_sp:
-            tp_rank = get_tensor_model_parallel_rank()
-            mc2_mask_sp = _metadata_for_padding.mc2_mask if _metadata_for_padding is not None else forward_context.mc2_mask
-            chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
-            mc2_mask = chunk_mc2_mask[tp_rank]
+        # NOTE enable_sp: qwen3-moe/gqa sp, self.enable_sp: deepseek-v2/mla sp
+        # TODO need to use the same enable_sp switch for deepseek & qwen3-moe sp
+        if enable_sp or (self.enable_sp and is_prefill):
             replace_allreduce = True
 
         if (fused_moe_state not in [

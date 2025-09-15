@@ -18,6 +18,7 @@ import time
 from collections import deque
 from typing import Iterable, Union
 
+import numpy as np
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
 from vllm.logger import logger
@@ -51,6 +52,12 @@ class AscendScheduler(Scheduler):
                          include_finished_set, log_stats)
         self.scheduled_req_ids: set[str] = set()
         self.running: list[Request] = []
+        self.cp_size = vllm_config.parallel_config.context_parallel_size
+        self.enable_sp = vllm_config.parallel_config.enable_sequence_parallel
+        self.sp_size = vllm_config.parallel_config.tensor_parallel_size if self.enable_sp else 1
+        self.sp_cp_size = self.cp_size * self.sp_size
+        if self.sp_cp_size > 1:
+            assert not self.cache_config.enable_prefix_caching
 
         self.finished_prefill_reqs: deque[Request] = deque()
         enable_pd_transfer = getattr(self.scheduler_config,
@@ -63,6 +70,7 @@ class AscendScheduler(Scheduler):
 
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:
+            assert self.cp_size == 1 and self.sp_size == 1
             return super().schedule()
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -163,6 +171,40 @@ class AscendScheduler(Scheduler):
             encoder_inputs_to_schedule = None
             new_encoder_budget = encoder_budget
 
+            if self.sp_cp_size > 1:
+                # block_size align
+                num_total_blocks = cdiv(
+                    (request.num_tokens - num_computed_tokens),
+                    self.block_size)
+
+                num_blocks_of_cp_sp = np.array(
+                    [num_total_blocks // (self.sp_cp_size)] * self.sp_cp_size)
+                remain_blocks = num_total_blocks % (self.sp_cp_size)
+                for i in range(remain_blocks):
+                    num_blocks_of_cp_sp[i] += 1
+                num_blocks_of_cp_sp = num_blocks_of_cp_sp.reshape(
+                    self.cp_size, self.sp_size)
+                request.num_blocks_of_cp_sp = num_blocks_of_cp_sp
+
+                start_id = 0
+                request.token_ids_of_cp_sp = [[0] * self.sp_size
+                                              for _ in range(self.cp_size)]
+                request.num_computed_tokens_of_cp_sp = [
+                    [0] * self.sp_size for _ in range(self.cp_size)
+                ]
+                for i in range(self.cp_size):
+                    for j in range(self.sp_size):
+                        request.token_ids_of_cp_sp[i][
+                            j] = request.all_token_ids[
+                                start_id:start_id +
+                                request.num_blocks_of_cp_sp[i][j] *
+                                self.block_size]
+                        request.num_computed_tokens_of_cp_sp[i][j] = len(
+                            request.token_ids_of_cp_sp[i][j]
+                        ) + num_computed_tokens  #  实际存kv cache的数量，不包含pad，用于prefill slot计算，decode分配block和slot计算
+                        start_id += request.num_blocks_of_cp_sp[i][
+                            j] * self.block_size
+
             # P/D: loading remote KV, do not allocate for new work.
             if load_kv_async:
                 assert num_external_computed_tokens > 0
@@ -174,7 +216,10 @@ class AscendScheduler(Scheduler):
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed
                 # requests, which have output tokens.
-                num_new_tokens = request.num_tokens - num_computed_tokens
+                if self.sp_cp_size > 1:
+                    num_new_tokens = len(request.token_ids_of_cp_sp[0][0])
+                else:
+                    num_new_tokens = request.num_tokens - num_computed_tokens
                 max_tokens_in_kvcache = (self.kv_cache_config.num_blocks *
                                          self.block_size)
                 prompt_limit = min(prompt_limit, max_tokens_in_kvcache)
@@ -266,8 +311,10 @@ class AscendScheduler(Scheduler):
                 request.request_id] = self.kv_cache_manager.get_blocks(
                     request.request_id)
             # Update request info.
-            num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            if self.sp_cp_size > 1:
+                num_new_tokens = request.num_tokens - num_computed_tokens
+            num_scheduled_tokens[request.request_id] = num_new_tokens
             request.status = RequestStatus.RUNNING
             request.num_computed_tokens = num_computed_tokens
             # Count the number of prefix cached tokens.
@@ -304,6 +351,28 @@ class AscendScheduler(Scheduler):
                     # This request has already been scheduled.
                     req_index += 1
                     continue
+
+                # In decode phase, fill cp/sp ranks with unfull block first, only allocate new slot when all cp/sp blocks are full.
+                if self.sp_cp_size > 1:
+                    full_block_num_of_cp_sp = np.array(
+                        request.num_computed_tokens_of_cp_sp
+                    ) // self.block_size
+                    if np.sum(
+                            full_block_num_of_cp_sp
+                    ) == full_block_num_of_cp_sp[0][0] * self.sp_cp_size:
+                        # all cp/sp blocks are full, new kv_cache will be stored in cp0 sp0 and new slot will be allocated
+                        kv_rank = (0, 0)
+                    else:
+                        # find the first cp/sp rank with unfull block and store kv_cache here
+                        unfull_block_ranks = np.where(
+                            full_block_num_of_cp_sp <
+                            full_block_num_of_cp_sp[0][0])
+                        kv_rank = (unfull_block_ranks[0][0],
+                                   unfull_block_ranks[1][0])
+
+                    request.token_ids_of_cp_sp[kv_rank[0]][kv_rank[1]].append(
+                        request.output_token_ids[-1])
+                    request.kv_rank = kv_rank
 
                 num_new_tokens = (request.num_tokens_with_spec -
                                   request.num_computed_tokens)
@@ -347,10 +416,17 @@ class AscendScheduler(Scheduler):
                     continue
 
                 while True:
+                    # use min computed tokens of all cp/sp ranks to allocate slot
+                    if self.sp_cp_size > 1:
+                        computed_tokens = request.num_computed_tokens
+                        request.num_computed_tokens = min(
+                            min(request.num_computed_tokens_of_cp_sp))
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens)
+                    if self.sp_cp_size > 1:
+                        request.num_computed_tokens = computed_tokens
                     if new_blocks is None:
                         # The request cannot be scheduled.
                         # Preempt the lowest-priority request.
@@ -381,6 +457,9 @@ class AscendScheduler(Scheduler):
                 self.scheduled_req_ids.add(request.request_id)
                 req_to_new_blocks[request.request_id] = new_blocks
                 num_scheduled_tokens[request.request_id] = num_new_tokens
+                if self.sp_cp_size > 1:
+                    request.num_computed_tokens_of_cp_sp[kv_rank[0]][
+                        kv_rank[1]] += num_new_tokens
                 token_budget -= num_new_tokens
                 req_index += 1
 
@@ -410,7 +489,7 @@ class AscendScheduler(Scheduler):
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
-        assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
+        assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens * self.sp_cp_size
         assert token_budget >= 0
         assert len(
             self.running

@@ -299,12 +299,10 @@ class CustomDeepseekV2MoE(nn.Module):
 
     top_k: int
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self,
+                 config: PretrainedConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
@@ -364,8 +362,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 reduce_results=reduce_results,
                 force_replicate=self.enable_multistream_moe
                 or enable_shared_expert_dp,
-                prefix=f"{prefix}.shared_experts",
-            )
+                prefix=f"{prefix}.shared_experts")
         else:
             self.shared_experts = None  # type: ignore
         CustomDeepseekV2MoE.top_k = config.num_experts_per_tok
@@ -499,6 +496,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
+
         if (config.n_routed_experts is not None
                 and self.debug_layer_idx >= config.first_k_dense_replace
                 and self.debug_layer_idx % config.moe_layer_freq == 0
@@ -510,12 +508,11 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.o_proj")
         else:
-            self.o_proj = CustomDeepseekV2RowParallelLinear(
-                self.num_heads * self.v_head_dim,
-                self.hidden_size,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.o_proj")
+            self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
+                                            self.hidden_size,
+                                            bias=False,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.o_proj")
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -575,14 +572,12 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        prefix: str,
-        model_config: ModelConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+    def __init__(self,
+                 config: PretrainedConfig,
+                 prefix: str,
+                 model_config: ModelConfig,
+                 cache_config: Optional[CacheConfig] = None,
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -634,8 +629,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-            )
+                prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -766,8 +760,7 @@ class CustomDeepseekV2Model(nn.Module):
                 prefix,
                 model_config=model_config,
                 cache_config=cache_config,
-                quant_config=quant_config,
-            ),
+                quant_config=quant_config),
             prefix=f"{prefix}.layers")
 
         if get_pp_group().is_last_rank:

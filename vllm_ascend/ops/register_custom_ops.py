@@ -22,7 +22,7 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
         return residual
 
     if x.size(0) != residual.size(0):
-        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
+        flashcomm_v1_enabled = bool(forward_context.flashcomm_v1_enabled)
         assert flashcomm_v1_enabled is True, (
             "Currently, this situation only occurs "
             "when flashcomm_v1 is enabled")

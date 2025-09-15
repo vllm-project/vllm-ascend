@@ -1,7 +1,39 @@
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import torch
+
+
+@dataclass
+class AscendCommonLongSequenceMetadata:
+    cp_kv_recover_idx: torch.Tensor = None
+
+    num_actual_tokens_cp_full: Optional[int] = None
+
+    num_computed_tokens_of_cp_sp: Optional[list[Optional[list[Optional[
+        list[int]]]]]] = None
+
+    q_head_idx_tensor: torch.Tensor = None
+
+    q_tail_idx_tensor: torch.Tensor = None
+
+    kv_with_q_head_nomask_idx_tensor: torch.Tensor = None
+
+    kv_with_q_head_mask_idx_tensor: torch.Tensor = None
+
+    kv_with_q_tail_nomask_idx_tensor: torch.Tensor = None
+
+    kv_with_q_tail_mask_idx_tensor: torch.Tensor = None
+
+    attn_mask_seqlens: torch.Tensor = None
+
+    head_attn_nomask_seqlens: torch.Tensor = None
+
+    tail_attn_nomask_seqlens: torch.Tensor = None
+
+    q_full_idx: torch.Tensor = None
+
+    cp_prefill_mask: torch.Tensor = None
 
 
 @dataclass
@@ -51,6 +83,8 @@ class AscendCommonAttentionMetadata:
     is_only_prefill: bool = False
 
     graph_pad_size: int = -1
+
+    common_long_seq_metadata: Optional[AscendCommonLongSequenceMetadata] = None
 
 
 def split_decodes_and_prefills(
