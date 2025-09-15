@@ -14,13 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
+import os
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 import torch_npu
-import os
 from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
 import vllm_ascend.envs as envs_ascend
@@ -1039,6 +1038,7 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
+
 
 
 
