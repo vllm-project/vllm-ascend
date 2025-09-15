@@ -442,7 +442,7 @@ def get_custom_tp_group_row(
     if custom_tp_group is not None:
         return custom_tp_group, custom_tp_group.tp_rank, custom_tp_group.tp_size
 
-    return None, get_tp_group().tp_rank, get_tp_group().tp_size
+    return None, get_tp_group().rank_in_group, get_tp_group().world_size
 
 
 class AscendColumnParallelLinear(ColumnParallelLinear):
