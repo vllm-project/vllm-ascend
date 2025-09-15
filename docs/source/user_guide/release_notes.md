@@ -1,5 +1,46 @@
 # Release note
 
+## v0.10.2rc1 - 2025.09.16
+
+This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started.
+
+### Highlights
+
+- Add support for Qwen3 Next. Please note that expert parallel and MTP feature doesn't work with this release. We'll make it work enough soon. Follow the [official guide](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_npu_qwen3_next.html) to get start [#2917](https://github.com/vllm-project/vllm-ascend/pull/2917)
+- Add quantization support for aclgraph [#2841](https://github.com/vllm-project/vllm-ascend/pull/2841)
+
+### Core
+
+- Aclgraph now works with Ray backend. [#2589](https://github.com/vllm-project/vllm-ascend/pull/2589)
+- MTP now works with the token > 1. [#2708](https://github.com/vllm-project/vllm-ascend/pull/2708)
+- Qwen2.5 VL now works with quantization. [#2778](https://github.com/vllm-project/vllm-ascend/pull/2778)
+- Improved the performance with async scheduler enabled. [#2783](https://github.com/vllm-project/vllm-ascend/pull/2783)
+- Fixed the performance regression with non MLA model when use default scheduler. [#2894](https://github.com/vllm-project/vllm-ascend/pull/2894)
+
+### Other
+- The performance of w8a8 quantization is improved. [#2275](https://github.com/vllm-project/vllm-ascend/pull/2275)
+- The performance of moe model is improved. [#2689](https://github.com/vllm-project/vllm-ascend/pull/2689) [#2842](https://github.com/vllm-project/vllm-ascend/pull/2842)
+- Fixed resources limit error when apply speculative decoding and aclgraph. [#2472](https://github.com/vllm-project/vllm-ascend/pull/2472)
+- Fixed the git config error in docker images. [#2746](https://github.com/vllm-project/vllm-ascend/pull/2746)
+- Fixed the sliding windows attention bug with prefill. [#2758](https://github.com/vllm-project/vllm-ascend/pull/2758)
+- The official doc for Prefill Decode Disaggregation with Qwen3 is added. [#2751](https://github.com/vllm-project/vllm-ascend/pull/2751)
+- `VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP` env works again. [#2740](https://github.com/vllm-project/vllm-ascend/pull/2740)
+- A new improvement for oproj in deepseek is added. Set `oproj_tensor_parallel_size` to enable this feature[#2167](https://github.com/vllm-project/vllm-ascend/pull/2167)
+- Fix a bug that deepseek with torchair doesn't work as expect when `graph_batch_sizes` is set. [#2760](https://github.com/vllm-project/vllm-ascend/pull/2760)
+- Avoid duplicate generation of sin_cos_cache in rope when kv_seqlen > 4k. [#2744](https://github.com/vllm-project/vllm-ascend/pull/2744)
+- The performance of Qwen3 dense model is improved with flashcomm_v1. Set `VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE=1` and `VLLM_ASCEND_ENABLE_FLASHCOMM=1` to enable it. [#2779](https://github.com/vllm-project/vllm-ascend/pull/2779)
+- The performance of Qwen3 dense model is improved with prefetch feature. Set `VLLM_ASCEND_ENABLE_PREFETCH_MLP=1` to enable it. [#2816](https://github.com/vllm-project/vllm-ascend/pull/2816)
+- The performance of Qwen3 MoE model is improved with rope ops update. [#2571](https://github.com/vllm-project/vllm-ascend/pull/2571)
+- Fix the weight load error for RLHF case. [#2756](https://github.com/vllm-project/vllm-ascend/pull/2756)
+- Add warm_up_atb step to speed up the inference. [#2823](https://github.com/vllm-project/vllm-ascend/pull/2823)
+- Fixed the aclgraph steam error for moe model. [#2827](https://github.com/vllm-project/vllm-ascend/pull/2827)
+
+### Known issue
+- The server will be hang when running Prefill Decode Disaggregation with different TP size for P and D. It's fixed by [vLLM commit](https://github.com/vllm-project/vllm/pull/23917) which is not included in v0.10.2. You can pick this commit to fix the issue.
+- The HBM usage of Qwen3 Next is higher than expected. It's a [known issue](https://github.com/vllm-project/vllm-ascend/issues/2884) and we're working on it. You can set `max_model_len` and `gpu_memory_utilization` to suitable value basing on your parallel config to avoid oom error.
+- We notice that lora doesn't work with this release due to the refactor of kv cache. We'll fix it soon. [2941](https://github.com/vllm-project/vllm-ascend/issues/2941)
+- Please do not enable chunked prefill with prefix cache when running with Ascend scheduler. The performance and accuracy is not good/correct. [#2943](https://github.com/vllm-project/vllm-ascend/issues/2943)
+
 ## v0.10.1rc1 - 2025.09.04
 
 This is the 1st release candidate of v0.10.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started.
