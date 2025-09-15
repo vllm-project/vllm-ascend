@@ -373,14 +373,8 @@ class ReqMeta:
         skip_leading_tokens = tracker.num_saved_tokens
         chunk_boundary = (
             cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
+            if discard_partial_chunks else 0
         )
-        skip_save = skip_save or (
-            tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary
-        )
-
-        if skip_save and load_spec is None:
-            return None
-
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
         num_tokens_to_save = (
@@ -388,6 +382,12 @@ class ReqMeta:
             if discard_partial_chunks
             else input_token_len
         )
+
+        skip_save = skip_save and num_tokens_to_save < chunk_boundary
+        if skip_save and load_spec is None:
+            return None
+
+        
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
@@ -419,12 +419,10 @@ class ReqMeta:
         )
 
 
-@dataclass
 class MemcacheConnectorMetadata(KVConnectorMetadata):
-    requests: list[ReqMeta]
-
-    def __init__(self):
+    def __init__(self, unfinished_request_ids):
         self.requests = []
+        self.unfinished_request_ids = unfinished_request_ids
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata.
@@ -443,4 +441,3 @@ class LasyerMultiBlockReqMeta:
     ends: list[int]
     block_ids: list[int]
     layer_id: int
-
