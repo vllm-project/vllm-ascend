@@ -53,3 +53,6 @@ def register_model():
         "PanguProMoEForCausalLM",
         "vllm_ascend.torchair.models.torchair_pangu_moe:PanguProMoEForCausalLM"
     )
+    ModelRegistry.register_model(
+        "Glm4MoeForCausalLM",
+        "vllm_ascend.models.glm4_moe:CustomGlm4MoeForCausalLM")
