@@ -164,6 +164,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # are not freed within this timeout, they will be forcibly released.
     "VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT":
     lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
+    "VLLM_ASCEND_COMM_QUANT_MODE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_COMM_QUANT_MODE", '1'))),
 }
 
 # end-env-vars-definition

@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
+import os
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
@@ -23,6 +23,7 @@ import torch_npu
 from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -30,6 +31,8 @@ from vllm_ascend.torchair.ops.torchair_fused_moe import torchair_select_experts
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version)
+
+VLLM_ASCEND_COMM_QUANT_MODE: bool = envs_ascend.VLLM_ASCEND_COMM_QUANT_MODE
 
 
 def torchair_apply_mlp_decode(hidden_states: torch.Tensor,
@@ -198,6 +201,14 @@ def torchair_apply_mlp(hidden_states: torch.Tensor,
     return hidden_states
 
 
+if VLLM_ASCEND_COMM_QUANT_MODE:
+    os.environ["HCCL_INTRA_PCIE_ENABLE"] = "1"
+    os.environ["HCCL_INTRA_ROCE_ENABLE"] = "0"
+    comm_quant_mode = 2
+else:
+    comm_quant_mode = 0
+
+
 def torchair_fused_experts_with_mc2(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -317,6 +328,7 @@ def torchair_fused_experts_with_mc2(
         "shared_expert_rank_num": 0,
         "moe_expert_num": moe_expert_num,
         "global_bs": 0,
+        "comm_quant_mode": comm_quant_mode,
     }
     tp_recv_counts = torch.empty(1,
                                  dtype=torch.int32,
