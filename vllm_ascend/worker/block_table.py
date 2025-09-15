@@ -166,7 +166,9 @@ class BlockTable:
             self.slot_mapping_np[:req_indices.shape[0]] = np.where(
                 mask, slot_mapping, -1)
         else:
-            if self.block_size == self.kernel_sizes[0]:
+            assert self.kernel_sizes is not None
+            if self.block_size == self.kernel_sizes[0] or self.kernel_sizes[
+                    0] == 0:
                 # IMPORTANT: In hybrid mode, positions are in logical block space,
                 # but we need to map them to the correct logical block table indices
                 logical_block_idx = positions // self.block_size
