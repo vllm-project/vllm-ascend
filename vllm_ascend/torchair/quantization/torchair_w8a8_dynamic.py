@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
+import os
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
@@ -22,7 +22,7 @@ import torch.distributed as dist
 import torch_npu
 from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
-
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -31,6 +31,7 @@ from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version)
 
+VLLM_ASCEND_COMM_QUANT_MODE: bool = envs_ascend.VLLM_ASCEND_COMM_QUANT_MODE
 
 def torchair_apply_mlp_decode(hidden_states: torch.Tensor,
                               w1: torch.Tensor,
@@ -1031,3 +1032,4 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
+
