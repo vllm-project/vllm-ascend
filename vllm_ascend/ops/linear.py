@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -68,6 +68,9 @@ class CustomTensorParallelBase:
         self.skip_bias_add = self.layer.skip_bias_add
         self.return_bias = self.layer.return_bias
         self.quant_method = self.layer.quant_method
+
+    def apply(self, input_):
+        raise NotImplementedError
 
 
 class CustomColumnParallel(CustomTensorParallelBase):
@@ -188,18 +191,25 @@ class DenseOptimQKVParallelLinear(CustomColumnParallel):
         return output, output_bias
 
 
-def get_custom_tp_group_column(disable_tp, prefix, layer):
+def get_custom_tp_group_column(
+    disable_tp, prefix, layer
+) -> Tuple[
+        Optional[Union[MLPCustomColumnParallel, DenseOptimMergedColumnParallel,
+                       DenseOptimQKVParallelLinear]], int, int]:
     if disable_tp:
         return None, 0, 1
 
+    custom_tp_group: Optional[Union[
+        MLPCustomColumnParallel,
+        DenseOptimMergedColumnParallel,
+        DenseOptimQKVParallelLinear,
+    ]] = None
     if "gate_up_proj" in prefix and mlp_tp_enable():
         custom_tp_group = MLPCustomColumnParallel(layer)
     elif "gate_up_proj" in prefix and dense_optim_enable():
         custom_tp_group = DenseOptimMergedColumnParallel(layer)
     elif dense_optim_enable():
         custom_tp_group = DenseOptimQKVParallelLinear(layer, prefix)
-    else:
-        custom_tp_group = None
 
     if custom_tp_group is not None:
         return custom_tp_group, custom_tp_group.tp_rank, custom_tp_group.tp_size
@@ -329,6 +339,7 @@ class MatmulAllreduceCustomRowParallel(CustomTensorParallelBase):
                                                       self.hcomm_info,
                                                       bias=bias_)
         else:
+            assert self.quant_method is not None
             output = self.quant_method.apply(self.layer,
                                              input_parallel,
                                              bias=bias_)
@@ -407,10 +418,18 @@ class DenseOptimCustomRowParallel(CustomRowParallel):
         self.reduce_results = self.layer.reduce_results
 
 
-def get_custom_tp_group_row(disable_tp, prefix, layer):
+def get_custom_tp_group_row(
+    disable_tp, prefix, layer
+) -> Tuple[Optional[Union[MLPCustomRowParallel, OProjCustomRowParallel,
+                          MatmulAllreduceCustomRowParallel,
+                          DenseOptimCustomRowParallel]], int, int]:
     if disable_tp:
         return None, 0, 1
 
+    custom_tp_group: Optional[Union[MLPCustomRowParallel,
+                                    OProjCustomRowParallel,
+                                    MatmulAllreduceCustomRowParallel,
+                                    DenseOptimCustomRowParallel]] = None
     if prefix.find("down_proj") != -1 and mlp_tp_enable():
         custom_tp_group = MLPCustomRowParallel(layer)
     elif prefix.find("o_proj") != -1 and oproj_tp_enable():
@@ -419,8 +438,6 @@ def get_custom_tp_group_row(disable_tp, prefix, layer):
         custom_tp_group = MatmulAllreduceCustomRowParallel(layer)
     elif dense_optim_enable():
         custom_tp_group = DenseOptimCustomRowParallel(layer, prefix)
-    else:
-        custom_tp_group = None
 
     if custom_tp_group is not None:
         return custom_tp_group, custom_tp_group.tp_rank, custom_tp_group.tp_size
