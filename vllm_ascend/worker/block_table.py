@@ -208,7 +208,7 @@ class BlockTable:
             # Physical block 1 becomes logical blocks
             # [1*split_ratio, 1*split_ratio+1, ...]
             # But we need to account for the fact that block 0 is special
-            base_logical = (phys_block - 1) * self.blocks_per_phys_block + 1
+            base_logical = phys_block * self.blocks_per_phys_block
             logical_blocks.extend(
                 range(base_logical, base_logical + self.blocks_per_phys_block))
 

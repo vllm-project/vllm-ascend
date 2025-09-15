@@ -2503,13 +2503,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
-                # TODO: REFACTOR ME to sharing hybrid cache
-                tensor = torch.zeros(kv_cache_tensor.size,
-                                     dtype=torch.int8,
-                                     device=self.device)
                 layer_name = kv_cache_tensor.shared_by[idx]
-                kv_cache_raw_tensors[layer_name] = tensor
+                if "linear_attn" in layer_name:
+                    for layer_name_inner in kv_cache_tensor.shared_by:
+                        if "self_attn" in layer_name_inner or layer_name_inner in kv_cache_raw_tensors.keys(
+                        ):
+                            continue
+                        tensor = torch.zeros(kv_cache_tensor.size,
+                                             dtype=torch.int8,
+                                             device=self.device)
+                        kv_cache_raw_tensors[layer_name_inner] = tensor
+                elif "self_attn" in layer_name:
+                    tensor = torch.zeros(kv_cache_tensor.size,
+                                         dtype=torch.int8,
+                                         device=self.device)
+                    kv_cache_raw_tensors[layer_name] = tensor
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
