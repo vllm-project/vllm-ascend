@@ -19,7 +19,7 @@
 
 import math
 import types
-from typing import Optional, Dict
+from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -135,7 +135,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                           is_torchair_compile, input_ids,
                                           positions, attn_metadata, num_tokens,
                                           intermediate_tensors, inputs_embeds):
-        if attn_metadata is not None and isinstance(attn_metadata, Dict):
+        if attn_metadata is not None and isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         if not with_prefill:
             # Only mark static while compiling
@@ -282,7 +282,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds):
-        if attn_metadata is not None and isinstance(attn_metadata, Dict):
+        if attn_metadata is not None and isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         model_kwargs = {
             "kv_caches": self.kv_caches,

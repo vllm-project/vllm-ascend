@@ -1,5 +1,4 @@
 import types
-from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -187,7 +186,7 @@ class MtpProposer(Proposer):
                            hidden_states: torch.Tensor = None,
                            attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None):
-        if attn_metadata is not None and isinstance(attn_metadata, Dict):
+        if attn_metadata is not None and isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
