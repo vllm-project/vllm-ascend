@@ -41,7 +41,7 @@ from vllm_ascend.utils import (dense_optim_enable, matmul_allreduce_enable,
 _HCOMM_INFO = None
 
 
-class CustomTensorParallelBase:
+class CustomTensorParallelOp:
 
     def __init__(self, layer):
         self.layer = layer
@@ -73,7 +73,7 @@ class CustomTensorParallelBase:
         raise NotImplementedError
 
 
-class CustomColumnParallel(CustomTensorParallelBase):
+class CustomColumnParallelOp(CustomTensorParallelOp):
 
     def __init__(self, layer):
         super().__init__(layer)
@@ -84,7 +84,7 @@ class CustomColumnParallel(CustomTensorParallelBase):
         self.gather_output = self.layer.gather_output
 
 
-class CustomRowParallel(CustomTensorParallelBase):
+class CustomRowParallelOp(CustomTensorParallelOp):
 
     def __init__(self, layer):
         super().__init__(layer)
@@ -99,7 +99,7 @@ class CustomRowParallel(CustomTensorParallelBase):
         self.input_size_per_partition = self.layer.input_size_per_partition
 
 
-class MLPCustomColumnParallel(CustomColumnParallel):
+class MLPColumnParallelOp(CustomColumnParallelOp):
 
     def __init__(self, layer):
         super().__init__(layer)
@@ -124,7 +124,7 @@ class MLPCustomColumnParallel(CustomColumnParallel):
         return output, output_bias
 
 
-class DenseOptimMergedColumnParallel(CustomColumnParallel):
+class DenseOptimMergedColumnParallelOp(CustomColumnParallelOp):
 
     def apply(
         self, input_: torch.Tensor
@@ -154,7 +154,7 @@ class DenseOptimMergedColumnParallel(CustomColumnParallel):
         return output, output_bias
 
 
-class DenseOptimQKVParallelLinear(CustomColumnParallel):
+class DenseOptimQKVParallelOp(CustomColumnParallelOp):
 
     def __init__(self, layer, prefix):
         super().__init__(layer)
@@ -191,33 +191,33 @@ class DenseOptimQKVParallelLinear(CustomColumnParallel):
         return output, output_bias
 
 
-def get_custom_tp_group_column(
+def get_column_parallel_op(
     disable_tp, prefix, layer
 ) -> Tuple[
-        Optional[Union[MLPCustomColumnParallel, DenseOptimMergedColumnParallel,
-                       DenseOptimQKVParallelLinear]], int, int]:
+        Optional[Union[MLPColumnParallelOp, DenseOptimMergedColumnParallelOp,
+                       DenseOptimQKVParallelOp]], int, int]:
     if disable_tp:
         return None, 0, 1
 
-    custom_tp_group: Optional[Union[
-        MLPCustomColumnParallel,
-        DenseOptimMergedColumnParallel,
-        DenseOptimQKVParallelLinear,
+    custom_op: Optional[Union[
+        MLPColumnParallelOp,
+        DenseOptimMergedColumnParallelOp,
+        DenseOptimQKVParallelOp,
     ]] = None
     if "gate_up_proj" in prefix and mlp_tp_enable():
-        custom_tp_group = MLPCustomColumnParallel(layer)
+        custom_op = MLPColumnParallelOp(layer)
     elif "gate_up_proj" in prefix and dense_optim_enable():
-        custom_tp_group = DenseOptimMergedColumnParallel(layer)
+        custom_op = DenseOptimMergedColumnParallelOp(layer)
     elif dense_optim_enable():
-        custom_tp_group = DenseOptimQKVParallelLinear(layer, prefix)
+        custom_op = DenseOptimQKVParallelOp(layer, prefix)
 
-    if custom_tp_group is not None:
-        return custom_tp_group, custom_tp_group.tp_rank, custom_tp_group.tp_size
+    if custom_op is not None:
+        return custom_op, custom_op.tp_rank, custom_op.tp_size
 
     return None, get_tp_group().rank_in_group, get_tp_group().world_size
 
 
-class MLPCustomRowParallel(CustomRowParallel):
+class MLPRowParallelOp(CustomRowParallelOp):
 
     def __init__(self, layer):
         super().__init__(layer)
@@ -250,7 +250,7 @@ class MLPCustomRowParallel(CustomRowParallel):
         return output, output_bias
 
 
-class OProjCustomRowParallel(CustomRowParallel):
+class OProjRowParallelOp(CustomRowParallelOp):
 
     def __init__(self, layer):
         super().__init__(layer)
@@ -312,10 +312,10 @@ class OProjCustomRowParallel(CustomRowParallel):
     def after_create_weights_hook(self):
         super().after_create_weights_hook()
         self.input_is_parallel = self.layer.input_is_parallel
-        self.input_size_per_partition = self.layer.input_is_parallel
+        self.input_size_per_partition = self.layer.input_size_per_partition
 
 
-class MatmulAllreduceCustomRowParallel(CustomTensorParallelBase):
+class MatmulAllreduceRowParallelOp(CustomTensorParallelOp):
 
     def __init__(self, layer):
         super().__init__(layer)
@@ -372,7 +372,7 @@ class MatmulAllreduceCustomRowParallel(CustomTensorParallelBase):
         self.weight_t = self.layer.weight.t()
 
 
-class DenseOptimCustomRowParallel(CustomRowParallel):
+class DenseOptimRowParallelOp(CustomRowParallelOp):
 
     def __init__(self, layer, prefix):
         super().__init__(layer)
@@ -418,29 +418,28 @@ class DenseOptimCustomRowParallel(CustomRowParallel):
         self.reduce_results = self.layer.reduce_results
 
 
-def get_custom_tp_group_row(
+def get_row_parallel_op(
     disable_tp, prefix, layer
-) -> Tuple[Optional[Union[MLPCustomRowParallel, OProjCustomRowParallel,
-                          MatmulAllreduceCustomRowParallel,
-                          DenseOptimCustomRowParallel]], int, int]:
+) -> Tuple[Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
+                          MatmulAllreduceRowParallelOp,
+                          DenseOptimRowParallelOp]], int, int]:
     if disable_tp:
         return None, 0, 1
 
-    custom_tp_group: Optional[Union[MLPCustomRowParallel,
-                                    OProjCustomRowParallel,
-                                    MatmulAllreduceCustomRowParallel,
-                                    DenseOptimCustomRowParallel]] = None
+    custom_op: Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
+                              MatmulAllreduceRowParallelOp,
+                              DenseOptimRowParallelOp]] = None
     if prefix.find("down_proj") != -1 and mlp_tp_enable():
-        custom_tp_group = MLPCustomRowParallel(layer)
+        custom_op = MLPRowParallelOp(layer)
     elif prefix.find("o_proj") != -1 and oproj_tp_enable():
-        custom_tp_group = OProjCustomRowParallel(layer)
+        custom_op = OProjRowParallelOp(layer)
     elif matmul_allreduce_enable():
-        custom_tp_group = MatmulAllreduceCustomRowParallel(layer)
+        custom_op = MatmulAllreduceRowParallelOp(layer)
     elif dense_optim_enable():
-        custom_tp_group = DenseOptimCustomRowParallel(layer, prefix)
+        custom_op = DenseOptimRowParallelOp(layer, prefix)
 
-    if custom_tp_group is not None:
-        return custom_tp_group, custom_tp_group.tp_rank, custom_tp_group.tp_size
+    if custom_op is not None:
+        return custom_op, custom_op.tp_rank, custom_op.tp_size
 
     return None, get_tp_group().rank_in_group, get_tp_group().world_size
 
@@ -467,7 +466,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_group, self.tp_rank, self.tp_size = get_custom_tp_group_column(
+        self.custom_op, self.tp_rank, self.tp_size = get_column_parallel_op(
             disable_tp, prefix, self)
 
         self.input_size_per_partition = input_size
@@ -516,15 +515,15 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         else:
             self.register_parameter("bias", None)
 
-        if self.custom_group is not None:
-            self.custom_group.after_create_weights_hook()
+        if self.custom_op is not None:
+            self.custom_op.after_create_weights_hook()
 
     def forward(
         self,
         input_,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        if self.custom_group is not None:
-            return self.custom_group.apply(input_)
+        if self.custom_op is not None:
+            return self.custom_op.apply(input_)
 
         return super().forward(input_)
 
@@ -550,7 +549,7 @@ class AscendRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_group, self.tp_rank, self.tp_size = get_custom_tp_group_row(
+        self.custom_op, self.tp_rank, self.tp_size = get_row_parallel_op(
             disable_tp, prefix, self)
 
         # Divide the weight matrix along the first dimension.
@@ -596,16 +595,16 @@ class AscendRowParallelLinear(RowParallelLinear):
         else:
             self.register_parameter("bias", None)
 
-        if self.custom_group is not None:
-            self.custom_group.after_create_weights_hook()
+        if self.custom_op is not None:
+            self.custom_op.after_create_weights_hook()
 
     def forward(
         self,
         input_,
         is_prefill: bool = True,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        if self.custom_group is not None:
-            return self.custom_group.apply(input_)
+        if self.custom_op is not None:
+            return self.custom_op.apply(input_)
 
         return super().forward(input_)
 
@@ -635,7 +634,7 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_group, self.tp_rank, self.tp_size = get_custom_tp_group_column(
+        self.custom_op, self.tp_rank, self.tp_size = get_column_parallel_op(
             disable_tp, prefix, self)
 
         self.output_sizes = output_sizes
@@ -657,8 +656,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         self,
         input_,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        if self.custom_group is not None:
-            return self.custom_group.apply(input_)
+        if self.custom_op is not None:
+            return self.custom_op.apply(input_)
 
         return super().forward(input_)
 
@@ -689,7 +688,7 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_group, _, tp_size = get_custom_tp_group_column(
+        self.custom_op, _, tp_size = get_column_parallel_op(
             disable_tp, prefix, self)
         self.hidden_size = hidden_size
         self.head_size = head_size
@@ -730,8 +729,8 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         self,
         input_,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        if self.custom_group is not None:
-            return self.custom_group.apply(input_)
+        if self.custom_op is not None:
+            return self.custom_op.apply(input_)
 
         return super().forward(input_)
 
