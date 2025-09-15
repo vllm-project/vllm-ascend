@@ -25,6 +25,7 @@ from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.utils import cdiv
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
@@ -245,6 +246,11 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
+            else:
+                if not vllm_config.model_config.is_deepseek_mla:
+                    cache_config.block_size = cdiv(cache_config.block_size,
+                                                   64) * 64
+
             if cache_config.enable_prefix_caching and cache_config.block_size != 128:
                 logger.warning(
                     "If prefix caching is enabled, block size must be set to 128."
@@ -365,3 +371,7 @@ class NPUPlatform(Platform):
 
         pg._register_backend(device, backend_type, backend_class)
         return pg
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True

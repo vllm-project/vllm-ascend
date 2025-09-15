@@ -350,7 +350,8 @@ class EagleProposer(Proposer):
                 spec_attn_mask=self.runner.spec_attn_mask,
                 attn_state=self.runner.attn_state,
                 decode_token_per_req=self.runner.decode_token_per_req,
-            )
+                num_computed_tokens_cpu=None,
+                seq_lens=None)
             attn_metadata_i = self.runner.attn_metadata_builder.build(
                 common_attn_metadata, self.runner.get_model())
             for layer_name in kv_cache_group_spec.layer_names:
@@ -436,7 +437,8 @@ class EagleProposer(Proposer):
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
             decode_token_per_req=self.runner.decode_token_per_req,
-        )
+            num_computed_tokens_cpu=None,
+            seq_lens=None)
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         attn_metadata = self.runner.attn_metadata_builder.build(
             common_attn_metadata, self.runner.model)
