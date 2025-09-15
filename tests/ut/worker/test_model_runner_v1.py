@@ -57,7 +57,7 @@ def test_select_moe_comm_method(soc_version, enable_expert_parallel,
     mock_runner = MagicMock(spec=NPUModelRunner)
     mock_runner.parallel_config = MagicMock()
     mock_runner.parallel_config.enable_expert_parallel = enable_expert_parallel
-    mock_runner.parallel_config.world_size = world_size
+    mock_runner.parallel_config.world_size_across_dp = world_size
     mock_runner.mc2_tokens_capacity = mc2_tokens_capacity
 
     # Patch the helper functions

@@ -43,7 +43,7 @@ jobs:
     strategy:
       matrix:
         os: [linux-aarch64-a3-8]
-        vllm_version: [main]
+        vllm_version: [v0.10.2]
     name: vLLM Ascend test
     runs-on: ${{ matrix.os }}
     container:
