@@ -6,7 +6,7 @@ This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the 
 
 ### Highlights
 
-- Add support for Qwen3 Next. Please note that expert parallel and MTP feature doesn't work with this release. The server may crash in some case as well. We'll make it stable enough soon. Follow the [official guide](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_npu_qwen3_next.html) to get start [#2917](https://github.com/vllm-project/vllm-ascend/pull/2917)
+- Add support for Qwen3 Next. Please note that expert parallel and MTP feature doesn't work with this release. We'll make it work enough soon. Follow the [official guide](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_npu_qwen3_next.html) to get start [#2917](https://github.com/vllm-project/vllm-ascend/pull/2917)
 - Add quantization support for aclgraph [#2841](https://github.com/vllm-project/vllm-ascend/pull/2841)
 
 ### Core
@@ -34,6 +34,11 @@ This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the 
 - Fix the weight load error for RLHF case. [#2756](https://github.com/vllm-project/vllm-ascend/pull/2756)
 - Add warm_up_atb step to speed up the inference. [#2823](https://github.com/vllm-project/vllm-ascend/pull/2823)
 - Fixed the aclgraph steam error for moe model. [#2827](https://github.com/vllm-project/vllm-ascend/pull/2827)
+
+### Known issue
+- The server will be hang when running Prefill Decode Disaggregation with different TP size for P and D. It's fixed by [vLLM commit](https://github.com/vllm-project/vllm/pull/23917) which is not included in v0.10.2. You can pick this commit to fix the issue.
+- The HBM usage of Qwen3 Next is higher than expected. It's a [known issue](https://github.com/vllm-project/vllm-ascend/issues/2884) and we're working on it. You can set `max_model_len` and `gpu_memory_utilization` to suitable value basing on your parallel config to avoid oom error.
+- We notice that lora doesn't work with this release due to the refactor of kv cache. We'll fix it soon. [2941](https://github.com/vllm-project/vllm-ascend/issues/2941)
 
 ## v0.10.1rc1 - 2025.09.04
 
