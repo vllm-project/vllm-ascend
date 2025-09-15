@@ -195,7 +195,8 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
         ascend_config.torchair_graph_config.enabled = True
         with patch("vllm_ascend.torchair.torchair_mla.get_ascend_config",
                    return_value=ascend_config):
-            builder = AscendMLATorchairMetadataBuilder(mock_vllm_config,
+            builder = AscendMLATorchairMetadataBuilder(None, None,
+                                                       mock_vllm_config,
                                                        mock_device)
 
             self.assertEqual(builder.block_size,
@@ -216,7 +217,8 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
         ascend_config.torchair_graph_config = MagicMock()
         ascend_config.torchair_graph_config.enabled = True
 
-        builder = AscendMLATorchairMetadataBuilder(mock_vllm_config,
+        builder = AscendMLATorchairMetadataBuilder(None, None,
+                                                   mock_vllm_config,
                                                    mock_device)
 
         input_batch = MagicMock()
@@ -252,7 +254,8 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
 
         with patch("vllm_ascend.torchair.torchair_mla.get_ascend_config",
                    return_value=ascend_config):
-            builder = AscendMLATorchairMetadataBuilder(mock_vllm_config,
+            builder = AscendMLATorchairMetadataBuilder(None, None,
+                                                       mock_vllm_config,
                                                        mock_device)
 
         input_batch = MagicMock()
@@ -285,7 +288,8 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
 
-        builder = AscendMLATorchairMetadataBuilder(mock_vllm_config,
+        builder = AscendMLATorchairMetadataBuilder(None, None,
+                                                   mock_vllm_config,
                                                    mock_device)
         block_tables = torch.randint(0, 100, (3, 10), dtype=torch.int32)
 
@@ -305,7 +309,8 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
 
-        builder = AscendMLATorchairMetadataBuilder(mock_vllm_config,
+        builder = AscendMLATorchairMetadataBuilder(None, None,
+                                                   mock_vllm_config,
                                                    mock_device)
         block_tables = torch.randint(0, 100, (3, 10), dtype=torch.int32)
 
@@ -326,7 +331,8 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
 
-        builder = AscendMLATorchairMetadataBuilder(mock_vllm_config,
+        builder = AscendMLATorchairMetadataBuilder(None, None,
+                                                   mock_vllm_config,
                                                    mock_device)
 
         block_tables = torch.randint(0, 100, (3, 10), dtype=torch.int32)
@@ -352,6 +358,8 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
         mock_device = 'cpu'
 
         builder = AscendMLATorchairMetadataBuilder(
+            None,
+            None,
             mock_vllm_config,
             mock_device,
             metadata_cls=AscendMLATorchairMetadata)
@@ -417,6 +425,8 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
         model.model = MagicMock(spec=nn.Module)
 
         builder = AscendMLATorchairMetadataBuilder(
+            None,
+            None,
             mock_vllm_config,
             mock_device,
             metadata_cls=AscendMLATorchairMetadata)
@@ -442,9 +452,11 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
                 positions=torch.tensor([1, 1]),
                 attn_mask=torch.ones((15, 15)),
                 spec_attn_mask=None,
-                attn_state=AscendAttentionState.ChunkedPrefill)
+                attn_state=AscendAttentionState.ChunkedPrefill,
+                num_computed_tokens_cpu=None,
+                seq_lens=None)
 
-            metadata = builder.build(common_attn_metadata, model)
+            metadata = builder.build(1, common_attn_metadata, model)
 
         self.assertIsInstance(metadata, AscendMLATorchairMetadata)
         self.assertEqual(metadata.num_input_tokens, 0)
