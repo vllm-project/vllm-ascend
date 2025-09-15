@@ -50,6 +50,9 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
+            vllm_config, device)
+
         ascend_config = get_ascend_config()
         self.new_kv_cache_bytes = -1
         self.torchair_compiled_model = None  # type: ignore

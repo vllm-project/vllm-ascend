@@ -1,9 +1,7 @@
-# mypy: ignore-errors
 from typing import Optional, Union
 
 import numpy as np
 import torch
-import vllm.v1.worker.block_table
 from vllm.distributed import get_dcp_group
 from vllm.utils import cdiv
 
@@ -91,7 +89,7 @@ class BlockTable:
 
     def append_row(
         self,
-        block_ids,
+        block_ids: list[int],
         row_idx: int,
     ) -> None:
         if not block_ids:
@@ -309,7 +307,3 @@ class MultiGroupBlockTable:
     def __getitem__(self, idx: int) -> "BlockTable":
         """Returns the BlockTable for the i-th KV cache group."""
         return self.block_tables[idx]
-
-
-vllm.v1.worker.block_table.BlockTable = BlockTable
-vllm.v1.worker.block_table.MultiGroupBlockTable = MultiGroupBlockTable
