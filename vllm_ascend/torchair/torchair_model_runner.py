@@ -135,8 +135,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                           is_torchair_compile, input_ids,
                                           positions, attn_metadata, num_tokens,
                                           intermediate_tensors, inputs_embeds):
-        if attn_metadata is not None and isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
+
         if not with_prefill:
             # Only mark static while compiling
             if is_torchair_compile:
@@ -284,6 +283,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                              inputs_embeds):
         if attn_metadata is not None and isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
+
         model_kwargs = {
             "kv_caches": self.kv_caches,
             "attn_metadata": attn_metadata
