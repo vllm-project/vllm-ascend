@@ -30,6 +30,22 @@ def elastic_load(
     tp: int,
     pp: int,
 ):
+    """
+    Loads a model using elastic loading across multiple devices.
+
+    Parameters:
+    - model: The model instance to be loaded.
+    - device_id: The ID of the current device (i.e. global rank).
+    - model_path: The path to the model file.
+    - sources: A list of source configurations, each containing device_id and sources.
+    - tp: Tensor parallel size, indicating the number of devices for tensor parallelism.
+    - pp: Pipeline parallel size, indicating the number of devices for pipeline parallelism.
+
+    Returns:
+    - The loaded model if successful, otherwise None.
+    """
+
+    # Filter sources for the current device
     sources_this_device = []
     for s in sources:
         if isinstance(
@@ -40,24 +56,29 @@ def elastic_load(
     if len(sources_this_device) == 0:
         return None
 
-    client_interaction_layer = ElasticClient(sources_this_device, device_id,
-                                             model_path, tp, pp)
-    if client_interaction_layer.s is None or client_interaction_layer.server_addr is None:
-        return None
-    ack = client_interaction_layer.ack
-    if ack is None:
-        return None
+    try:
+        # Initialize the interaction layer with the ElasticClient
+        with ElasticClient(sources_this_device, device_id, model_path, tp,
+                           pp) as client_interaction_layer:
+            if client_interaction_layer.s is None or client_interaction_layer.server_addr is None:
+                raise RuntimeError(
+                    "Failed to initialize ElasticClient: socket or server_addr is None"
+                )
+            ack = client_interaction_layer.ack
+            if ack is None:
+                raise RuntimeError("ElasticClient.register did not return ack")
 
-    t0 = time.perf_counter()
-    elastic_loader = P2PLoad(ack[0], client_interaction_layer.server_addr,
-                             ack[1])
-    model = elastic_loader.load(model=model)
-    if model is None:
-        logger.error("Failed to load model")
-    else:
-        logger.info(
-            "Finish elastic load (duration: {}s)".format(time.perf_counter() -
-                                                         t0))
-
-    del client_interaction_layer
-    return model
+            t0 = time.perf_counter()
+            elastic_loader = P2PLoad(ack[0],
+                                     client_interaction_layer.server_addr,
+                                     ack[1])
+            model_loaded = elastic_loader.load(model=model)
+            if model_loaded is None:
+                logger.error("Failed to load model")
+                return None
+            logger.info("Finish elastic load (duration: {}s)".format(
+                time.perf_counter() - t0))
+            return model_loaded
+    except Exception as e:
+        logger.error(f"elastic_load error: {e}")
+        return None

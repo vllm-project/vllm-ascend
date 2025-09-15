@@ -18,7 +18,7 @@ import json
 import re
 import socket
 import threading
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 from vllm.logger import logger
@@ -28,19 +28,37 @@ from ..utils import find_free_port
 
 
 class ElasticClient:
+    """
+    Class for handling the client-side logic of Netloader of models.
+    """
 
-    def __init__(self, sources: list, device_id: int, model_path: str, tp: int,
-                 pp: int):
+    def __init__(self, sources: list[str], device_id: int, model_path: str,
+                 tp: int, pp: int):
+        """
+        Initializes the ElasticClient instance.
+
+        Parameters:
+        - sources: List of source addresses in the format IP:port.
+        - device_id: The ID of the current device.
+        - model_path: The path to the model.
+        - tp: Tensor parallel size.
+        - pp: Pipeline parallel size.
+        """
         self.sources = sources
-        self.s = None
-        self.ack = None
-        self.server_addr = None
-        self.server_port = None
+        self.device_id = device_id
+        self.model_path = model_path
+        self.tp = tp
+        self.pp = pp
+
+        self.s: Optional[socket.socket] = None
+        self.ack: Optional[Tuple[str, int]] = None
+        self.server_addr: Optional[str] = None
+        self.server_port: Optional[int] = None
 
         for source in self.sources:
             try:
-                ip, port = source.split(':')
-                port = int(port)
+                ip, port_str = source.split(':')
+                port = int(port_str)
             except Exception as e:
                 logger.error(f"IP format error: {source}, detail: {e}")
                 continue
@@ -49,41 +67,104 @@ class ElasticClient:
             self.server_port = port
 
             try:
-                self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                logger.info("Start connection to server: {}:{}".format(
-                    self.server_addr, self.server_port))
-                self.s.connect((self.server_addr, self.server_port))
-                logger.info("Finish connection to server: {}:{}".format(
-                    self.server_addr, self.server_port))
-                self.s.settimeout(60)
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                logger.info(
+                    f"Start connection to server: {self.server_addr}:{self.server_port}"
+                )
+                sock.connect((self.server_addr, self.server_port))
+                logger.info(
+                    f"Finish connection to server: {self.server_addr}:{self.server_port}"
+                )
+                sock.settimeout(60)
 
+                self.s = sock
                 self.ack = self.register(device_id, model_path, tp, pp)
                 break
             except Exception as e:
                 logger.error(f"Connect to {source} fails, detail: {e}")
-                if self.s is not None:
-                    self.s.close()
+                if sock is not None:
+                    try:
+                        sock.close()
+                    except Exception:
+                        pass
                 self.s = None
                 self.ack = None
                 self.server_addr = None
                 self.server_port = None
 
-    def __del__(self):
+    def close(self) -> None:
+        """
+        Closes the socket connection.
+        """
         if self.s is not None:
-            self.s.close()
+            try:
+                self.s.close()
+            except Exception as e:
+                logger.error(f"Error closing socket: {e}")
+            finally:
+                self.s = None
 
-    def send_str(self, data_str):
+    def __enter__(self) -> "ElasticClient":
+        """
+        Context manager enter method.
+        """
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        """
+        Context manager exit method.
+        """
+        self.close()
+
+    def __del__(self):
+        """
+        Destructor method to ensure socket is closed.
+        """
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def send_str(self, data_str: str) -> None:
+        """
+        Sends a string over the socket connection.
+
+        Parameters:
+        - data_str: The string to be sent.
+        """
         if self.s is None:
             raise RuntimeError("Socket was not created correctly.")
         self.s.send(data_str.encode("utf-8"))
 
-    def recv_str(self, buffer_size=1024):
+    def recv_str(self, buffer_size: int = 1024) -> str:
+        """
+        Receives a string over the socket connection.
+
+        Parameters:
+        - buffer_size: The size of the buffer for receiving data.
+
+        Returns:
+        - The received string.
+        """
         if self.s is None:
             raise RuntimeError("Socket was not created correctly.")
         data_str = self.s.recv(buffer_size).decode("utf-8")
         return data_str
 
-    def register(self, device_id: int, model_path: str, tp: int, pp: int):
+    def register(self, device_id: int, model_path: str, tp: int,
+                 pp: int) -> Tuple[str, int]:
+        """
+        Registers the client with the server.
+
+        Parameters:
+        - device_id: The ID of the current device.
+        - model_path: The path to the model.
+        - tp: Tensor parallel size.
+        - pp: Pipeline parallel size.
+
+        Returns:
+        - A tuple containing the communication name and port.
+        """
         free_port = find_free_port()
         data = {
             "label": "JOIN",
@@ -116,9 +197,8 @@ class ElasticClient:
 
         logger.info(f"Receive ack: {ack}")
 
-        if "label" in ack and ack[
-                "label"] == 'JOIN_ACK' and "content" in ack and ack[
-                    "content"] is not None and "name" in ack["content"]:
+        if ("label" in ack and ack["label"] == 'JOIN_ACK' and "content" in ack
+                and ack["content"] is not None and "name" in ack["content"]):
             return (ack["content"]["name"], free_port)
         else:
             raise RuntimeError(
@@ -127,10 +207,27 @@ class ElasticClient:
 
 
 class ElasticServer:
+    """
+    Class for handling the server-side logic of Netloader of models.
+    """
 
     def __init__(self, addr: str, port: int, model, device_id: int,
                  model_path: str, tp: int, pp: int, int8_cache: str,
                  int8_cache_name: Optional[List[str]]):
+        """
+        Initializes the ElasticServer instance.
+
+        Parameters:
+        - addr: The IP address to listen on.
+        - port: The port number to listen on.
+        - model: The model to be served.
+        - device_id: The ID of the current device (i.e. global rank).
+        - model_path: The path to the model.
+        - tp: Tensor parallel size.
+        - pp: Pipeline parallel size.
+        - int8_cache: The type of caching for int8 parameters (HBM, DRAM, or no).
+        - int8_cache_name: List of parameter names to be cached.
+        """
         self.addr = addr
         self.port = port
         self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -180,20 +277,37 @@ class ElasticServer:
         )
 
     def __del__(self):
+        """
+        Destructor method to ensure socket is closed.
+        """
         self.s.close()
 
     def start(self):
+        """
+        Starts the server to handle incoming connections.
+        """
         handler_thread = threading.Thread(target=self.elastic_client_handler)
         handler_thread.daemon = True
         handler_thread.start()
 
     def elastic_client_handler(self):
+        """
+        Handles incoming client connections.
+        """
         while True:
             conn, addr = self.s.accept()
             logger.info("Accept new connection from {}:{}...".format(*addr))
             self.register_handler(conn, addr)
 
     def register_handler(self, conn, addr, buffer_size=1024):
+        """
+        Handles the registration of a client.
+
+        Parameters:
+        - conn: The connection socket.
+        - addr: The address of the client.
+        - buffer_size: The size of the buffer for receiving data.
+        """
         data_str = conn.recv(buffer_size).decode("utf-8")
         if not data_str:
             return
@@ -205,6 +319,15 @@ class ElasticServer:
             return
 
         def is_valid_data(data):
+            """
+            Validates the received data.
+
+            Parameters:
+            - data: The data to be validated.
+
+            Returns:
+            - True if the data is valid, otherwise False.
+            """
             if not isinstance(data, dict):
                 return False
             if data.get("label") != "JOIN":
@@ -260,8 +383,12 @@ class ElasticServer:
 
         if ack["content"] and isinstance(ack["content"],
                                          dict) and 'name' in ack["content"]:
-            p2psend = P2PSend(self.addr, data["content"]["port"],
-                              ack["content"]["name"])
-            p2psend.send(self.model, self.original_int8)
-
+            try:
+                p2psend = P2PSend(self.addr, data["content"]["port"],
+                                  ack["content"]["name"])
+                p2psend.send(self.model, self.original_int8)
+            except Exception as e:
+                logger.error(
+                    f"P2PSend Failed to send model to {self.addr}, details: {e}"
+                )
         conn.close()

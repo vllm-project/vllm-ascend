@@ -64,10 +64,11 @@ def test_elastic_client_init():
         mock_socket_instance.getsockname.return_value = ('127.0.0.1', 12346)
         mock_socket_instance.__enter__.return_value = mock_socket_instance
 
-        client = ElasticClient(sources, device_id, model_path, tp, pp)
-        assert client.server_addr == "127.0.0.1"
-        assert client.server_port == 12345
-        assert client.ack == ("mocked_name", 12346)
+        with ElasticClient(sources, device_id, model_path, tp, pp) as client:
+            assert client.server_addr == "127.0.0.1"
+            assert client.server_port == 12345
+            assert client.ack == ("mocked_name", 12346)
+        mock_socket_instance.close.assert_called_once()
 
 
 # Test the register method of ElasticClient
@@ -107,9 +108,10 @@ def test_elastic_client_register_error_response():
         mock_socket_instance.recv.return_value = mock_server_error_response(
             None)
 
-        client = ElasticClient(sources, device_id, model_path, tp, pp)
-        with pytest.raises(RuntimeError):
-            client.register(device_id, model_path, tp, pp)
+        with ElasticClient(sources, device_id, model_path, tp, pp) as client:
+            with pytest.raises(RuntimeError):
+                client.register(device_id, model_path, tp, pp)
+        mock_socket_instance.close.assert_called_once()
 
 
 # Test the behavior of the `register` method of ElasticClient when an exception is thrown on the server.
@@ -125,10 +127,13 @@ def test_elastic_client_register_exception():
         mock_socket.return_value = mock_socket_instance
         mock_socket_instance.connect.return_value = None
         mock_socket_instance.recv.side_effect = mock_server_exception_response
+        mock_socket_instance.__enter__.return_value = mock_socket_instance
+        mock_socket_instance.__exit__.return_value = None
 
-        client = ElasticClient(sources, device_id, model_path, tp, pp)
-        with pytest.raises(RuntimeError):
-            client.register(device_id, model_path, tp, pp)
+        with ElasticClient(sources, device_id, model_path, tp, pp) as client:
+            with pytest.raises(RuntimeError):
+                client.register(device_id, model_path, tp, pp)
+        mock_socket_instance.close.assert_called_once()
 
 
 class FakeInt8Param:

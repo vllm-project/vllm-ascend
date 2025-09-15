@@ -37,6 +37,9 @@ from .utils import find_free_port, is_valid_path_prefix
 
 @register_model_loader("netloader")
 class ModelNetLoaderElastic(BaseModelLoader):
+    """
+    A model loader that uses elastic loading for loading weights.
+    """
     source: Optional[List[dict]]
     model_path: Optional[str]
     listen_port: Optional[int]
@@ -45,6 +48,12 @@ class ModelNetLoaderElastic(BaseModelLoader):
     output_prefix: Optional[str]
 
     def __init__(self, load_config: LoadConfig):
+        """
+        Initializes the ModelNetLoaderElastic with configuration.
+
+        Parameters:
+        - load_config: Configuration for loading the model.
+        """
         super().__init__(load_config)
 
         config = None
@@ -108,6 +117,16 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
     def load_model(self, vllm_config: VllmConfig,
                    model_config: ModelConfig) -> nn.Module:
+        """
+        Loads the model using the specified configuration.
+
+        Parameters:
+        - vllm_config: Configuration for the VLLM.
+        - model_config: Configuration for the model.
+
+        Returns:
+        - The loaded model.
+        """
 
         device_config = vllm_config.device_config
         parallel_config = vllm_config.parallel_config

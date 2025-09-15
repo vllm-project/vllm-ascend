@@ -22,12 +22,27 @@ from vllm.logger import logger
 
 
 def find_free_port():
+    """
+    Finds a free port on the local machine.
+
+    Returns:
+    - A free port number.
+    """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(('', 0))
         return s.getsockname()[1]
 
 
 def is_valid_path_prefix(path_prefix):
+    """
+    Checks if the provided path prefix is valid.
+
+    Parameters:
+    - path_prefix: The path prefix to validate.
+
+    Returns:
+    - True if the path prefix is valid, otherwise False.
+    """
     if not path_prefix:
         return False
 
