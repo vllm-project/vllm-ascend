@@ -1,6 +1,6 @@
 # Release note
 
-## v0.10.2rc1 - 2025.09.15
+## v0.10.2rc1 - 2025.09.16
 
 This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started.
 
@@ -39,6 +39,7 @@ This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the 
 - The server will be hang when running Prefill Decode Disaggregation with different TP size for P and D. It's fixed by [vLLM commit](https://github.com/vllm-project/vllm/pull/23917) which is not included in v0.10.2. You can pick this commit to fix the issue.
 - The HBM usage of Qwen3 Next is higher than expected. It's a [known issue](https://github.com/vllm-project/vllm-ascend/issues/2884) and we're working on it. You can set `max_model_len` and `gpu_memory_utilization` to suitable value basing on your parallel config to avoid oom error.
 - We notice that lora doesn't work with this release due to the refactor of kv cache. We'll fix it soon. [2941](https://github.com/vllm-project/vllm-ascend/issues/2941)
+- Please do not enable chunked prefill with prefix cache when running with Ascend scheduler. The performance and accuracy is not good/correct. [#2943](https://github.com/vllm-project/vllm-ascend/issues/2943)
 
 ## v0.10.1rc1 - 2025.09.04
 

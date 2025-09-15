@@ -73,7 +73,7 @@ myst_substitutions = {
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
     'pip_vllm_ascend_version': "0.10.2rc1",
-    'pip_vllm_version': "v0.10.2",
+    'pip_vllm_version': "0.10.2",
     # CANN image tag
     'cann_image_tag': "8.2.rc1-910b-ubuntu22.04-py3.11",
     # vllm version in ci
