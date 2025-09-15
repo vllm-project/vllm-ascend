@@ -440,8 +440,17 @@ class EagleProposer(Proposer):
             num_computed_tokens_cpu=None,
             seq_lens=None)
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        attn_metadata = self.runner.attn_metadata_builder.build(
-            common_attn_metadata, self.runner.model)
+        
+        # attn_metadata = self.runner.attn_metadata_builder.build(
+        #     common_attn_metadata, self.runner.model)
+        builder = self.runner.attn_groups[0][0].metadata_builder
+        attn_metadata_mtp = builder.build(0, common_attn_metadata,
+                                            self.runner.get_model())
+
+        attn_metadata = {}
+        for layer_name in self.attn_layer_name:
+            attn_metadata[layer_name] = attn_metadata_mtp
+        
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -450,7 +459,7 @@ class EagleProposer(Proposer):
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
-        attn_metadata.block_tables = block_table.to(device)
+        attn_metadata[self.attn_layer_name[0]].block_tables = block_table.to(device)
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
                                         num_tokens=num_input_tokens):
@@ -462,6 +471,7 @@ class EagleProposer(Proposer):
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
+        attn_metadata = attn_metadata[self.attn_layer_name[0]]
 
         # Early exit if there is only one draft token to be generated.
         if self.vllm_config.speculative_config.num_speculative_tokens == 1:
