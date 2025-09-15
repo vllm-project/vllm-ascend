@@ -97,7 +97,7 @@ def test_select_moe_comm_method_unsupported_soc():
 
 @patch('vllm_ascend.worker.model_runner_v1.torch_npu')
 @patch('vllm_ascend.worker.model_runner_v1.torch')
-def test_init_creates_transfer_event_and_pinned_memory(self, mock_torch,
+def test_init_creates_transfer_event_and_pinned_memory(mock_torch,
                                                        mock_torch_npu):
     """Test that initialization creates transfer event and pinned CPU memory."""
     # This is a simplified test focusing only on the new attributes
