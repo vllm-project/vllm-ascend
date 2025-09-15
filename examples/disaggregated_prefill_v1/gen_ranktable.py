@@ -73,6 +73,8 @@ if local_rank == "0":
     super_pod_id = "0"
     for idx in range(len(local_device_ids)):
         device_id = local_device_ids[idx]
+        chip_id = device_id % chips_per_card
+        card_id = device_id // chips_per_card
         if soc_info == AscendSocVersion.A3:
             device_ip = get_cmd_stdout(
                 f"{hccn_tool_path} -i {device_id} -vnic -g | grep ipaddr"
