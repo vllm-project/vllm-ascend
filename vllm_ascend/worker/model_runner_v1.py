@@ -2506,11 +2506,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for idx in range(len(kv_cache_tensor.shared_by)):
                 # TODO: REFACTOR ME to sharing hybrid cache
                 tensor = torch.zeros(kv_cache_tensor.size,
-                                    dtype=torch.int8,
-                                    device=self.device)
+                                     dtype=torch.int8,
+                                     device=self.device)
                 layer_name = kv_cache_tensor.shared_by[idx]
                 kv_cache_raw_tensors[layer_name] = tensor
-
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:

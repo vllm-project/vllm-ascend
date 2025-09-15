@@ -1,4 +1,5 @@
 import types
+from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -186,6 +187,8 @@ class MtpProposer(Proposer):
                            hidden_states: torch.Tensor = None,
                            attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None):
+        if attn_metadata is not None and isinstance(attn_metadata, Dict):
+            attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
             if token_ids:
@@ -382,7 +385,7 @@ class MtpProposer(Proposer):
             num_computed_tokens_cpu=None,
             seq_lens=None)
         attn_metadata = self.runner.attn_metadata_builder.build(
-            common_attn_metadata, self.runner.get_model())
+            0, common_attn_metadata, self.runner.get_model())
 
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states

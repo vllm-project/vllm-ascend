@@ -19,7 +19,7 @@
 
 import math
 import types
-from typing import Optional
+from typing import Optional, Dict
 
 import torch
 import torch.distributed as dist
@@ -51,7 +51,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
-            vllm_config, device)
+            None, None, vllm_config, device)
 
         ascend_config = get_ascend_config()
         self.new_kv_cache_bytes = -1
@@ -135,7 +135,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                           is_torchair_compile, input_ids,
                                           positions, attn_metadata, num_tokens,
                                           intermediate_tensors, inputs_embeds):
-
+        if attn_metadata is not None and isinstance(attn_metadata, Dict):
+            attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         if not with_prefill:
             # Only mark static while compiling
             if is_torchair_compile:
@@ -281,6 +282,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds):
+        if attn_metadata is not None and isinstance(attn_metadata, Dict):
+            attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         model_kwargs = {
             "kv_caches": self.kv_caches,
             "attn_metadata": attn_metadata
