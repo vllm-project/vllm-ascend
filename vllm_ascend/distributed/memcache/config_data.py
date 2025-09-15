@@ -383,11 +383,9 @@ class ReqMeta:
             else input_token_len
         )
 
-        skip_save = skip_save and num_tokens_to_save < chunk_boundary
+        skip_save = skip_save or num_tokens_to_save < chunk_boundary
         if skip_save and load_spec is None:
             return None
-
-        
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
