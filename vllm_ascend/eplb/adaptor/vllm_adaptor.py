@@ -140,7 +140,7 @@ class VllmEplbAdaptor(EplbAdaptor):
                 self.expert_map_per_layer_cpu[layer_idx] = \
                     expert_map_all[layer_idx][self.rank_id]
             else:
-                self.expert_map_per_layer_cpu[layer_idx + 3] = \
+                self.expert_map_per_layer_cpu[layer_idx + self.num_dense_layers] = \
                     expert_map_all[layer_idx][self.rank_id]
         return expert_map_all
 

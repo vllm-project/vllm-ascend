@@ -30,7 +30,8 @@ def get_log2phy_map(self, layer_id):
 def get_all_expert_map(self, num_moe_layers):
     all_loads = []
     for layer_id in range(num_moe_layers):
-        load_tensor = self.get_expert_map(layer_id)  # (num_experts_per_layer,)
+        load_tensor = self.get_expert_map(
+            layer_id + self.num_dense_layers)  # (num_experts_per_layer,)
         all_loads.append(load_tensor)
 
     return torch.stack(all_loads, dim=0)
@@ -38,8 +39,8 @@ def get_all_expert_map(self, num_moe_layers):
 
 def get_all_moe_loads(self):
     all_moe_loads = torch.stack(
-        [self.model.layers[layer_id].mlp.experts.moe_load \
-         for layer_id in range(self.num_moe_layers)],
+        [self.model.layers[layer_id + self.num_dense_layers].mlp.experts.moe_load \
+            for layer_id in range(self.num_moe_layers)],
         dim=0
     )
     return all_moe_loads
@@ -47,7 +48,8 @@ def get_all_moe_loads(self):
 
 def clear_all_moe_loads(self):
     for layer_id in range(self.num_moe_layers):
-        self.model.layers[layer_id].mlp.experts.clear_moe_load()
+        self.model.layers[
+            layer_id + self.num_dense_layers].mlp.experts.clear_moe_load()
 
 
 def model_register(model, model_config):
@@ -61,7 +63,7 @@ def model_register(model, model_config):
 
     if config.model_type == "qwen3_moe":
         model.num_moe_layers = config.num_hidden_layers
-    elif config.model_type == "deepseek_v2":
+    elif config.model_type == "deepseek_v2" or config.model_type == "deepseek_v3":
         num_dense_layers = config.first_k_dense_replace
         model.num_moe_layers = config.num_hidden_layers - num_dense_layers
     else:

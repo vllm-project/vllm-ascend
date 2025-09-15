@@ -48,6 +48,11 @@ class EplbWorker:
         # D2D
         # H2D
 
+        # If the process is consistently stuck before the expert weight update,
+        # it might be due to thread issues related to PyTorch.
+        # TODO: A temporary solution is as follows, but further analysis is needed. 
+        # torch.set_num_threads(1)
+        
         # Get initial expert_map
         torch.set_num_threads(1)
         if self.old_expert_maps is None:
