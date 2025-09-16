@@ -60,6 +60,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
         get_ascend_config()
+        self.dynamic_eplb = get_ascend_config().dynamic_eplb
 
         try:
             device_group = get_mc2_group().device_group
@@ -138,7 +139,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             shared_experts=shared_experts,
-            need_trans=True)
+            need_trans=True,
+            dynamic_eplb=self.dynamic_eplb)
 
 
 class AscendFusedMoE(FusedMoE):
