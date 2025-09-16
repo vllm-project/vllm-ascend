@@ -82,7 +82,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [main, v0.10.2]
+        vllm_version: [68dbde5, v0.10.2]
     steps:
       - name: Install packages
         run: |
@@ -121,7 +121,7 @@ jobs:
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut --ignore=tests/ut/test_platform.py
 
       - name: Upload coverage to Codecov
-        if: ${{ matrix.vllm_version == 'main' }}
+        if: ${{ matrix.vllm_version != 'v0.10.2' }}
         uses: codecov/codecov-action@v5
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
@@ -138,7 +138,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-1]
-        vllm_version: [main, v0.10.2]
+        vllm_version: [68dbde5, v0.10.2]
     name: singlecard e2e test - light
     runs-on: ${{ matrix.os }}
     container:
@@ -203,7 +203,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-2]
-        vllm_version: [main, v0.10.2]
+        vllm_version: [68dbde5, v0.10.2]
     name: multicard e2e test - light
     runs-on: ${{ matrix.os }}
     container:
