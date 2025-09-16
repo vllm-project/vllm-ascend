@@ -443,8 +443,7 @@ class AscendFusedMoE(FusedMoE):
                           tuple) and len(e_hidden_states) == 2:
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
-        if isinstance(e_hidden_states,
-                      tuple) and len(e_hidden_states) == 3:
+        if isinstance(e_hidden_states, tuple) and len(e_hidden_states) == 3:
             e_hidden_states, group_list_type, expert_tokens = e_hidden_states
 
         if self.dynamic_eplb:
