@@ -39,9 +39,8 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 
-from vllm_ascend.worker.block_table import MultiGroupBlockTable
-
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
 @dataclass
