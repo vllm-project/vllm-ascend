@@ -238,7 +238,7 @@ class NPUPlatform(Platform):
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
         if parallel_config and parallel_config.worker_cls == "auto":
-            if ascend_config.torchair_graph_config.enabled:
+            if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
@@ -289,7 +289,12 @@ class NPUPlatform(Platform):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
 
-        use_torchair = get_ascend_config().torchair_graph_config.enabled
+        ascend_config = get_ascend_config()
+
+        if use_mla and ascend_config.enable_shared_expert_dp:
+            return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
+
+        use_torchair = ascend_config.torchair_graph_config.enabled
         # choose attention backend based on use_mla and use_torchair
         backend_map = {
             (True, True):
