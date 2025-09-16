@@ -86,8 +86,8 @@ def generate_log2phy_map(expert_map):
                     for _ in range(num_ranks - num_rank_holding_expert)
                 ]
                 log2phy_map[negative_rank_idx,
-                idx] = torch.tensor(random_list,
-                                    dtype=log2phy_map.dtype)
+                            idx] = torch.tensor(random_list,
+                                                dtype=log2phy_map.dtype)
             except Exception as e:
                 logger.error(f"Fail to get log2phy_map: {str(e)}")
 
