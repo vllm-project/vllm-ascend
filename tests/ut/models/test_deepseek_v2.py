@@ -21,7 +21,6 @@ from vllm.config import CacheConfig
 from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2MergedReplicatedLinear, CustomDeepseekV2MLAAttention,
     CustomDeepseekV2MLP, CustomDeepseekV2RowParallelLinear,
-    CustomDeepseekV2RowParallelLinearReplaceAllreduce,
     CustomDeepseekV2SiluAndMul, LogitsProcessor, ParallelLMHead)
 
 
