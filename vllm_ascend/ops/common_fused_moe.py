@@ -245,7 +245,7 @@ class AscendFusedMoE(FusedMoE):
         if self.dynamic_eplb:
             self.expert_map_path = ascend_config.expert_map_path
             self.global_redundant_expert_num = ascend_config.init_redundancy_expert
-            self.global_num_experts = num_experts + self.global_redundant_expert_num
+            self.global_num_experts = self.global_num_experts + self.global_redundant_expert_num
             if self.expert_map_path and os.path.exists(self.expert_map_path) and os.access(self.expert_map_path, os.R_OK):
                 self.expert_load_balancer = ExpertLoadBalancer(self.expert_map_path, self.global_num_experts)
                 self.local_num_experts, self.expert_map = (self.expert_load_balancer.get_rank_placement_map(self.moe_instance_id, self.ep_rank))
@@ -261,7 +261,7 @@ class AscendFusedMoE(FusedMoE):
                     self.log2phy = determine_default_log2phy_map(
                         self.global_num_experts, self.ep_size, self.ep_rank,
                         self.global_redundant_expert_num)
-            local_num_experts = (torch.sum(self.expert_map != -1) if self.expert_map is not None else num_experts)
+            local_num_experts = (torch.sum(self.expert_map != -1) if self.expert_map is not None else self.global_num_experts)
             self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
 
 
