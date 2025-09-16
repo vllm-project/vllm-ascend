@@ -25,7 +25,7 @@ would be hidden by eplb worker process too.
 
 Currently swift balancer optimize 5ms TPOT with ep size 64 while cost less than 2ms for every layer expert movement.
 
-We add new parameters for eplb: 
+We add new parameters for eplb:
 "dynamic_eplb":true ---  enable dynamic eplb
 "num_iterations_eplb_update": 400 -- forward iterations when eplb would begin
 "gate_eplb":true -- eplb would update only once, false by default.
@@ -39,7 +39,7 @@ Enable dynamic eplb and specify the trigger rounds.
 --additional-config '{ "dynamic_eplb":true,"num_iterations_eplb_update":400, "gate_eplb":true, "num_wait_worker_iterations":30}'
 ### Record expert map for static eplb
 Specify the path for the static eplb initialization file.
---additional-config '{ "expert_map_record_path": "/xx/xx.json", "init_redundancy_expert": 16, """dynamic_eplb":true,"num_iterations_eplb_update":400, "gate_eplb":true, "num_wait_worker_iterations":30}'
+--additional-config '{ "expert_map_record_path": "/xx/xx.json", "init_redundancy_expert": 16, dynamic_eplb":true,"num_iterations_eplb_update":400, "gate_eplb":true, "num_wait_worker_iterations":30}'
 ### Static eplb
 If expert map has been recorded, enable static eplb with expert map path.
 --additional-config '{ "expert_map_path": "/xx/xx.json"}'
