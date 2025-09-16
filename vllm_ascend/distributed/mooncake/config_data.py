@@ -1,17 +1,16 @@
-# Standard
-from dataclasses import dataclass
 import hashlib
-from typing import Any, Iterable, List, Optional, Tuple, Union
 import json
 import os
-# Third Party
-from numpy import array
-import torch, torch_npu
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-from vllm.utils import logger
-from vllm.utils import cdiv
+from dataclasses import dataclass
+from typing import Iterable, List, Optional, Tuple, Union
 
-# First Party
+import torch
+from numpy import array
+from vllm.distributed.kv_transfer.kv_connector.v1.base import \
+    KVConnectorMetadata
+from vllm.utils import cdiv, logger
+from vllm.v1.core.sched.output import NewRequestData
+
 
 @dataclass
 class MooncakeEngineMetadata:
@@ -30,7 +29,8 @@ class MooncakeEngineMetadata:
     block_size: int = 128
     """ whether use MLA"""
     use_mla: bool = False
-    
+
+
 @dataclass(order=True)
 class MooncakeEngineKey:
     model_name: str
@@ -39,20 +39,16 @@ class MooncakeEngineKey:
     chunk_hash: str
 
     def __hash__(self):
-        return hash(
-            (
-                self.model_name,
-                self.world_size,
-                self.worker_id,
-                self.chunk_hash,
-            )
-        )
+        return hash((
+            self.model_name,
+            self.world_size,
+            self.worker_id,
+            self.chunk_hash,
+        ))
 
     def to_string(self):
-        return (
-            f"{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash}"
-        )
+        return (f"{self.model_name}@{self.world_size}"
+                f"@{self.worker_id}@{self.chunk_hash}")
 
     def split_layers(self, num_layers: int) -> List["LayerMooncakeEngineKey"]:
         """Split the key into multiple keys for each layer"""
@@ -65,18 +61,8 @@ class MooncakeEngineKey:
                     self.worker_id,
                     self.chunk_hash,
                     layer_id,
-                )
-            )
-        return keys   
-
-    @staticmethod
-    def from_string(s):
-        parts = s.split("@")
-        if len(parts) != 5:
-            raise ValueError(f"Invalid key string: {s}")
-        return MooncakeEngineKey(
-            parts[0], int(parts[1]), int(parts[2]), parts[3]
-        )
+                ))
+        return keys
 
     def to_dict(self):
         # Note(Kuntai): this is used for serializing CacheEngineKey via msgpack.
@@ -105,42 +91,30 @@ class LayerMooncakeEngineKey(MooncakeEngineKey):
     layer_id: int
 
     def __hash__(self):
-        return hash(
-            (
-                self.model_name,
-                self.world_size,
-                self.worker_id,
-                self.chunk_hash,
-                self.layer_id,
-            )
-        )
+        return hash((
+            self.model_name,
+            self.world_size,
+            self.worker_id,
+            self.chunk_hash,
+            self.layer_id,
+        ))
 
     def to_string(self):
-        return (
-            f"{self.model_name}@{self.world_size}"
-            f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}"
-        )
-
-    @staticmethod
-    def from_string(s):
-        parts = s.split("@")
-        return LayerMooncakeEngineKey(
-            parts[0],
-            int(parts[1]),
-            int(parts[2]),
-            parts[3],
-            int(parts[4]),
-        )
+        return (f"{self.model_name}@{self.world_size}"
+                f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}")
 
 
 class ChunkedTokenDatabase():
+
     def __init__(
         self,
         metadata: Optional[MooncakeEngineMetadata] = None,
     ):
         self.metadata = metadata
 
-    def _make_key_by_hash(self, chunk_hash: str, layer_id: Optional[int] = None):
+    def _make_key_by_hash(self,
+                          chunk_hash: str,
+                          layer_id: Optional[int] = None):
         assert self.metadata is not None
         return MooncakeEngineKey(
             self.metadata.model_name,
@@ -159,7 +133,8 @@ class ChunkedTokenDatabase():
             tokens_bytes = tokens.cpu().to(torch.uint32).numpy().tobytes()
         elif isinstance(tokens, list):
             tokens_bytes = array.array("I", tokens).tobytes()
-        return hashlib.sha256(prefix_hash.encode("ascii") + tokens_bytes).hexdigest()
+        return hashlib.sha256(prefix_hash.encode("ascii") +
+                              tokens_bytes).hexdigest()
 
     def _chunk_tokens(
         self,
@@ -175,7 +150,7 @@ class ChunkedTokenDatabase():
                 shape [metadata.block_size]
         """
         for i in range(0, len(tokens), self.metadata.block_size):
-            yield tokens[i : i + self.metadata.block_size]
+            yield tokens[i:i + self.metadata.block_size]
 
     def _prefix_hash(
         self,
@@ -248,12 +223,14 @@ class LoadSpec:
     # Whether the scheduler allow us to load the tokens
     can_load: bool
 
+
 @dataclass
 class SaveSpec:
     # Skip already saved tokens
     skip_leading_tokens: int
     # Whether the scheduler allow us to save the tokens
     can_save: bool
+
 
 @dataclass
 class RequestTracker:
@@ -299,7 +276,8 @@ class RequestTracker:
 
         return RequestTracker(
             req_id=new_request.req_id,
-            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].copy(),
+            token_ids=new_request.prompt_token_ids[:num_tokens_to_compute].
+            copy(),
             allocated_block_ids=unfolded_block_ids,
             num_saved_tokens=0,
         )
@@ -322,7 +300,8 @@ class RequestTracker:
         elif isinstance(new_block_ids, list):
             pass
         else:
-            raise ValueError(f"Unsupported new_block_ids type {type(new_block_ids)}")
+            raise ValueError(
+                f"Unsupported new_block_ids type {type(new_block_ids)}")
         self.allocated_block_ids.extend(new_block_ids)
 
 
@@ -342,6 +321,7 @@ class ReqMeta:
     load_spec: Optional[LoadSpec] = None
 
     is_last_chunk: Optional[bool] = None
+
     @staticmethod
     def from_request_tracker(
         tracker: RequestTracker,
@@ -371,23 +351,16 @@ class ReqMeta:
         # 1. has already been saved before (num_saved_tokens > 0)
         # 2. number of unsaved tokens is not reached the chunk boundary
         skip_leading_tokens = tracker.num_saved_tokens
-        chunk_boundary = (
-            cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
-        )
-        skip_save = skip_save or (
-            tracker.num_saved_tokens > 0 and input_token_len < chunk_boundary
-        )
-
-        if skip_save and load_spec is None:
-            return None
-
+        chunk_boundary = (cdiv(tracker.num_saved_tokens + 1, block_size) *
+                          block_size if discard_partial_chunks else 0)
         # Calculate number of tokens to save based on discard_partial_chunks
         # setting
-        num_tokens_to_save = (
-            (input_token_len // block_size * block_size)
-            if discard_partial_chunks
-            else input_token_len
-        )
+        num_tokens_to_save = ((input_token_len // block_size * block_size)
+                              if discard_partial_chunks else input_token_len)
+
+        skip_save = skip_save or num_tokens_to_save < chunk_boundary
+        if skip_save and load_spec is None:
+            return None
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
@@ -408,7 +381,9 @@ class ReqMeta:
         else:
             # Do not load if not in `can_load` state
             load_spec = None
-
+        logger.debug(
+            f"request:{tracker.req_id}, meta save spec:{save_spec}, meta load spec:{load_spec}"
+        )
         return ReqMeta(
             req_id=tracker.req_id,
             token_ids=token_ids,
@@ -419,12 +394,11 @@ class ReqMeta:
         )
 
 
-@dataclass
 class MooncakeConnectorMetadata(KVConnectorMetadata):
-    requests: list[ReqMeta]
 
-    def __init__(self):
+    def __init__(self, unfinished_request_ids):
         self.requests = []
+        self.unfinished_request_ids = unfinished_request_ids
 
     def add_request(self, req_meta: ReqMeta) -> None:
         """Add a request to the metadata.
@@ -466,12 +440,12 @@ class MooncakeStoreConfig:
             local_buffer_size=config.get("local_buffer_size", 1073741824),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address")
-        )
-        
+            master_server_address=config.get("master_server_address"))
+
     @staticmethod
     def load_from_env() -> "MooncakeStoreConfig":
         config_path = os.getenv("MOONCAKE_CONFIG_PATH")
         if not config_path:
-            raise ValueError("The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
+            raise ValueError(
+                "The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
         return MooncakeStoreConfig.from_file(config_path)

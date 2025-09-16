@@ -1,28 +1,13 @@
 # Standard
-from contextlib import contextmanager
-from dataclasses import dataclass
-from functools import reduce
-from typing import List, Optional, no_type_check
-from enum import Enum
-import asyncio
-import json
-import operator
 import os
-import struct
-import ctypes
-import time
-import csv
-from contextlib import contextmanager
-# Third Party
-import torch, torch_npu
-from vllm.config import ParallelConfig
 
-# First Party
+# Third Party
+from vllm.config import ParallelConfig
+from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.utils import logger
-from vllm.distributed.parallel_state import (get_dp_group,
-                                             get_tensor_model_parallel_rank,
-                                             get_tp_group)
+
 from vllm_ascend.distributed.mooncake.config_data import MooncakeEngineKey
+
 from .config_data import MooncakeStoreConfig
 
 METADATA_BYTES_LEN = 24
@@ -30,9 +15,8 @@ BASE_PORT = int(os.getenv("VLLM_BASE_PORT", "8790"))
 
 
 class Mooncakestore():
-    def __init__(
-        self, parallel_config: ParallelConfig
-    ):
+
+    def __init__(self, parallel_config: ParallelConfig):
         try:
             from mooncake.store import MooncakeDistributedStore
         except ImportError as e:
@@ -45,7 +29,8 @@ class Mooncakestore():
         dp_rank = parallel_config.data_parallel_rank_local
         all_device_ids = os.getenv("ASCEND_RT_VISIBLE_DEVICES", None)
         if not all_device_ids:
-            device_ids_list = list(range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
+            device_ids_list = list(
+                range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
         else:
             device_ids_list = list(map(int, all_device_ids.split(',')))
         assert len(device_ids_list) > tp_rank
@@ -57,14 +42,11 @@ class Mooncakestore():
         else:
             local_hostname = self.config.local_hostname
         self.store = MooncakeDistributedStore()
-        ret = self.store.setup(
-            local_hostname,
-            self.config.metadata_server,
-            self.config.global_segment_size,
-            self.config.local_buffer_size,
-            self.config.protocol, self.config.device_name,
-            self.config.master_server_address
-        )
+        ret = self.store.setup(local_hostname, self.config.metadata_server,
+                               self.config.global_segment_size,
+                               self.config.local_buffer_size,
+                               self.config.protocol, self.config.device_name,
+                               self.config.master_server_address)
         if ret != 0:
             msg = "Initialize mooncake failed."
             logger.error(msg)
@@ -75,20 +57,20 @@ class Mooncakestore():
 
     def exists(self, key: MooncakeEngineKey) -> bool:
         return self.store.is_exist(key.to_string()) == 1
-    
-    def batch_exists(self, keys:list[str]) -> list[bool]:
+
+    def batch_exists(self, keys: list[str]) -> list[bool]:
         return self.store.batch_is_exist(keys)
 
     def get(self, key: MooncakeEngineKey, addr: list[int], size: list[int]):
+        expect_res = sum(size)
         key_str = key.to_string()
         try:
             res = self.store.batch_get_into_ascend(key_str, addr, size)
             if res[0] != expect_res:
                 logger.error(f"Failed to get key: [{key_str}] .")
-        except Exception as e:
+        except Exception:
             logger.error(f"Failed to get key: [{key_str}] .")
         return res
-
 
     def put(self, key: MooncakeEngineKey, addr: list[int], size: list[int]):
         key_str = key.to_string()
@@ -96,11 +78,11 @@ class Mooncakestore():
             ret = self.store.batch_put_from_ascend(key_str, addr, size)
             if ret[0] != 0:
                 logger.error(f"Failed to put key {key_str}.")
-        except Exception as e:
+        except Exception:
             logger.error(f"Failed to put key {key_str}.")
-        
+
         return ret
-    
+
     def close(self):
         self.store.close()
         logger.info("Closed the mooncake store connection")
