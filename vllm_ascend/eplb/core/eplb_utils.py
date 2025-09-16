@@ -69,7 +69,7 @@ def generate_log2phy_map(expert_map):
         num_rank_holding_expert = positive_rank_idx.size(0)
 
         if num_rank_holding_expert == 0:
-            log2phy_map[:, idx] = torch.full((num_ranks,),
+            log2phy_map[:, idx] = torch.full((num_ranks, ),
                                              0,
                                              dtype=log2phy_map.dtype)
 
@@ -84,8 +84,8 @@ def generate_log2phy_map(expert_map):
                 for _ in range(num_ranks - num_rank_holding_expert)
             ]
             log2phy_map[negative_rank_idx,
-            idx] = torch.tensor(random_list,
-                                dtype=log2phy_map.dtype)
+                        idx] = torch.tensor(random_list,
+                                            dtype=log2phy_map.dtype)
 
     return log2phy_map
 
