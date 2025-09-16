@@ -48,8 +48,8 @@ def get_all_moe_loads(self):
 
 def clear_all_moe_loads(self):
     for layer_id in range(self.num_moe_layers):
-        self.model.layers[
-            layer_id + self.num_dense_layers].mlp.experts.clear_moe_load()
+        self.model.layers[layer_id +
+                          self.num_dense_layers].mlp.experts.clear_moe_load()
 
 
 def model_register(model, model_config):

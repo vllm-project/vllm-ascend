@@ -40,7 +40,8 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.num_dense_layers = self.model.config.first_k_dense_replace
             self.global_expert_num = self.model.config.n_routed_experts
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
-        self.init_redundancy_expert = get_ascend_config().init_redundancy_expert
+        self.init_redundancy_expert = get_ascend_config(
+        ).init_redundancy_expert
 
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 and qwen3-moe is supported here
         if self.model.quant_config is not None:
@@ -163,7 +164,8 @@ class VllmEplbAdaptor(EplbAdaptor):
     def _export_tensor_to_file(self, expert_maps, expert_map_record_path: str):
         if self.rank_id == 0:
             num_local_experts = expert_maps.max() + 1
-            expert_maps_local = self.global2local(expert_maps, num_local_experts)
+            expert_maps_local = self.global2local(expert_maps,
+                                                  num_local_experts)
 
             expert_maps_list = expert_maps_local.tolist()
             record: dict[str, Any] = {
@@ -192,7 +194,7 @@ class VllmEplbAdaptor(EplbAdaptor):
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
         self.expert_map_per_layer[layer_id] = updated_expert_map.clone()
-        self.expert_map_per_layer_cpu[layer_id]= updated_expert_map.clone()
+        self.expert_map_per_layer_cpu[layer_id] = updated_expert_map.clone()
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace,
                                 buffer_tensor_id):

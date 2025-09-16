@@ -25,7 +25,8 @@ from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 
 class EplbUpdator:
 
-    def __init__(self, ascend_config, loader, eplb_process:EplbProcess,  process):
+    def __init__(self, ascend_config, loader, eplb_process:EplbProcess,
+                 process):
         self.ascend_config = ascend_config
         self.init_eplb(self.ascend_config.expert_map_path, process)
         self.eplb_loader = loader
@@ -66,8 +67,7 @@ class EplbUpdator:
         self.process = process
 
         logger.info(
-            f"[ModelRunner] Launched EPLB process (pid={self.process.pid})"
-        )
+            f"[ModelRunner] Launched EPLB process (pid={self.process.pid})")
 
     def update_iteration(self):
         self.cur_iterations += 1

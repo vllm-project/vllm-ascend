@@ -47,12 +47,6 @@ class EplbWorker:
         # async stream
         # D2D
         # H2D
-
-        # If the process is consistently stuck before the expert weight update,
-        # it might be due to thread issues related to PyTorch.
-        # TODO: A temporary solution is as follows, but further analysis is needed. 
-        # torch.set_num_threads(1)
-        
         # Get initial expert_map
         torch.set_num_threads(1)
         if self.old_expert_maps is None:
@@ -206,9 +200,8 @@ class EplbWorker:
                         # src: src_rank, dest: dst_rank, expert: expert_id
                         expert_id = np.intersect1d(
                             experts_v,
-                            np.where(
-                                current_expert_maps_this_layer[src_rank] != -1)
-                        )[0]
+                            np.where(current_expert_maps_this_layer[src_rank]
+                                     != -1))[0]
 
                         # record send/rcv pairs
                         if src_rank not in expert_send_info_this_layer:

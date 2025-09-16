@@ -28,7 +28,7 @@ def determine_default_expert_map(global_expert_num, world_size, rank_id,
 
     local_num_experts = global_expert_num // world_size
 
-    expert_map = torch.full((global_expert_num,), -1, dtype=torch.int32)
+    expert_map = torch.full((global_expert_num, ), -1, dtype=torch.int32)
 
     if rank_id < world_size - 1:
         start = rank_id * local_num_experts
@@ -68,7 +68,7 @@ def generate_log2phy_map(expert_map):
 
         if num_rank_holding_expert == 1:
             log2phy_map[negative_rank_idx, idx] = torch.full(
-                (num_ranks - 1,),
+                (num_ranks - 1, ),
                 log2phy_map[positive_rank_idx, idx].item(),
                 dtype=log2phy_map.dtype)
         else:
@@ -82,7 +82,8 @@ def generate_log2phy_map(expert_map):
     return log2phy_map
 
 
-def determine_default_log2phy_map(global_expert_num, world_size, rank_id, global_redundant_expert_num):
+def determine_default_log2phy_map(global_expert_num, world_size, rank_id,
+                                  global_redundant_expert_num):
     if world_size == 1:
         local_ids = torch.arange(global_expert_num, dtype=torch.int32)
         expert_map_all = local_ids.unsqueeze(0).expand(world_size, -1)
