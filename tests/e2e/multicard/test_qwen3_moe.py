@@ -103,17 +103,17 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_ACLGRAPH():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_Qwen3_235b_all2allv_mc2_quant(monkeypatch):
+def test_Qwen3_235b_all2allv_mc2_quant():
     """Test Qwen3-235B with all2all sequence and multi-card configuration."""
     # Set environment variables similar to the startup command
-    monkeypatch.setenv('VLLM_USE_V1', '1')
-    monkeypatch.setenv('VLLM_VERSION', '0.10.1.1')
-    monkeypatch.setenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ', '1')
-    monkeypatch.setenv('TASK_QUEUE_ENABLE', '2')
-    monkeypatch.setenv('PYTORCH_NPU_ALLOC_CONF', 'expandable_segments:True')
-    monkeypatch.setenv('ACL_STREAM_TIMEOUT', '340000')
-    monkeypatch.setenv('HCCL_OP_EXPANSION_MODE', 'AIV')
-    monkeypatch.setenv('HCCL_OP_BASE_FFTS_MODE_ENABLE', 'true')
+    os.environ['VLLM_USE_V1'] = '1'
+    os.environ['VLLM_VERSION'] = '0.10.1.1'
+    os.environ['VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ'] = '1'
+    os.environ['TASK_QUEUE_ENABLE'] = '2'
+    os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'expandable_segments:True'
+    os.environ['ACL_STREAM_TIMEOUT'] = '340000'
+    os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
+    os.environ['HCCL_OP_BASE_FFTS_MODE_ENABLE'] = 'true'
 
     example_prompts = [
         "Hello, my name is",
