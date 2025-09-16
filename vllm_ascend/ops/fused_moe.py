@@ -438,6 +438,8 @@ class AscendFusedMoE(FusedMoE):
             dynamic_scale_for_share=dynamic_scale_for_share,
         )
 
+        group_list_type = None
+
         if shared_experts:
             if isinstance(e_hidden_states,
                           tuple) and len(e_hidden_states) == 2:
@@ -446,7 +448,7 @@ class AscendFusedMoE(FusedMoE):
         if isinstance(e_hidden_states, tuple) and len(e_hidden_states) == 3:
             e_hidden_states, group_list_type, expert_tokens = e_hidden_states
 
-        if self.dynamic_eplb:
+        if self.dynamic_eplb and group_list_type is not None:
             self.moe_load += expert_tokens if group_list_type else \
                 torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
