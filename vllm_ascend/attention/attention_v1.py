@@ -456,18 +456,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.seq_lens = \
                 attn_metadata.seq_lens.to(device=query.device)
 
-        torch_npu._npu_paged_attention_splitfuse(
+        num_block, block_size, head_num, head_dim = self.key_cache.shape
+        key = self.key_cache.view(num_block, block_size, -1)
+        value = self.value_cache.view(num_block, block_size, -1)
+
+        output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
-            mask=attn_metadata.attn_mask,
+            key=key,
+            value=value,
+            atten_mask=attn_metadata.attn_mask.to(device=query.device),
             block_table=attn_metadata.block_tables,
-            seq_len=attn_metadata.query_lens,
-            context_lens=attn_metadata.seq_lens,
-            num_kv_heads=self.num_kv_heads,
+            input_layout="TND",
+            block_size=block_size,
+            actual_seq_lengths=attn_metadata.query_start_loc[1:],
+            actual_seq_lengths_kv=attn_metadata.seq_lens,
+            num_key_value_heads=self.num_kv_heads,
             num_heads=self.num_heads,
-            scale_value=self.scale,
-            out=output)
+            scale=self.scale,
+            sparse_mode=3,
+            )
         return output
 
     def forward(
