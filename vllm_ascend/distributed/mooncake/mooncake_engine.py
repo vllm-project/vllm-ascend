@@ -17,8 +17,6 @@ from vllm_ascend.distributed.mooncake.kv_transfer import (
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
 from vllm_ascend.distributed.mooncake.mooncake_store import Mooncakestore
 
-# First Party
-
 
 class MooncakeEngine:
     #The main class for the cache engine.
@@ -181,7 +179,7 @@ class MooncakeEngine:
                 next(layerwise_retriever)  # first layer load
                 self.layerwise_retrievers.append(layerwise_retriever)
             else:
-                self.kv_recv_thread.add_request(
+                self.kv_recv_thread.add_request(  # type: ignore[union-attr]
                     req_id,
                     tokens,
                     request.block_ids,
@@ -269,7 +267,8 @@ class MooncakeEngine:
             )
             if skip_leading_tokens == len(token_ids):
                 if request.is_last_chunk:
-                    self.kv_send_thread.set_finished_request(req_id)
+                    self.kv_send_thread.set_finished_request(
+                        req_id)  # type: ignore[union-attr]
                 continue  # skip this request
 
             skip_leading_tokens = (skip_leading_tokens // self.block_size *
@@ -287,7 +286,7 @@ class MooncakeEngine:
                 request.req_id,
             )
 
-            self.kv_send_thread.add_request(
+            self.kv_send_thread.add_request(  # type: ignore[union-attr]
                 req_id,
                 token_ids,
                 request.block_ids,
@@ -340,8 +339,7 @@ class MooncakeEngine:
 
         if keys:
             # Transpose the keys into layer major format
-            keys = [list(row) for row in zip(*keys, strict=False)
-                    ]  # [num_layer,block_num]
+            keys = [list(row) for row in zip(*keys)]  # [num_layer,block_num]
             for layer_id, keys_multi_chunk in enumerate(keys):
                 if not first_flag:
                     is_finish = self.get_event.wait(timeout=3)  #try---cache
@@ -351,7 +349,8 @@ class MooncakeEngine:
                 req_meta = LasyerMultiBlockReqMeta(req_id, keys_multi_chunk,
                                                    starts, ends, block_ids,
                                                    layer_id)
-                self.kv_recv_thread.add_request(req_meta)
+                self.kv_recv_thread.add_request(
+                    req_meta)  # type: ignore[union-attr]
                 first_flag = False
                 yield None
         else:
@@ -411,13 +410,13 @@ class MooncakeEngine:
             keys.append(keys_multi_layer)  #[block_num,layer_num]
 
         if keys:
-            keys = [list(row) for row in zip(*keys, strict=False)
-                    ]  #[layer_num,block_num]
+            keys = [list(row) for row in zip(*keys)]  #[layer_num,block_num]
             for layer_id, keys_multi_chunk in enumerate(keys):
                 req_meta = LasyerMultiBlockReqMeta(req_id, keys_multi_chunk,
                                                    starts, ends, block_ids,
                                                    layer_id)
-                self.kv_send_thread.add_request(req_meta)
+                self.kv_send_thread.add_request(
+                    req_meta)  # type: ignore[union-attr]
                 yield
         else:
             for layer_id in range(self.num_layers):

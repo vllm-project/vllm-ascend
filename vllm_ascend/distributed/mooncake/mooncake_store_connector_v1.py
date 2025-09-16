@@ -124,7 +124,6 @@ class MooncakeConnectorV1(KVConnectorBase_V1):
             return
 
         self.connector_worker.wait_for_save(self._get_connector_metadata())
-        #time.sleep(1)
 
     def get_finished(self,
                      finished_req_ids: set[str]) -> tuple[set[str], set[str]]:

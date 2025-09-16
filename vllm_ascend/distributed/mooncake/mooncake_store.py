@@ -18,7 +18,7 @@ class Mooncakestore():
 
     def __init__(self, parallel_config: ParallelConfig):
         try:
-            from mooncake.store import MooncakeDistributedStore
+            from mooncake.store import MooncakeDistributedStore  # type: ignore
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "

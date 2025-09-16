@@ -1,3 +1,4 @@
+import array
 import hashlib
 import json
 import os
@@ -5,7 +6,6 @@ from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
-from numpy import array
 from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
 from vllm.utils import cdiv, logger
@@ -108,7 +108,7 @@ class ChunkedTokenDatabase():
 
     def __init__(
         self,
-        metadata: Optional[MooncakeEngineMetadata] = None,
+        metadata: MooncakeEngineMetadata,
     ):
         self.metadata = metadata
 
@@ -165,7 +165,6 @@ class ChunkedTokenDatabase():
         self,
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
-        make_key: bool = True,
     ) -> Iterable[Tuple[int, int, Union[MooncakeEngineKey, str]]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -208,10 +207,7 @@ class ChunkedTokenDatabase():
             if start_idx < num_falses:
                 continue
             else:
-                if make_key:
-                    yield start_idx, end_idx, self._make_key_by_hash(hash_val)
-                else:
-                    yield start_idx, end_idx, hash_val
+                yield start_idx, end_idx, self._make_key_by_hash(hash_val)
 
 
 @dataclass
