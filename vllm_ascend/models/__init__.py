@@ -53,3 +53,6 @@ def register_model():
         "PanguProMoEForCausalLM",
         "vllm_ascend.torchair.models.torchair_pangu_moe:PanguProMoEForCausalLM"
     )
+    ModelRegistry.register_model(
+        "Qwen3NextForCausalLM",
+        "vllm_ascend.models.qwen3_next:Qwen3NextForCausalLM")

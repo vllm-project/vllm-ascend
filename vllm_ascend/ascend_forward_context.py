@@ -42,17 +42,6 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
         return FusedMoEState.MC2
 
 
-def get_dispatcher_name(ep_size: int, with_prefill: bool) -> str:
-    if ep_size == 1:
-        return "TokenDispatcherWithAllGather"
-    elif envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1:
-        return "TokenDispatcherWithAllGather"
-    elif ep_size < 16 or with_prefill:
-        return "TokenDispatcherWithAll2AllV"
-    else:
-        return "TokenDispatcherWithMC2"
-
-
 @contextmanager
 def set_ascend_forward_context(
         attn_metadata: Any,
@@ -66,7 +55,9 @@ def set_ascend_forward_context(
         moe_comm_method: str = "",
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        batch_descriptor: Optional[BatchDescriptor] = None):
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        prefetch_stream: torch.npu.Stream = None,
+        model_instance: torch.nn.Module = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -95,11 +86,6 @@ def set_ascend_forward_context(
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
 
-        from vllm_ascend.ops.moe.token_dispatcher import get_token_dispatcher
-        dispatcher_name = get_dispatcher_name(ep_size, with_prefill)
-        dispatcher = get_token_dispatcher(dispatcher_name)
-        forward_context.token_dispatcher = dispatcher
-
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
@@ -108,7 +94,8 @@ def set_ascend_forward_context(
         # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
-        flashcomm_v1_enabled = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM and \
+        flashcomm_v1_enabled = envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE and \
+            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM and \
             tp_world_size > 1 and \
             num_tokens is not None and num_tokens > 1000
 
@@ -121,6 +108,26 @@ def set_ascend_forward_context(
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
+
+        # set layer_idx to enable optimization features that depend on this information.
+        # This is only applicable to models that contain these necessary attributes.
+        forward_context.layer_idx = None
+        if model_instance is not None and \
+            hasattr(model_instance, "model") and \
+            hasattr(model_instance.model, "start_layer"):
+            forward_context.layer_idx = model_instance.model.start_layer
+
+        # set for mlp weight prefetch
+        prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE and \
+            envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
+            forward_context.layer_idx is not None and \
+            num_tokens is not None and num_tokens < 500
+        if prefetch_mlp_enabled:
+            forward_context.prefetch_stream = prefetch_stream
+            forward_context.model_instance = model_instance
+            forward_context.prefetch_mlp_gate_up_proj = False
+            forward_context.prefetch_mlp_down_proj = False
+        forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens

@@ -176,6 +176,8 @@ class AscendMLATorchairMetadataBuilder:
 
     # _attn_mask_builder = None
     def __init__(self,
+                 kv_cache_spec,
+                 layer_names,
                  vllm_config: VllmConfig,
                  device: torch.device,
                  metadata_cls: Optional[AscendMLATorchairMetadata] = None):
@@ -372,6 +374,7 @@ class AscendMLATorchairMetadataBuilder:
 
     def build(
         self,
+        common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         model: nn.Module,
     ) -> AscendMLATorchairMetadata:

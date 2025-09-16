@@ -49,7 +49,7 @@ def _rope_forward_oot(
     # adopt custom kernel path for rotary_embedding
     if _custom_rotary_embedding_enabled(query, is_neox_style,
                                         self.head_size) and not is_310p():
-        query, key = torch.ops._C.rotary_embedding(
+        query, key = torch.ops._C_ascend.rotary_embedding(
             positions,
             query,
             key,
@@ -138,8 +138,8 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         forward_context = get_forward_context()
         is_first_layer = forward_context.is_first_layer
         # Generate cos and sin outside layers to avoid repeated calculation.
-        if is_neox_style and \
-            self.head_size == 128:
+        if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
+                -1] == 128:
             if is_first_layer:
                 cos_sin = self.cos_sin_cache.index_select(0, positions)
                 last_dim = cos_sin.size()[-1]

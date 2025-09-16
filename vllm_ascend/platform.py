@@ -25,6 +25,7 @@ from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.utils import cdiv
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
@@ -128,6 +129,35 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
+        decoding_config = vllm_config.decoding_config
+        scheduler_config = vllm_config.scheduler_config
+        ascend_scheduler_config = ascend_config.ascend_scheduler_config
+
+        if model_config is not None and not model_config.use_mla:
+            logger.info(
+                "Non-MLA LLMs forcibly disable the chunked prefill feature,"
+                "as the performance of operators supporting this feature "
+                "functionality is currently suboptimal.")
+            if not model_config.is_multimodal_model and \
+                decoding_config.backend == "auto" and \
+                not scheduler_config.delay_factor > 0 and \
+                not scheduler_config.send_delta_data and \
+                scheduler_config.policy == "fcfs":
+                ascend_scheduler_config.enabled = True
+                chunked_prefill_enabled_in_ascend_scheduler = getattr(
+                    ascend_scheduler_config, "enable_chunked_prefill", False)
+                if chunked_prefill_enabled_in_ascend_scheduler:
+                    logger.warning(
+                        "Chunked prefill feature is enabled in ascend_scheduler,"
+                        "but note that the operator supporting this feature "
+                        "would lead to performance degradation.")
+                # In this situation, max_num_batched_tokens would have been rewritten.
+                # So we must make sure max_num_batched_tokens is not smaller than max_model_len.
+                if (scheduler_config.max_num_batched_tokens
+                        < scheduler_config.max_model_len
+                        and not chunked_prefill_enabled_in_ascend_scheduler):
+                    scheduler_config.max_num_batched_tokens = scheduler_config.max_model_len
+
         kv_cache_dtype = vllm_config.additional_config.get(
             "kv_cache_dtype", None)
         if kv_cache_dtype is not None:
@@ -216,6 +246,11 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
+            else:
+                if not vllm_config.model_config.is_deepseek_mla:
+                    cache_config.block_size = cdiv(cache_config.block_size,
+                                                   64) * 64
+
             if cache_config.enable_prefix_caching and cache_config.block_size != 128:
                 logger.warning(
                     "If prefix caching is enabled, block size must be set to 128."
@@ -336,3 +371,7 @@ class NPUPlatform(Platform):
 
         pg._register_backend(device, backend_type, backend_class)
         return pg
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True
