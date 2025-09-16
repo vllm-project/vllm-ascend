@@ -588,7 +588,7 @@ class MtpProposer(Proposer):
             self.torchair_compiled_model = torch.compile(
                 self.model,
                 dynamic=True,
-                fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                fullgraph=True,
                 backend=npu_backend)
             return self.torchair_compiled_model
         else:
