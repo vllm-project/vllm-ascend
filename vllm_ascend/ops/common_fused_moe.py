@@ -323,7 +323,7 @@ class AscendFusedMoE(FusedMoE):
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
-            reduce_results=(not self.all_reduce_merge))
+            reduce_results=self.reduce_results)
 
         return final_hidden_states
 
