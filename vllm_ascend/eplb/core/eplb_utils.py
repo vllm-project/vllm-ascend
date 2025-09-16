@@ -18,7 +18,6 @@
 import random
 
 import torch
-
 from vllm.logger import logger
 
 
