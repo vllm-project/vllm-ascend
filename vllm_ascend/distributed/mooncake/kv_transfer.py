@@ -199,12 +199,12 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                          name="KVCacheStoreLayerSendingThread")
         self.final_layer_id = num_layers - 1
 
-    def add_request(
+    def add_request(  # type: ignore[override]
             self,
-            req_meta: LasyerMultiBlockReqMeta) -> torch.Tensor:  # type: ignore
+            req_meta: LasyerMultiBlockReqMeta) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
-    def _handle_request(self, req_meta: LasyerMultiBlockReqMeta):
+    def _handle_request(self, req_meta: LasyerMultiBlockReqMeta):  # type: ignore[override]
         torch.npu.current_stream().synchronize()
         for index, key in enumerate(req_meta.keys):
             addr, size = self.prepare_value_layer(req_meta.starts[index],
@@ -235,12 +235,12 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                          name="KVCacheStoreLayerRecvingThread")
         self.get_event = get_event
 
-    def add_request(
+    def add_request(  # type: ignore[override]
             self,
-            req_meta: LasyerMultiBlockReqMeta) -> torch.Tensor:  # type: ignore
+            req_meta: LasyerMultiBlockReqMeta) -> torch.Tensor:
         self.request_queue.put(req_meta)
 
-    def _handle_request(self, req_meta: LasyerMultiBlockReqMeta):
+    def _handle_request(self, req_meta: LasyerMultiBlockReqMeta):  # type: ignore[override]
         for index, key in enumerate(req_meta.keys):
             addr, size = self.prepare_value_layer(req_meta.starts[index],
                                                   req_meta.ends[index],

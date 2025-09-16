@@ -218,7 +218,7 @@ class MooncakeEngine:
                 )
                 if skip_leading_tokens == len(token_ids):
                     if request.is_last_chunk:
-                        self.kv_send_thread.set_finished_request(req_id)
+                        self.kv_send_thread.set_finished_request(req_id)  # type: ignore[union-attr]
                     continue  # skip this request
 
                 skip_leading_tokens = (skip_leading_tokens // self.block_size *
@@ -267,8 +267,8 @@ class MooncakeEngine:
             )
             if skip_leading_tokens == len(token_ids):
                 if request.is_last_chunk:
-                    self.kv_send_thread.set_finished_request(
-                        req_id)  # type: ignore[union-attr]
+                    self.kv_send_thread.set_finished_request(  # type: ignore[union-attr]
+                        req_id)
                 continue  # skip this request
 
             skip_leading_tokens = (skip_leading_tokens // self.block_size *
@@ -349,8 +349,8 @@ class MooncakeEngine:
                 req_meta = LasyerMultiBlockReqMeta(req_id, keys_multi_chunk,
                                                    starts, ends, block_ids,
                                                    layer_id)
-                self.kv_recv_thread.add_request(
-                    req_meta)  # type: ignore[union-attr]
+                self.kv_recv_thread.add_request(  # type: ignore[union-attr][call-arg]
+                    req_meta)  # type: ignore[arg-type]
                 first_flag = False
                 yield None
         else:
@@ -415,8 +415,8 @@ class MooncakeEngine:
                 req_meta = LasyerMultiBlockReqMeta(req_id, keys_multi_chunk,
                                                    starts, ends, block_ids,
                                                    layer_id)
-                self.kv_send_thread.add_request(
-                    req_meta)  # type: ignore[union-attr]
+                self.kv_send_thread.add_request(  # type: ignore[union-attr][call-arg]
+                    req_meta)  # type: ignore[arg-type]
                 yield
         else:
             for layer_id in range(self.num_layers):
@@ -429,8 +429,8 @@ class MooncakeEngine:
             self.kv_send_thread.
             get_and_clear_finished_requests(  # type: ignore[union-attr]
             ) if self.kv_role == 'kv_producer' else set())
-        done_recving = self.kv_recv_thread.get_and_clear_finished_requests(
-        )  # type: ignore[union-attr]
+        done_recving = self.kv_recv_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
+        )
 
         logger.debug(
             "Number of completed KV cache send requests: %d, receive "

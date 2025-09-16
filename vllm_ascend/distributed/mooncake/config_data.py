@@ -165,7 +165,7 @@ class ChunkedTokenDatabase():
         self,
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
-    ) -> Iterable[Tuple[int, int, Union[MooncakeEngineKey, str]]]:
+    ) -> Iterable[Tuple[int, int, MooncakeEngineKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
@@ -323,7 +323,7 @@ class ReqMeta:
         tracker: RequestTracker,
         block_size: int,
         load_spec: Optional[LoadSpec] = None,
-        skip_save: bool = False,
+        skip_save: Optional[bool] = False,
         is_last_chunk: Optional[bool] = None,
         discard_partial_chunks: bool = True,
     ) -> Optional["ReqMeta"]:
