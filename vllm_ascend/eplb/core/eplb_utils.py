@@ -21,6 +21,7 @@ import torch
 
 from vllm.logger import logger
 
+
 def determine_default_expert_map(global_expert_num, world_size, rank_id,
                                  global_redundant_expert_num):
     if world_size == 1:
