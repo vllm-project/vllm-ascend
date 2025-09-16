@@ -227,61 +227,9 @@ def process_weights_after_loading(self, layer):
 
 class AscendFusedMoE(FusedMoE):
 
-    def __init__(
-        self,
-        num_experts,
-        top_k,
-        hidden_size,
-        intermediate_size,
-        params_dtype=None,
-        reduce_results=False,
-        renormalize=True,
-        use_grouped_topk=False,
-        num_expert_group=None,
-        topk_group=None,
-        quant_config=None,
-        tp_size=None,
-        ep_size=None,
-        dp_size=None,
-        prefix="",
-        custom_routing_function=None,
-        scoring_func="softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias=None,
-        apply_router_weight_on_input=False,
-        activation="silu",
-        enable_eplb=False,
-        num_redundant_experts=0,
-        has_bias=False,
-    ):
-        super().__init__(
-            num_experts,
-            top_k,
-            hidden_size,
-            intermediate_size,
-            params_dtype,
-            reduce_results,
-            renormalize,
-            use_grouped_topk,
-            num_expert_group,
-            topk_group,
-            quant_config,
-            tp_size,
-            ep_size,
-            dp_size,
-            prefix,
-            custom_routing_function,
-            scoring_func,
-            routed_scaling_factor,
-            e_score_correction_bias,
-            apply_router_weight_on_input,
-            activation,
-            enable_eplb,
-            num_redundant_experts,
-            has_bias,
-        )
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-        self.hidden_size = hidden_size
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
         self.moe_config.ep_group = get_ep_group()

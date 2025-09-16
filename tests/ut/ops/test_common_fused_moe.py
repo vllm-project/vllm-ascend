@@ -75,7 +75,7 @@ class TestLoadWeight(TestBase):
         with patch.object(AscendFusedMoE, "__init__",
                           lambda self, *args, **kwargs: None):
             moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
-            moe.hidden_size = 8
+
             expert_data = torch.randn(128, 8)
             loaded_weight = torch.randn(128, 4)
             moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
