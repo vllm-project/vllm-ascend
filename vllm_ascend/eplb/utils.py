@@ -30,17 +30,19 @@ def get_log2phy_map(self, layer_id):
 
 def get_all_expert_map(self, num_moe_layers):
     all_loads = []
+    num_dense_layers = self.num_dense_layers if hasattr(self, "num_dense_layers") else 0
     for layer_id in range(num_moe_layers):
         load_tensor = self.get_expert_map(
-            layer_id + self.num_dense_layers)  # (num_experts_per_layer,)
+            layer_id + num_dense_layers)  # (num_experts_per_layer,)
         all_loads.append(load_tensor)
 
     return torch.stack(all_loads, dim=0)
 
 
 def get_all_moe_loads(self):
+    num_dense_layers = self.num_dense_layers if hasattr(self, "num_dense_layers") else 0
     all_moe_loads = torch.stack(
-        [self.model.layers[layer_id + self.num_dense_layers].mlp.experts.moe_load \
+        [self.model.layers[layer_id + num_dense_layers].mlp.experts.moe_load \
             for layer_id in range(self.num_moe_layers)],
         dim=0
     )
@@ -48,9 +50,10 @@ def get_all_moe_loads(self):
 
 
 def clear_all_moe_loads(self):
+    num_dense_layers = self.num_dense_layers if hasattr(self, "num_dense_layers") else 0
     for layer_id in range(self.num_moe_layers):
         self.model.layers[layer_id +
-                          self.num_dense_layers].mlp.experts.clear_moe_load()
+                          num_dense_layers].mlp.experts.clear_moe_load()
 
 
 def model_register(model, model_config):
