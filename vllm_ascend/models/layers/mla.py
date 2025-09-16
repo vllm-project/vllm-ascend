@@ -120,7 +120,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
             hidden_states: torch.Tensor,
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        # return self.mla_attn(positions, hidden_states, kv_cache, attn_metadata)
         num_tokens = hidden_states.shape[0]
         need_gather_q_kv = False
         if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
@@ -138,11 +137,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
-        if forward_context.attn_metadata:
-            attn_metadata = forward_context.attn_metadata[
-                self.mla_attn.layer_name]
-        else:
-            attn_metadata = forward_context.attn_metadata
         torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output,
                                    self.prefix)
         output = output.view(-1, output_shape[-1])
@@ -156,8 +150,11 @@ def mla_forward(
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
     self = forward_context.no_compile_layers[layer_name]
+    if forward_context.attn_metadata:
+        attn_metadata = forward_context.attn_metadata[self.mla_attn.layer_name]
+    else:
+        attn_metadata = forward_context.attn_metadata
     kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
     self.mla_attn.impl.forward(hidden_states, kv_cache, attn_metadata,
                                need_gather_q_kv, output)
