@@ -39,12 +39,13 @@ class AttentionMaskBuilder:
         self,
         max_seq_len: int,
         dtype: torch.dtype,
+        device: torch.device,
     ):
         attn_mask = _generate_attn_mask(max_seq_len, dtype)
 
         self._seq_len_cached = attn_mask.shape[0]
         self.attn_mask_cache = attn_mask
-        self.chunked_prefill_attn_mask = torch.triu(torch.ones(2048, 2048), diagonal=1).to(torch.int8)
+        self.chunked_prefill_attn_mask = torch.triu(torch.ones(2048, 2048), diagonal=1).to(torch.int8).to(device)
 
     @staticmethod
     def get_mask_scale_factor(dtype: torch.dtype = torch.float16):
@@ -67,9 +68,8 @@ class AttentionMaskBuilder:
 
     def get_splitfuse_attn_mask(
         self,
-        device: torch.device,
     ) -> torch.Tensor:
-        return self.chunked_prefill_attn_mask.to(device)
+        return self.chunked_prefill_attn_mask
 
     def _update_attn_cache(self, seqlen: int, dtype: torch.dtype):
         if seqlen > self._seq_len_cached:
