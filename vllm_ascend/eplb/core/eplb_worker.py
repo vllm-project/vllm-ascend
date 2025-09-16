@@ -49,6 +49,7 @@ class EplbWorker:
         # H2D
 
         # Get initial expert_map
+        torch.set_num_threads(1)
         if self.old_expert_maps is None:
             self.old_expert_maps = self.get_init_expert_maps()
             if self.old_expert_maps is not None:

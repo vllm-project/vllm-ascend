@@ -187,8 +187,6 @@ class VllmEplbAdaptor(EplbAdaptor):
 
                 record["layer_list"].append(layer_record)
 
-            print("++++++++++++_export_tensor_to_file++++++++++++++")
-
             print(record)
 
             with open(expert_map_record_path, "w") as f:
@@ -198,7 +196,6 @@ class VllmEplbAdaptor(EplbAdaptor):
         # logger.info("+++++++++++++++++expert_map_per_layer[layer_id].copy_(updated_expert_map)++++++++++++++++++++++")
         # self.expert_map_per_layer[layer_id].copy_(updated_expert_map)
         self.expert_map_per_layer[layer_id] = updated_expert_map.clone()
-        logger.info("+++++++++++++++++expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)++++++++++++++++++++++")
         # self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
         self.expert_map_per_layer_cpu[layer_id]= updated_expert_map.clone()
 

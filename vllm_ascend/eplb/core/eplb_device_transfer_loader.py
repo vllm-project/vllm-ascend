@@ -92,11 +92,9 @@ class D2DExpertWeightLoader:
 
         # set asynchronous stream for d2d expert weight transfer
         if self.comm_op_list:
-            logger.info("+++++++++++++++++++batch_isend_irecv+++++++++++++++++++")
             ret_list = dist.batch_isend_irecv(self.comm_op_list)
             reqs.extend(ret_list)
 
-        logger.info("+++++++++++++++++++ExpertWeightUpdateState.TRANSFERRING+++++++++++++++++++")
         self.state = ExpertWeightUpdateState.TRANSFERRING
 
     def update_expert_map_and_weight(self, reqs):
@@ -106,20 +104,16 @@ class D2DExpertWeightLoader:
 
         # Waiting for send/recv tasks finish
         for req in reqs:
-            logger.info("++++++++++++++++++ req.wait()++++++++++++++++++++++++")
-            print(req)
             req.wait()
 
         if self.comm_op_list is not None:
             self.comm_op_list = None
 
         # update expert_map
-        logger.info("++++++++++++++++++do_update_expert_map++++++++++++++++++++++++")
         self.eplb_adaptor.do_update_expert_map(self.layer_id,
                                                self.updated_expert_map)
 
         # update log2phy_map
-        logger.info("++++++++++++++++++do_update_log2phy_map++++++++++++++++++++++++")
         self.eplb_adaptor.do_update_log2phy_map(self.layer_id,
                                                 self.updated_log2phy_map)
 
@@ -127,7 +121,6 @@ class D2DExpertWeightLoader:
         buffer_tensor_id = 0
         for recv_expert_info in self.recv_expert_list:
             local_expert_to_replace, buffer_tensor_id = recv_expert_info
-            logger.info("++++++++++++++++++do_update_expert_weight++++++++++++++++++++++++")
             self.eplb_adaptor.do_update_expert_weight(self.layer_id,
                                                       local_expert_to_replace,
                                                       buffer_tensor_id)
