@@ -74,12 +74,13 @@ def generate_log2phy_map(expert_map):
                 log2phy_map[positive_rank_idx, idx].item(),
                 dtype=log2phy_map.dtype)
         else:
-            random_list = [
-                random.choice(log2phy_map[positive_rank_idx, idx])
-                for _ in range(num_ranks - num_rank_holding_expert)
-            ]
-            log2phy_map[negative_rank_idx, idx] = torch.tensor(random_list, \
-                                                               dtype=log2phy_map.dtype)
+            if log2phy_map[positive_rank_idx, idx] and len(log2phy_map[positive_rank_idx, idx]) > 0:
+                random_list = [
+                    random.choice(log2phy_map[positive_rank_idx, idx])
+                    for _ in range(num_ranks - num_rank_holding_expert)
+                ]
+                log2phy_map[negative_rank_idx, idx] = torch.tensor(random_list, \
+                                                                   dtype=log2phy_map.dtype)
 
     return log2phy_map
 
