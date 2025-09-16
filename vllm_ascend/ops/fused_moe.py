@@ -37,6 +37,9 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
+from vllm_ascend.eplb.core.eplb_utils import (
+    determine_default_expert_map,
+    determine_default_log2phy_map)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
@@ -290,37 +293,29 @@ class AscendFusedMoE(FusedMoE):
             self.moe_parallel_config.ep_size, is_deepseek_v3_r1)
 
         ascend_config = get_ascend_config()
-        expert_map_path = ascend_config.expert_map_path
         self.dynamic_eplb = ascend_config.dynamic_eplb
-        if expert_map_path and os.path.exists(expert_map_path):
-            # moe expert load balance
-            expert_load_balancer = ExpertLoadBalancer(expert_map_path,
-                                                      self.global_num_experts)
-            self.local_num_experts, self.expert_map = \
-                                expert_load_balancer.get_rank_placement_map(
-                                                self.moe_instance_id,
-                                                get_ep_group().rank_in_group)
-            self.log2phy = expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id,
-                get_ep_group().rank_in_group)
-            self.global_redundant_expert_num = \
-                        expert_load_balancer.get_global_redundant_expert_num()
-        else:
-            # Create a tensor of size num_experts filled with -1
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size,
-                get_ep_group().rank_in_group, self.global_num_experts)
-            if self.dynamic_eplb:
-                self.global_redundant_expert_num = ascend_config.init_redundancy_expert
-                from vllm_ascend.eplb.core.eplb_utils import (
-                    determine_default_expert_map,
-                    determine_default_log2phy_map)
-                self.local_num_experts, self.expert_map = determine_default_expert_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
-                self.log2phy = determine_default_log2phy_map(
-                    self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
+        if self.dynamic_eplb:
+            self.expert_map_path = ascend_config.expert_map_path
+            self.global_redundant_expert_num = ascend_config.init_redundancy_expert
+            self.global_num_experts = num_experts + self.global_redundant_expert_num
+            if self.expert_map_path and os.path.exists(self.expert_map_path) and os.access(self.expert_map_path, os.R_OK):
+                self.expert_load_balancer = ExpertLoadBalancer(self.expert_map_path, self.global_num_experts)
+                self.local_num_experts, self.expert_map = (self.expert_load_balancer.get_rank_placement_map(self.moe_instance_id, self.ep_rank))
+                self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(self.moe_instance_id, self.ep_rank).npu()
+                self.global_redundant_expert_num = (self.expert_load_balancer.get_global_redundant_expert_num())
+            else:
+                self.local_num_experts, self.expert_map = determine_expert_map(self.ep_size, self.ep_rank, self.global_num_experts)
+                if self.dynamic_eplb:
+                    self.global_redundant_expert_num = ascend_config.init_redundancy_expert
+                    self.local_num_experts, self.expert_map = determine_default_expert_map(
+                        self.global_num_experts, self.ep_size, self.ep_rank,
+                        self.global_redundant_expert_num)
+                    self.log2phy = determine_default_log2phy_map(
+                        self.global_num_experts, self.ep_size, self.ep_rank,
+                        self.global_redundant_expert_num)
+            local_num_experts = (torch.sum(self.expert_map != -1) if self.expert_map is not None else num_experts)
+            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
+
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
