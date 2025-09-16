@@ -464,7 +464,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             query=query,
             key=key,
             value=value,
-            atten_mask=attn_metadata.attn_mask.to(device=query.device),
+            atten_mask=attn_metadata.attn_mask,
             block_table=attn_metadata.block_tables,
             input_layout="TND",
             block_size=block_size,

@@ -818,7 +818,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                              attn_state) -> torch.Tensor:
         # Chunk Prefill situation.
         if attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla:
-            return torch.triu(torch.ones(2048, 2048), diagonal=1).to(torch.int8)
+            return self.attn_mask_builder.get_splitfuse_attn_mask(
+                self.device)
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
             max_seq_len = max(seq_lens, default=0)
