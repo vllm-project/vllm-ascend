@@ -102,6 +102,7 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_ACLGRAPH():
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
+
 def test_Qwen3_235b_all2allv_mc2_quant(monkeypatch):
     """Test Qwen3-235B with all2all sequence and multi-card configuration."""
     # Set environment variables similar to the startup command
@@ -113,14 +114,14 @@ def test_Qwen3_235b_all2allv_mc2_quant(monkeypatch):
     monkeypatch.setenv('ACL_STREAM_TIMEOUT', '340000')
     monkeypatch.setenv('HCCL_OP_EXPANSION_MODE', 'AIV')
     monkeypatch.setenv('HCCL_OP_BASE_FFTS_MODE_ENABLE', 'true')
-    
+
     example_prompts = [
         "Hello, my name is",
         "The capital of France is",
         "In the field of artificial intelligence,",
     ]
     max_tokens = 32
-    
+
     # Additional config matching the startup command
     additional_config = {
         "torchair_graph_config": {
@@ -134,7 +135,7 @@ def test_Qwen3_235b_all2allv_mc2_quant(monkeypatch):
         },
         "refresh": True
     }
-    
+
     with VllmRunner(
             "vllm-ascend/Qwen3-235B-A22B-W8A8",  # Use quantized model path
             tensor_parallel_size=4,
@@ -150,4 +151,3 @@ def test_Qwen3_235b_all2allv_mc2_quant(monkeypatch):
             additional_config=additional_config,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
-    
