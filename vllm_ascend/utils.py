@@ -21,7 +21,7 @@ import atexit
 import functools
 import math
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
@@ -617,3 +617,29 @@ def weak_ref_tensors(
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
     raise ValueError("Invalid type for tensors")
+
+
+def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
+    """
+    Switch to the target stream if enabled is True.
+    Otherwise, do nothing.
+    """
+    if not enabled:
+        return nullcontext()
+    return torch.npu.stream(target_stream)
+
+
+def npu_wait_stream(
+    current_stream: torch.npu.Stream,
+    target_stream: torch.npu.Stream,
+    *,
+    enabled: bool = True
+):
+    """
+    Make current stream wait for the target stream if enabled is True.
+    This operation will launch a record event on the target stream,
+    and launch a wait event on current stream, waitint for the record event.
+    Otherwise, do nothing.
+    """
+    if enabled:
+        current_stream.wait_stream(target_stream)
