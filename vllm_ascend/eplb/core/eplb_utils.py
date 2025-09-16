@@ -19,6 +19,7 @@ import random
 
 import torch
 
+from vllm.logger import logger
 
 def determine_default_expert_map(global_expert_num, world_size, rank_id,
                                  global_redundant_expert_num):
@@ -79,13 +80,16 @@ def generate_log2phy_map(expert_map):
                 log2phy_map[positive_rank_idx, idx].item(),
                 dtype=log2phy_map.dtype)
         else:
-            random_list = [
-                random.choice(log2phy_map[positive_rank_idx, idx])
-                for _ in range(num_ranks - num_rank_holding_expert)
-            ]
-            log2phy_map[negative_rank_idx,
-                        idx] = torch.tensor(random_list,
-                                            dtype=log2phy_map.dtype)
+            try:
+                random_list = [
+                    random.choice(log2phy_map[positive_rank_idx, idx])
+                    for _ in range(num_ranks - num_rank_holding_expert)
+                ]
+                log2phy_map[negative_rank_idx,
+                idx] = torch.tensor(random_list,
+                                    dtype=log2phy_map.dtype)
+            except Exception as e:
+                logger.error(f"Fail to get log2phy_map: {str(e)}")
 
     return log2phy_map
 
