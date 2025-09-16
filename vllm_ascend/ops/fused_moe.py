@@ -445,7 +445,7 @@ class AscendFusedMoE(FusedMoE):
 
         if isinstance(e_hidden_states,
                       tuple) and len(e_hidden_states) == 3:
-            final_hidden_states, group_list_type, expert_tokens = e_hidden_states
+            e_hidden_states, group_list_type, expert_tokens = e_hidden_states
 
         if self.dynamic_eplb:
             self.moe_load += expert_tokens if group_list_type else \
