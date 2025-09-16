@@ -952,6 +952,7 @@ class MooncakeConnectorWorker:
         first_kv_cache = first_kv_cache_tuple[0]
 
         # TODO(tms): Find a more robust way to detect and handle MLA
+<<<<<<< HEAD
         self.use_mla = first_kv_cache_tuple[0].size(
             -1) != first_kv_cache_tuple[1].size(-1) and len(
                 first_kv_cache_tuple) == 2
@@ -997,6 +998,24 @@ class MooncakeConnectorWorker:
         logger.info(
             "Registering KV_Caches. use_mla: %s, use_sfa: %s, shape %s",
             self.use_mla, self.use_sfa, first_kv_cache.shape)
+=======
+        self.num_blocks = first_kv_cache.shape[0]
+        block_rank = len(first_kv_cache_tuple[0]) - 1
+        kv_elem_size = first_kv_cache.element_size()
+        # MLA case.[num_block, block_size, 1, hidden_dims],
+        # block_shape_1 -> nope, block_shape_2 -> rope
+        # non-MLA case.[num_block, block_size, num_heads, head_dims]
+        # block_shape_1 -> k, block_shape_1 -> v
+        block_shape_1 = first_kv_cache_tuple[0].shape[-block_rank:]
+        block_shape_2 = first_kv_cache_tuple[1].shape[-block_rank:]
+        self.block_len = [
+            kv_elem_size * math.prod(block_shape_1),
+            kv_elem_size * math.prod(block_shape_2)
+        ]
+        logger.debug(
+            "num_blocks: %s, block_shape_1: %s, block_shape_2: %s",
+            self.num_blocks, block_shape_1, block_shape_1)
+>>>>>>> ebea8ec (fit new kv shape)
 
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
