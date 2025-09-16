@@ -6,7 +6,8 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ops.moe.fused_moe_prepare_and_finalize import (
     FusedMoEPrepareAndFinalizeWithAll2All,
-    FusedMoEPrepareAndFinalizeWithAllGather, FusedMoEPrepareAndFinalizeWithMC2)
+    FusedMoEPrepareAndFinalizeWithAllGather, FusedMoEPrepareAndFinalizeWithMC2,
+    FusedMoEPrepareAndFinalizeWithNaiveMulticast)
 
 
 class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
@@ -216,3 +217,68 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         mock_tp_all_reduce.return_value = result
         result_with_tp = layer.finalize(h_out, reduce_results=True)
         self.assertEqual(result_with_tp.shape[0], 3)
+
+    @patch("vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_dp_group")
+    @patch(
+        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.tensor_model_parallel_all_reduce"
+    )
+    @patch(
+        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_forward_context"
+    )
+    def test_naive_multicast_prepare_finalize(self, mock_get_forward_context,
+                                              mock_tp_all_reduce,
+                                              mock_get_dp_group):
+        # Mock forward context with DP metadata
+        mock_context = MagicMock()
+        mock_context.dp_metadata.cu_tokens_across_dp_cpu = torch.tensor(
+            [2, 5, 7])
+        mock_get_forward_context.return_value = mock_context
+
+        # Setup DP group mock
+        mock_dp_group = MagicMock()
+        mock_dp_group.broadcast = MagicMock()
+        mock_dp_group.all_reduce = MagicMock()
+        mock_get_dp_group.return_value = mock_dp_group
+
+        # Mock all_reduce to just return input (simulate sum)
+        def mock_all_reduce(tensor):
+            return tensor * 2
+
+        mock_dp_group.all_reduce.side_effect = mock_all_reduce
+
+        # Setup config
+        self.moe_config.dp_size = 3
+        self.moe_config.dp_rank = 1
+        self.moe_config.tp_size = 1
+        self.moe_config.ep_size = 1
+
+        layer = FusedMoEPrepareAndFinalizeWithNaiveMulticast(self.moe_config)
+
+        # Local inputs
+        hidden_states = torch.randn(3, 8)
+        router_logits = torch.randn(3, 2)
+
+        # Mock gate for router logits recomputation
+        mock_gate = MagicMock()
+        mock_gate.return_value = (torch.randn(7, 2), None)
+
+        # Run prepare
+        h_out, r_out, _ = layer.prepare(hidden_states,
+                                        router_logits,
+                                        rm_router_logits=False,
+                                        gate=mock_gate)
+
+        # Should be global tensor: [7, 8] and [7, 2]
+        self.assertEqual(h_out.shape, (7, 8))
+        self.assertEqual(r_out.shape, (7, 2))
+
+        # Run finalize
+        result = layer.finalize(h_out, reduce_results=False)
+
+        # Should slice back to local: [3, 8]
+        self.assertEqual(result.shape, (3, 8))
+
+        # Test with reduce_results=True and TP/EP > 1
+        mock_tp_all_reduce.return_value = result
+        result_with_tp = layer.finalize(h_out, reduce_results=True)
+        self.assertEqual(result_with_tp.shape, (3, 8))

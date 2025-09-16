@@ -23,8 +23,7 @@ from vllm.distributed.parallel_state import GroupCoordinator
 
 from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2MergedReplicatedLinear, CustomDeepseekV2MLAAttention,
-    CustomDeepseekV2MLP, CustomDeepseekV2MoE,
-    CustomDeepseekV2RowParallelLinear,
+    CustomDeepseekV2MLP, CustomDeepseekV2RowParallelLinear,
     CustomDeepseekV2RowParallelLinearReplaceAllreduce,
     CustomDeepseekV2SiluAndMul, LogitsProcessor, ParallelLMHead)
 
@@ -211,22 +210,6 @@ def test_custom_deepseek_v2_mlp(mock_distributed, base_config):
                             intermediate_size=256,
                             hidden_act="relu",
                             quant_config=None)
-
-
-def test_custom_deepseek_v2_moe(mock_distributed, base_config,
-                                mock_forward_context):
-    base_config.n_shared_experts = 1
-    moe = CustomDeepseekV2MoE(config=base_config,
-                              quant_config=None,
-                              prefix="mlp")
-    assert moe.top_k == 2
-
-    x = torch.randn(2, 4, 128)
-    attn_metadata = Mock(num_prefills=1)
-    with patch("vllm_ascend.ops.fused_moe.AscendFusedMoE.__call__",
-               return_value=(torch.randn(2, 4, 128), torch.randn(2, 4, 128))):
-        output = moe(x, attn_metadata)
-        assert output.shape == (2, 4, 128)
 
 
 @patch("torch_npu.npu_rms_norm")

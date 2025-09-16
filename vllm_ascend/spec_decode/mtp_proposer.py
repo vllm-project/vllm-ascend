@@ -112,6 +112,10 @@ class MtpProposer(Proposer):
             (num_tokens, num_tokens_across_dp, with_prefill,
              _) = self.runner._sync_metadata_across_dp(num_tokens,
                                                        with_prefill, False)
+
+        moe_comm_method = self.runner._select_moe_comm_method(
+            num_tokens, with_prefill)
+
         is_running_torchair = self.torchair_graph_enabled and \
             not with_prefill
 
@@ -142,6 +146,7 @@ class MtpProposer(Proposer):
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
+                    moe_comm_method=moe_comm_method,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=0):
                 if is_running_torchair:
@@ -411,6 +416,9 @@ class MtpProposer(Proposer):
             num_tokens_across_dp = self.runner.num_tokens_across_dp
             with_prefill = self.runner.with_prefill
 
+        moe_comm_method = self.runner._select_moe_comm_method(
+            num_input_tokens, with_prefill)
+
         for step in range(self.num_speculative_tokens):
             with set_ascend_forward_context(
                     attn_metadata,
@@ -419,6 +427,7 @@ class MtpProposer(Proposer):
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
+                    moe_comm_method=moe_comm_method,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
