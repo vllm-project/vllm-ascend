@@ -79,7 +79,7 @@ class CachedRequestState:
     @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
                 "removed in v0.13. Please use `mm_kwargs` instead.")
     def mm_inputs(self) -> list[MultiModalKwargsItems]:
-        if vllm_version_is("0.10.2rc2"):
+        if vllm_version_is("0.10.2"):
             assert self.mm_kwargs is not None
             return [
                 MultiModalKwargsItems.from_seq([item])
