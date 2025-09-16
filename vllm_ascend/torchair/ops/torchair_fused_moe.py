@@ -1311,7 +1311,6 @@ class TorchairAscendFusedMoE(FusedMoE):
         else:
             return final_hidden_states
 
-
     def update_expert_map(self, new_expert_map):
         self.expert_map = new_expert_map
 

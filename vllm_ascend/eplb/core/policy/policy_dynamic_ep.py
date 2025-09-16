@@ -7,6 +7,7 @@ import numpy as np
 
 from .policy_abstract import DynamicConfig, EplbPolicy
 
+
 class DynamicTable:
     # workload_table:
     # 3D matrix: [layer, gpus, experts_per_gpu_per_layer] -> value: workload (heat) at the corresponding position

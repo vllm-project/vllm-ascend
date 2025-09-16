@@ -25,6 +25,7 @@ from vllm.logger import logger
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 
+
 class VllmEplbAdaptor(EplbAdaptor):
 
     def __init__(self, model, **args):
@@ -256,7 +257,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         if self.world_size == 1:
             local_ids = torch.arange(self.global_expert_num, dtype=torch.int32)
             return local_ids.view(1, 1, -1).expand(self.num_moe_layers, 1, -1)
-        
+
         local_num_experts = self.global_expert_num // self.world_size
 
         expert_map_all = torch.full(
@@ -273,7 +274,7 @@ class VllmEplbAdaptor(EplbAdaptor):
                 start = r * local_num_experts
                 end = self.global_expert_num
                 local_count = self.global_expert_num - r * local_num_experts
-                
+
             if r < self.init_redundancy_expert:
                 local_count += 1
                 if end < self.global_expert_num:

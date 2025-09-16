@@ -19,6 +19,7 @@ import types
 
 import torch
 
+
 def get_expert_map(self, layer_id):
     return self.model.layers[layer_id].mlp.experts.get_map()
 

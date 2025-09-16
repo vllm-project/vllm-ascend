@@ -269,7 +269,6 @@ class AscendFusedMoE(FusedMoE):
                                  self.expert_map is not None else num_experts)
             self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
 
-
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:

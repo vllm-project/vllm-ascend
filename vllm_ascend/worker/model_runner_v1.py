@@ -1769,7 +1769,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
 
-
         moe_comm_method = self._select_moe_comm_method(num_input_tokens,
                                                        self.with_prefill)
 
@@ -2401,7 +2400,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
-
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

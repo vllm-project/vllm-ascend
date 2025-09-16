@@ -274,7 +274,6 @@ class AscendFusedMoE(FusedMoE):
                                  self.global_num_experts)
             self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
 
-
         for method in {
                 AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl,
                 NaiveMulticastCommImpl
@@ -295,7 +294,6 @@ class AscendFusedMoE(FusedMoE):
     def clear_moe_load(self):
         if self.moe_load is not None:
             self.moe_load.zero_()
-
 
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):

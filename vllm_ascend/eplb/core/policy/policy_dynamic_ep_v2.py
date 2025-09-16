@@ -5,6 +5,7 @@ from collections import defaultdict
 
 import numpy as np
 
+
 class DynamicConfig:
     placement_policy = None
 

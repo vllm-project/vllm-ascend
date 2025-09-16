@@ -18,6 +18,7 @@
 from abc import abstractmethod
 from typing import Any
 
+
 class EplbAdaptor():
 
     def __init__(self, **args):

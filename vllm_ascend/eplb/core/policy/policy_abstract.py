@@ -2,6 +2,7 @@
 # Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this policy.
 from abc import abstractmethod
 
+
 class DynamicConfig:
     placement_policy = None
 
