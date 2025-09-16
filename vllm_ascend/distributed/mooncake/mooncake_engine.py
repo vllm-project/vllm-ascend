@@ -218,7 +218,8 @@ class MooncakeEngine:
                 )
                 if skip_leading_tokens == len(token_ids):
                     if request.is_last_chunk:
-                        self.kv_send_thread.set_finished_request(req_id)  # type: ignore[union-attr]
+                        self.kv_send_thread.set_finished_request(  # type: ignore[union-attr]
+                            req_id)
                     continue  # skip this request
 
                 skip_leading_tokens = (skip_leading_tokens // self.block_size *
@@ -350,7 +351,7 @@ class MooncakeEngine:
                                                    starts, ends, block_ids,
                                                    layer_id)
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr][call-arg]
-                    req_meta)  # type: ignore[arg-type]
+                    req_meta)  # type: ignore[union-attr][call-arg]
                 first_flag = False
                 yield None
         else:
@@ -416,7 +417,7 @@ class MooncakeEngine:
                                                    starts, ends, block_ids,
                                                    layer_id)
                 self.kv_send_thread.add_request(  # type: ignore[union-attr][call-arg]
-                    req_meta)  # type: ignore[arg-type]
+                    req_meta)  # type: ignore[union-attr][call-arg]
                 yield
         else:
             for layer_id in range(self.num_layers):
