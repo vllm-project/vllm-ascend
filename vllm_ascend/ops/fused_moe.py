@@ -20,7 +20,7 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
@@ -28,8 +28,6 @@ from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEConfig  # isort: skip
-from vllm.model_executor.layers.fused_moe.config import \
-    FusedMoEParallelConfig  # isort: skip
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 from vllm.model_executor.layers.quantization.base_config import \
@@ -56,21 +54,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
-
-        self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.max_model_len = vllm_config.model_config.max_model_len
-        get_ascend_config()
-        self.dynamic_eplb = get_ascend_config().dynamic_eplb
-
-        try:
-            device_group = get_mc2_group().device_group
-            # TODO: Try local_rank = ep_group.rank_in_group
-            local_rank = torch.distributed.get_rank(group=device_group)
-            backend = device_group._get_backend(torch.device("npu"))
-            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(
-                local_rank)
-        except AttributeError:
-            self.moe_all_to_all_group_name = None
+        
+        # NOTE: Currently, this self.use_aclgraph is only used in
+        # UnquantizedFusedMoEMethod.forward_oot to decide whether to use in
+        # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
+        # Once torch.randint_like is supported or removed, this flag can be removed.
+        vllm_config = get_current_vllm_config()
+        ascend_config = get_ascend_config()
+        if ascend_config.torchair_graph_config.enabled:
+            self.use_aclgraph = False
+        else:
+            self.use_aclgraph = (vllm_config.compilation_config.level
+                                 == CompilationLevel.PIECEWISE and
+                                 not vllm_config.model_config.enforce_eager)
+        self.transpose = True
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod,
@@ -199,35 +196,6 @@ class AscendFusedMoE(FusedMoE):
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
 
-        if params_dtype is None:
-            params_dtype = torch.get_default_dtype()
-
-        vllm_config = get_current_vllm_config()
-
-        self.moe_parallel_config = FusedMoEParallelConfig.make(
-            tp_size_=(tp_size if tp_size is not None else
-                      get_tensor_model_parallel_world_size()),
-            dp_size_=(dp_size
-                      if dp_size is not None else get_dp_group().world_size),
-            vllm_parallel_config=vllm_config.parallel_config)
-
-        self.top_k = top_k
-        self.num_experts = num_experts
-        self.global_num_experts = num_experts
-        assert intermediate_size % self.tp_size == 0
-        self.intermediate_size_per_partition = intermediate_size // self.tp_size
-        self.reduce_results = reduce_results
-        self.renormalize = renormalize
-        self.use_grouped_topk = use_grouped_topk
-        if self.use_grouped_topk:
-            assert num_expert_group is not None and topk_group is not None
-        self.num_expert_group = num_expert_group
-        self.topk_group = topk_group
-        self.custom_routing_function = custom_routing_function
-        self.scoring_func = scoring_func
-        self.e_score_correction_bias = e_score_correction_bias
-        self.expert_map = None
-        self.activation = activation
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
@@ -275,53 +243,12 @@ class AscendFusedMoE(FusedMoE):
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
-        if self.scoring_func != "softmax" and not self.use_grouped_topk:
-            raise ValueError("Only softmax scoring function is supported for "
-                             "non-grouped topk.")
-        moe = FusedMoEConfig.make(
-            num_experts=self.global_num_experts,
-            experts_per_token=top_k,
-            hidden_dim=hidden_size,
-            num_local_experts=self.local_num_experts,
-            moe_parallel_config=self.moe_parallel_config,
-            # TODO (bnell): this needs to be fixed for quantized types.
-            in_dtype=params_dtype,
-            quant_config=quant_config)
-
-        self.moe_config = moe
-
         if quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod(moe)
+            self.quant_method = AscendUnquantizedFusedMoEMethod(self.moe_config)
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
 
         assert self.quant_method is not None
-
-        local_num_experts = torch.sum(self.expert_map != -1) \
-            if self.expert_map is not None else num_experts
-
-        self.moe_load = None
-
-        if self.dynamic_eplb:
-            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
-
-        moe_quant_params = {
-            "num_experts": local_num_experts,
-            "hidden_size": hidden_size,
-            "intermediate_size_per_partition":
-            self.intermediate_size_per_partition,
-            "params_dtype": params_dtype,
-            "weight_loader": self.weight_loader,
-        }
-        # need full intermediate size pre-sharding for WNA16 act order
-        if (self.quant_method.__class__.__name__
-                in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
-            moe_quant_params["intermediate_size_full"] = intermediate_size
-
-        self.ep_group = get_ep_group()
-        # NOTE: self.tp_group is not expert_tp_group
-        self.tp_group = get_tp_group().device_group
-        self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -349,22 +276,6 @@ class AscendFusedMoE(FusedMoE):
     def clear_moe_load(self):
         if self.moe_load is not None:
             self.moe_load.zero_()
-
-    def naive_multicast(self, x: torch.Tensor,
-                        cu_tokens_across_dp_cpu: torch.Tensor):
-        assert (len(x.shape) == 2)
-        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
-                             device=x.device,
-                             dtype=x.dtype)
-        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.dp_rank]
-        buffer[start:end, :].copy_(x)
-        for idx in range(self.dp_size):
-            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
-            end = cu_tokens_across_dp_cpu[idx]
-            get_dp_group().broadcast(buffer[start:end, :], idx)
-        return buffer
 
     def forward(self,
                 hidden_states: torch.Tensor,

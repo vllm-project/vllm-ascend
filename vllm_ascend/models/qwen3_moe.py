@@ -47,7 +47,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
 from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
                                                init_metadata_for_sp)
 

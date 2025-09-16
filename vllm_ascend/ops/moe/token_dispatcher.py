@@ -377,14 +377,13 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
 
 
 # mypy: disable-error-code="override"
-class UnquantizedTokenDispatcherWithFusedExpertsMoge(MoETokenDispatcher):
+class TokenDispatcherWithMoge(MoETokenDispatcher):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.apply_router_weight_on_input = False
-        self.local_ep = 1
-        self.local_num_experts = self.num_experts // self.local_ep
-        self.local_num_group = self.top_k // self.local_ep
+        self.local_num_experts = self.num_experts // self.ep_size
+        self.local_num_group = self.top_k // self.ep_size
         self.bsz = None
 
     def token_dispatch(self,
@@ -401,17 +400,6 @@ class UnquantizedTokenDispatcherWithFusedExpertsMoge(MoETokenDispatcher):
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False):
-        self.apply_router_weight_on_input = apply_router_weight_on_input
-        if self.apply_router_weight_on_input:
-            assert (topk_weights.dim() == 2
-                    ), "`topk_weights` should be in shape (num_tokens, topk)"
-            _, topk = topk_weights.shape
-            assert (
-                topk == 1
-            ), "Only support topk=1 when `apply_router_weight_on_input` is True"
-            hidden_states = hidden_states * \
-                topk_weights.to(hidden_states.dtype)
-
         self.bsz, _ = hidden_states.shape
         flatten_topk_ids = topk_ids.view(-1)
         self.sorted_topk_ids = torch.argsort(flatten_topk_ids.float())
@@ -445,7 +433,7 @@ class UnquantizedTokenDispatcherWithFusedExpertsMoge(MoETokenDispatcher):
         unsorted_hidden_states = hidden_states.index_select(
             0, unsorted_topk_ids)
         final_hidden_states = unsorted_hidden_states.reshape(
-            self.bsz, self.top_k // self.local_ep, -1).sum(1)
+            self.bsz, self.top_k // self.ep_size, -1).sum(1)
         return final_hidden_states
 
 

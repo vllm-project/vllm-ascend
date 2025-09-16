@@ -1718,6 +1718,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         soc_version = get_ascend_soc_version()
         quant_type = getattr(self.vllm_config.model_config.hf_config,
                              'moe_quantize', None)
+        model_type = self.vllm_config.model_config.hf_config.model_type
 
         if not self.parallel_config.enable_expert_parallel:
             moe_comm_method = "allgather"
@@ -1737,6 +1738,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if moe_comm_method == "allgather" and with_prefill:
             moe_comm_method = "naivemulticast"
+            
+        if model_type == "PanguProMoE":
+            moe_comm_method = "allgather"
 
         if is_global_first_rank():
             logger.debug(f"num_tokens: {num_tokens}, "

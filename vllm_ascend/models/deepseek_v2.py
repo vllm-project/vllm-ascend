@@ -21,7 +21,7 @@
 # limitations under the License.
 # # Adapted from
 # # vllm-project/vllm/blob/main/vllm/model_executor/models/deepseek_v2.py
-# # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
+# # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py  
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
@@ -60,7 +60,7 @@ from vllm.model_executor.models.utils import (PPMissingLayer,
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.mla import AscendMLAModules
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
 
 
 class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
@@ -389,7 +389,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.num_redundant_experts = example_moe.n_redundant_experts
 
     # NOTE: This `load_weights` is mainly copied from
-    # https://github.com/vllm-project/vllm/commit/07b8fae219b1fff51ef115c38c44b51395be5bb5
+    # https://github.com/vllm-project/vllm/commit/07b8fae219b1fff51ef115c38c44b51395be5bb5  
     # to fix CI, and it is different from the implementation in main
     # TODO: support eplb style load_weights
     def load_weights(self, weights: Iterable[tuple[str,
