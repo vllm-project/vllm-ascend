@@ -47,8 +47,9 @@ def determine_default_expert_map(global_expert_num, world_size, rank_id,
         else:
             start -= 1
 
-    local_ids = torch.arange(local_count, dtype=torch.int32)
-    expert_map[start:end] = local_ids
+    if isinstance(local_count, int):
+        local_ids = torch.arange(local_count, dtype=torch.int32)
+        expert_map[start:end] = local_ids
 
     return (local_count, expert_map)
 
