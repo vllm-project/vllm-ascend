@@ -52,6 +52,9 @@ class NPUTorchairModelRunner(NPUModelRunner):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         super().__init__(vllm_config, device)
+        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
+            None, None, vllm_config, device)
+
         register_torchair_model()
         torchair_ops_patch()
         torchair_quant_method_register()
@@ -291,6 +294,9 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds):
+        if attn_metadata is not None and isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
+
         if self.enable_shared_expert_dp:
             return super()._generate_process_reqs_hidden_states(
                 attn_metadata, with_prefill, padded_num_tokens_across_dp,
