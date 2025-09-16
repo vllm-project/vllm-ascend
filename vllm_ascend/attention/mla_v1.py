@@ -21,12 +21,13 @@ from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
-from vllm_ascend.utils import npu_prefetch
+from vllm_ascend.utils import npu_prefetch, npu_stream_switch, npu_wait_stream
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
+_mla_extra_stream = None
 
 class AscendMLABackend(AttentionBackend):
 
@@ -485,6 +486,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.enable_prefetch = ascend_config.enable_prefetch
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         self.chunked_prefill_for_mla = ascend_config.chunked_prefill_for_mla
+        self.enable_multistream_mla = ascend_config.enable_multistream_mla
+        if self.enable_multistream_mla:
+            global _mla_extra_stream
+            _mla_extra_stream = torch.npu.Stream()
 
         vllm_config = get_current_vllm_config()
         self.ring_mla_mask_size = 512
@@ -505,18 +510,21 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
         return x
 
-    # Return `ql_nope`, `q_pe`
-    def _q_proj_and_k_up_proj(self, x):
+    def _q_proj(self, x):
         q_nope, q_pe = self.q_proj(x)[0]\
             .view(-1, self.num_heads, self.qk_head_dim)\
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-
+            
+        return q_nope, q_pe
+    
+    def _k_up_proj(self, q_nope):
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
         ql_nope = torch.bmm(q_nope, self.W_UK_T)
         # Convert from (N, B, L) to (B, N, L)
-        return ql_nope.transpose(0, 1), q_pe
+        return ql_nope.transpose(0, 1)
+        
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
@@ -903,6 +911,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = attn_metadata.num_actual_tokens
+        enable_multistream = self.enable_multistream_mla and not has_prefill
+        global _mla_extra_stream
+        npu_wait_stream(_mla_extra_stream, torch.npu.current_stream(), enabled=enable_multistream)
         if self.q_a_proj is not None:
             npu_prefetch(self.q_a_proj.weight,
                          hidden_states,
@@ -912,10 +923,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             q_c = hidden_states
 
-        kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
+        with npu_stream_switch(_mla_extra_stream, enabled=enable_multistream):
+            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
         # Process for shared_expert_dp
         if need_gather_q_kv:
             q_c = get_tp_group().all_gather(q_c, 0)
+            npu_wait_stream(torch.npu.current_stream(), _mla_extra_stream, enabled=enable_multistream)
             kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
         decode_preprocess_res = None
         prefill_preprocess_res = None
@@ -924,13 +937,17 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_q_c = q_c[:num_decode_tokens]
             cos = attn_metadata.decode.cos
             sin = attn_metadata.decode.sin
-            decode_ql_nope, decode_q_pe = \
-                self._q_proj_and_k_up_proj(decode_q_c)
-            decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
-            decode_slots = attn_metadata.slot_mapping[:num_decode_tokens]
             decode_kv_no_split = kv_no_split[:num_decode_tokens]
-            decode_k_pe, decode_k_nope = self.exec_kv_decode(
-                decode_kv_no_split, cos, sin, kv_cache, decode_slots)
+            decode_slots = attn_metadata.slot_mapping[:num_decode_tokens]
+            with npu_stream_switch(torch.npu.current_stream(), enabled=enable_multistream):
+                decode_k_pe, decode_k_nope = self.exec_kv_decode(
+                    decode_kv_no_split, cos, sin, kv_cache, decode_slots)
+            decode_q_nope, decode_q_pe = self._q_proj(decode_q_c)
+            npu_wait_stream(_mla_extra_stream, torch.npu.current_stream(), enabled=enable_multistream)
+            with npu_stream_switch(torch.npu.current_stream(), enabled=enable_multistream):
+                decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
+            decode_ql_nope = self._k_up_proj(decode_q_nope)
+            npu_wait_stream(torch.npu.current_stream(), _mla_extra_stream, enabled=enable_multistream)
             decode_preprocess_res = DecodeMLAPreprocessResult(
                 decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe)
         # Preprocess for prefill tokens
