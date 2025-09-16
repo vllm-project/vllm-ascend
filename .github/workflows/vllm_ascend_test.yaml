@@ -95,6 +95,7 @@ jobs:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
           path: ./vllm-empty
+          fetch-depth: 1
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
@@ -174,6 +175,7 @@ jobs:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
           path: ./vllm-empty
+          fetch-depth: 1
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
@@ -239,6 +241,7 @@ jobs:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
           path: ./vllm-empty
+          fetch-depth: 1
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
