@@ -25,7 +25,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-import vllm.envs as envs_vllm
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_dp_group
@@ -368,11 +367,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
         torch.npu.set_compile_mode(jit_compile=False)
         if not self.use_cached_npu_graph:
             npu_backend = torchair.get_npu_backend(compiler_config=config)
-            self.torchair_compiled_model = torch.compile(
-                self.model,
-                dynamic=True,
-                fullgraph=True,
-                backend=npu_backend)
+            self.torchair_compiled_model = torch.compile(self.model,
+                                                         dynamic=True,
+                                                         fullgraph=True,
+                                                         backend=npu_backend)
             return self.torchair_compiled_model
         else:
             # Generate a new forward proxy code object to prevent the invalidation of
