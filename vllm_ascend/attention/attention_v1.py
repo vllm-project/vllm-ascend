@@ -529,7 +529,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                           "encoder/decoder cross-attention "
                                           "are not implemented for "
                                           "PallasAttentionBackendImpl")
-            # View q k v to BSH.
+            # View q k v to TND.
             query = query.view(-1, self.num_heads, self.head_size)
             key = key.view(-1, self.num_kv_heads, self.head_size)
             value = value.view(-1, self.num_kv_heads, self.head_size)
