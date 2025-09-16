@@ -35,15 +35,15 @@ class SharedWindowMetadata:
 
 
 @dataclass
-class ClusterMetadata:
-    """Metadata for a cluster.
+class SeriesMetadata:
+    """Metadata for a series.
     """
     group: GroupCoordinator
     start_layer: int
     end_layer: int
     num_layers: int
     prefetch_step: int
-    dummy_weight: torch.Tensor  # Dummy weight to replace the loaded weight matrix. All the layers in the cluster share the same dummy weight tensor.
+    dummy_weight: torch.Tensor  # Dummy weight to replace the loaded weight matrix. All the layers in the series share the same dummy weight tensor.
     layers: list[LayerMetadata]
     shared_windows: list[
         SharedWindowMetadata]  # Shared windows for prefetching. The window size is (`prefetch_step` + 1), as only the weights for the next (`prefetch_step` + 1) layers need to be stored.
@@ -53,7 +53,7 @@ class ClusterMetadata:
         return layer_idx % self.group.world_size == self.group.rank_in_group
 
     def post_process_after_loading(self):
-        # This method only needs to be called once per cluster.
+        # This method only needs to be called once per series.
         if self.shared_windows:
             return
         for layer_idx in range(self.start_layer, self.end_layer):
@@ -127,10 +127,10 @@ class ClusterMetadata:
             async_op=True)
 
 
-_cluster_dict: dict[str, ClusterMetadata] = {}
+_series_dict: dict[str, SeriesMetadata] = {}
 
 
-def register_layer_to_cluster(
+def register_layer_to_series(
     name: str,
     group: GroupCoordinator,
     start_layer: int,
@@ -138,13 +138,13 @@ def register_layer_to_cluster(
     prefetch_step: int,
     layer_idx: int,
     layer: LinearBase,
-) -> ClusterMetadata:
-    global _cluster_dict
-    if name not in _cluster_dict:
+) -> SeriesMetadata:
+    global _series_dict
+    if name not in _series_dict:
         num_layers = end_layer - start_layer
         assert num_layers > 0
         assert prefetch_step >= 0 and prefetch_step <= num_layers - 2
-        _cluster_dict[name] = ClusterMetadata(
+        _series_dict[name] = SeriesMetadata(
             group=group,
             start_layer=start_layer,
             end_layer=end_layer,
@@ -162,9 +162,9 @@ def register_layer_to_cluster(
             shared_windows=[],
             window_offset=prefetch_step,
         )
-    cluster = _cluster_dict[name]
+    series = _series_dict[name]
     assert layer.quant_method is not None
-    cluster.layers[layer_idx - start_layer] = LayerMetadata(
+    series.layers[layer_idx - start_layer] = LayerMetadata(
         layer=layer,
         post_method=layer.quant_method.process_weights_after_loading,
         weight=layer.weight,
@@ -173,20 +173,26 @@ def register_layer_to_cluster(
     # Discard the original `process_weights_after_loading` method such that it won't be called by others.
     layer.quant_method.process_weights_after_loading = lambda layer: None
     # When the layer not intended to be stored in this device, dispose the tensor.
-    if not cluster.is_source(layer_idx):
+    if not series.is_source(layer_idx):
         dispose_tensor(layer.weight)
-    return cluster
+    return series
 
 
 @CustomOp.register("layer_shard_linear")
 class LayerShardLinear(LinearBase):
     """Linear layer with sharding storage.
 
-    Each device in the parallel group evenly stores a set of disjoint layers. All layers must have the same structure. Assuming there are n devices, the weight matrix of the i-th layer will be stored on the (i % n)-th device.
+    Each device in the parallel group evenly stores a set of disjoint layers. All layers must have the same structure. A set of isomorphic layers is defined as a "series". Assuming there are n devices, the weight matrix of the i-th layer will be stored on the (i % n)-th device.
 
-    After loading the model, you must call `post_process_after_loading_for_cluster()` to complete the initialization.
+    After loading the model, you must call `post_process_after_loading_for_series()` from any layer of this series to complete the initialization.
 
-    Each time a new layer is reached, you must call `reach_layer()` to prefetch the weights.
+    Each time a new layer is reached, you must call `reach_layer()` from that layer to prefetch the weights. The argument `prefetch_step` is a non-negative integer k that manages asynchronous weight prefetching. Each call to this layer's `reach_layer()` method will trigger an asynchronous prefetch for the weights of the k-th subsequent layer.
+
+    Note: The layers are managed as a circular buffer. The index of the layer to prefetch is determined by the formula:
+    - total_layers = end_layer - start_layer
+    - prefetch_layer_idx = (layer_idx + prefetch_step) % total_layers + start_layer
+
+    To hold the weights for the current layer and the k prefetched layers, a pool of (k + 1) shared tensor buffers will be created for this series.
 
     Arguments:
         input_size: first dimension of matrix.
@@ -200,12 +206,12 @@ class LayerShardLinear(LinearBase):
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.self_attn.o_proj)
         return_bias: If true, return bias together with outputs in forward pass.
-        cluster_name: A set of isomorphic layers is defined as a "cluster". This name identifies which cluster this class belongs to.
-        group: The group coordinator for handling asynchronous communications. It is recommended to create a new group coordinator for each new cluster.
-        start_layer: The index of the first layer in the cluster (inclusive).
-        end_layer: The index of the last layer in the cluster (exclusive). Thus, the cluster includes all layers with indices in the range [start_layer, end_layer).
+        series_name: This name identifies which series this layer belongs to.
+        group: The group coordinator for handling asynchronous communications. It is recommended to create a new group coordinator for each new series.
+        start_layer: The index of the first layer in the series (inclusive).
+        end_layer: The index of the last layer in the series (exclusive). Thus, the series includes all layers with indices in the range [start_layer, end_layer).
         layer_idx: The index of the current layer.
-        prefetch_step: If set to 0, no weights will be prefetched. If set to k, it will prefetch the weights for the next k layers.
+        prefetch_step: An integer that manages asynchronous weight prefetching.
     """
 
     def __init__(
@@ -219,7 +225,7 @@ class LayerShardLinear(LinearBase):
         prefix: str = "",
         *,
         return_bias: bool = True,
-        cluster_name: str,
+        series_name: str,
         group: GroupCoordinator,
         start_layer: int,
         end_layer: int,
@@ -256,8 +262,8 @@ class LayerShardLinear(LinearBase):
             self.register_parameter("bias", None)
 
         self.layer_idx = layer_idx
-        self.cluster = register_layer_to_cluster(
-            name=cluster_name,
+        self.series = register_layer_to_series(
+            name=series_name,
             group=group,
             start_layer=start_layer,
             end_layer=end_layer,
@@ -268,7 +274,7 @@ class LayerShardLinear(LinearBase):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         # Skip loading matrix weight when not intended to be stored on this device.
-        if param is self.weight and not self.cluster.is_source(self.layer_idx):
+        if param is self.weight and not self.series.is_source(self.layer_idx):
             return
         assert not getattr(param, "is_gguf_weight", False)
         assert not getattr(param, "is_gguf_weight_type", False)
@@ -281,18 +287,18 @@ class LayerShardLinear(LinearBase):
             f"to a parameter of size {param.size()}")
         param.data.copy_(loaded_weight)
 
-    def post_process_after_loading_for_cluster(self):
-        self.cluster.post_process_after_loading()
+    def post_process_after_loading_for_series(self):
+        self.series.post_process_after_loading()
 
     def reach_layer(self):
-        self.cluster.reach_layer(self.layer_idx)
+        self.series.reach_layer(self.layer_idx)
 
     def forward(
         self,
         input,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        # Find the async broadcast work and wait for it.
-        window = self.cluster.get_shared_window(self.layer_idx)
+        # Find the asynchronous broadcast work and wait for it.
+        window = self.series.get_shared_window(self.layer_idx)
         # Make sure the data in the corresponding shared window is for the current layer.
         assert window.data_layer_idx == self.layer_idx
         if window.work is not None:
