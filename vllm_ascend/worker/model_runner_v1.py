@@ -93,6 +93,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.logits_processor import build_logitsprocs
@@ -412,7 +413,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-        self.mc2_tokens_capacity = 512 * self.parallel_config.tensor_parallel_size
+        # NOTE: Technically, MC2 can have 512 tokens each rank, but this will consume too much memory. The formula is:
+        # ((maxBs * tokenNeedSizeDispatch * ep_worldsize * localMoeExpertNum) + (maxBs * tokenNeedSizeCombine * (k + sharedExpertNum))) * 2
+        # so we have to limit the MC2 tokens to save memory, should fix this in the future.
+        self.mc2_tokens_capacity = 512
         self.reserved_mc2_mask = torch.zeros(
             self.mc2_tokens_capacity,
             dtype=torch.bool,
@@ -2810,6 +2814,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # a given amount of memory to accommodate longer context lengths
                 # or enable more requests to be processed simultaneously.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+                continue
+            if isinstance(attn_module, AscendMultiHeadLatentAttention):
                 continue
 
             # TODO: Support other attention modules, e.g., cross-attention

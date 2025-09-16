@@ -50,7 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.deepseek_v2 import \
     yarn_get_mscale  # noqa: E501
-from vllm.model_executor.models.deepseek_v2 import (  # noqa: E501
+from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2ForCausalLM,
     DeepseekV2MLAAttention, DeepseekV2MLP, DeepseekV2Model, DeepseekV2MoE,
     get_spec_layer_idx_from_weight_name)

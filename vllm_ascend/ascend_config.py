@@ -218,14 +218,8 @@ def check_ascend_config(vllm_config, enforce_eager):
                     "it has been disabled automatically.")
         # aclgraph case
         else:
-            # aclgraph doesn't work with deepseek model and only qwen model is well tested.
             if vllm_config.model_config:
                 model_type = vllm_config.model_config.hf_config.model_type
-                if "deepseek" in model_type:
-                    raise NotImplementedError(
-                        "ACL Graph does not support deepseek. Please "
-                        "try torchair graph mode to serve deepseek models on vllm-ascend."
-                        " Or set `enforce_eager=True` to use eager mode.")
                 if "qwen" not in model_type:
                     logger.warning(
                         "ACL Graph is currently experimental. Please "
