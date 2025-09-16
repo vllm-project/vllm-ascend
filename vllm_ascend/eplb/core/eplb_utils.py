@@ -39,7 +39,8 @@ def determine_default_expert_map(global_expert_num, world_size, rank_id,
         end = global_expert_num
         local_count = global_expert_num - rank_id * local_num_experts
 
-    if isinstance(global_redundant_expert_num, int) and rank_id < global_redundant_expert_num:
+    if isinstance(global_redundant_expert_num,
+                  int) and rank_id < global_redundant_expert_num:
         local_count += 1
         if end < global_expert_num:
             end += 1

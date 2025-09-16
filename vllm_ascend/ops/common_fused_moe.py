@@ -246,8 +246,7 @@ class AscendFusedMoE(FusedMoE):
         self.global_redundant_expert_num = ascend_config.init_redundancy_expert
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
-                self.expert_map_path) and os.access(
-            self.expert_map_path, os.R_OK):
+                self.expert_map_path) and os.access(self.expert_map_path, os.R_OK):
             self.expert_load_balancer = ExpertLoadBalancer(
                 self.expert_map_path, self.global_num_experts)
             self.local_num_experts, self.expert_map = (
@@ -256,8 +255,7 @@ class AscendFusedMoE(FusedMoE):
             self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
                 self.moe_instance_id, self.ep_rank).npu()
             self.global_redundant_expert_num = (
-                self.expert_load_balancer.get_global_redundant_expert_num(
-                ))
+                self.expert_load_balancer.get_global_redundant_expert_num())
         else:
             # init moe.
             self.local_num_experts, self.expert_map = determine_expert_map(

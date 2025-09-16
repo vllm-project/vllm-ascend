@@ -1019,8 +1019,7 @@ class TorchairAscendFusedMoE(FusedMoE):
         self.global_num_experts = num_experts + self.global_redundant_expert_num
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
-                self.expert_map_path) and os.access(
-            self.expert_map_path, os.R_OK):
+                self.expert_map_path) and os.access(self.expert_map_path, os.R_OK):
             self.expert_load_balancer = ExpertLoadBalancer(
                 self.expert_map_path, self.global_num_experts)
             self.local_num_experts, self.expert_map = (
@@ -1029,8 +1028,7 @@ class TorchairAscendFusedMoE(FusedMoE):
             self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
                 self.moe_instance_id, self.ep_rank).npu()
             self.global_redundant_expert_num = (
-                self.expert_load_balancer.get_global_redundant_expert_num(
-                ))
+                self.expert_load_balancer.get_global_redundant_expert_num())
         else:
             # init moe.
             self.local_num_experts, self.expert_map = determine_expert_map(
@@ -1044,9 +1042,10 @@ class TorchairAscendFusedMoE(FusedMoE):
                 self.log2phy = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num)
-        local_num_experts = (torch.sum(self.expert_map != -1) if
-                             self.expert_map is not None else num_experts)
-        self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
+        local_num_experts = (torch.sum(self.expert_map != -1)
+                             if self.expert_map is not None else num_experts)
+        if self.dynamic_eplb:
+            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = \
