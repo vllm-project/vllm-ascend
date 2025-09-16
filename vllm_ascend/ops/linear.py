@@ -38,8 +38,6 @@ from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
 from vllm_ascend.utils import (dense_optim_enable, matmul_allreduce_enable,
                                mlp_tp_enable, oproj_tp_enable)
 
-_HCOMM_INFO = None
-
 
 class CustomTensorParallelOp:
 
@@ -315,7 +313,8 @@ class OProjRowParallelOp(CustomRowParallelOp):
         self.input_size_per_partition = self.layer.input_size_per_partition
 
 
-class MatmulAllreduceRowParallelOp(CustomTensorParallelOp):
+class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
+    _HCOMM_INFO = None
 
     def __init__(self, layer):
         super().__init__(layer)
@@ -349,26 +348,23 @@ class MatmulAllreduceRowParallelOp(CustomTensorParallelOp):
             return output
         return output, output_bias
 
-    @staticmethod
-    def get_hcomm_info(group: ProcessGroup) -> str:
+    @classmethod
+    def get_hcomm_info(cls, group: ProcessGroup) -> str:
         """Get the HCCL communication information for the given group."""
-        global _HCOMM_INFO
-        if _HCOMM_INFO is not None:
-            return _HCOMM_INFO
+        if cls._HCOMM_INFO is not None:
+            return cls._HCOMM_INFO
 
         rank = torch.distributed.get_rank(group)
         if torch.__version__ > "2.0":
             global_rank = torch.distributed.get_global_rank(group, rank)
-            _HCOMM_INFO = group._get_backend(
+            cls._HCOMM_INFO = group._get_backend(
                 torch.device("npu")).get_hccl_comm_name(global_rank)
         else:
-            _HCOMM_INFO = group.get_hccl_comm_name(rank)
-        return _HCOMM_INFO
+            cls._HCOMM_INFO = group.get_hccl_comm_name(rank)
+        return cls._HCOMM_INFO
 
     def after_create_weights_hook(self):
         super().after_create_weights_hook()
-        self.input_is_parallel = self.layer.input_is_parallel
-        self.reduce_results = self.layer.reduce_results
         self.weight_t = self.layer.weight.t()
 
 
