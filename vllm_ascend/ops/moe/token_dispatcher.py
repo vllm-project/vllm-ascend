@@ -170,6 +170,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False):
+        print("using mc2 dispatcher")
         self.with_quant = with_quant
         self.expert_map = expert_map
         self.topk_ids = topk_ids
@@ -314,6 +315,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False):
+        print("using allgather dispatcher")
         self.with_quant = with_quant
         self.original_shape = hidden_states.shape
 
@@ -400,6 +402,7 @@ class TokenDispatcherWithMoge(MoETokenDispatcher):
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False):
+        print("using moge dispatcher")
         self.bsz, _ = hidden_states.shape
         flatten_topk_ids = topk_ids.view(-1)
         self.sorted_topk_ids = torch.argsort(flatten_topk_ids.float())
@@ -501,6 +504,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                        mc2_mask: Optional[torch.Tensor] = None,
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False):
+        print("using all2allv dispatcher")
         self.with_quant = with_quant
         self.hidden_shape = hidden_states.shape
         self.topk_weights = topk_weights

@@ -27,10 +27,10 @@ from vllm_ascend.ops.moe.fused_moe_prepare_and_finalize import (
     FusedMoEPrepareAndFinalizeWithAllGather, FusedMoEPrepareAndFinalizeWithMC2,
     FusedMoEPrepareAndFinalizeWithNaiveMulticast)
 from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.moe.token_dispatcher import (TokenDispatcherWithMoge,
-                                                  TokenDispatcherWithAll2AllV,
+from vllm_ascend.ops.moe.token_dispatcher import (TokenDispatcherWithAll2AllV,
                                                   TokenDispatcherWithAllGather,
-                                                  TokenDispatcherWithMC2)
+                                                  TokenDispatcherWithMC2,
+                                                  TokenDispatcherWithMoge)
 
 
 class MoECommMethod(ABC):

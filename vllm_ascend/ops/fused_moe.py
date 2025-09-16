@@ -54,7 +54,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
-        
+
         # NOTE: Currently, this self.use_aclgraph is only used in
         # UnquantizedFusedMoEMethod.forward_oot to decide whether to use in
         # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
@@ -244,7 +244,8 @@ class AscendFusedMoE(FusedMoE):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         if quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod(self.moe_config)
+            self.quant_method = AscendUnquantizedFusedMoEMethod(
+                self.moe_config)
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
 
@@ -287,7 +288,7 @@ class AscendFusedMoE(FusedMoE):
                 gate=None,
                 replace_allreduce: bool = False,
                 _metadata_for_padding: Optional[MetadataForPadding] = None):
-
+        print("using fused_moe")
         assert self.quant_method is not None
 
         if top_k:

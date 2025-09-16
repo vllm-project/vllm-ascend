@@ -42,7 +42,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
                                get_rm_router_logits_state, is_310p)
 
 
-
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None):
@@ -141,7 +140,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             row_idx=row_idx,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
-            shared_experts=shared_experts)
+            shared_experts=shared_experts,
+            apply_router_weight_on_input=apply_router_weight_on_input)
 
 
 class AscendFusedMoE(FusedMoE):
@@ -149,7 +149,7 @@ class AscendFusedMoE(FusedMoE):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        
+
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
 
@@ -190,7 +190,8 @@ class AscendFusedMoE(FusedMoE):
             self.quant_method = AscendUnquantizedFusedMoEMethod(
                 self.moe_config)
         else:
-            self.quant_method = self.quant_config.get_quant_method(self, self.layer_name)
+            self.quant_method = self.quant_config.get_quant_method(
+                self, self.layer_name)
 
         assert self.quant_method is not None
 
@@ -274,15 +275,22 @@ class AscendFusedMoE(FusedMoE):
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
+        print("using common_fused_moe")
         assert self.quant_method is not None
 
+        quantized_x_for_share, dynamic_scale_for_share = None, None
+
         forward_context = get_forward_context()
+        enable_force_load_balance = forward_context.in_profile_run
         moe_comm_method_name = forward_context.moe_comm_method_name
 
         forward_context.moe_comm_method = getattr(self, moe_comm_method_name)
 
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
-            hidden_states=hidden_states, router_logits=router_logits)
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            enable_shared_expert_dp=self.enable_shared_expert_dp,
+            rm_router_logits=self.rm_router_logits)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -315,10 +323,10 @@ class AscendFusedMoE(FusedMoE):
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
-            reduce_results=self.reduce_results)
+            reduce_results=(not self.all_reduce_merge))
 
         return final_hidden_states
-    
+
     def _forward_ms_fused_moe_comp(
         self,
         hidden_states: torch.Tensor,
