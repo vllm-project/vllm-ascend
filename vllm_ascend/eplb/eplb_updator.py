@@ -25,7 +25,7 @@ from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 
 class EplbUpdator:
 
-    def __init__(self, ascend_config, loader, eplb_process:EplbProcess,
+    def __init__(self, ascend_config, loader, eplb_process: EplbProcess,
                  process):
         self.ascend_config = ascend_config
         self.init_eplb(self.ascend_config.expert_map_path, process)

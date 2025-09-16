@@ -95,7 +95,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
+    D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
@@ -434,10 +435,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 "moe_load": None,
                 "expert_maps": None
             })
-            self.eplb_process = EplbProcess(shared_dict=self.shared_dict, policy_type=1, enable_d2d=True)
+            self.eplb_process = EplbProcess(shared_dict=self.shared_dict,
+                                            policy_type=1,
+                                            enable_d2d=True)
             self.process = self.eplb_process._launch_process()
             ascend_config = get_ascend_config()
-            self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader, self.eplb_process, self.process)
+            self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader,
+                                            self.eplb_process, self.process)
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.async_output_copy_stream = torch.npu.Stream() if \
