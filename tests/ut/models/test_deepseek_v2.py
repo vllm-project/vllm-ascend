@@ -17,50 +17,11 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 from vllm.config import CacheConfig
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
-from vllm_ascend.models.deepseek_v2 import (
-    CustomDeepseekV2MergedReplicatedLinear, CustomDeepseekV2MLAAttention,
-    CustomDeepseekV2MLP, CustomDeepseekV2RowParallelLinear,
-    CustomDeepseekV2SiluAndMul, LogitsProcessor, ParallelLMHead)
-
-
-def test_custom_deepseek_v2_silu_and_mul():
-    torch.set_default_device("cpu")
-
-    silu = CustomDeepseekV2SiluAndMul()
-    assert silu.weight_scale is None
-
-    x = torch.randn(2, 4)
-    output = silu.forward_oot(x)
-    assert output.shape == (2, 2)
-
-    weight_scale = Mock(return_value=torch.tensor(0.1))
-    silu = CustomDeepseekV2SiluAndMul(weight_scale=weight_scale)
-    quant_x = torch.randint(-128, 127, (2, 4), dtype=torch.int32)
-    dynamic_scale = torch.randn(2, 1)
-    with patch("torch_npu.npu_dequant_swiglu_quant",
-               return_value=torch.randn(2, 4)):
-        output = silu.forward_oot((quant_x, dynamic_scale))
-        assert output.shape == (2, 4)
-
-
-def test_custom_deepseek_v2_merged_replicated_linear(mock_distributed):
-    linear = CustomDeepseekV2MergedReplicatedLinear(input_size=128,
-                                                    output_sizes=[64, 64],
-                                                    bias=False,
-                                                    quant_config=None)
-    assert linear.output_sizes == [64, 64]
-
-    param = Mock()
-    param.data = torch.zeros(128, 128)
-    param.output_dim = 1
-    param.is_gguf_weight = False
-    param.is_gguf_weight_type = False
-    loaded_weight = torch.randn(128, 64)
-    linear.weight_loader(param, loaded_weight, loaded_shard_id=0)
-
-    with pytest.raises(AssertionError):
-        linear.weight_loader(param, torch.randn(128, 32), loaded_shard_id=0)
+from vllm_ascend.models.deepseek_v2 import (CustomDeepseekV2MLAAttention,
+                                            CustomDeepseekV2RowParallelLinear)
 
 
 @pytest.mark.parametrize("cls", [CustomDeepseekV2RowParallelLinear])
@@ -78,33 +39,6 @@ def test_row_parallel_linear(cls, mock_distributed):
     linear.input_is_parallel = True
     output = linear(input_, is_prefill=False)
     assert output[0].shape == (2, 4, 64)
-
-
-def test_custom_deepseek_v2_mlp(mock_distributed, base_config):
-    mlp = CustomDeepseekV2MLP(hidden_size=128,
-                              intermediate_size=256,
-                              hidden_act="silu",
-                              quant_config=None)
-    assert isinstance(mlp.act_fn, CustomDeepseekV2SiluAndMul)
-
-    x = torch.randn(2, 4, 128)
-    output = mlp(x)
-    assert output.shape == (2, 4, 128)
-
-    with patch("vllm_ascend.models.deepseek_v2.QuantizationConfig"
-               ) as mock_quant_config:
-        mock_quant_config.name = "w8a8dynamic"
-        with pytest.raises(NotImplementedError):
-            CustomDeepseekV2MLP(hidden_size=128,
-                                intermediate_size=256,
-                                hidden_act="silu",
-                                quant_config=mock_quant_config,
-                                force_replicate=False)
-    with pytest.raises(ValueError):
-        CustomDeepseekV2MLP(hidden_size=128,
-                            intermediate_size=256,
-                            hidden_act="relu",
-                            quant_config=None)
 
 
 @patch("torch_npu.npu_rms_norm")
