@@ -384,6 +384,19 @@ class AscendFusedMoE(FusedMoE):
             num_global_redundant_experts=self.global_redundant_expert_num,
             num_local_experts=self.local_num_experts)
 
+    def update_expert_map(self, new_expert_map):
+        self.expert_map = new_expert_map
+
+    def get_map(self):
+        return self.expert_map
+
+    def get_log2phy_map(self):
+        return self.logical_to_physical_map
+
+    def clear_moe_load(self):
+        if self.moe_load is not None:
+            self.moe_load.zero_()
+
     def naive_multicast(self, x: torch.Tensor,
                         cu_tokens_across_dp_cpu: torch.Tensor):
         assert (len(x.shape) == 2)
