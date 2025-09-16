@@ -943,7 +943,7 @@ class MooncakeConnectorWorker:
 
         # TODO(tms): Find a more robust way to detect and handle MLA
         self.num_blocks = first_kv_cache.shape[0]
-        block_rank = 3
+        block_rank = len(first_kv_cache_tuple[0]) - 1
         kv_elem_size = first_kv_cache.element_size()
         # MLA case.[num_block, block_size, 1, hidden_dims],
         # block_shape_1 -> nope, block_shape_2 -> rope
@@ -955,7 +955,7 @@ class MooncakeConnectorWorker:
             kv_elem_size * math.prod(block_shape_1),
             kv_elem_size * math.prod(block_shape_2)
         ]
-        logger.info(
+        logger.debug(
             "num_blocks: %s, block_shape_1: %s, block_shape_2: %s",
             self.num_blocks, block_shape_1, block_shape_1)
 
