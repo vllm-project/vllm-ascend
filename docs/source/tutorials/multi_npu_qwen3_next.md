@@ -95,12 +95,12 @@ Once your server is started, you can query the model with input prompts
 curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
   "model": "Qwen/Qwen3-Next-80B-A3B-Instruct",
   "messages": [
-    {"role": "user", "content": "Give me a short introduction to large language models."}
+    {"role": "user", "content": "Who are you?"}
   ],
   "temperature": 0.6,
   "top_p": 0.95,
   "top_k": 20,
-  "max_tokens": 4096
+  "max_tokens": 32
 }'
 ```
 
