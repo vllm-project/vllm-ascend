@@ -113,7 +113,8 @@ class MtpProposer(Proposer):
              _) = self.runner._sync_metadata_across_dp(num_tokens,
                                                        with_prefill, False)
 
-        moe_comm_method = self.runner._select_moe_comm_method(num_tokens)
+        moe_comm_method = self.runner._select_moe_comm_method(
+            num_tokens, with_prefill)
 
         is_running_torchair = self.torchair_graph_enabled and \
             not with_prefill
@@ -415,7 +416,8 @@ class MtpProposer(Proposer):
             num_tokens_across_dp = self.runner.num_tokens_across_dp
             with_prefill = self.runner.with_prefill
 
-        moe_comm_method = self.runner._select_moe_comm_method(num_input_tokens)
+        moe_comm_method = self.runner._select_moe_comm_method(
+            num_input_tokens, with_prefill)
 
         for step in range(self.num_speculative_tokens):
             with set_ascend_forward_context(

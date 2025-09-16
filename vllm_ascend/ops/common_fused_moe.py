@@ -32,8 +32,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
-                                                 AlltoAllCommImpl, MC2CommImpl)
-from vllm_ascend.ops.moe.token_dispatcher import setup_token_dispatchers
+                                                 AlltoAllCommImpl, MC2CommImpl,
+                                                 NaiveMulticastCommImpl)
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
 
 original_unquantized_fused_moe_init_func = UnquantizedFusedMoEMethod.__init__
@@ -230,16 +230,15 @@ class AscendFusedMoE(FusedMoE):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        setup_token_dispatchers(self.moe_config.ep_size,
-                                top_k=self.top_k,
-                                num_experts=self.global_num_experts,
-                                num_local_experts=self.local_num_experts)
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
 
-        for method in {AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl}:
+        for method in {
+                AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl,
+                NaiveMulticastCommImpl
+        }:
             setattr(
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
