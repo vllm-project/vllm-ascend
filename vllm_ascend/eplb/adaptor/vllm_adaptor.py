@@ -199,7 +199,6 @@ class VllmEplbAdaptor(EplbAdaptor):
         for expert_tensor, buffer_tensor in zip(
                 self.expert_param_per_layer[layer_id][local_expert_to_replace],
                 self.buffer_tensor_list[buffer_tensor_id]):
-            # expert_tensor.copy_(buffer_tensor)
             expert_tensor = buffer_tensor.clone()
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
