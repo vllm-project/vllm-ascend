@@ -136,7 +136,7 @@ def test_Qwen3_235b_all2allv_mc2_quant(monkeypatch):
     }
     
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-235B-A22B-W8A8"),  # Use quantized model path
+            "vllm-ascend/Qwen3-235B-A22B-W8A8",  # Use quantized model path
             tensor_parallel_size=4,
             data_parallel_size=4,
             enable_expert_parallel=True,
