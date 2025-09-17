@@ -49,15 +49,14 @@ class TestParallelConfigGetDpPort(unittest.TestCase):
 class TestCommunicationAdaptation(unittest.TestCase):
     def setUp(self):
         import torch.distributed as dist
-        from vllm_ascend.patch.platform.patch_common.patch_distributed import communication_adaptation_310p
-
         self.original_broadcast = dist.broadcast
         self.original_all_reduce = dist.all_reduce
 
 
     def test_communication_adaptation_310p(self):
         import torch.distributed as dist
-        from vllm_ascend.patch.platform.patch_common.patch_distributed import is_310p
+        from vllm_ascend.patch.platform.patch_common.patch_distributed import (
+            is_310p, communication_adaptation_310p)
         if is_310p():
             communication_adaptation_310p()
             self.assertNotEqual(dist.broadcast, self.original_broadcast)
