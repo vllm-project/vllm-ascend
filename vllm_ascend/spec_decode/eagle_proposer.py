@@ -354,8 +354,8 @@ class EagleProposer(Proposer):
                 num_computed_tokens_cpu=None,
                 seq_lens=None)
             builder = self.runner.attn_groups[0][0].metadata_builder
-            attn_metadata_i = builder.build(0,
-                common_attn_metadata, self.runner.get_model())
+            attn_metadata_i = builder.build(0, common_attn_metadata,
+                                            self.runner.get_model())
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
@@ -423,8 +423,8 @@ class EagleProposer(Proposer):
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
         attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
-        seq_lens, target_positions,
-        self.vllm_config.model_config.dtype, self.device)
+            seq_lens, target_positions, self.vllm_config.model_config.dtype,
+            self.device)
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=cu_num_tokens.to(device),
@@ -434,7 +434,8 @@ class EagleProposer(Proposer):
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
-            block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor(),
+            block_table_tensor=self.runner.input_batch.block_table[0].
+            get_device_tensor(),
             slot_mapping_cpu=target_slot_mapping,
             positions=target_positions,
             attn_mask=attn_mask,
@@ -445,8 +446,8 @@ class EagleProposer(Proposer):
             seq_lens=None)
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         builder = self.runner.attn_groups[0][0].metadata_builder
-        attn_metadata = builder.build(0,
-            common_attn_metadata, self.runner.get_model())
+        attn_metadata = builder.build(0, common_attn_metadata,
+                                      self.runner.get_model())
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
@@ -652,7 +653,8 @@ class EagleProposer(Proposer):
                     dtype=torch.int32,
                     device=out_tensor.device) + offset_tensor
                 values_to_store = torch.tensor(
-                    index_start + global_start_offset, dtype=torch.int32,
+                    index_start + global_start_offset,
+                    dtype=torch.int32,
                     device=out_tensor.device) + offset_tensor
                 mask = (target_indices >= start_pos) & \
                     (target_indices < end_pos) & \
