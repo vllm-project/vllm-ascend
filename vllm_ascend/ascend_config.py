@@ -43,8 +43,19 @@ class AscendConfig:
             "ascend_scheduler_config", {})
         self.ascend_scheduler_config = AscendSchedulerConfig(
             ascend_scheduler_config)
-
+        # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
         self.expert_map_path = additional_config.get("expert_map_path", None)
+        self.expert_map_record_path = additional_config.get(
+            "expert_map_record_path",
+            None)  # Provide path to export expert map
+        self.init_redundancy_expert = additional_config.get(
+            "init_redundancy_expert", 0)
+        self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
+        self.num_iterations_eplb_update = additional_config.get(
+            "num_iterations_eplb_update", 400)
+        self.gate_eplb = additional_config.get("gate_eplb", False)
+        self.num_wait_worker_iterations = additional_config.get(
+            "num_wait_worker_iterations", 30)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
         self.enable_shared_expert_dp = additional_config.get(

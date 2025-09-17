@@ -88,7 +88,8 @@ class MoECommMethod(ABC):
             # For load balance
             log2phy: torch.Tensor = None,
             global_redundant_expert_num: int = 0,
-            need_trans: bool = False) -> torch.Tensor:
+            need_trans: bool = False,
+            dynamic_eplb: bool = False):
         # Check constraints
         assert hidden_states.dtype in [
             torch.float32, torch.float16, torch.bfloat16
@@ -132,6 +133,9 @@ class MoECommMethod(ABC):
 
         final_hidden_states = self.token_dispatcher.token_combine(
             hidden_states=mlp_output)
+
+        if dynamic_eplb:
+            return (final_hidden_states, group_list_type, expert_tokens)
 
         return final_hidden_states
 
