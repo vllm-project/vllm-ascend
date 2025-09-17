@@ -345,7 +345,7 @@ class MooncakeEngine:
                 if not first_flag:
                     is_finish = self.get_event.wait(timeout=3)  #try---cache
                     if not is_finish:
-                        raise SystemError("Layerwise get failed")
+                        logger.info("Layerwise get failed")
                 self.get_event.clear()
                 req_meta = LasyerMultiBlockReqMeta(req_id, keys_multi_chunk,
                                                    starts, ends, block_ids,
