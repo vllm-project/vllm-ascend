@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 if [ -z "$1" ]; then
     weight_dir="slanyer/Qwen3_32B_INT8"
