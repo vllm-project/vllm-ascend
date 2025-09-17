@@ -4,19 +4,15 @@ import time
 
 def test_vllm_aclgraph_qwen3_32b_server_A2():
     script_path = "tests/smoke_test/qwen3_32b/run_dp_server_qianwen3_32B_aclgraph.sh"
-    subprocess.run(["chmod", "+x", script_path], text=True)
     server_proc = subprocess.Popen(
         ["bash", script_path],
         stdout=open("output.txt", "w+"),
         stderr=subprocess.STDOUT
     )
-    #subprocess.run(["bash", "-c", f"bash {script_path} {weight_path} > output.txt 2>&1 &"], capture_output=True, text=True)
     time.sleep(1)
     try:
         for i in range(30):
             time.sleep(10)
-            #result = subprocess.run(["cat", "output.txt"], capture_output=True, text=True)
-            #ret = result.stdout.strip()
             with open("output.txt", "r") as f:
                 ret = f.read().strip()
                 print(ret)
