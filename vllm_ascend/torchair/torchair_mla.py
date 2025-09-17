@@ -495,11 +495,12 @@ class AscendMLATorchairMetadataBuilder:
         graph_pad_size = common_attn_metadata.graph_pad_size
         use_torchair_graph = graph_pad_size != -1
         if num_decodes > 0:
+            # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
             actual_seq_lengths_q = query_start_loc[1:num_decodes + 1].tolist()
             max_seq_lens = seq_lens[:num_decodes].max().item()
-            seq_lens = seq_lens[:num_decode_tokens]
+            seq_lens = seq_lens[:num_decodes]
             input_positions = input_positions[:num_decode_tokens]
-            block_table = block_table[:num_decode_tokens, ...]
+            block_table = block_table[:num_decodes, ...]
             num_token_pad_size = 0
             if use_torchair_graph and common_attn_metadata.attn_state in [
                     AscendAttentionState.DecodeOnly,
@@ -538,10 +539,9 @@ class AscendMLATorchairMetadataBuilder:
                                                device=input_positions.device)
                 input_positions = torch.cat(
                     [input_positions, position_padding])
-                actual_seq_lengths_q = (
-                    actual_seq_lengths_q + common_attn_metadata.
-                    actual_seq_lengths_q[num_reqs:num_reqs +
-                                         num_reqs_pad_size])
+                actual_seq_lengths_q = self.pad_actual_seq_len_q(
+                    num_reqs_pad_size, num_reqs, actual_seq_lengths_q,
+                    common_attn_metadata)
             else:
                 seq_lens_list = seq_lens.tolist()
             # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to batch_size(num_tokens)
@@ -583,6 +583,48 @@ class AscendMLATorchairMetadataBuilder:
             seq_lens=seq_lens,
             enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
         )
+
+    def pad_actual_seq_len_q(self, num_reqs_pad_size, num_reqs,
+                             actual_seq_lengths_q, common_attn_metadata):
+        """
+        Pads actual_seq_lengths_q evenly to not exceed 16 tokens per request 
+        in order to meet the requirement of npu_fused_infer_attention_score.
+
+        In Torchair scenario, the lengths of the queries must be padded to the same length.
+        And npu_fused_infer_attention_score constraint requires the last element must equal to batch_size(num_tokens).
+
+        For example:
+        batch_size=36, num_reqs_pad_size=2, num_reqs=16
+        By default, each request should have inference 2 token, which means actual_seq_lengths_q should be 
+        [2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36].
+
+        However, mtp torchair + PD scenario, the actual_seq_lengths_q may be 
+        [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16] before padding, since the first decode request only has 1 token.
+        In order to meet the requirement of npu_fused_infer_attention_score, we need to pad actual_seq_lengths_q evenly to not exceed 16 tokens per request.
+        after padding actual_seq_lengths_q should be similar to [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,32,36]
+        """
+        FIA_SEQ_LEN_LIMIT = 16
+        need_padding = num_reqs_pad_size != 0 and \
+            len(common_attn_metadata.actual_seq_lengths_q) > num_reqs and \
+            common_attn_metadata.actual_seq_lengths_q[num_reqs] - actual_seq_lengths_q[-1] > FIA_SEQ_LEN_LIMIT
+        if need_padding:
+            padding_seq_len_q = common_attn_metadata.actual_seq_lengths_q[
+                num_reqs:num_reqs + num_reqs_pad_size]
+            start_val = actual_seq_lengths_q[-1]
+            end_val = padding_seq_len_q[-1]
+
+            num_step = len(padding_seq_len_q)
+            interpolated = np.round(
+                np.linspace(start_val, end_val,
+                            num_step + 1)[1:]).astype(int).tolist()
+            assert interpolated[-1] == end_val
+            assert len(interpolated) == len(padding_seq_len_q)
+            actual_seq_lengths_q = actual_seq_lengths_q + interpolated
+        else:
+            actual_seq_lengths_q = actual_seq_lengths_q + common_attn_metadata.actual_seq_lengths_q[
+                num_reqs:num_reqs + num_reqs_pad_size]
+
+        return actual_seq_lengths_q
 
 
 class AscendMLATorchairImpl(MLAAttentionImpl):
