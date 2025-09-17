@@ -163,29 +163,6 @@ class AscendFusedMoE(FusedMoE):
         self.all_reduce_merge = get_all_reduce_merge_state(
             self.moe_parallel_config.ep_size, is_deepseek_v3_r1)
 
-        ascend_config = get_ascend_config()
-        expert_map_path = ascend_config.expert_map_path
-        if expert_map_path and os.path.exists(expert_map_path):
-            # moe expert load balance
-            expert_load_balancer = ExpertLoadBalancer(expert_map_path,
-                                                      self.global_num_experts)
-            self.local_num_experts, self.expert_map = \
-                expert_load_balancer.get_rank_placement_map(
-                    self.moe_instance_id,
-                    get_ep_group().rank_in_group)
-            self.log2phy = expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id,
-                get_ep_group().rank_in_group)
-            self.global_redundant_expert_num = \
-                expert_load_balancer.get_global_redundant_expert_num()
-        else:
-            # Create a tensor of size num_experts filled with -1
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size,
-                get_ep_group().rank_in_group, self.global_num_experts)
-
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-
         if self.quant_config is None:
             self.quant_method = AscendUnquantizedFusedMoEMethod(
                 self.moe_config)
@@ -202,6 +179,7 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
         ascend_config = get_ascend_config()
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.dynamic_eplb = ascend_config.dynamic_eplb
         self.expert_map_path = ascend_config.expert_map_path
         self.global_redundant_expert_num = ascend_config.init_redundancy_expert
