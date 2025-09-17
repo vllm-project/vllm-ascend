@@ -1,42 +1,21 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
-Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-This file is a part of the vllm-ascend project.
+This file extends the functionality of linear operations by encapsulating custom
+communication groups and forward functions into classes (linear ops).
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-"""
-
-"""
-本文件通过将自定义通信组和forward函数封装成类(linear op)，拓展了linear的功能。
-当前类的继承关系：
-CustomTensorParallelOp
-├── CustomColumnParallelOp
-│   ├── MLPColumnParallelOp
-│   ├── DenseOptimMergedColumnParallelOp
-│   └── DenseOptimQKVParallelOp
-└── CustomRowParallelOp
-    ├── MLPRowParallelOp
-    ├── OProjRowParallelOp
-    ├── MatmulAllreduceRowParallelOp
-    └── DenseOptimRowParallelOp
-
-如何拓展新的linear op?以列并行为例：
-1. 继承CustomColumnParallelOp，创建新的class MyColumnParallelOp。
-2. [可选]默认的通信组是TP group，如果需要使用自定义的通信组，需要override comm_group方法
-3. 根据需求override apply方法，它将会替换原本的linear.forward
-4. 在get_column_parallel_op方法中加入MyColumnParallelOp的选择逻辑，一般是根据prefix和配置进行判断
-行并行类似，需要继承RowColumnParallelOp，并在get_row_parallel_op中注册新的类
-
-This file extends the functionality of linear operations by encapsulating custom communication groups and forward functions into classes (linear ops).
 Current class inheritance structure:
 CustomTensorParallelOp
 ├── CustomColumnParallelOp
@@ -82,7 +61,6 @@ class CustomTensorParallelOp:
         self.return_bias = None
         self.quant_method = None
 
-    # 自定义通信组，同时决定权重切分
     # Custom communication group, while determining weight sharding
     @property
     def comm_group(self):
@@ -96,7 +74,6 @@ class CustomTensorParallelOp:
     def tp_size(self):
         return self.comm_group.world_size
 
-    # 更新apply()需要用到的属性，从layer获取，在layer完成初始化，也就是layer.__init__()结束的位置调用
     # Update the attributes required by apply(), obtaining them from the layer.
     # Call this after the layer completes its initialization, specifically at the end of layer.init().
     def update_attrs(self):
@@ -106,7 +83,6 @@ class CustomTensorParallelOp:
         self.return_bias = self.layer.return_bias
         self.quant_method = self.layer.quant_method
 
-    # 取代layer.forward，自定义layer计算过程
     # Replace layer.forward to customize the layer computation process.
     def apply(self, input_):
         raise NotImplementedError

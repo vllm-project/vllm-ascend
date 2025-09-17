@@ -1,30 +1,24 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
-Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-This file is a part of the vllm-ascend project.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+To customize linear communication groups or forward of classes in this file,
+extend new linear operations in linear_op.py.
+The classes in this file should not be modified, including AscendQKVParallelLinear,
+AscendMergedColumnParallelLinear, AscendMergedColumnParallelLinear,
+AscendRowParallelLinear and AscendColumnParallelLinear.
 """
-"""
-如果要自定义linear的通信组或者forward，不应该修改本文件的类，包括AscendQKVParallelLinear, AscendMergedColumnParallelLinear
-AscendMergedColumnParallelLinear, AscendRowParallelLinear, AscendColumnParallelLinear.
-而是应该在linear_op.py中拓展新的linear op
-To customize linear communication groups or forward, do not modify the classes in this file, including
-AscendQKVParallelLinear, AscendMergedColumnParallelLinear, AscendMergedColumnParallelLinear, AscendRowParallelLinear
-and AscendColumnParallelLinear.
-Instead, extend new linear operations in linear_op.py.
-"""
-
-
 
 from typing import Optional, Union
 
@@ -40,7 +34,9 @@ from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ops.linear_op import get_row_parallel_op, get_column_parallel_op
+from vllm_ascend.ops.linear_op import (get_column_parallel_op,
+                                       get_row_parallel_op)
+
 
 # TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group
 class AscendLinearBase(LinearBase):
