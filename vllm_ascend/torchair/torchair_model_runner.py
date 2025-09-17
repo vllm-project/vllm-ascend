@@ -359,7 +359,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
         config = torchair.CompilerConfig()
         if get_ascend_config().torchair_graph_config.mode:
             config.mode = get_ascend_config().torchair_graph_config.mode
-        config.experimental_config.frozen_parameter = True
+        config.experimental_config.frozen_parameter = \
+        get_ascend_config().torchair_graph_config.enable_frozen_parameter
         # enabling tiling_schedule_optimize on 300I Duo has some bugs, so we have to
         # disable it on 300I Duo platform now.
         config.experimental_config.tiling_schedule_optimize = not is_310p()

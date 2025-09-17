@@ -53,6 +53,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(torchair_graph_config.enable_multistream_mla)
         self.assertFalse(torchair_graph_config.enable_multistream_moe)
         self.assertTrue(torchair_graph_config.enable_view_optimize)
+        self.assertTrue(torchair_graph_config.enable_frozen_parameter)
         self.assertFalse(torchair_graph_config.enable_kv_nz)
 
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
@@ -70,6 +71,7 @@ class TestAscendConfig(TestBase):
                 "enable_multistream_mla": True,
                 "enable_multistream_moe": True,
                 "enable_view_optimize": True,
+                "enable_frozen_parameter": True,
                 "enable_kv_nz": True
             },
             "ascend_scheduler_config": {
@@ -89,6 +91,7 @@ class TestAscendConfig(TestBase):
         self.assertTrue(torchair_graph_config.enable_multistream_mla)
         self.assertTrue(torchair_graph_config.enable_multistream_moe)
         self.assertTrue(torchair_graph_config.enable_view_optimize)
+        self.assertTrue(torchair_graph_config.enable_frozen_parameter)
         self.assertTrue(torchair_graph_config.enable_kv_nz)
 
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
