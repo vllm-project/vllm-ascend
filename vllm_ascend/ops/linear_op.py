@@ -15,6 +15,48 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+"""
+本文件通过将自定义通信组和forward函数封装成类(linear op)，拓展了linear的功能。
+当前类的继承关系：
+CustomTensorParallelOp
+├── CustomColumnParallelOp
+│   ├── MLPColumnParallelOp
+│   ├── DenseOptimMergedColumnParallelOp
+│   └── DenseOptimQKVParallelOp
+└── CustomRowParallelOp
+    ├── MLPRowParallelOp
+    ├── OProjRowParallelOp
+    ├── MatmulAllreduceRowParallelOp
+    └── DenseOptimRowParallelOp
+
+如何拓展新的linear op?以列并行为例：
+1. 继承CustomColumnParallelOp，创建新的class MyColumnParallelOp。
+2. [可选]默认的通信组是TP group，如果需要使用自定义的通信组，需要override comm_group方法
+3. 根据需求override apply方法，它将会替换原本的linear.forward
+4. 在get_column_parallel_op方法中加入MyColumnParallelOp的选择逻辑，一般是根据prefix和配置进行判断
+行并行类似，需要继承RowColumnParallelOp，并在get_row_parallel_op中注册新的类
+
+This file extends the functionality of linear operations by encapsulating custom communication groups and forward functions into classes (linear ops).
+Current class inheritance structure:
+CustomTensorParallelOp
+├── CustomColumnParallelOp
+│   ├── MLPColumnParallelOp
+│   ├── DenseOptimMergedColumnParallelOp
+│   └── DenseOptimQKVParallelOp
+└── CustomRowParallelOp
+    ├── MLPRowParallelOp
+    ├── OProjRowParallelOp
+    ├── MatmulAllreduceRowParallelOp
+    └── DenseOptimRowParallelOp
+
+How to extend a new linear op? Taking column parallel op as an example:
+1. Inherit from CustomColumnParallelOp and create a new class MyColumnParallelOp
+2. [Optional] The default communication group is the TP group. If a custom communication group is needed, override the comm_group method
+3. Override the apply method according to requirements, which will replace the original linear.forward
+4. Add selection logic for MyColumnParallelOp in the get_column_parallel_op method, typically based on prefix and configuration judgments
+Row parallel op follows a similar approach - inherit from RowColumnParallelOp and register the new class in get_row_parallel_op.
+"""
+
 from typing import Optional, Tuple, Union
 
 import torch
@@ -40,7 +82,8 @@ class CustomTensorParallelOp:
         self.return_bias = None
         self.quant_method = None
 
-    # TODO add comment
+    # 自定义通信组，同时决定权重切分
+    # Custom communication group, while determining weight sharding
     @property
     def comm_group(self):
         return get_tp_group()
@@ -53,6 +96,9 @@ class CustomTensorParallelOp:
     def tp_size(self):
         return self.comm_group.world_size
 
+    # 更新apply()需要用到的属性，从layer获取，在layer完成初始化，也就是layer.__init__()结束的位置调用
+    # Update the attributes required by apply(), obtaining them from the layer.
+    # Call this after the layer completes its initialization, specifically at the end of layer.init().
     def update_attrs(self):
         if hasattr(self.layer, "bias"):
             self.bias = self.layer.bias
@@ -60,6 +106,8 @@ class CustomTensorParallelOp:
         self.return_bias = self.layer.return_bias
         self.quant_method = self.layer.quant_method
 
+    # 取代layer.forward，自定义layer计算过程
+    # Replace layer.forward to customize the layer computation process.
     def apply(self, input_):
         raise NotImplementedError
 

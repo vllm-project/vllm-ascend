@@ -14,6 +14,17 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+"""
+如果要自定义linear的通信组或者forward，不应该修改本文件的类，包括AscendQKVParallelLinear, AscendMergedColumnParallelLinear
+AscendMergedColumnParallelLinear, AscendRowParallelLinear, AscendColumnParallelLinear.
+而是应该在linear_op.py中拓展新的linear op
+To customize linear communication groups or forward, do not modify the classes in this file, including
+AscendQKVParallelLinear, AscendMergedColumnParallelLinear, AscendMergedColumnParallelLinear, AscendRowParallelLinear
+and AscendColumnParallelLinear.
+Instead, extend new linear operations in linear_op.py.
+"""
+
+
 
 from typing import Optional, Union
 
@@ -31,7 +42,7 @@ from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.linear_op import get_row_parallel_op, get_column_parallel_op
 
-
+# TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group
 class AscendLinearBase(LinearBase):
 
     def __init__(
@@ -95,6 +106,7 @@ class AscendQKVParallelLinear(QKVParallelLinear):
     ):
         self.custom_op, _, tp_size = get_column_parallel_op(
             disable_tp, prefix, self)
+        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         self.hidden_size = hidden_size
         self.head_size = head_size
         self.total_num_heads = total_num_heads
@@ -167,7 +179,7 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
     ):
         self.custom_op, self.tp_rank, self.tp_size = get_column_parallel_op(
             disable_tp, prefix, self)
-
+        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         self.output_sizes = output_sizes
         assert all(output_size % self.tp_size == 0
                    for output_size in output_sizes)
@@ -216,7 +228,7 @@ class AscendRowParallelLinear(RowParallelLinear):
     ):
         self.custom_op, self.tp_rank, self.tp_size = get_row_parallel_op(
             disable_tp, prefix, self)
-
+        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         # Divide the weight matrix along the first dimension.
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
@@ -298,7 +310,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
     ):
         self.custom_op, self.tp_rank, self.tp_size = get_column_parallel_op(
             disable_tp, prefix, self)
-
+        # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
@@ -308,7 +320,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
                 divide(output_size, self.tp_size)
                 for output_size in self.output_sizes
             ]
-        # TODO: remove
+
         AscendLinearBase.__init__(self,
                                   input_size,
                                   output_size,
