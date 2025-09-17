@@ -350,8 +350,8 @@ class MooncakeEngine:
                 req_meta = LasyerMultiBlockReqMeta(req_id, keys_multi_chunk,
                                                    starts, ends, block_ids,
                                                    layer_id)
-                self.kv_recv_thread.add_request(  # type: ignore[union-attr][call-arg]
-                    req_meta)  # type: ignore[union-attr][call-arg]
+                self.kv_recv_thread.add_request(  # type: ignore[union-attr, call-arg]
+                    req_meta)  # type: ignore[union-attr, call-arg, arg-type]
                 first_flag = False
                 yield None
         else:
@@ -416,8 +416,8 @@ class MooncakeEngine:
                 req_meta = LasyerMultiBlockReqMeta(req_id, keys_multi_chunk,
                                                    starts, ends, block_ids,
                                                    layer_id)
-                self.kv_send_thread.add_request(  # type: ignore[union-attr][call-arg]
-                    req_meta)  # type: ignore[union-attr][call-arg]
+                self.kv_send_thread.add_request(  # type: ignore[union-attr, call-arg]
+                    req_meta)  # type: ignore[union-attr, call-arg, arg-type]
                 yield
         else:
             for layer_id in range(self.num_layers):
