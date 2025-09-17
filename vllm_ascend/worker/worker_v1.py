@@ -200,8 +200,9 @@ class NPUWorker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-        if isinstance(output, ModelRunnerOutput):
+        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
             return output
+
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != (
