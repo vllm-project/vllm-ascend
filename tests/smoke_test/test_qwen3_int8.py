@@ -19,8 +19,8 @@ def test_vllm_aclgraph_qwen3_32b_server_A2():
                                  capture_output=True,
                                  text=True)
             print(ret.stdout)
-            assert "ERROR" not in ret, "some errors happen."
-            if "startup complete" in ret:
+            assert "ERROR" not in ret.stdout, "some errors happen."
+            if "startup complete" in ret.stdout:
                 break
         else:
             assert False, "max tries achieved, server may not start."
@@ -34,8 +34,9 @@ def test_vllm_aclgraph_qwen3_32b_server_A2():
         ret = result.stdout.strip()
         assert "text" in ret, "failed to get response."
     finally:
-        if 'server_proc' in locals() and server_proc.poll() is None:
-            server_proc.terminate()
-            server_proc.wait()
-            if server_proc.stdout is not None:
+        if server_proc is not None:
+            if server_proc.poll() is None:
+                server_proc.terminate()
+                server_proc.wait()
+            if server_proc.stdout:
                 server_proc.stdout.close()
