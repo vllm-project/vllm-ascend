@@ -631,19 +631,3 @@ def npu_stream_switch(target_stream: torch.npu.Stream,
         return nullcontext()
     assert target_stream is not None
     return torch.npu.stream(target_stream)
-
-
-def npu_wait_stream(current_stream: torch.npu.Stream,
-                    target_stream: torch.npu.Stream,
-                    *,
-                    enabled: bool = True):
-    """
-    Make current stream wait for the target stream if enabled is True.
-    This operation will launch a record event on the target stream,
-    and launch a wait event on current stream, waitint for the record event.
-    Otherwise, do nothing.
-    """
-    if enabled:
-        assert current_stream is not None 
-        assert target_stream is not None
-        current_stream.wait_stream(target_stream)

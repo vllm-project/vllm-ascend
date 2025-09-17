@@ -37,8 +37,7 @@ from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
                                                  AlltoAllCommImpl, MC2CommImpl,
                                                  NaiveMulticastCommImpl)
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, is_310p,
-                               npu_stream_switch, npu_wait_stream)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, npu_stream_switch
 
 original_unquantized_fused_moe_init_func = UnquantizedFusedMoEMethod.__init__
 
@@ -439,8 +438,10 @@ class AscendSharedFusedMoE(AscendFusedMoE):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Make sure the shared experts stream begins after hidden_states are ready.
-        npu_wait_stream(self.shared_expert_stream, torch.npu.current_stream(), enabled=self.multistream_overlap_shared_expert)
-        with npu_stream_switch(self.shared_expert_stream, enabled=self.multistream_overlap_shared_expert):
+        if self.multistream_overlap_shared_expert:
+            self.shared_expert_stream.wait_stream(torch.npu.current_stream())
+        with npu_stream_switch(self.shared_expert_stream,
+                               enabled=self.multistream_overlap_shared_expert):
             # Use a separate stream to run shared experts.
             shared_out = self._shared_experts(hidden_states)
 
@@ -455,7 +456,8 @@ class AscendSharedFusedMoE(AscendFusedMoE):
             router_logits=router_logits,
         )
         # Make sure the default stream waits for the shared experts stream to finish.
-        npu_wait_stream(torch.npu.current_stream(), self.shared_expert_stream, enabled=self.multistream_overlap_shared_expert)
+        if self.multistream_overlap_shared_expert:
+            torch.npu.current_stream().wait_stream(self.shared_expert_stream)
         return shared_out, fused_out
 
 
