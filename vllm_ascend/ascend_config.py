@@ -114,6 +114,8 @@ class TorchairGraphConfig:
             "enable_multistream_moe", False)
         self.enable_view_optimize = torchair_graph_config.get(
             "enable_view_optimize", True)
+        self.enable_frozen_parameter = torchair_graph_config.get(
+            "enable_frozen_parameter", True)
         self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
 
         if not isinstance(self.graph_batch_sizes, list):
