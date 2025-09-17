@@ -1440,6 +1440,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.drafter and (self.drafter.name == SpecDcodeType.EAGLE
                                  or self.drafter.name == SpecDcodeType.EAGLE3):
                 attn_state = AscendAttentionState.ChunkedPrefill
+            elif self.drafter and self.drafter.name == SpecDcodeType.NGRAM:
+                attn_state = AscendAttentionState.DecodeOnly
             else:
                 attn_state = AscendAttentionState.SpecDecoding
         # splitfuse
