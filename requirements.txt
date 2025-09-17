@@ -26,5 +26,4 @@ torch-npu==2.5.1.post1
 
 # Remove after https://github.com/vllm-project/vllm-ascend/issues/1470
 transformers<4.53.0
-pytest_mock
-networkx
+
