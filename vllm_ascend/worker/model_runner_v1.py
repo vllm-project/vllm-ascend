@@ -2566,7 +2566,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
         # init kv cache tensors
-        kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        kv_cache_raw_tensors = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
@@ -2581,10 +2581,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                              device=self.device)
                         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "self_attn" in layer_name:
-                    tensor = torch.zeros(kv_cache_tensor.size,
-                                         dtype=torch.int8,
-                                         device=self.device)
-                    kv_cache_raw_tensors[layer_name] = tensor
+                    # tensor = torch.zeros(kv_cache_tensor.size,
+                    #                      dtype=torch.int8,
+                    #                      device=self.device)
+                    # kv_cache_raw_tensors[layer_name] = tensor
+                    k_tensor = torch.zeros(kv_cache_tensor.size//2,
+                                            dtype=torch.int8,
+                                            device=self.device)
+                    v_tensor = torch.zeros(kv_cache_tensor.size//2,
+                                            dtype=torch.int8,
+                                            device=self.device)
+                    kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
@@ -2602,24 +2609,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in kv_cache_group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                raw_tensor = kv_cache_raw_tensors[layer_name]
-
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel(
-                ) // kv_cache_spec.page_size_bytes
-
-                # `num_blocks` is the number of blocks the model runner can use.
-                # `kv_cache_config.num_blocks` is the number of blocks that
-                # KVCacheManager may allocate.
-                # Since different GPUs may have different number of layers and
-                # different memory capacities, `num_blocks` can be different on
-                # different GPUs, and `kv_cache_config.num_blocks` is set to
-                # the min of all `num_blocks`. Verify it here.
-                assert num_blocks >= kv_cache_config.num_blocks
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
+                    print(30*"^", f"layer_name: {layer_name}")
+                    raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name]
+                    assert (raw_k_tensor.numel() + raw_v_tensor.numel()) % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = (raw_k_tensor.numel() + raw_v_tensor.numel()) // kv_cache_spec.page_size_bytes
+
+                    # `num_blocks` is the number of blocks the model runner can use.
+                    # `kv_cache_config.num_blocks` is the number of blocks that
+                    # KVCacheManager may allocate.
+                    # Since different GPUs may have different number of layers and
+                    # different memory capacities, `num_blocks` can be different on
+                    # different GPUs, and `kv_cache_config.num_blocks` is set to
+                    # the min of all `num_blocks`. Verify it here.
+                    assert num_blocks >= kv_cache_config.num_blocks
+
+
                     if self.vllm_config.additional_config.get(
                             "kv_cache_dtype", None) == 'int8':
                         kv_cache_shape = attn_backend.get_bsh_kv_cache_shape(
@@ -2640,11 +2648,26 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
-                    kv_cache = raw_tensor.view(dtype).view(kv_cache_shape)
-                    kv_cache = self._convert_torch_format(kv_cache)
-                    kv_caches[layer_name] = kv_cache
+                    k_cache = raw_k_tensor.view(dtype).view(kv_cache_shape[1:])
+                    k_cache = self._convert_torch_format(k_cache)
+                    v_cache = raw_v_tensor.view(dtype).view(kv_cache_shape[1:])
+                    v_cache = self._convert_torch_format(v_cache)
+                    kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
+                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel(
+                    ) // kv_cache_spec.page_size_bytes
+
+                    # `num_blocks` is the number of blocks the model runner can use.
+                    # `kv_cache_config.num_blocks` is the number of blocks that
+                    # KVCacheManager may allocate.
+                    # Since different GPUs may have different number of layers and
+                    # different memory capacities, `num_blocks` can be different on
+                    # different GPUs, and `kv_cache_config.num_blocks` is set to
+                    # the min of all `num_blocks`. Verify it here.
+                    assert num_blocks >= kv_cache_config.num_blocks
+
                     state_tensors = []
                     storage_offset_bytes = 0
                     for (shape, dtype) in zip(kv_cache_spec.shapes,
