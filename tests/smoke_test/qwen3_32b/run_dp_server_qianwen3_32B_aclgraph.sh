@@ -17,7 +17,7 @@ export HCCL_OP_EXPANSION_MODE="AIV"
 # MASK
 #export PAGED_ATTENTION_MASK_LEN= 5500
 #图模式--aclgraph
-vllm serve $weight_dir \
+vllm serve "$weight_dir" \
   --host 0.0.0.0 \
   --port 20002 \
   --no-enable-prefix-caching \
