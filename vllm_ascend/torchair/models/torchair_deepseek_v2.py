@@ -928,6 +928,8 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.num_dense_layers = self.config.first_k_dense_replace
+        self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
         self.quant_config = quant_config
         self.model = TorchairDeepseekV2Model(vllm_config=vllm_config,
                                              prefix=maybe_prefix(
