@@ -13,15 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
+from vllm_ascend.ascend_forward_context import MoECommImpl
 from vllm_ascend.ops.moe.fused_moe_prepare_and_finalize import (
     FusedMoEPrepareAndFinalizeWithAll2All,
     FusedMoEPrepareAndFinalizeWithAllGather, FusedMoEPrepareAndFinalizeWithMC2,
@@ -31,6 +33,23 @@ from vllm_ascend.ops.moe.token_dispatcher import (TokenDispatcherWithAll2AllV,
                                                   TokenDispatcherWithAllGather,
                                                   TokenDispatcherWithMC2,
                                                   TokenDispatcherWithMoge)
+
+_MoECommMethods: Dict[str, MoECommMethod] = {}
+
+
+def _register_moe_comm_method(moe_comm_method: MoECommMethod):
+    _MoECommMethods[moe_comm_method.__class__.__name__] = moe_comm_method
+
+
+def get_moe_comm_method(name: MoECommImpl) -> Optional[MoECommMethod]:
+    return _MoECommMethods.get(str(name))
+
+
+def setup_moe_comm_method(moe_config):
+    _register_moe_comm_method(AlltoAllCommImpl(moe_config))
+    _register_moe_comm_method(AllGatherCommImpl(moe_config))
+    _register_moe_comm_method(MC2CommImpl(moe_config))
+    _register_moe_comm_method(NaiveMulticastCommImpl(moe_config))
 
 
 class MoECommMethod(ABC):

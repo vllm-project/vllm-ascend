@@ -29,14 +29,13 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import MoECommImpl
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
                                               determine_default_log2phy_map)
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
-                                                 AlltoAllCommImpl, MC2CommImpl,
-                                                 NaiveMulticastCommImpl)
+from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
                                get_all_reduce_merge_state,
                                get_rm_router_logits_state, is_310p)
@@ -145,6 +144,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
 
 class AscendFusedMoE(FusedMoE):
+    # The moe_counter parameter is required during the initialization of EPLB
+    # to identify the current layer index within the MOE model.
     moe_counter = -1
 
     def __init__(self, *args, **kwargs):
@@ -172,14 +173,11 @@ class AscendFusedMoE(FusedMoE):
 
         assert self.quant_method is not None
 
-        AscendFusedMoE.moe_counter += 1
-        self.moe_instance_id = AscendFusedMoE.moe_counter
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
         ascend_config = get_ascend_config()
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.dynamic_eplb = ascend_config.dynamic_eplb
         self.expert_map_path = ascend_config.expert_map_path
         self.global_redundant_expert_num = ascend_config.init_redundancy_expert
@@ -215,13 +213,9 @@ class AscendFusedMoE(FusedMoE):
         if self.dynamic_eplb:
             self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
 
-        for method in {
-                AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl,
-                NaiveMulticastCommImpl
-        }:
-            setattr(
-                self, method.__name__.lower(),
-                method(moe_config=self.moe_config))  # type: ignore[abstract]
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+
+        setup_moe_comm_method(self.moe_config)
 
     def update_expert_map(self, new_expert_map):
         self.expert_map = new_expert_map
@@ -245,8 +239,8 @@ class AscendFusedMoE(FusedMoE):
         outputs since each rank only has partial outputs.
         """
         forward_context = get_forward_context()
-        moe_comm_method_name = forward_context.moe_comm_method_name
-        if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
+        moe_comm_method_type = forward_context.moe_comm_method_type
+        if moe_comm_method_type in {MoECommImpl.AllTOAll, MoECommImpl.MC2}:
             return final_hidden_states
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
@@ -260,9 +254,6 @@ class AscendFusedMoE(FusedMoE):
 
         forward_context = get_forward_context()
         enable_force_load_balance = forward_context.in_profile_run
-        moe_comm_method_name = forward_context.moe_comm_method_name
-
-        forward_context.moe_comm_method = getattr(self, moe_comm_method_name)
 
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
@@ -287,11 +278,13 @@ class AscendFusedMoE(FusedMoE):
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
-            enable_eplb=self.enable_eplb,
-            expert_load_view=self.expert_load_view,
-            logical_to_physical_map=self.logical_to_physical_map,
-            logical_replica_count=self.logical_replica_count,
-        )
+            quantized_x_for_share=quantized_x_for_share,
+            dynamic_scale_for_share=dynamic_scale_for_share,
+            shared_experts=None,
+            enable_force_load_balance=enable_force_load_balance,
+            log2phy=self.log2phy,
+            global_redundant_expert_num=self.global_redundant_expert_num)
+
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
 
@@ -410,8 +403,8 @@ class AscendSharedFusedMoE(AscendFusedMoE):
 
         # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
         forward_context = get_forward_context()
-        moe_comm_method_name = forward_context.moe_comm_method_name
-        if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
+        moe_comm_method_type = forward_context.moe_comm_method_type
+        if moe_comm_method_type in {MoECommImpl.AllTOAll, MoECommImpl.MC2}:
             shared_out = tensor_model_parallel_all_reduce(shared_out)
 
         fused_out = super().forward(
