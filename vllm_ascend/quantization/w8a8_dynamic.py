@@ -123,6 +123,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
             and not vllm_config.model_config.enforce_eager
             and not ascend_config.torchair_graph_config.enabled)
+        self.dynamic_eplb = ascend_config.dynamic_eplb
 
         try:
             device_group = get_mc2_group().device_group
@@ -229,7 +230,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 expert_map=expert_map,
-            )
+                dynamic_eplb=self.dynamic_eplb)
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
@@ -255,7 +256,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
-            dynamic_scale_for_share=dynamic_scale_for_share)
+            dynamic_scale_for_share=dynamic_scale_for_share,
+            dynamic_eplb=self.dynamic_eplb)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
