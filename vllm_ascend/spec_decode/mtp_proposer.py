@@ -113,7 +113,7 @@ class MtpProposer(Proposer):
              _) = self.runner._sync_metadata_across_dp(num_tokens,
                                                        with_prefill, False)
 
-        moe_comm_method = self.runner._select_moe_comm_method(
+        moe_comm_type = self.runner._select_moe_comm_method(
             num_tokens, with_prefill)
 
         is_running_torchair = self.torchair_graph_enabled and \
@@ -146,7 +146,7 @@ class MtpProposer(Proposer):
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
-                    moe_comm_method=moe_comm_method,
+                    moe_comm_type=moe_comm_type,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=0):
                 if is_running_torchair:
@@ -425,7 +425,7 @@ class MtpProposer(Proposer):
             num_tokens_across_dp = self.runner.num_tokens_across_dp
             with_prefill = self.runner.with_prefill
 
-        moe_comm_method = self.runner._select_moe_comm_method(
+        moe_comm_type = self.runner._select_moe_comm_method(
             num_input_tokens, with_prefill)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=False)
@@ -440,7 +440,7 @@ class MtpProposer(Proposer):
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
-                    moe_comm_method=moe_comm_method,
+                    moe_comm_type=moe_comm_type,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens):
