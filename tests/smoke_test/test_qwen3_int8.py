@@ -1,5 +1,18 @@
 import subprocess
 import time
+import requests
+
+
+Url = "http://localhost:20002/v1/completions"
+Headers = {
+    "Content-Type": "application/json"
+}
+Data = {
+    "model": "Qwen3",
+    "prompt": "San Francisco is a",
+    "max_tokens": 10,
+    "temperature": 0
+}
 
 
 def test_vllm_aclgraph_qwen3_32b_server_A2():
@@ -25,15 +38,9 @@ def test_vllm_aclgraph_qwen3_32b_server_A2():
                 break
         else:
             assert False, "max tries achieved, server may not start."
-        curl_request = '''
-        curl -X POST -s http://localhost:20002/v1/completions -H "Content-Type: application/json" -d '{"model": "Qwen3","prompt": "San Francisco is a","max_tokens": 10,"temperature": 0}';echo
-        '''
-        result = subprocess.run(["bash", "-c", curl_request],
-                                capture_output=True,
-                                text=True,
-                                check=True)
-        ret = result.stdout.strip()
-        assert "text" in ret, "failed to get response."
+        response = requests.post(Url, headers=Headers, json=Data)
+        assert response.status_code == 200, "failed to get response."
+        print(response.json())
     finally:
         if server_proc is not None:
             if server_proc.poll() is None:
