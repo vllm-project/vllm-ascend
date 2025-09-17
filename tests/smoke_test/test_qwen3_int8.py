@@ -3,7 +3,7 @@ import time
 
 
 def test_vllm_aclgraph_qwen3_32b_server_A2():
-    script_path = "tests/smoke_test/qwen3_32b/run_dp_server_qianwen3_32B_aclgraph.sh"
+    script_path = "tests/smoke_test/qwen3_32b/run_dp_server_qwen3_32B_aclgraph.sh"
     try:
         server_proc = subprocess.Popen(["bash", script_path],
                                        stdout=subprocess.PIPE,

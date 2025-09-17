@@ -9,7 +9,7 @@ fi
 export TASK_QUEUE_ENABLE=1
 export VLLM_USE_V1=1
 export OMP_PROC_BIND=false
-export ASCEND_RT_VISIBLE_DEVICES=0,1
+#export ASCEND_RT_VISIBLE_DEVICES=0,1
 # jemalloc
 #export LD_PRELOAD=/home/vllm_auto/libjemalloc.so:$LD_PRELOAD
 # AIV
