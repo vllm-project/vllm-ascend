@@ -1,16 +1,19 @@
 import subprocess
 import time
+import os
 
 
 def test_vllm_aclgraph_qwen3_32b_server_A2():
     script_path = "tests/smoke_test/qwen3_32b/run_dp_server_qwen3_32B_aclgraph.sh"
+    output_file = "qwen3_32b_int8_output.txt"
     try:
         server_proc = subprocess.Popen(["bash", script_path],
-                                       stdout=subprocess.PIPE,
+                                       stdout=open(output_file, "w+"),
                                        stderr=subprocess.STDOUT)
         for i in range(30):
             time.sleep(10)
-            ret = server_proc.stdout.read().decode()
+            ret = os.popen(f'tail -n 50 {output_file}').read()
+            #ret = server_proc.stdout.read().decode()
             print(ret)
             assert "ERROR" not in ret, "some errors happen."
             if "startup complete" in ret:
@@ -29,4 +32,5 @@ def test_vllm_aclgraph_qwen3_32b_server_A2():
         if 'server_proc' in locals() and server_proc.poll() is None:
             server_proc.terminate()
             server_proc.wait()
-            server_proc.stdout.close()
+            if server_proc.stdout is not None:
+                server_proc.stdout.close()
