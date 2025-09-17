@@ -1,12 +1,10 @@
 import subprocess
 import time
+
 import requests
 
-
 Url = "http://localhost:20002/v1/completions"
-Headers = {
-    "Content-Type": "application/json"
-}
+Headers = {"Content-Type": "application/json"}
 Data = {
     "model": "Qwen3",
     "prompt": "San Francisco is a",
@@ -48,4 +46,3 @@ def test_vllm_aclgraph_qwen3_32b_server_A2():
                 server_proc.wait()
         if output_fp is not None:
             output_fp.close()
-
