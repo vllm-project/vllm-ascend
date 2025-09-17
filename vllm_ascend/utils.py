@@ -322,7 +322,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # TODO: Find out whether we need to take into account the pp_size
         parallel_factor = 1 + num_comm_groups + int(
             parallel_config.enable_expert_parallel) + int(
-            vllm_config.additional_config.get("multistream_overlap_shared_expert", False))
+                vllm_config.additional_config.get(
+                    "multistream_overlap_shared_expert", False))
         if is_moe_model(vllm_config):
             parallel_factor += (parallel_config.data_parallel_size > 1)
         # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device

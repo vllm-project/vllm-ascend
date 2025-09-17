@@ -439,7 +439,8 @@ class AscendSharedFusedMoE(AscendFusedMoE):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Make sure the shared experts stream begins after hidden_states are ready.
         if self.multistream_overlap_shared_expert:
-            self.shared_expert_stream.wait_stream(torch.npu.current_stream())
+            self.shared_expert_stream.wait_stream(  # type: ignore
+                torch.npu.current_stream())
         with npu_stream_switch(self.shared_expert_stream,
                                enabled=self.multistream_overlap_shared_expert):
             # Use a separate stream to run shared experts.

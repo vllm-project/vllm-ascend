@@ -1256,7 +1256,8 @@ class TorchairAscendFusedMoE(FusedMoE):
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
             shared_experts=shared_experts if self.torchair_graph_enabled
-            and self.multistream_overlap_shared_expert and not is_prefill else None,
+            and self.multistream_overlap_shared_expert and not is_prefill else
+            None,
             mc2_mask=mc2_mask,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,

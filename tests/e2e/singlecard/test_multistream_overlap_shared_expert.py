@@ -52,7 +52,8 @@ def test_models_with_multistream_overlap_shared_expert(
                 "multistream_overlap_shared_expert": True,
             },
     ) as runner:
-        vllm_moe_ms_eager_outputs = runner.model.generate(prompts, sampling_params)
+        vllm_moe_ms_eager_outputs = runner.model.generate(
+            prompts, sampling_params)
 
     with VllmRunner(
             model,
@@ -62,7 +63,8 @@ def test_models_with_multistream_overlap_shared_expert(
                 "multistream_overlap_shared_expert": True,
             },
     ) as runner:
-        vllm_moe_ms_aclgraph_outputs = runner.model.generate(prompts, sampling_params)
+        vllm_moe_ms_aclgraph_outputs = runner.model.generate(
+            prompts, sampling_params)
 
     with VllmRunner(
             model,
