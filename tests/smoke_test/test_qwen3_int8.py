@@ -1,21 +1,17 @@
-
 import subprocess
 import time
 
+
 def test_vllm_aclgraph_qwen3_32b_server_A2():
     script_path = "tests/smoke_test/qwen3_32b/run_dp_server_qianwen3_32B_aclgraph.sh"
-    server_proc = subprocess.Popen(
-        ["bash", script_path],
-        stdout=open("output.txt", "w+"),
-        stderr=subprocess.STDOUT
-    )
-    time.sleep(1)
     try:
+        server_proc = subprocess.Popen(["bash", script_path],
+                                       stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT)
         for i in range(30):
             time.sleep(10)
-            with open("output.txt", "r") as f:
-                ret = f.read().strip()
-                print(ret)
+            ret = server_proc.stdout.read().decode()
+            print(ret)
             assert "ERROR" not in ret, "some errors happen."
             if "startup complete" in ret:
                 break
@@ -24,11 +20,13 @@ def test_vllm_aclgraph_qwen3_32b_server_A2():
         curl_request = '''
         curl -X POST -s http://localhost:20002/v1/completions -H "Content-Type: application/json" -d '{"model": "Qwen3","prompt": "San Francisco is a","max_tokens": 10,"temperature": 0}';echo
         '''
-        result = subprocess.run(["bash", "-c", curl_request], capture_output=True, text=True)
+        result = subprocess.run(["bash", "-c", curl_request],
+                                capture_output=True,
+                                text=True)
         ret = result.stdout.strip()
         assert "text" in ret, "failed to get response."
     finally:
         if 'server_proc' in locals() and server_proc.poll() is None:
             server_proc.terminate()
             server_proc.wait()
-
+            server_proc.stdout.close()
