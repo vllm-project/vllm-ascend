@@ -175,7 +175,14 @@ class NPUWorker(WorkerBase):
             "not properly cleaned up before initializing the vLLM instance.")
 
         # Get the peak memory allocation recorded by torch
-        peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"]
+        chuked_prefill_work_space_size = self.vllm_config.cache_config.block_size * \
+            self.vllm_config.scheduler_config.max_num_seqs * 1024 *1024
+        if self.vllm_config.scheduler_config.enable_chunked_prefill:
+            peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"] + \
+            chuked_prefill_work_space_size
+        else:
+            peak_memory = torch_npu.npu.memory_stats(
+            )["allocated_bytes.all.peak"]
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
         NPUPlatform.empty_cache()
