@@ -1,11 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-if [ -z "$1" ]; then
-    weight_dir="slanyer/Qwen3_32B_INT8"
-else
-    weight_dir="$1"
-fi
+weight_dir="slanyer/Qwen3_32B_INT8"
 
 export TASK_QUEUE_ENABLE=1
 export VLLM_USE_V1=1
