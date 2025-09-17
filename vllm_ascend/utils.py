@@ -619,22 +619,23 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
-def npu_stream_switch(target_stream: torch.npu.Stream, *, enabled: bool = True):
+def npu_stream_switch(target_stream: torch.npu.Stream,
+                      *,
+                      enabled: bool = True):
     """
     Switch to the target stream if enabled is True.
     Otherwise, do nothing.
     """
     if not enabled:
         return nullcontext()
+    assert target_stream is not None
     return torch.npu.stream(target_stream)
 
 
-def npu_wait_stream(
-    current_stream: torch.npu.Stream,
-    target_stream: torch.npu.Stream,
-    *,
-    enabled: bool = True
-):
+def npu_wait_stream(current_stream: torch.npu.Stream,
+                    target_stream: torch.npu.Stream,
+                    *,
+                    enabled: bool = True):
     """
     Make current stream wait for the target stream if enabled is True.
     This operation will launch a record event on the target stream,
@@ -642,4 +643,6 @@ def npu_wait_stream(
     Otherwise, do nothing.
     """
     if enabled:
+        assert current_stream is not None 
+        assert target_stream is not None
         current_stream.wait_stream(target_stream)
