@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
+import os.path
 from typing import Callable, Optional
 
 import torch
@@ -26,10 +26,13 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEParallelConfig  # isort: skip
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, UnquantizedFusedMoEMethod)
+    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
+                                              determine_default_log2phy_map)
+from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
                                                  AlltoAllCommImpl, MC2CommImpl,
@@ -226,14 +229,52 @@ def process_weights_after_loading(self, layer):
 
 
 class AscendFusedMoE(FusedMoE):
+    moe_counter = -1
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        AscendFusedMoE.moe_counter += 1
+        self.moe_instance_id = AscendFusedMoE.moe_counter
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
+        ascend_config = get_ascend_config()
+        self.dynamic_eplb = ascend_config.dynamic_eplb
+        self.expert_map_path = ascend_config.expert_map_path
+        self.global_redundant_expert_num = ascend_config.init_redundancy_expert
+        # static eplb initializing with expert_map_path
+        if self.expert_map_path and os.path.exists(
+                self.expert_map_path) and os.access(self.expert_map_path,
+                                                    os.R_OK):
+            self.expert_load_balancer = ExpertLoadBalancer(
+                self.expert_map_path, self.global_num_experts)
+            self.local_num_experts, self.expert_map = (
+                self.expert_load_balancer.get_rank_placement_map(
+                    self.moe_instance_id, self.ep_rank))
+            self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
+                self.moe_instance_id, self.ep_rank).npu()
+            self.global_redundant_expert_num = (
+                self.expert_load_balancer.get_global_redundant_expert_num())
+        else:
+            # init moe.
+            self.local_num_experts, self.expert_map = determine_expert_map(
+                self.ep_size, self.ep_rank, self.global_num_experts)
+            # dynamic eplb initializing with not expert_map_path
+            if self.dynamic_eplb:
+                self.global_redundant_expert_num = ascend_config.init_redundancy_expert
+                self.local_num_experts, self.expert_map = determine_default_expert_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank,
+                    self.global_redundant_expert_num)
+                self.log2phy = determine_default_log2phy_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank,
+                    self.global_redundant_expert_num)
+        local_num_experts = (torch.sum(
+            self.expert_map != -1) if self.expert_map is not None else
+                             self.global_num_experts)
+        if self.dynamic_eplb:
+            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
 
         for method in {
                 AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl,
@@ -242,6 +283,19 @@ class AscendFusedMoE(FusedMoE):
             setattr(
                 self, method.__name__.lower(),
                 method(moe_config=self.moe_config))  # type: ignore[abstract]
+
+    def update_expert_map(self, new_expert_map):
+        self.expert_map = new_expert_map
+
+    def get_map(self):
+        return self.expert_map
+
+    def get_log2phy_map(self):
+        return self.logical_to_physical_map
+
+    def clear_moe_load(self):
+        if self.moe_load is not None:
+            self.moe_load.zero_()
 
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
@@ -292,6 +346,12 @@ class AscendFusedMoE(FusedMoE):
             logical_to_physical_map=self.logical_to_physical_map,
             logical_replica_count=self.logical_replica_count,
         )
+        if isinstance(final_hidden_states, tuple):
+            final_hidden_states, group_list_type, expert_tokens = final_hidden_states
+
+        if self.dynamic_eplb:
+            self.moe_load += expert_tokens if group_list_type else \
+                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
