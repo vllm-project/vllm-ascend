@@ -1,4 +1,3 @@
-
 import subprocess
 import time
 
@@ -7,9 +6,11 @@ def test_vllm_aclgraph_qwen3_32b_server_A2():
     script_path = "tests/smoke_test/qwen3_32b/run_dp_server_qwen3_32B_aclgraph.sh"
     output_file = "qwen3_32b_int8_output.txt"
     server_proc = None
+    output_fp = None
     try:
+        output_fp = open(output_file, "w+")
         server_proc = subprocess.Popen(["bash", script_path],
-                                       stdout=open(output_file, "w+"),
+                                       stdout=output_fp,
                                        stderr=subprocess.STDOUT)
         for i in range(30):
             time.sleep(10)
@@ -38,5 +39,6 @@ def test_vllm_aclgraph_qwen3_32b_server_A2():
             if server_proc.poll() is None:
                 server_proc.terminate()
                 server_proc.wait()
-            if server_proc.stdout:
-                server_proc.stdout.close()
+        if output_fp is not None:
+            output_fp.close()
+
