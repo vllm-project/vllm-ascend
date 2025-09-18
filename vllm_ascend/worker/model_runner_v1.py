@@ -2567,7 +2567,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
         # init kv cache tensors
-        kv_cache_raw_tensors = {}
+        kv_cache_raw_tensors: dict[str, Union[torch.Tensor,
+                                              Optional[torch.Tensor]]] = {}
         # llmdatadist need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
@@ -2579,7 +2580,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         if "self_attn" in layer_name_inner or layer_name_inner in kv_cache_raw_tensors.keys(
                         ):
                             continue
-                        if self.vllm_config.kv_transfer_config:
+                        if self.vllm_config.kv_transfer_config is None:
                             tensor = torch.zeros(kv_cache_tensor.size,
                                                  dtype=torch.int8,
                                                  device=self.device)
@@ -2592,7 +2593,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                 tensor, alignment)[:kv_cache_tensor.size]
                         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "self_attn" in layer_name:
-                    if self.vllm_config.kv_transfer_config:
+                    if self.vllm_config.kv_transfer_config is None:
                         k_tensor = torch.zeros(kv_cache_tensor.size // 2,
                                                dtype=torch.int8,
                                                device=self.device)
@@ -2636,6 +2637,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if isinstance(kv_cache_spec, FullAttentionSpec):
                     raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[
                         layer_name]
+                    assert raw_k_tensor is not None
+                    assert raw_v_tensor is not None
                     assert (raw_k_tensor.numel() + raw_v_tensor.numel()
                             ) % kv_cache_spec.page_size_bytes == 0
                     num_blocks = (raw_k_tensor.numel() + raw_v_tensor.numel()
@@ -2679,6 +2682,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
+                    assert raw_tensor is not None
                     assert raw_tensor.numel(
                     ) % kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel(
