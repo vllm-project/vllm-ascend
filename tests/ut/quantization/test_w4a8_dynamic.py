@@ -48,18 +48,27 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     output_size = 56
     group_size = 2
 
+    @patch('vllm_ascend.quantization.w4a8_dynamic.get_ascend_config')
     @patch('vllm_ascend.quantization.w4a8_dynamic.get_current_vllm_config')
     @patch('vllm_ascend.quantization.w4a8_dynamic.get_ep_group')
     @patch('vllm_ascend.quantization.w4a8_dynamic.get_mc2_group')
     @patch('torch.distributed.get_rank', return_value=0)
     def setUp(self, mock_get_rank, mock_get_mc2_group, mock_get_ep_group,
-              get_current_vllm_config):
+              get_current_vllm_config, mock_get_ascend_config):
+        # Mock ascend config
+        mock_ascend_config = Mock()
+        mock_ascend_config.dynamic_eplb = False
+        mock_get_ascend_config.return_value = mock_ascend_config
+
         mock_vllm_config = Mock()
         mock_vllm_config.quant_config = Mock(quant_description={
             "group_size": self.group_size,
             "version": "0.0.0"
         })
         mock_vllm_config.parallel_config = Mock(enable_expert_parallel=True)
+        mock_vllm_config.scheduler_config = Mock(max_num_batched_tokens=2048,
+                                                 max_model_len=2048,
+                                                 enable_chunked_prefill=False)
         get_current_vllm_config.return_value = mock_vllm_config
         self.quant_method = AscendW4A8DynamicFusedMoEMethod()
 
