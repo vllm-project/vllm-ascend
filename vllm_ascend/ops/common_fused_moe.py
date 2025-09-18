@@ -18,10 +18,13 @@ import os.path
 from typing import Callable, Optional
 
 import torch
+import torch.nn.functional as F
 import torch_npu
 from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
-                              tensor_model_parallel_all_reduce)
+                              tensor_model_parallel_all_reduce,
+                              get_pp_group, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEParallelConfig  # isort: skip
@@ -307,10 +310,18 @@ class AscendFusedMoE(FusedMoE):
         """
         forward_context = get_forward_context()
         moe_comm_method_name = forward_context.moe_comm_method_name
+        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
         if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
+            if flashcomm_v1_enabled:
+                pad_size = forward_context.pad_size
+                if pad_size > 0:
+                    final_hidden_states = F.pad(final_hidden_states, (0, 0, 0, pad_size))
+                tp_size = get_tensor_model_parallel_world_size()
+                tp_rank = get_tensor_model_parallel_rank()
+                final_hidden_states = torch.chunk(final_hidden_states, tp_size, dim=0)[tp_rank]
             return final_hidden_states
         else:
-            return tensor_model_parallel_all_reduce(final_hidden_states)
+            return torch.ops.vllm.maybe_pad_and_reduce(final_hidden_states)
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
@@ -432,6 +443,11 @@ class AscendSharedFusedMoE(AscendFusedMoE):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        forward_context = get_forward_context()
+        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
+        if flashcomm_v1_enabled:
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True)
+            router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits, True)
         shared_out = self._shared_experts(hidden_states)
 
         # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`

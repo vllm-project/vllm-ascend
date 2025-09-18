@@ -13,9 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm.model_executor.models import deepseek_v2, llama4
+from vllm.model_executor.models import deepseek_v2, llama4, glm4_moe
 
 from vllm_ascend.ops.common_fused_moe import AscendSharedFusedMoE
 
 deepseek_v2.SharedFusedMoE = AscendSharedFusedMoE
 llama4.SharedFusedMoE = AscendSharedFusedMoE
+glm4_moe.SharedFusedMoE = AscendSharedFusedMoE
