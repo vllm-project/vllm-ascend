@@ -20,8 +20,11 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
-from vllm.distributed import divide, tensor_model_parallel_all_reduce
+from vllm.distributed import (divide, get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_reduce_scatter)
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
@@ -30,7 +33,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, pad_vocab_size)
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
+from vllm_ascend.distributed.parallel_state import (get_lmhead_tp_group,
+                                                    is_sp_enabled)
 from vllm_ascend.utils import lmhead_tp_enable
 
 
@@ -146,6 +150,8 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         return input_, ~vocab_mask
 
     def forward(self, input_):
+        self.enable_sp = is_sp_enabled()
+
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = self._get_masked_input_and_mask(
@@ -163,6 +169,27 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
         # Reduce across all the model parallel GPUs.
+        is_prefill = False
+        if self.enable_sp:
+            forward_context = get_forward_context()
+            if forward_context.attn_metadata:
+                is_prefill = list(
+                    forward_context.attn_metadata.values())[0].num_prefills
+        if self.enable_sp and is_prefill:
+            sp_size = get_tensor_model_parallel_world_size()
+            original_len = input_.shape[0]
+
+            reminder = original_len % sp_size
+            if reminder != 0:
+                padding_len = sp_size - reminder
+                output_parallel = nn.functional.pad(output_parallel,
+                                                    (0, 0, 0, padding_len),
+                                                    mode='constant',
+                                                    value=0)
+
+            output = tensor_model_parallel_reduce_scatter(
+                output_parallel.movedim(0, -1)).movedim(-1, 0)
+            return output
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
 

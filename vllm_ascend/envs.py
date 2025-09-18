@@ -164,6 +164,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # are not freed within this timeout, they will be forcibly released.
     "VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT":
     lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
+    # Decide whether we should enable CP parallelism and SP parallelism.
+    "VLLM_ASCEND_ENABLE_SP":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_SP", '0'))),
+    "VLLM_ASCEND_ENABLE_CP":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CP", '0')))
 }
 
 # end-env-vars-definition

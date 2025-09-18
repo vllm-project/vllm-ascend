@@ -7,12 +7,19 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import long_sequence_enable, sequence_parallel_enable
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
 _MLP_TP: Optional[GroupCoordinator] = None
 _OTP: Optional[GroupCoordinator] = None
 _LMTP: Optional[GroupCoordinator] = None
+
+_ENABLE_SP: bool = False
+
+
+def is_sp_enabled():
+    return _ENABLE_SP
 
 
 def get_mc2_group() -> GroupCoordinator:
@@ -51,8 +58,12 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     # The layout of all ranks: ExternalDP * EP
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
+    if long_sequence_enable():
+        context_parallel_size = parallel_config.context_parallel_size
+    else:
+        context_parallel_size = 1
     all_ranks = torch.arange(world_size).reshape(
-        -1, parallel_config.data_parallel_size *
+        -1, parallel_config.data_parallel_size * context_parallel_size *
         parallel_config.tensor_parallel_size)
     global _MC2
     group_ranks = all_ranks.unbind(0)
@@ -62,6 +73,9 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                      get_world_group().local_rank,
                                      backend,
                                      group_name="mc2")
+    global _ENABLE_SP
+    _ENABLE_SP = parallel_config.enable_sequence_parallel if sequence_parallel_enable(
+    ) else 0
     if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
         global _MLP_TP
         assert _MLP_TP is None, (

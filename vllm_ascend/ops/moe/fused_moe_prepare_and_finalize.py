@@ -133,11 +133,10 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
         """
         self.replace_allreduce = replace_allreduce
         self.enable_shared_expert_dp = enable_shared_expert_dp
-
+        forward_context = get_forward_context()
+        mc2_mask = forward_context.mc2_mask
         if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
-            forward_context = get_forward_context()
-            mc2_mask = forward_context.mc2_mask
             target_pad_length = forward_context.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
 

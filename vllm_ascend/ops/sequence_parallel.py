@@ -8,6 +8,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.platform import NPUPlatform
 
 
+
 class MetadataForPadding:
 
     def __init__(self,

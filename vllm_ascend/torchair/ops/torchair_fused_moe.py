@@ -40,17 +40,20 @@ from vllm.model_executor.layers.quantization.base_config import \
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
-from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.distributed.parallel_state import get_mc2_group, is_sp_enabled
 from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
                                               determine_default_log2phy_map)
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
-from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
-                               get_all_reduce_merge_state,
+from vllm_ascend.utils import (AscendSocVersion, context_parallel_enable,
+                               dispose_tensor, get_all_reduce_merge_state,
                                get_ascend_soc_version,
                                get_rm_router_logits_state, is_310p)
+
+if context_parallel_enable():
+    from vllm.distributed import get_context_model_parallel_world_size
 
 
 def torchair_fused_experts_with_mc2(
@@ -978,13 +981,21 @@ class TorchairAscendFusedMoE(FusedMoE):
             params_dtype = torch.get_default_dtype()
 
         vllm_config = get_current_vllm_config()
-
-        self.moe_parallel_config = FusedMoEParallelConfig.make(
-            tp_size_=(tp_size if tp_size is not None else
-                      get_tensor_model_parallel_world_size()),
-            dp_size_=(dp_size
-                      if dp_size is not None else get_dp_group().world_size),
-            vllm_parallel_config=vllm_config.parallel_config)
+        if context_parallel_enable():
+            self.moe_parallel_config = FusedMoEParallelConfig.make(
+                tp_size_=(tp_size if tp_size is not None else
+                          get_tensor_model_parallel_world_size()),
+                dp_size_=(dp_size if dp_size is not None else
+                          get_dp_group().world_size),
+                cp_size_=get_context_model_parallel_world_size(),
+                vllm_parallel_config=vllm_config.parallel_config)
+        else:
+            self.moe_parallel_config = FusedMoEParallelConfig.make(
+                tp_size_=(tp_size if tp_size is not None else
+                          get_tensor_model_parallel_world_size()),
+                dp_size_=(dp_size if dp_size is not None else
+                          get_dp_group().world_size),
+                vllm_parallel_config=vllm_config.parallel_config)
 
         self.top_k = top_k
         self.num_experts = num_experts
@@ -1167,12 +1178,9 @@ class TorchairAscendFusedMoE(FusedMoE):
         mc2_mask = forward_context.mc2_mask
 
         enable_sp = _metadata_for_padding is not None and _metadata_for_padding.not_dummy_and_is_prefill
+        self.enable_sp = is_sp_enabled()
         tp_size = get_tensor_model_parallel_world_size()
-        if enable_sp:
-            tp_rank = get_tensor_model_parallel_rank()
-            mc2_mask_sp = _metadata_for_padding.mc2_mask if _metadata_for_padding is not None else forward_context.mc2_mask
-            chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
-            mc2_mask = chunk_mc2_mask[tp_rank]
+        if enable_sp or (self.enable_sp and is_prefill):
             replace_allreduce = True
 
         if (fused_moe_state not in [

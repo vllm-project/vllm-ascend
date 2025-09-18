@@ -238,8 +238,11 @@ class NPUPlatform(Platform):
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        from vllm_ascend.utils import is_dense_model, long_sequence_enable
         if parallel_config and parallel_config.worker_cls == "auto":
-            if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
+            if (ascend_config.torchair_graph_config.enabled
+                    or ascend_config.enable_shared_expert_dp
+                    or (long_sequence_enable() and not is_dense_model())):
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
@@ -272,7 +275,8 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config = ascend_scheduler_config
 
         if compilation_config.pass_config.enable_sequence_parallelism:
-            if not parallel_config.enable_expert_parallel or vllm_config.model_config.hf_config.model_type != "qwen3_moe":
+            if not parallel_config.enable_expert_parallel \
+                    and vllm_config.model_config.hf_config.model_type not in ["qwen3_moe"]:
                 raise NotImplementedError(
                     "For better performance in Qwen3 MoE, SP only works exclusively with MC2, AllToAll, and AllToAllV."
                 )
