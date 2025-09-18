@@ -7,6 +7,8 @@ tasks:
   - name: "exact_match,flexible-extract"
     value: 0.375
 tensor_parallel_size: 2
+batch_size: 8
+gpu_memory_utilization: 0.7
 apply_chat_template: False
 fewshot_as_multiturn: False
 trust_remote_code: True
