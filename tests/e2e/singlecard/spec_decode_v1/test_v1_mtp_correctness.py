@@ -39,7 +39,7 @@ def mtp_correctness(
                     tensor_parallel_size=1,
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
-                    enforce_eager=True) as ref_llm:
+                    enforce_eager=False) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
 
     with VllmRunner(
@@ -53,7 +53,7 @@ def mtp_correctness(
                 "method": "deepseek_mtp",
                 "num_speculative_tokens": num_speculative_tokens,
             },
-            enforce_eager=True,
+            enforce_eager=False,
             max_model_len=2000,
             additional_config={"ascend_scheduler_config": {
                 "enabled": False
