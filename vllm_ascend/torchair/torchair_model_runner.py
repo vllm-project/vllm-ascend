@@ -52,6 +52,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         super().__init__(vllm_config, device)
+        if self.speculative_config:
+            self.actual_seq_lengths_q = list(
+                range(self.decode_token_per_req, self.max_num_tokens + 1,
+                      self.decode_token_per_req))
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             None, None, vllm_config, device)
 
@@ -365,7 +369,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
         config = torchair.CompilerConfig()
         if get_ascend_config().torchair_graph_config.mode:
             config.mode = get_ascend_config().torchair_graph_config.mode
-        config.experimental_config.frozen_parameter = True
+        config.experimental_config.frozen_parameter = \
+        get_ascend_config().torchair_graph_config.enable_frozen_parameter
         # enabling tiling_schedule_optimize on 300I Duo has some bugs, so we have to
         # disable it on 300I Duo platform now.
         config.experimental_config.tiling_schedule_optimize = not is_310p()

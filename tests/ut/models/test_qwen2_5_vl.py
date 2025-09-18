@@ -295,7 +295,7 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         mock_group.rank_in_group = 0
         mock_group.world_size = 2
         mocker.patch(
-            "vllm_ascend.ops.linear.get_tp_group",
+            "vllm_ascend.ops.linear_op.get_tp_group",
             return_value=mock_group,
         )
 
