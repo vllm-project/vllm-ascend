@@ -2635,7 +2635,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
-                    raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[
+                    raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
                         layer_name]
                     assert raw_k_tensor is not None
                     assert raw_v_tensor is not None
