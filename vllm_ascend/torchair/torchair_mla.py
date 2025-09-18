@@ -673,6 +673,8 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.running_in_graph = False
+        self.prefill_mask = None
+        self.ring_mla_mask_size = 512
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -819,16 +821,13 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
             k_nope, v = kv_nope\
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
-            mask = torch.triu(
-                torch.ones(512, 512, device=query.device, dtype=query.dtype),
-                1)
             torch_npu.atb.npu_ring_mla(
                 q_nope=q_nope,
                 q_rope=q_pe,
                 k_nope=k_nope,
                 k_rope=k_pe,
                 value=v,
-                mask=mask,
+                mask=self.prefill_mask,
                 seqlen=seq_len,
                 head_num=self.num_heads,
                 kv_head_num=self.num_heads,
@@ -871,9 +870,18 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         # Here is only 2 possibility of input, ChunkedPrefill or PrefillNoCache
         q_pe = query[..., self.qk_nope_head_dim:]
         q_nope = query[..., :self.qk_nope_head_dim]
-        mask = torch.triu(
-            torch.ones(512, 512, device=query.device, dtype=query.dtype),
-            1)  # 512: mask only support 512
+        if self.prefill_mask is None:
+            if q_nope.dtype == torch.float16:
+                mask_value = torch.finfo(torch.float32).min
+            else:
+                mask_value = 1
+            prefill_mask = torch.triu(
+                torch.ones(self.ring_mla_mask_size,
+                           self.ring_mla_mask_size,
+                           device=q_nope.device,
+                           dtype=q_nope.dtype), 1)
+            self.prefill_mask = torch.where(prefill_mask == 1, mask_value,
+                                            0).to(q_nope.dtype)
         if attn_metadata.num_prefills > 1:
             mask = mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1, 1)
         torch_npu.atb.npu_ring_mla(q_nope=q_nope,
@@ -881,7 +889,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                                    k_nope=k_nope,
                                    k_rope=k_pe,
                                    value=value,
-                                   mask=mask,
+                                   mask=self.prefill_mask,
                                    seqlen=torch.tensor(
                                        attn_metadata.prefill.query_lens,
                                        dtype=torch.int32),
