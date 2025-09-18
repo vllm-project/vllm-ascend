@@ -3,9 +3,9 @@ import time
 
 import requests
 
-Url = "http://localhost:20002/v1/completions"
-Headers = {"Content-Type": "application/json"}
-Data = {
+URL = "http://localhost:20002/v1/completions"
+HEADERS = {"Content-Type": "application/json"}
+DATA = {
     "model": "Qwen3",
     "prompt": "San Francisco is a",
     "max_tokens": 10,
@@ -36,7 +36,7 @@ def test_vllm_aclgraph_qwen3_32b_server_A2():
                 break
         else:
             assert False, "max tries achieved, server may not start."
-        response = requests.post(Url, headers=Headers, json=Data)
+        response = requests.post(URL, headers=HEADERS, json=DATA)
         assert response.status_code == 200, "failed to get response."
         print(response.json())
     finally:
