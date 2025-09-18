@@ -882,8 +882,6 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                            dtype=q_nope.dtype), 1)
             self.prefill_mask = torch.where(prefill_mask == 1, mask_value,
                                             0).to(q_nope.dtype)
-        if attn_metadata.num_prefills > 1:
-            mask = mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1, 1)
         torch_npu.atb.npu_ring_mla(q_nope=q_nope,
                                    q_rope=q_pe,
                                    k_nope=k_nope,
