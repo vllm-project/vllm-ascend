@@ -2451,8 +2451,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
-        self.may_reinitialize_input_batch(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
+        self.may_reinitialize_input_batch(kv_cache_config)
 
         if self.model_config.is_deepseek_mla:
             kv_caches = self.initialize_kv_cache_tensors_deepseek(
@@ -2463,6 +2463,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
+    def _align_memory(self, tensor: torch.Tensor,
+                      alignment: int) -> torch.Tensor:
+        data_ptr = tensor.data_ptr()
+        aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
+        offset = (aligned_addr - data_ptr) // tensor.element_size()
+        return tensor[int(offset):]
+
     def initialize_kv_cache_tensors_deepseek(
             self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         kv_cache_sizes = {}
@@ -2471,12 +2478,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 "KV cache tensor shared by multiple layers is not supported in "
                 "NPU.")
             kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
-
-        def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
-            data_ptr = tensor.data_ptr()
-            aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
-            offset = (aligned_addr - data_ptr) // tensor.element_size()
-            return tensor[int(offset):]
 
         kv_caches: Dict[str, torch.Tensor] = {}
         for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
@@ -2540,10 +2541,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     rope_cache = torch.zeros(rope_allocate_shape_alignment,
                                              dtype=dtype,
                                              device=self.device)
-                    nope_cache = align_memory(
+                    nope_cache = self._align_memory(
                         nope_cache,
                         alignment)[:nope_allocate_shape].view(nope_cache_shape)
-                    rope_cache = align_memory(
+                    rope_cache = self._align_memory(
                         rope_cache,
                         alignment)[:rope_allocate_shape].view(rope_cache_shape)
                 kv_caches[layer_name] = (nope_cache, rope_cache)
@@ -2567,6 +2568,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         # init kv cache tensors
         kv_cache_raw_tensors = {}
+        # llmdatadist need the addr of cache tensor be aligned with 2M
+        alignment = 2 * 1024 * 1024
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
@@ -2576,21 +2579,39 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         if "self_attn" in layer_name_inner or layer_name_inner in kv_cache_raw_tensors.keys(
                         ):
                             continue
-                        tensor = torch.zeros(kv_cache_tensor.size,
-                                             dtype=torch.int8,
-                                             device=self.device)
+                        if self.vllm_config.kv_transfer_config:
+                            tensor = torch.zeros(kv_cache_tensor.size,
+                                                 dtype=torch.int8,
+                                                 device=self.device)
+                        else:
+                            cache_size_aligned = kv_cache_tensor.size + alignment
+                            tensor = torch.zeros(cache_size_aligned,
+                                                 dtype=torch.int8,
+                                                 device=self.device)
+                            tensor = self._align_memory(
+                                tensor, alignment)[:kv_cache_tensor.size]
                         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "self_attn" in layer_name:
-                    # tensor = torch.zeros(kv_cache_tensor.size,
-                    #                      dtype=torch.int8,
-                    #                      device=self.device)
-                    # kv_cache_raw_tensors[layer_name] = tensor
-                    k_tensor = torch.zeros(kv_cache_tensor.size//2,
-                                            dtype=torch.int8,
-                                            device=self.device)
-                    v_tensor = torch.zeros(kv_cache_tensor.size//2,
-                                            dtype=torch.int8,
-                                            device=self.device)
+                    if self.vllm_config.kv_transfer_config:
+                        k_tensor = torch.zeros(kv_cache_tensor.size // 2,
+                                               dtype=torch.int8,
+                                               device=self.device)
+                        v_tensor = torch.zeros(kv_cache_tensor.size // 2,
+                                               dtype=torch.int8,
+                                               device=self.device)
+                    else:
+                        cache_size = kv_cache_tensor.size // 2
+                        cache_size_aligned = kv_cache_tensor.size // 2 + alignment
+                        k_tensor = torch.zeros(cache_size_aligned,
+                                               dtype=torch.int8,
+                                               device=self.device)
+                        v_tensor = torch.zeros(cache_size_aligned,
+                                               dtype=torch.int8,
+                                               device=self.device)
+                        k_tensor = self._align_memory(k_tensor,
+                                                      alignment)[:cache_size]
+                        v_tensor = self._align_memory(v_tensor,
+                                                      alignment)[:cache_size]
                     kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
         layer_names = set()
@@ -2613,10 +2634,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
-                    print(30*"^", f"layer_name: {layer_name}")
-                    raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[layer_name]
-                    assert (raw_k_tensor.numel() + raw_v_tensor.numel()) % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = (raw_k_tensor.numel() + raw_v_tensor.numel()) // kv_cache_spec.page_size_bytes
+                    raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[
+                        layer_name]
+                    assert (raw_k_tensor.numel() + raw_v_tensor.numel()
+                            ) % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = (raw_k_tensor.numel() + raw_v_tensor.numel()
+                                  ) // kv_cache_spec.page_size_bytes
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
@@ -2627,16 +2650,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # the min of all `num_blocks`. Verify it here.
                     assert num_blocks >= kv_cache_config.num_blocks
 
-
                     if self.vllm_config.additional_config.get(
                             "kv_cache_dtype", None) == 'int8':
                         kv_cache_shape = attn_backend.get_bsh_kv_cache_shape(
                             num_blocks, kv_cache_spec.block_size,
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
-                    elif hasattr(attn_backend, "get_supported_block_size"
-                                 ) and not self.model_config.is_deepseek_mla:
+                    elif hasattr(
+                            attn_backend, "get_supported_block_size"
+                    ) and not self.model_config.is_deepseek_mla and self.model_config.hf_config.model_type == "qwen3_next":
                         block_size = attn_backend.get_supported_block_size()[0]
+
                         block_size_chunk = kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks * block_size_chunk, block_size,
@@ -2655,7 +2679,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
-                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                    assert raw_tensor.numel(
+                    ) % kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel(
                     ) // kv_cache_spec.page_size_bytes
 
@@ -2736,7 +2761,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_groups = self.attn_groups[kv_cache_group_id]
                 except IndexError:
                     attn_groups = None
-                if attn_groups:
+                # TODO: Refactor the hard code of qwen3_next when we could get `use_hybrid_blocks`
+                # from vllm_config or anywhere others before this
+                if attn_groups and self.model_config.hf_config.model_type == "qwen3_next":
                     # Use the backend's supported block size list
                     backend = attn_groups[0].backend
                     supported_sizes = backend.get_supported_block_size()
@@ -2747,13 +2774,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                               [self.cache_config.block_size])
                 else:
                     # Fallback to cache config block_size if no backend found
-                    kernel_block_size_list = [
-                        64
-                    ] if not self.model_config.is_deepseek_mla else [0]
+                    kernel_block_size_list = [self.cache_config.block_size]
                 kernel_block_sizes.append(kernel_block_size_list)
             else:
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
+                # NOTE: set kernel_block_sizes to 0 to disable slotmapping computation
+                # of mamba block. In this case, BlockTable.block_size will never equal
+                # to kernel_block_sizes[0]
                 kernel_block_sizes.append([0])
         if kernel_block_sizes != [self.cache_config.block_size]:
             assert self.cache_config.cpu_offload_gb == 0, (
