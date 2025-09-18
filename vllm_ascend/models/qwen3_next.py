@@ -1166,15 +1166,6 @@ class Qwen3NextModel(nn.Module):
 
 class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                            MixtureOfExperts, IsHybrid):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "in_proj": ["in_proj_qkvz", "in_proj_ba"],
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
