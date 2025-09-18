@@ -323,8 +323,8 @@ class KVCacheRecvingThread(threading.Thread):
             # Always send the done signal to the remote host to ensure proper
             # resource cleanup. Failing to do so may cause a memory leak on the
             # remote host.
+            self._send_done_recv_signal(request_id, remote_host, remote_handshake_port)
             if offset == num_need_pulls - 1:
-                self._send_done_recv_signal(request_id, remote_host, remote_handshake_port)
                 self.task_tracker.update_done_task_count(request_id)
             self.request_queue.task_done()
 
