@@ -118,7 +118,7 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut --ignore=tests/ut/test_platform.py --ignore=tests/ut/ops/test_vocab_parallel_embedding.py
+          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut --ignore=tests/ut/test_platform.py
 
       - name: Upload coverage to Codecov
         if: ${{ matrix.vllm_version == 'main' }}
