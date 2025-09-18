@@ -331,6 +331,11 @@ class AscendFusedMoE(FusedMoE):
         moe_comm_method_name = forward_context.moe_comm_method_name
 
         forward_context.moe_comm_method = getattr(self, moe_comm_method_name)
+        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
+        if flashcomm_v1_enabled:
+            router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits, True)
+            if router_logits.shape[0] != hidden_states.shape[0]:
+                hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True)
 
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states, router_logits=router_logits)
