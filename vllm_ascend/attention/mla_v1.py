@@ -187,6 +187,8 @@ class AscendMLAMetadataBuilder:
                            self.block_size - 1) // self.block_size
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
 
+        self.is_kv_producer = vllm_config.kv_transfer_config is not None and \
+            vllm_config.kv_transfer_config.is_kv_producer
         self.decode_threshold = 1
 
         if self.chunked_prefill_enabled:
@@ -229,7 +231,7 @@ class AscendMLAMetadataBuilder:
 
         for i, req_id in enumerate(input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            if num_tokens <= self.decode_threshold:
+            if num_tokens <= self.decode_threshold and not self.is_kv_producer:
                 decodes.append(i)
             else:
                 prefills.append(i)
@@ -277,7 +279,9 @@ class AscendMLAMetadataBuilder:
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         # TODO(xyx): remove the if condition after mla supports torch mode speculative decoding
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
+            split_decodes_and_prefills(common_attn_metadata,
+                                       decode_threshold=self.decode_threshold,
+                                       is_kv_producer=self.is_kv_producer)
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_actual_tokens
 
