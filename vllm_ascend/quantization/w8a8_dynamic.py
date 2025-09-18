@@ -24,9 +24,7 @@ from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
@@ -125,6 +123,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
             and not vllm_config.model_config.enforce_eager
             and not ascend_config.torchair_graph_config.enabled)
+        self.dynamic_eplb = ascend_config.dynamic_eplb
 
         try:
             device_group = get_mc2_group().device_group
@@ -231,15 +230,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 expert_map=expert_map,
-            )
-
-        fused_moe_state = get_forward_context().fused_moe_state
-        shared_gate_up, shared_dequant_scale = None, None
-        if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
-            share_up_out, _ = shared_experts.gate_up_proj(
-                (quantized_x_for_share, dynamic_scale_for_share))
-            shared_gate_up, shared_dequant_scale = share_up_out[
-                0], share_up_out[1]
+                dynamic_eplb=self.dynamic_eplb)
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
@@ -249,7 +240,8 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         topk_weights = topk_weights.to(x.dtype)
 
-        return unified_fused_experts_eager(
+        moe_comm_method = get_forward_context().moe_comm_method
+        return moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
             w1_scale=layer.w13_weight_scale_fp32,
@@ -258,15 +250,14 @@ class AscendW8A8DynamicFusedMoEMethod:
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             row_idx=row_idx,
+            use_int8_w8a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
             global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
-            shared_gate_up=shared_gate_up,
-            shared_dequant_scale=shared_dequant_scale,
-            mc2_mask=kwargs.get("mc2_mask", None),
-            with_quant=True,
-            fusion_mlp=True)
+            quantized_x_for_share=quantized_x_for_share,
+            dynamic_scale_for_share=dynamic_scale_for_share,
+            dynamic_eplb=self.dynamic_eplb)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

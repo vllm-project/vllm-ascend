@@ -42,17 +42,6 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
         return FusedMoEState.MC2
 
 
-def get_dispatcher_name(ep_size: int, with_prefill: bool) -> str:
-    if ep_size == 1:
-        return "TokenDispatcherWithAllGather"
-    elif envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1:
-        return "TokenDispatcherWithAllGather"
-    elif ep_size < 16 or with_prefill:
-        return "TokenDispatcherWithAll2AllV"
-    else:
-        return "TokenDispatcherWithMC2"
-
-
 @contextmanager
 def set_ascend_forward_context(
         attn_metadata: Any,
@@ -97,11 +86,6 @@ def set_ascend_forward_context(
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
 
-        from vllm_ascend.ops.moe.token_dispatcher import get_token_dispatcher
-        dispatcher_name = get_dispatcher_name(ep_size, with_prefill)
-        dispatcher = get_token_dispatcher(dispatcher_name)
-        forward_context.token_dispatcher = dispatcher
-
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
@@ -144,6 +128,22 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
+
+        # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
+        # It will be improved later by implementing operator fusion through the FX graph.
+        #
+        # set for addrmsnorm+quant fusion.
+        # this optim now just support dense models due to the specific operators used.
+        # Once the necessary conditions are met, support for MOE models will also be added.
+        from vllm_ascend.quantization.quant_config import AscendQuantConfig
+        addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
+            vllm_config.model_config.hf_config.model_type in ["llama", "qwen2", "qwen3"] and \
+            forward_context.layer_idx is not None
+        if addrmsnorm_quant_fusion_enabled:
+            forward_context.model_instance = model_instance
+            forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
+            forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
+        forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens

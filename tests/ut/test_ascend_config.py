@@ -53,6 +53,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(torchair_graph_config.enable_multistream_mla)
         self.assertFalse(torchair_graph_config.enable_multistream_moe)
         self.assertTrue(torchair_graph_config.enable_view_optimize)
+        self.assertTrue(torchair_graph_config.enable_frozen_parameter)
         self.assertFalse(torchair_graph_config.enable_kv_nz)
 
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
@@ -70,6 +71,7 @@ class TestAscendConfig(TestBase):
                 "enable_multistream_mla": True,
                 "enable_multistream_moe": True,
                 "enable_view_optimize": True,
+                "enable_frozen_parameter": True,
                 "enable_kv_nz": True
             },
             "ascend_scheduler_config": {
@@ -89,6 +91,7 @@ class TestAscendConfig(TestBase):
         self.assertTrue(torchair_graph_config.enable_multistream_mla)
         self.assertTrue(torchair_graph_config.enable_multistream_moe)
         self.assertTrue(torchair_graph_config.enable_view_optimize)
+        self.assertTrue(torchair_graph_config.enable_frozen_parameter)
         self.assertTrue(torchair_graph_config.enable_kv_nz)
 
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
@@ -212,21 +215,6 @@ class TestAscendConfig(TestBase):
             fake_model_config = ModelConfig(model=model_path)
             fake_model_config.hf_config = PretrainedConfig()
             fake_model_config.hf_config.model_type = "llama"
-            test_vllm_config.model_config = fake_model_config
-            init_ascend_config(test_vllm_config)
-            check_ascend_config(test_vllm_config, False)
-        # aclgraph + deepseek model
-        with self.assertRaises(NotImplementedError):
-            test_vllm_config.additional_config = {
-                "torchair_graph_config": {
-                    "enabled": False,
-                },
-                "refresh": True
-            }
-            model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
-            fake_model_config = ModelConfig(model=model_path)
-            fake_model_config.hf_config = PretrainedConfig()
-            fake_model_config.hf_config.model_type = "deepseek"
             test_vllm_config.model_config = fake_model_config
             init_ascend_config(test_vllm_config)
             check_ascend_config(test_vllm_config, False)

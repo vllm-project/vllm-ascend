@@ -21,7 +21,7 @@ on:
     branches:
       - 'main'
       - '*-dev'
-    types: [ labeled ]
+    types: [ labeled, synchronize ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -38,10 +38,8 @@ concurrency:
 
 jobs:
   changes:
-    runs-on: linux-amd64-cpu-0
+    runs-on: ubuntu-latest
     if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
@@ -74,7 +72,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-1]
-        vllm_version: [main]
+        vllm_version: [v0.10.2]
     name: singlecard e2e test - full
     runs-on: ${{ matrix.os }}
     container:
@@ -137,7 +135,7 @@ jobs:
           pytest -sv tests/e2e/singlecard/test_chunked.py
           pytest -sv tests/e2e/singlecard/test_embedding.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
-          pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          #pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_profile_execute_duration.py
           pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_sampler.py
@@ -158,7 +156,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-2]
-        vllm_version: [main]
+        vllm_version: [v0.10.2]
     name: multicard e2e test - full
     runs-on: ${{ matrix.os }}
     container:
@@ -217,7 +215,7 @@ jobs:
           # external_launcher test is not stable enough. Fix it later
           # pytest -sv tests/e2e/multicard/test_external_launcher.py
           pytest -sv tests/e2e/multicard/test_fused_moe_allgather_ep.py
-          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          #pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
 
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ

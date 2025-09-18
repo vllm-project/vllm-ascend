@@ -83,7 +83,7 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
         _register_atb_extensions()
-        register_ascend_customop()
+        register_ascend_customop(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         init_ascend_soc_version()
@@ -250,6 +250,7 @@ class NPUWorker(WorkerBase):
 
     def compile_or_warm_up_model(self) -> None:
         # Note: need to adapt for graph mode.
+        self.model_runner.eplb_warmup()
         warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
                         or []).copy()
         if not self.model_config.enforce_eager:

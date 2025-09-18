@@ -6,7 +6,8 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
-from vllm.multimodal.inputs import PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalFeatureSpec,
+                                    MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingParams
 from vllm.utils import sha256
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
@@ -49,11 +50,23 @@ def create_requests(
                                      prompt_logprobs=prompt_logprobs)
     requests = []
     for i in range(num_requests):
+        mm_features = []
+        if mm_positions is not None:
+            mm_position = mm_positions[i]
+            for j, position in enumerate(mm_position):
+                identifier = f"hash{i}_{j}"
+                mm_feature = MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy("dummy_m"),
+                    mm_position=position,
+                    identifier=identifier,
+                    modality="image")
+                mm_features.append(mm_feature)
         request = Request(request_id=f"{i}",
                           prompt_token_ids=[i] * num_tokens,
                           sampling_params=sampling_params,
                           eos_token_id=EOS_TOKEN_ID,
                           pooling_params=None,
+                          mm_features=mm_features if mm_features else None,
                           block_hasher=get_request_block_hasher(
                               block_size, hash_fn))
         requests.append(request)
@@ -86,7 +99,7 @@ class TestAscendScheduler(TestBase):
     @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
     @patch('vllm.v1.core.sched.scheduler.compute_encoder_budget')
     def create_scheduler(self, mock_compute_encoder_budget):
-        mock_compute_encoder_budget.return_value = [10, 20]
+        mock_compute_encoder_budget.return_value = [100, 100]
         use_kv_connector = False
         block_size = 16
 
@@ -226,6 +239,39 @@ class TestAscendScheduler(TestBase):
         for req_id, num_tokens in output.num_scheduled_tokens.items():
             self.assertEqual(num_tokens,
                              len(requests[int(req_id)].prompt_token_ids))
+
+        # Verify requests moved from waiting to running
+        self.assertEqual(len(scheduler.waiting), 0)
+        self.assertEqual(len(scheduler.running), len(requests))
+        for i, request in enumerate(requests):
+            self.assertEqual(scheduler.running[i], request)
+
+    def test_schedule_multimodal_requests(self):
+        scheduler = self.create_scheduler()
+        scheduler.scheduler_config.chunked_prefill_enabled = False
+        mm_positions = [[PlaceholderRange(offset=i, length=10)]
+                        for i in range(10)]
+        requests = create_requests(
+            num_requests=10,
+            mm_positions=mm_positions,
+        )
+        for request in requests:
+            scheduler.add_request(request)
+
+        output = scheduler.schedule()
+        self.assertEqual(len(output.scheduled_new_reqs), len(requests))
+        self.assertEqual(output.scheduled_cached_reqs.num_reqs, 0)
+        self.assertEqual(len(output.finished_req_ids), 0)
+        for req_id, num_tokens in output.num_scheduled_tokens.items():
+            assert num_tokens == len(requests[int(req_id)].prompt_token_ids)
+
+        # Verify all requests are scheduled.
+        for req_id, num_tokens in output.num_scheduled_tokens.items():
+            self.assertEqual(num_tokens,
+                             len(requests[int(req_id)].prompt_token_ids))
+        self.assertEqual(len(output.scheduled_encoder_inputs), len(requests))
+        for req_id, encoder_input in output.scheduled_encoder_inputs.items():
+            assert len(encoder_input) == 1
 
         # Verify requests moved from waiting to running
         self.assertEqual(len(scheduler.waiting), 0)

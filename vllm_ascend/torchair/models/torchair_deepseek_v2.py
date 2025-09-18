@@ -813,6 +813,8 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             residual = get_tp_group().all_gather(residual, 0)
 
             attn_metadata = get_forward_context().attn_metadata
+            if attn_metadata is not None and isinstance(attn_metadata, dict):
+                attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
             if attn_metadata is not None:
                 num_tokens = attn_metadata.num_actual_tokens
             else:
@@ -928,6 +930,8 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.num_dense_layers = self.config.first_k_dense_replace
+        self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
         self.quant_config = quant_config
         self.model = TorchairDeepseekV2Model(vllm_config=vllm_config,
                                              prefix=maybe_prefix(
