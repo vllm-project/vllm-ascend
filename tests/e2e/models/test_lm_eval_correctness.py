@@ -84,7 +84,7 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         apply_chat_template=eval_config.get("apply_chat_template", True),
         fewshot_as_multiturn=eval_config.get("fewshot_as_multiturn", True),
         limit=eval_config.get("limit", "N/A"),
-        batch_size="auto",
+        batch_size=eval_config.get("batch_size", "auto"),
         num_fewshot=eval_config.get("num_fewshot", "N/A"),
         rows=report_data["rows"],
         parallel_mode=parallel_mode)
@@ -110,7 +110,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_dir,
         "apply_chat_template": eval_config.get("apply_chat_template", True),
         "fewshot_as_multiturn": eval_config.get("fewshot_as_multiturn", True),
         "limit": eval_config.get("limit", None),
-        "batch_size": "auto",
+        "batch_size": eval_config.get("batch_size", "auto"),
     }
     for s in ["num_fewshot", "fewshot_as_multiturn", "apply_chat_template"]:
         val = eval_config.get(s, None)
