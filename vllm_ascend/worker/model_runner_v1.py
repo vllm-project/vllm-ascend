@@ -280,6 +280,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
+        # use_hybrid_blocks: if hybrid blocks is used.
+        self.use_hybrid_blocks: bool = False
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.is_pooling_model = self.model_config.pooler_config is not None
@@ -2452,6 +2454,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self.initialize_attn_backend(kv_cache_config)
+        self.use_hybrid_blocks = (len(self.attn_groups) > 1)
         self.may_reinitialize_input_batch(kv_cache_config)
 
         if self.model_config.is_deepseek_mla:
@@ -2659,9 +2662,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             num_blocks, kv_cache_spec.block_size,
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
-                    elif hasattr(
-                            attn_backend, "get_supported_block_size"
-                    ) and not self.model_config.is_deepseek_mla and self.model_config.hf_config.model_type == "qwen3_next":
+                    elif hasattr(attn_backend, "get_supported_block_size"
+                                 ) and self.use_hybrid_blocks:
                         block_size = attn_backend.get_supported_block_size()[0]
 
                         block_size_chunk = kv_cache_spec.block_size // block_size
@@ -2765,9 +2767,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_groups = self.attn_groups[kv_cache_group_id]
                 except IndexError:
                     attn_groups = None
-                # TODO: Refactor the hard code of qwen3_next when we could get `use_hybrid_blocks`
-                # from vllm_config or anywhere others before this
-                if attn_groups and self.model_config.hf_config.model_type == "qwen3_next":
+                if attn_groups and self.use_hybrid_blocks:
                     # Use the backend's supported block size list
                     backend = attn_groups[0].backend
                     supported_sizes = backend.get_supported_block_size()
