@@ -1811,13 +1811,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
                 hidden_states, aux_hidden_states = hidden_states
 
-        kv_connector_output = None
-        if finished_sending is not None or finished_recving is not None:
-            kv_connector_output = KVConnectorOutput(
-                finished_sending=finished_sending,
-                finished_recving=finished_recving)
-        else:
-            kv_connector_output = None
+        kv_connector_output = KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving)
         finished_sending = None
         finished_recving = None
         with ProfileExecuteDuration().capture_async("post process"):
@@ -2067,8 +2063,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # For the case of no forward caused by receiving remote kv,
             # one round of dummy inference is necessary
             # to prevent hang over the collective calls.
-        if not finished_sending and not finished_recving:
-            return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = KVConnectorOutput(
