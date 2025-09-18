@@ -239,9 +239,8 @@ def torchair_fused_experts_with_mc2(
     # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
     # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
     # improve communication performance.
-    a2_need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A2
-                          and os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
-                          and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
+    need_expert_scale = (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
+                         and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
 
     enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
 
@@ -276,7 +275,7 @@ def torchair_fused_experts_with_mc2(
         stage1_kwargs.update({
             "x_active_mask": mc2_mask,
         })
-    if a2_need_extra_args:
+    if need_expert_scale:
         stage1_kwargs.update({
             "expert_scales": topk_weights.to(torch.float32),
         })

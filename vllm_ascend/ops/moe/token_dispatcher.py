@@ -102,9 +102,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
-        self.a2_need_extra_args = (
-            get_ascend_soc_version() == AscendSocVersion.A2
-            and os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
+        self.need_expert_scale = (
+            os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
             and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
         self.output = None
         self.assist_info_for_combine = None
@@ -160,7 +159,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             stage1_kwargs.update({
                 "x_active_mask": self.mc2_mask,
             })
-        if self.a2_need_extra_args:
+        if self.need_expert_scale:
             stage1_kwargs.update({
                 "expert_scales":
                 topk_weights.to(torch.float32),
