@@ -306,17 +306,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
                                      MtpProposer]] = None
-        self.actual_seq_lengths_q = []
+        self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
-            self.actual_seq_lengths_q = [
-                len for len in
-                range(self.decode_token_per_req, self.max_num_tokens +
-                      1, self.decode_token_per_req)
-            ]
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
