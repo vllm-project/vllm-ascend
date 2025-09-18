@@ -17,4 +17,5 @@ single_node_300i
 multi_node
 multi_node_kimi
 multi_node_pd_disaggregation
+multi_node_ray
 :::
