@@ -238,11 +238,12 @@ class NPUPlatform(Platform):
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        from vllm_ascend.utils import is_dense_model, long_sequence_enable
+        from vllm_ascend.utils import is_ascend_worker_v1, long_sequence_enable
         if parallel_config and parallel_config.worker_cls == "auto":
+            is_use_mla = model_config.use_mla if model_config is not None else False
             if (ascend_config.torchair_graph_config.enabled
                     or ascend_config.enable_shared_expert_dp
-                    or (long_sequence_enable() and not is_dense_model())):
+                    or (long_sequence_enable() and is_use_mla)):
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"

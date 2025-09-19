@@ -1854,9 +1854,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             hidden_states = get_tp_group().all_gather(hidden_states, 0)
             hidden_states = hidden_states[:attn_metadata.num_input_tokens]
         if self.cp_size > 1 and with_prefill:
+            if isinstance(attn_metadata, dict):
+                cp_kv_recover_idx = list(attn_metadata.values())[0].prefill.cp_kv_recover_idx
+            else:
+                cp_kv_recover_idx = attn_metadata.prefill.cp_kv_recover_idx
             hidden_states = get_cp_group().all_gather(hidden_states, 0)
             hidden_states = torch.index_select(
-                hidden_states, 0, attn_metadata.prefill.cp_kv_recover_idx)
+                hidden_states, 0, cp_kv_recover_idx)
         return hidden_states
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,

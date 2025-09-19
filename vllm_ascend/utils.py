@@ -589,10 +589,6 @@ def context_parallel_enable() -> bool:
 def long_sequence_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_SP or envs_ascend.VLLM_ASCEND_ENABLE_CP
 
-def is_dense_model() -> bool:
-    return envs_ascend.VLLM_ASCEND_DENSE_MODEL
-
-
 def matmul_allreduce_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
 
