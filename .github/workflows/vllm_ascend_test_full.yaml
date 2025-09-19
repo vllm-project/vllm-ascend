@@ -72,7 +72,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-1]
-        vllm_version: [68dbde5dbb11b9250454d0c9f21a8b3da960b341, v0.10.2]
+        vllm_version: [6d8246aaffff3ebec84767e373212a7b8da328e2, v0.10.2]
     name: singlecard e2e test - full
     runs-on: ${{ matrix.os }}
     container:
@@ -156,7 +156,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-2]
-        vllm_version: [68dbde5dbb11b9250454d0c9f21a8b3da960b341, v0.10.2]
+        vllm_version: [6d8246aaffff3ebec84767e373212a7b8da328e2, v0.10.2]
     name: multicard e2e test - full
     runs-on: ${{ matrix.os }}
     container:
