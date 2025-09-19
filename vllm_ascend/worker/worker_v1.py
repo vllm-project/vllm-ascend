@@ -83,7 +83,7 @@ class NPUWorker(WorkerBase):
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
 
-        if vllm_config.kv_transfer_config is not None:                                 
+        if vllm_config.kv_transfer_config is not None:
             self.kv_rank = vllm_config.kv_transfer_config.kv_rank
             self.kv_parallel_size = vllm_config.kv_transfer_config.kv_parallel_size
         else:
@@ -208,6 +208,8 @@ class NPUWorker(WorkerBase):
         available_kv_cache_memory = int(
             total_npu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
+        if self.vllm_config.kv_transfer_config is not None:
+            available_kv_cache_memory -= self.vllm_config.kv_transfer_config.kv_buffer_size
         available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
         logger.info(
             f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
