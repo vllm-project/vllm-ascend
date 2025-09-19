@@ -363,7 +363,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         output: torch.Tensor,
         cache_params: Optional[MambaCacheParams] = None,
     ):
-        return torch.ops.vllm.gdn_attention(
+        return torch.ops.vllm.npu_gdn_attention(
             hidden_states,
             output,
             self.prefix,
@@ -1107,7 +1107,7 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         return self.model.get_expert_mapping()
 
 
-def gdn_attention(
+def npu_gdn_attention(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
@@ -1117,7 +1117,7 @@ def gdn_attention(
     self._forward(hidden_states=hidden_states, output=output)
 
 
-def gdn_attention_fake(
+def npu_gdn_attention_fake(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
@@ -1126,9 +1126,9 @@ def gdn_attention_fake(
 
 
 direct_register_custom_op(
-    op_name="gdn_attention",
-    op_func=gdn_attention,
+    op_name="npu_gdn_attention",
+    op_func=npu_gdn_attention,
     mutates_args=["output"],
-    fake_impl=gdn_attention_fake,
+    fake_impl=npu_gdn_attention_fake,
     dispatch_key=current_platform.dispatch_key,
 )
