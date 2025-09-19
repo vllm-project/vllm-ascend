@@ -59,4 +59,4 @@ function install_binary_test() {
 }
 
 _info "====> Start install_binary_test"
-install_binary_test
+time install_binary_test
