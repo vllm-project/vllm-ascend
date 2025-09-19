@@ -1049,8 +1049,8 @@ class TorchairAscendFusedMoE(FusedMoE):
             self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        self.enable_multistream_moe = \
-            ascend_config.torchair_graph_config.enable_multistream_moe and \
+        self.multistream_overlap_shared_expert = \
+            ascend_config.multistream_overlap_shared_expert and \
             self.torchair_graph_enabled
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
@@ -1148,7 +1148,7 @@ class TorchairAscendFusedMoE(FusedMoE):
         quantized_x_for_share, dynamic_scale_for_share = None, None
         from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import \
             TorchairAscendW8A8DynamicFusedMoEMethod
-        if self.enable_multistream_moe:
+        if self.multistream_overlap_shared_expert:
             if not self.rm_router_logits:
                 router_logits, _ = gate(hidden_states)
             if hasattr(self.quant_method, "quant_method") and \
@@ -1160,7 +1160,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                         hidden_states)
 
         if shared_experts:
-            if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
+            if not self.multistream_overlap_shared_expert or fused_moe_state != FusedMoEState.MC2:
                 # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
                 shared_hidden_states = shared_experts(hidden_states)
 
@@ -1256,7 +1256,8 @@ class TorchairAscendFusedMoE(FusedMoE):
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
             shared_experts=shared_experts if self.torchair_graph_enabled
-            and self.enable_multistream_moe and not is_prefill else None,
+            and self.multistream_overlap_shared_expert and not is_prefill else
+            None,
             mc2_mask=mc2_mask,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,

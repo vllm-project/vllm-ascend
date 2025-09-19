@@ -37,7 +37,7 @@ from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
                                                  AlltoAllCommImpl, MC2CommImpl,
                                                  NaiveMulticastCommImpl)
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, npu_stream_switch
 
 original_unquantized_fused_moe_init_func = UnquantizedFusedMoEMethod.__init__
 
@@ -426,24 +426,39 @@ class AscendSharedFusedMoE(AscendFusedMoE):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
+        self.shared_expert_stream = None
+        ascend_config = get_ascend_config()
+        self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert
+        if self.multistream_overlap_shared_expert:
+            self.shared_expert_stream = torch.npu.Stream()
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        shared_out = self._shared_experts(hidden_states)
+        # Make sure the shared experts stream begins after hidden_states are ready.
+        if self.multistream_overlap_shared_expert:
+            self.shared_expert_stream.wait_stream(  # type: ignore
+                torch.npu.current_stream())
+        with npu_stream_switch(self.shared_expert_stream,
+                               enabled=self.multistream_overlap_shared_expert):
+            # Use a separate stream to run shared experts.
+            shared_out = self._shared_experts(hidden_states)
 
-        # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
-        forward_context = get_forward_context()
-        moe_comm_method_name = forward_context.moe_comm_method_name
-        if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
+            # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
+            forward_context = get_forward_context()
+            moe_comm_method_name = forward_context.moe_comm_method_name
+            if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
+                shared_out = tensor_model_parallel_all_reduce(shared_out)
 
         fused_out = super().forward(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
+        # Make sure the default stream waits for the shared experts stream to finish.
+        if self.multistream_overlap_shared_expert:
+            torch.npu.current_stream().wait_stream(self.shared_expert_stream)
         return shared_out, fused_out
 
 
