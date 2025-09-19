@@ -37,7 +37,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d, nd_to_nz_spec)
+                               nd_to_nz_2d, nd_to_nz_spec, verify_torch_npu_version)
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):
@@ -304,6 +304,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
 
+        pta_version_support_compressed_mask = "2.7.1.dev20250918"
+        self.compressed_mask = verify_torch_npu_version(pta_version_support_compressed_mask, "compressed mask")
+
     def _forward_prefill_no_cache(
         self,
         query: torch.Tensor,
@@ -456,25 +459,39 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.seq_lens = \
                 attn_metadata.seq_lens.to(device=query.device)
 
-        num_block, block_size, head_num, head_dim = self.key_cache.shape
-        key = self.key_cache.view(num_block, block_size, -1)
-        value = self.value_cache.view(num_block, block_size, -1)
+        if self.compressed_mask:
+            num_block, block_size, head_num, head_dim = self.key_cache.shape
+            key = self.key_cache.view(num_block, block_size, -1)
+            value = self.value_cache.view(num_block, block_size, -1)
 
-        output, _ = torch_npu.npu_fused_infer_attention_score(
-            query=query,
-            key=key,
-            value=value,
-            atten_mask=attn_metadata.attn_mask,
-            block_table=attn_metadata.block_tables,
-            input_layout="TND",
-            block_size=block_size,
-            actual_seq_lengths=attn_metadata.query_start_loc[1:],
-            actual_seq_lengths_kv=attn_metadata.seq_lens,
-            num_key_value_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale=self.scale,
-            sparse_mode=3,
-            )
+            output, _ = torch_npu.npu_fused_infer_attention_score(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                block_table=attn_metadata.block_tables,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=attn_metadata.query_start_loc[1:],
+                actual_seq_lengths_kv=attn_metadata.seq_lens,
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                sparse_mode=3,
+                )
+        else:
+            torch_npu._npu_paged_attention_splitfuse(
+                        query=query,
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        mask=attn_metadata.attn_mask,
+                        block_table=attn_metadata.block_tables,
+                        seq_len=attn_metadata.query_lens,
+                        context_lens=attn_metadata.seq_lens,
+                        num_kv_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        scale_value=self.scale,
+                        out=output)
         return output
 
     def forward(
