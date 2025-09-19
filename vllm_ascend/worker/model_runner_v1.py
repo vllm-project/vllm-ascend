@@ -1788,6 +1788,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
+                assert logits is not None
                 # NOTE:
                 # 1. XGrammar bitmask applying only supports CPU and GPU.
                 # 2. The logits and bitmask should be on the same device.
