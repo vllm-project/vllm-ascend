@@ -29,5 +29,5 @@ KVConnectorFactory.register_connector(
 
 KVConnectorFactory.register_connector(
     "P2pHcclConnector",
-    "vllm_ascend.distributed.kv_transfer.kv_connector.v1.p2p.p2p_hccl_connector",
+    "vllm_ascend.distributed.kv_transfer.kv_connector.p2p_hccl_connector",
     "P2pHcclConnector")
