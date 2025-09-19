@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torchair
 import vllm.envs as envs_vllm
+from vllm.attention.layer import Attention
 from torchair import patch_for_hcom
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
@@ -11,11 +12,15 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-
+from vllm.model_executor.model_loader.utils import (
+    process_weights_after_loading, set_default_torch_dtype)
+from vllm.model_executor.model_loader import get_model_loader
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.ops.common_fused_moe import process_weights_after_loading
 from vllm_ascend.spec_decode import MtpProposer
+from vllm_ascend.torchair.models.torchair_deepseek_mtp import TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
 from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
@@ -34,6 +39,37 @@ class MtpTorchairProposer(MtpProposer):
         super().__init__(vllm_config, device, runner)
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore
+
+    def load_model(self, model) -> None:
+        loader = get_model_loader(self.vllm_config.load_config)
+
+        target_attn_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
+        draft_model_config = \
+            self.vllm_config.speculative_config.draft_model_config
+        target_device = self.vllm_config.device_config.device
+
+        with set_default_torch_dtype(
+                draft_model_config.dtype), set_current_vllm_config(
+                    self.vllm_config):
+
+            self.model = TorchairDeepSeekMTP(
+                vllm_config=self.vllm_config).to(target_device)
+
+
+        draft_attn_layer_names = (
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
+            target_attn_layer_names)
+
+        assert len(draft_attn_layer_names) == 1
+        self.attn_layer_name = list(draft_attn_layer_names)
+
+        self.model.load_weights(
+            loader.get_all_weights(
+                self.vllm_config.speculative_config.draft_model_config,
+                self.model))
+        process_weights_after_loading(self.model, draft_model_config,
+                                      target_device)
 
     @torch.inference_mode()
     def dummy_run(self,
