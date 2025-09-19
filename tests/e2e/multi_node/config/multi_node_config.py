@@ -35,6 +35,8 @@ class ServerConfig:
     headless: bool = False
     quantization: Optional[str] = None
     tensor_parallel_size: int = 8
+    max_model_len: int = 8192
+    max_num_batched_token: int = 8192
     data_parallel_size: int = 2
     data_parallel_size_local: int = 1
     data_parallel_start_rank: int = 0
@@ -84,7 +86,7 @@ class ServerConfig:
 
             if value is None or not value:
                 continue
-            if value == "model":
+            if f.name == "model":
                 continue
 
             if isinstance(value, bool):
