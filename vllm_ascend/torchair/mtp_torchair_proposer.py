@@ -237,7 +237,6 @@ class MtpTorchairProposer(MtpProposer):
         query_len_per_req = (cu_target_query_lens[1:] -
                              cu_target_query_lens[:-1])
         # [a, b, c] -> [a - n1, b - n2, c - n3]
-        num_tokens_per_req = query_len_per_req - num_rejected_tokens
 
         cu_num_tokens = cu_target_query_lens
         relative_index = query_len_per_req - num_rejected_tokens - 1
