@@ -3,11 +3,11 @@ tasks:
 - name: "gsm8k"
   metrics:
   - name: "exact_match,strict-match"
-    value: 0.375
+    value: 0.385
   - name: "exact_match,flexible-extract"
-    value: 0.375
+    value: 0.385
 tensor_parallel_size: 2
-batch_size: 8
+batch_size: 32
 gpu_memory_utilization: 0.7
 apply_chat_template: False
 fewshot_as_multiturn: False
