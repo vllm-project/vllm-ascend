@@ -3,6 +3,7 @@
 from .policy_abstract import DynamicConfig, EplbPolicy
 from .policy_dynamic_ep import DynamicEplb
 from .policy_dynamic_ep_v2 import DynamicEplbV2
+from .policy_flashlb import FlashLB
 from .policy_random import RandomLoadBalance
 
 
@@ -22,5 +23,7 @@ class PolicyFactory:
             DynamicEplb,  # Dynamic EPLB policy: overall expert replacement based on current moe load
             2:
             DynamicEplbV2,  # Dynamic EPLB policy V2:  expert replacement with constrained number of expert shuffle
+            3:
+            FlashLB,  # FlashLB EPLB policy: expert replacement based on Joint Optimization, Multi-Shot Enhancement and Incremental Adjustment
         }
         return policy.get(policy_type, RandomLoadBalance)(config)
