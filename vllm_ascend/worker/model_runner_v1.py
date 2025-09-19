@@ -308,8 +308,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Set up speculative decoding.
         self.spec_attn_mask = None
-        self.drafter: Optional[Union[NgramProposer, EagleProposer,
-                                     MtpProposer,MtpTorchairProposer]] = None
+        self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
+                                     MtpTorchairProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
