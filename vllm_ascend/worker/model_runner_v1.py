@@ -111,8 +111,9 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
-                               get_ascend_soc_version, is_310p,
-                               lmhead_tp_enable, vllm_version_is)
+                               get_ascend_soc_version, get_graph_params,
+                               is_310p, lmhead_tp_enable, set_graph_params,
+                               vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -337,6 +338,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens = torch.zeros(self.max_num_reqs,
                                     dtype=torch.int32,
                                     device=self.device)
+        self.slot_mapping = torch.zeros(self.max_num_tokens,
+                                        dtype=torch.int32,
+                                        device=self.device)
 
         self.uses_mrope = self.model_config.uses_mrope
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1457,11 +1461,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             blk_table_tensor = blk_table.get_device_tensor()
             slot_mapping = blk_table.slot_mapping_cpu[:
                                                       total_num_scheduled_tokens]
-            self.slot_mapping_cpu[:total_num_scheduled_tokens].copy_(
-                slot_mapping)
-            # # Fill unused with -1. Needed for reshape_and_cache in full cuda
-            # # graph mode.
-            # blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
+            self.slot_mapping[:total_num_scheduled_tokens].copy_(
+                slot_mapping[:total_num_scheduled_tokens],
+                non_blocking=True,
+            )
 
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
@@ -1474,7 +1477,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
                 # TODO: change this to the right block table for linear attn
                 block_table_tensor=blk_table_tensor[:num_reqs],
-                slot_mapping_cpu=self.slot_mapping_cpu,
+                slot_mapping=self.slot_mapping,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 positions=self.positions,
                 attn_mask=self.attn_mask,
@@ -1546,12 +1549,57 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
+
+        forward_context = get_forward_context()
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            graph_params = get_graph_params()
+            self.update_attn_params(graph_params, forward_context,
+                                    positions.shape[0])
+
         if get_forward_context().flashcomm_v1_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             pad_size = get_forward_context().pad_size
             if pad_size > 0:
                 hidden_states = hidden_states[:-pad_size, :]
         return hidden_states
+
+    def update_attn_params(self, graph_params, forward_context, runtime_shape):
+        # FIXME: Behold! We are using a temporary hack here to update the args
+        # for each layer's attention op in the graph.
+        for key, param, handle, event in zip(
+                forward_context.attn_metadata,
+                graph_params.attn_params[runtime_shape],
+                graph_params.handles[runtime_shape],
+                graph_params.events[runtime_shape],
+        ):
+            (
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                num_heads,
+                scale,
+                block_table,
+                seq_lens,
+                output,
+            ) = param
+            # block_table = forward_context.attn_metadata[key].block_tables
+            seq_lens = forward_context.attn_metadata[key].seq_lens
+
+            with torch.npu.stream(self.update_stream):
+                torch.npu.graph_task_update_begin(self.update_stream, handle)
+                torch_npu._npu_paged_attention(query=query,
+                                               key_cache=key_cache,
+                                               value_cache=value_cache,
+                                               num_kv_heads=num_kv_heads,
+                                               num_heads=num_heads,
+                                               scale_value=scale,
+                                               block_table=block_table,
+                                               context_lens=seq_lens,
+                                               out=output)
+                torch.npu.graph_task_update_end(self.update_stream)
+
+                event.record(self.update_stream)
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
@@ -2234,7 +2282,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_actual_tokens=num_tokens,
                     actual_seq_lengths_q=self.actual_seq_lengths_q,
                     block_table_tensor=block_table_tensor[:num_reqs],
-                    slot_mapping_cpu=self.slot_mapping_cpu,
+                    slot_mapping=self.slot_mapping,
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     max_query_len=max_query_len,
                     decode_token_per_req=self.decode_token_per_req,
@@ -2578,6 +2626,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.update_stream = torch.npu.Stream()
+            set_graph_params(self.compilation_config.cudagraph_capture_sizes)
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
                                          runtime_mode=CUDAGraphMode.FULL)
