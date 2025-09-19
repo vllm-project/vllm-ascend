@@ -452,7 +452,6 @@ class AscendSharedFusedMoE(AscendFusedMoE):
         flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
         if flashcomm_v1_enabled:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True)
-            router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits, True)
         shared_out = self._shared_experts(hidden_states)
 
         # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
