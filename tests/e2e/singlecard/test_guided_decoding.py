@@ -110,8 +110,8 @@ def test_guided_json_completion(guided_decoding_backend: str,
 
     backwoards_compatibility_kwargs = {}
     if vllm_version_is("0.10.2"):
-        backwoards_compatibility_kwargs["guided_decoding_backend"] = (
-            guided_decoding_backend)
+        backwoards_compatibility_kwargs[
+            "guided_decoding_backend"] = guided_decoding_backend
     else:
         backwoards_compatibility_kwargs["structured_outputs_config"] = {
             "backend": guided_decoding_backend
@@ -154,8 +154,8 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
     })
     backwoards_compatibility_kwargs = {}
     if vllm_version_is("0.10.2"):
-        backwoards_compatibility_kwargs["guided_decoding_backend"] = (
-            guided_decoding_backend)
+        backwoards_compatibility_kwargs[
+            "guided_decoding_backend"] = guided_decoding_backend
     else:
         backwoards_compatibility_kwargs["structured_outputs_config"] = {
             "backend": guided_decoding_backend
