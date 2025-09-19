@@ -390,11 +390,11 @@ class TestACLGraphWrapper(TestBase):
 
         # First call to capture the graph
         tensor1 = torch.tensor([1, 2, 3])
-        first_result = wrapper(tensor1, "arg2")
+        _ = wrapper(tensor1, "arg2")
 
         # Second call with same tensor addresses should work
         tensor2 = torch.tensor([1, 2, 3])  # Same values
-        second_result = wrapper(tensor2, "arg2")
+        _ = wrapper(tensor2, "arg2")
 
         # Should not raise AssertionError
         self.assertTrue(True)
@@ -441,7 +441,7 @@ class TestACLGraphWrapper(TestBase):
 
         # First call to capture the graph
         tensor1 = torch.tensor([1, 2, 3])
-        first_result = wrapper(tensor1, "arg2")
+        _ = wrapper(tensor1, "arg2")
 
         # Second call with different tensor addresses should raise AssertionError
         tensor2 = torch.tensor([4, 5,
@@ -655,7 +655,7 @@ class TestACLGraphWrapper(TestBase):
                     test_tensor = torch.tensor([1, 2, 3])
 
                     # Call the wrapper
-                    result = wrapper(test_tensor, "arg2")
+                    _ = wrapper(test_tensor, "arg2")
 
                     # Verify debug log was called
                     mock_logger.debug.assert_called_once()
