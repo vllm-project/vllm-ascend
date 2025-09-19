@@ -28,7 +28,6 @@ from vllm.model_executor.layers.fused_moe.config import \
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
                                               determine_default_log2phy_map)
@@ -38,8 +37,6 @@ from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
                                                  AlltoAllCommImpl, MC2CommImpl,
                                                  NaiveMulticastCommImpl)
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, npu_stream_switch
-
-original_unquantized_fused_moe_init_func = UnquantizedFusedMoEMethod.__init__
 
 
 def fused_experts_moge(
@@ -122,110 +119,105 @@ def fused_experts_moge(
     return final_hidden_states
 
 
-def unquantized_fused_moe_init_func(self, *args, **kwargs):
-    original_unquantized_fused_moe_init_func(self, *args, **kwargs)
+class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
-    # NOTE: Currently, this self.use_aclgraph is only used in
-    # UnquantizedFusedMoEMethod.forward_oot to decide whether to use in
-    # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
-    # Once torch.randint_like is supported or removed, this flag can be removed.
-    vllm_config = get_current_vllm_config()
-    ascend_config = get_ascend_config()
-    if ascend_config.torchair_graph_config.enabled:
-        self.use_aclgraph = False
-    else:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        vllm_config = get_current_vllm_config()
         self.use_aclgraph = (vllm_config.compilation_config.level
                              == CompilationLevel.PIECEWISE
                              and not vllm_config.model_config.enforce_eager)
-    self.transpose = True
+        self.transpose = True
 
+    def process_weights_after_loading(self, layer):
+        super().process_weights_after_loading(layer)
+        if self.transpose:
+            w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(
+                1, 2).contiguous()
+            layer.w13_weight = torch.nn.Parameter(w13_data,
+                                                  requires_grad=False)
 
-def forward_oot(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
-        router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        routed_scaling_factor: float = 1.0,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        activation: str = "silu",
-        enable_eplb: bool = False,
-        expert_load_view: Optional[torch.Tensor] = None,
-        logical_to_physical_map: Optional[torch.Tensor] = None,
-        logical_replica_count: Optional[torch.Tensor] = None) -> torch.Tensor:
+            w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(
+                1, 2).contiguous()
+            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-    topk_weights, topk_ids, row_idx = select_experts(
-        hidden_states=x,
-        router_logits=router_logits,
-        top_k=top_k,
-        use_grouped_topk=use_grouped_topk,
-        renormalize=renormalize,
-        topk_group=topk_group,
-        num_expert_group=num_expert_group,
-        custom_routing_function=custom_routing_function,
-        scoring_func=scoring_func,
-        routed_scaling_factor=routed_scaling_factor,
-        e_score_correction_bias=e_score_correction_bias,
-        global_num_experts=global_num_experts)
+            self.transpose = False
+        else:
+            w13_data = self._maybe_pad_weight(layer.w13_weight.data)
+            layer.w13_weight = torch.nn.Parameter(w13_data,
+                                                  requires_grad=False)
 
-    if topk_ids.shape[1] < top_k or is_310p():
-        assert global_num_experts is not None
-        return fused_experts_moge(
+            w2_data = self._maybe_pad_weight(layer.w2_weight.data)
+            layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
+
+        if not is_310p():
+            layer.w13_weight.data = torch_npu.npu_format_cast(
+                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(
+                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+
+    def forward_oot(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            use_grouped_topk: bool,
+            top_k: int,
+            router_logits: torch.Tensor,
+            renormalize: bool,
+            topk_group: Optional[int] = None,
+            num_expert_group: Optional[int] = None,
+            custom_routing_function: Optional[Callable] = None,
+            scoring_func: str = "softmax",
+            routed_scaling_factor: float = 1.0,
+            e_score_correction_bias: Optional[torch.Tensor] = None,
+            global_num_experts: int = -1,
+            expert_map: Optional[torch.Tensor] = None,
+            apply_router_weight_on_input: bool = False,
+            activation: str = "silu",
+            enable_eplb: bool = False,
+            expert_load_view: Optional[torch.Tensor] = None,
+            logical_to_physical_map: Optional[torch.Tensor] = None,
+            logical_replica_count: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+
+        topk_weights, topk_ids, row_idx = select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            top_k=top_k,
+            use_grouped_topk=use_grouped_topk,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            global_num_experts=global_num_experts)
+
+        if topk_ids.shape[1] < top_k or is_310p():
+            assert global_num_experts is not None
+            return fused_experts_moge(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                moe_parallel_config=self.moe.moe_parallel_config,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input)
+
+        moe_comm_method = get_forward_context().moe_comm_method
+        return moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
-            moe_parallel_config=self.moe.moe_parallel_config,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            top_k=top_k,
+            row_idx=row_idx,
             global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input)
-
-    moe_comm_method = get_forward_context().moe_comm_method
-    return moe_comm_method.fused_experts(hidden_states=x,
-                                         w1=layer.w13_weight,
-                                         w2=layer.w2_weight,
-                                         topk_weights=topk_weights,
-                                         topk_ids=topk_ids,
-                                         row_idx=row_idx,
-                                         global_num_experts=global_num_experts,
-                                         expert_map=expert_map)
-
-
-def process_weights_after_loading(self, layer):
-    super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
-    if self.transpose:
-        w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(
-            1, 2).contiguous()
-        layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
-        w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(
-            1, 2).contiguous()
-        layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
-
-        self.transpose = False
-    else:
-        w13_data = self._maybe_pad_weight(layer.w13_weight.data)
-        layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
-
-        w2_data = self._maybe_pad_weight(layer.w2_weight.data)
-        layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
-
-    if not is_310p():
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            expert_map=expert_map)
 
 
 class AscendFusedMoE(FusedMoE):
@@ -460,8 +452,3 @@ class AscendSharedFusedMoE(AscendFusedMoE):
         if self.multistream_overlap_shared_expert:
             torch.npu.current_stream().wait_stream(self.shared_expert_stream)
         return shared_out, fused_out
-
-
-UnquantizedFusedMoEMethod.__init__ = unquantized_fused_moe_init_func
-UnquantizedFusedMoEMethod.process_weights_after_loading = process_weights_after_loading
-UnquantizedFusedMoEMethod.forward_oot = forward_oot

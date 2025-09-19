@@ -498,7 +498,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+    from vllm_ascend.ops.common_fused_moe import (
+        AscendFusedMoE, AscendUnquantizedFusedMoEMethod)
     from vllm_ascend.ops.layernorm import AscendQuantRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
@@ -526,6 +527,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "RMSNorm": AscendRMSNorm,
         "FusedMoE": AscendFusedMoE,
         "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
+        "UnquantizedFusedMoEMethod": AscendUnquantizedFusedMoEMethod,
     }
 
     if vllm_config is not None and \
