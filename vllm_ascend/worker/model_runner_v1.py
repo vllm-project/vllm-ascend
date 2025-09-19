@@ -109,6 +109,7 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
+from vllm_ascend.torchair.mtp_torchair_proposer import MtpTorchairProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                get_ascend_soc_version, is_310p,
@@ -270,6 +271,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.runner_only_attn_layers: set[str] = set()
 
         ascend_config = get_ascend_config()
+        is_torchair_graph = ascend_config.torchair_graph_config.enabled
         if ascend_config.ascend_scheduler_config.enabled:
             self.chunked_prefill_enabled = self.scheduler_config.chunked_prefill_enabled
         else:
@@ -306,8 +308,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Set up speculative decoding.
         self.spec_attn_mask = None
-        self.drafter: Optional[Union[NgramProposer, EagleProposer,
-                                     MtpProposer]] = None
+        self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
+                                     MtpTorchairProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -321,7 +323,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if get_pp_group().is_last_rank:
                 self.drafter = get_spec_decode_method(
                     self.speculative_config.method, self.vllm_config,
-                    self.device, self)
+                    self.device, self, is_torchair_graph)
                 self.rejection_sampler = AscendRejectionSampler()
 
         # Persistent batch.
