@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 from vllm.attention.layer import Attention
@@ -48,7 +47,6 @@ class MtpProposer(Proposer):
              vllm_config.model_config.get_hidden_size()),
             dtype=self.runner.dtype,
             device=self.device)
-
 
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
@@ -101,8 +99,6 @@ class MtpProposer(Proposer):
 
         moe_comm_method = self.runner._select_moe_comm_method(
             num_tokens, with_prefill)
-
-
 
         if skip_attn:
             attn_metadata = None
@@ -289,7 +285,6 @@ class MtpProposer(Proposer):
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
 
-
         self.input_ids[last_token_indices] = next_token_ids
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
@@ -344,8 +339,6 @@ class MtpProposer(Proposer):
         for layer_name in self.attn_layer_name:
             attn_metadata[layer_name] = attn_metadata_mtp
 
-
-
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
 
@@ -378,7 +371,6 @@ class MtpProposer(Proposer):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata
-
 
                     hidden_states = self.model(
                         input_ids=self.input_ids[:num_input_tokens],
@@ -418,9 +410,7 @@ class MtpProposer(Proposer):
             if step == self.num_speculative_tokens - 1 or with_prefill:
                 break
 
-
             attn_metadata_i = attn_metadata[self.attn_layer_name[0]]
-
 
             if step == 0:
                 positions = target_positions[last_token_indices]
@@ -431,7 +421,6 @@ class MtpProposer(Proposer):
                 last_token_indices = self.arange[:batch_size]
                 if attn_metadata_i.num_decode_tokens != 0:
                     attn_metadata_i.num_decode_tokens = batch_size
-
 
             input_ids = draft_token_ids_list[-1].int()
             positions += 1
@@ -488,7 +477,6 @@ class MtpProposer(Proposer):
         # mtp>1: [batch_size, k]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         return draft_token_ids
-
 
     # TODO Using torch instead of triton may result in poor performance
     def _prepare_input_kernel(self, out_ptr: torch.Tensor,

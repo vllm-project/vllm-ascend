@@ -15,6 +15,7 @@ from vllm.model_executor.model_loader.utils import (
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -55,7 +56,6 @@ class MtpTorchairProposer(MtpProposer):
 
             self.model = TorchairDeepSeekMTP(
                 vllm_config=self.vllm_config).to(target_device)
-
 
         draft_attn_layer_names = (
             get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
@@ -329,15 +329,11 @@ class MtpTorchairProposer(MtpProposer):
             num_computed_tokens_cpu=None,
             seq_lens=None)
 
-
-
-
         attn_metadata = self.runner.attn_metadata_builder.build(
             0, common_attn_metadata, self.runner.get_model())
 
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
-
 
         # torchair mode can reuse self.runner.num_tokens_across_dp
         num_tokens_across_dp = self.runner.num_tokens_across_dp
@@ -419,7 +415,6 @@ class MtpTorchairProposer(MtpProposer):
                     draft_token_ids_list.append(draft_token_ids)
             if step == self.num_speculative_tokens - 1 or with_prefill:
                 break
-
 
             attn_metadata_i = attn_metadata
 
@@ -546,5 +541,3 @@ class MtpTorchairProposer(MtpProposer):
                     config=config,
                     ge_cache=False)
             return self.torchair_compiled_models[batch_size]
-
-
