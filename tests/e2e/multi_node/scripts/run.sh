@@ -28,6 +28,14 @@ checkout_src() {
     if [ ! -d "$SRC_DIR/vllm" ]; then
         git clone -b v0.10.2 https://github.com/vllm-project/vllm.git "$SRC_DIR/vllm"
     fi
+
+    #mooncake
+    if [ ! -d "$SRC_DIR/Mooncake" ]; then
+        git clone https://github.com/kvcache-ai/Mooncake.git "$SRC_DIR/Mooncake"
+        cd "$SRC_DIR/Mooncake"
+        git checkout 06cc217504a6f1b0cdaa26b096b985651b262748
+        cd -
+    fi
 }
 
 install_sys_dependencies() {
@@ -51,6 +59,23 @@ install_vllm() {
     pip install -r "$SRC_DIR/vllm-ascend/requirements-dev.txt"
 }
 
+install_mooncake() {
+    echo "====> Install mooncake"
+    apt-get update
+    apt install -y --allow-change-held-packages python3 python-is-python3
+    apt-get install -y --no-install-recommends mpich libmpich-dev
+    cd $SRC_DIR/Mooncake
+    sed -i '/option(USE_ASCEND_DIRECT)/s/OFF/ON/' mooncake-common/common.cmake
+    bash dependencies.sh --yes
+    mkdir build
+    cd -
+    cd $SRC_DIR/Mooncake/build
+    cmake ..
+    make -j
+    make install
+    cd -
+}
+
 run_tests() {
     echo "====> Run tests"
     cd "$SRC_DIR/vllm-ascend"
@@ -63,6 +88,7 @@ main() {
     checkout_src
     install_sys_dependencies
     install_vllm
+    install_mooncake
     run_tests
 }
 
