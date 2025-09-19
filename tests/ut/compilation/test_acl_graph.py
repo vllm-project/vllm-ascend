@@ -239,6 +239,9 @@ class TestACLGraphWrapper(TestBase):
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
         
+        # Set up the compilation counter mock
+        mock_compilation_counter.num_cudagraph_captured = 0
+        
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
@@ -302,6 +305,9 @@ class TestACLGraphWrapper(TestBase):
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
+        
+        # Set up the compilation counter mock
+        mock_compilation_counter.num_cudagraph_captured = 0
         
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
@@ -473,6 +479,9 @@ class TestACLGraphWrapper(TestBase):
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
         
+        # Set up the compilation counter mock
+        mock_compilation_counter.num_cudagraph_captured = 0
+        
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
@@ -532,6 +541,9 @@ class TestACLGraphWrapper(TestBase):
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
+        
+        # Set up the compilation counter mock
+        mock_compilation_counter.num_cudagraph_captured = 0
         
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
