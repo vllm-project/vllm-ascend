@@ -41,14 +41,17 @@ class AttentionMaskBuilder:
         dtype: torch.dtype,
         device: torch.device = None,
     ):
+        # NOTE: The device argument specifies the target NPU 
+        # to be used for the newly added FIA operator.
+        # Only pass this parameter when using the new FIA operator.
+
         attn_mask = _generate_attn_mask(max_seq_len, dtype)
 
         self._seq_len_cached = attn_mask.shape[0]
         self.attn_mask_cache = attn_mask
         self.device = device
         if self.device:
-            #NOTE: New compressed mask needs to be sent to certain device, 
-            # so device needs to be passed here.
+
             assigned_mask_dim = 2048
             self.chunked_prefill_attn_mask = torch.triu(torch.ones(assigned_mask_dim, assigned_mask_dim), diagonal=1
             ).to(torch.int8).to(device)

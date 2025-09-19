@@ -460,6 +460,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 attn_metadata.seq_lens.to(device=query.device)
 
         if self.compressed_mask:
+            # TODO:The npu_fused_infer_attention_score op is planned to
+            # be utilized in a wider range in upcoming versions.
             num_block, block_size, head_num, head_dim = self.key_cache.shape
             key = self.key_cache.view(num_block, block_size, -1)
             value = self.value_cache.view(num_block, block_size, -1)
