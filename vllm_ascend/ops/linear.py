@@ -281,7 +281,10 @@ class AscendRowParallelLinear(RowParallelLinear):
                                                   bias=bias_)
         if self.reduce_results and self.enable_sp and is_prefill:
             sp_size = get_tensor_model_parallel_world_size()
-            original_len = input_.shape[0]
+            if not isinstance(input_, tuple):
+                original_len = input_.shape[0]
+            else:
+                original_len = input_[0].shape[0]
             reminder = original_len % sp_size
             if reminder != 0:
                 padding_len = sp_size - reminder
