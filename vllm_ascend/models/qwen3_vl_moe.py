@@ -56,7 +56,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
     })
 class AscendQwen3MoeLLMModel(Qwen3MoeLLMModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # super().__init__(vllm_config=vllm_config, prefix=prefix)
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config.get_text_config()
         cache_config = vllm_config.cache_config
@@ -131,7 +130,6 @@ class AscendQwen3MoeLLMForCausalLM(Qwen3MoeLLMForCausalLM):
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        # super(Qwen3MoeLLMForCausalLM).__init__()
         nn.Module.__init__(self)
         SupportsPP.__init__(self)
         SupportsLoRA.__init__(self)
