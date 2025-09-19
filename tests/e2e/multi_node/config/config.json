@@ -1,0 +1,63 @@
+[
+    {
+        "test_name": "test_deepseek_dp",
+        "disaggregate_prefill": false,
+        "num_nodes": 2,
+        "server_parameters": {
+            "leader_config": {
+                "model": "vllm-ascend/DeepSeek-V3-W8A8",
+                "trust_remote_code": true,
+                "enable_expert_parallel": true,
+                "gpu_memory_utilization": 0.9,
+                "host": "0.0.0.0",
+                "port": 8080,
+                "data_parallel_size": 4,
+                "data_parallel_size_local": 2,
+                "data_parallel_rpc_port": 13389,
+                "quantization": "ascend",
+                "tensor_parallel_size": 8,
+                "kv_transfer_config": {},
+                "additional_config": {
+                    "ascend_scheduler_config": {
+                        "enabled": true
+                    },
+                    "torchair_graph_config": {
+                        "enabled": true
+                    }
+                }
+            },
+            "worker_config": {
+                "model": "vllm-ascend/DeepSeek-V3-W8A8",
+                "trust_remote_code": true,
+                "enable_expert_parallel": true,
+                "gpu_memory_utilization": 0.9,
+                "host": "0.0.0.0",
+                "port": 8080,
+                "data_parallel_size": 4,
+                "data_parallel_size_local": 2,
+                "data_parallel_address": "127.0.0.1",
+                "data_parallel_rpc_port": 13389,
+                "quantization": "ascend",
+                "tensor_parallel_size": 8,
+                "kv_transfer_config": {},
+                "additional_config": {
+                    "ascend_scheduler_config": {
+                        "enabled": true
+                    },
+                    "torchair_graph_config": {
+                        "enabled": true
+                    }
+                }
+            }
+        },
+        "client_parameters": {
+            "model": "vllm-ascend/DeepSeek-V3-W8A8",
+            "endpoint_type": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "/root/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200,
+            "request_rate": 1
+        },
+        "accuracy_parameters": {}
+    }
+]
