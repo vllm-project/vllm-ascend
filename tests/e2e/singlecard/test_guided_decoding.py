@@ -108,7 +108,7 @@ def test_guided_json_completion(guided_decoding_backend: str,
         "max_tokens": 500,
     })
 
-    runner_kwargs = {
+    runner_kwargs: Dict[str, Any] = {
         "seed": 0,
     }
     if vllm_version_is("0.10.2"):
@@ -154,7 +154,7 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
         "top_p": 0.95,
     })
 
-    runner_kwargs = {
+    runner_kwargs: Dict[str, Any] = {
         "seed": 0,
     }
     if vllm_version_is("0.10.2"):
@@ -164,8 +164,7 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
             "backend": guided_decoding_backend
         }
 
-    with VllmRunner(MODEL_NAME,
-                    **runner_kwargs) as vllm_model:  # type: ignore[arg-type]
+    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
         prompts = [
             f"Give an example IPv4 address with this regex: {sample_regex}"
         ] * 2
