@@ -69,8 +69,8 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LazyLoader, cdiv, get_dtype_size,
                         is_pin_memory_available)
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.utils import \
-    reorder_batch_to_split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    AttentionCGSupport, reorder_batch_to_split_decodes_and_prefills)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec, MambaSpec)
@@ -1204,7 +1204,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> tuple[dict[str, Any], torch.Tensor, np.ndarray, int, torch.Tensor,
                int, torch.Tensor, SpecDecodeMetadata, Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+               Optional[torch.Tensor], Optional[torch.Tensor], int]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -1531,7 +1531,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return (attn_metadata, positions, num_scheduled_tokens,
                 num_input_tokens, num_tokens_across_dp,
                 maybe_padded_num_tokens, logits_indices, spec_decode_metadata,
-                input_ids, inputs_embeds, intermediate_tensors)
+                input_ids, inputs_embeds, intermediate_tensors,
+                max_num_scheduled_tokens)
 
     def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill,
                                              maybe_padded_num_tokens,
@@ -1868,8 +1869,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             (attn_metadata, positions, num_scheduled_tokens_np,
              num_input_tokens, num_tokens_across_dp, maybe_padded_num_tokens,
              logits_indices, spec_decode_metadata, input_ids, inputs_embeds,
-             intermediate_tensors) = (self._prepare_inputs(
-                 scheduler_output, intermediate_tensors))
+             intermediate_tensors,
+             max_query_len) = (self._prepare_inputs(scheduler_output,
+                                                    intermediate_tensors))
 
             if self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
@@ -1877,8 +1879,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         moe_comm_method = self._select_moe_comm_method(num_input_tokens,
                                                        self.with_prefill)
 
+        uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
+            scheduler_output.total_num_scheduled_tokens
+            == self.input_batch.num_reqs * max_query_len)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                           uniform_decode=False)
+                                           uniform_decode=uniform_decode)
         aclgraph_runtime_mode, batch_descriptor = \
             self.aclgraph_dispatcher.dispatch(batch_descriptor)
 
@@ -2231,12 +2236,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     ) -> torch.Tensor:
         # only support eager mode and piecewise graph now
         assert aclgraph_runtime_mode in {
-            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE
+            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
-        if force_attention:
-            raise RuntimeError(
-                "Capturing attention in aclgraph is unexpected, because full graph is not supported now"
-            )
 
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
@@ -2532,6 +2533,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                   self.device)
         logger.info("Loading model weights took %.4f GB",
                     m.consumed_memory / float(2**30))
+
+        # wrap the model with full graph wrapper if needed.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.model = ACLGraphWrapper(self.model,
+                                         self.vllm_config,
+                                         runtime_mode=CUDAGraphMode.FULL)
 
     def _convert_torch_format(self, tensor):
         tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT)
@@ -3093,9 +3100,75 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return kv_cache_spec
 
     def initialize_aclgraph_capture(self) -> None:
-        # TODO: Add check of AttentionCGSupport and cudagraph_mode.decode_mode when full graph is supported
-        # Trigger aclgraph dispatching keys initialization here (after
-        # initializing attn backends).
+        min_ag_support = AttentionCGSupport.ALWAYS
+        min_ag_builder_name = None
+
+        for attn_group in self._attn_group_iterator():
+            builder = attn_group.metadata_builder
+            if builder.cudagraph_support.value < min_ag_support.value:
+                min_ag_support = builder.cudagraph_support
+                min_ag_builder_name = builder.__class__.__name__
+
+        # This is an imitation of compilation_config.splitting_ops_contain_attention()
+        splitting_ops_contain_attention = (
+            self.compilation_config.splitting_ops is not None
+            and all(op in self.compilation_config.splitting_ops for op in [
+                "vllm.unified_ascend_attention_with_output",
+                "vllm.mla_forward",
+            ]))
+
+        # Flexible resolve the aclgraph mode
+        aclgraph_mode = self.compilation_config.cudagraph_mode
+        # check graph for mixed batch is supported
+        if aclgraph_mode.mixed_mode() == CUDAGraphMode.FULL \
+            and min_ag_support != AttentionCGSupport.ALWAYS:
+            msg = (f"ACLGraphMode.{aclgraph_mode.name} is not supported "
+                   f"with {min_ag_builder_name} backend (support: "
+                   f"{min_ag_support})")
+            if min_ag_support == AttentionCGSupport.NEVER:
+                # if not supported any full graphs, just raise it.
+                msg += "; please try cudagraph_mode=PIECEWISE, and "\
+                    "make sure compilation level is piecewise"
+                raise ValueError(msg)
+
+            # attempt to resolve the full graph related mode
+            if splitting_ops_contain_attention:
+                msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
+                aclgraph_mode = self.compilation_config.cudagraph_mode = (
+                    CUDAGraphMode.FULL_AND_PIECEWISE)
+            else:
+                msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
+                aclgraph_mode = self.compilation_config.cudagraph_mode = (
+                    CUDAGraphMode.FULL_DECODE_ONLY)
+            logger.warning(msg)
+
+        # check that if spec-decode + decode full-graphs is supported
+        if (aclgraph_mode.decode_mode() == CUDAGraphMode.FULL
+                and self.uniform_decode_query_len > 1 and min_ag_support.value
+                < AttentionCGSupport.UNIFORM_BATCH.value):
+            msg = (f"CUDAGraphMode.{aclgraph_mode.name} is not supported"
+                   f" with spec-decode for attention backend "
+                   f"{min_ag_builder_name} (support: {min_ag_support})")
+            if splitting_ops_contain_attention:
+                msg += "; setting cudagraph_mode=PIECEWISE"
+                aclgraph_mode = self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=NONE"
+                aclgraph_mode = self.compilation_config.cudagraph_mode = \
+                    CUDAGraphMode.NONE
+            logger.warning(msg)
+
+        # double check that we can support full graph if they are requested
+        # even after automatic downgrades
+        if aclgraph_mode.has_full_cudagraphs() \
+            and min_ag_support == AttentionCGSupport.NEVER:
+            raise ValueError(f"CUDAGraphMode.{aclgraph_mode.name} is not "
+                             f"supported with {min_ag_builder_name} backend ("
+                             f"support:{min_ag_support}) "
+                             "; please try cudagraph_mode=PIECEWISE, "
+                             "and make sure compilation level is piecewise")
+
         self.aclgraph_dispatcher.initialize_cudagraph_keys(
             self.compilation_config.cudagraph_mode,
             self.uniform_decode_query_len)
@@ -3104,10 +3177,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                            aclgraph_runtime_mode: CUDAGraphMode,
                            uniform_decode: bool):
         assert aclgraph_runtime_mode != CUDAGraphMode.NONE and \
-            aclgraph_runtime_mode in [CUDAGraphMode.PIECEWISE]
+            aclgraph_runtime_mode in [CUDAGraphMode.FULL,
+                                      CUDAGraphMode.PIECEWISE]
 
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
+            logger.info(
+                "Starting to capture ACL graphs for cases: %s, "
+                "mode: %s, uniform_decode: %s", compilation_cases,
+                aclgraph_runtime_mode.name, uniform_decode)
             compilation_cases = tqdm(
                 compilation_cases,
                 disable=not self.load_config.use_tqdm_on_load,
@@ -3154,6 +3232,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     compilation_cases,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     uniform_decode=False)
+
+            if aclgraph_mode.decode_mode() == CUDAGraphMode.FULL and \
+                aclgraph_mode.separate_routine():
+                max_num_tokens = self.scheduler_config.max_num_seqs * \
+                        self.uniform_decode_query_len
+                decode_cudagraph_batch_sizes = [
+                    x for x in self.aclgraph_batch_sizes if x <= max_num_tokens
+                    and x >= self.uniform_decode_query_len
+                ]
+                compilation_cases_decode = list(
+                    reversed(decode_cudagraph_batch_sizes))
+                self._capture_aclgraphs(
+                    compilation_cases=compilation_cases_decode,
+                    aclgraph_runtime_mode=CUDAGraphMode.FULL,
+                    uniform_decode=True)
 
         # Disable aclgraph capturing globally, so any unexpected aclgraph
         # capturing will be detected and raise an error after here.
