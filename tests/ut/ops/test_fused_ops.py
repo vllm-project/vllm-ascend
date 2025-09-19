@@ -94,7 +94,8 @@ def mock_dist_env(mocker: MockerFixture):
             return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm_ascend.ops.fused_moe.get_ascend_config',
             return_value=MagicMock(
-                torchair_graph_config=MagicMock(enabled=False, enable_multistream_moe=False),
+                torchair_graph_config=MagicMock(enabled=False),
+                enable_multistream_moe=False,
                 expert_map_path=None
             )), \
         patch('vllm_ascend.ops.fused_moe.determine_expert_map',
