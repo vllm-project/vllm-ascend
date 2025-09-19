@@ -355,8 +355,10 @@ class TestACLGraphWrapper(TestBase):
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
+    @patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors')
     def test_call_with_debug_mode_input_address_check(
-            self, mock_envs, mock_current_platform, mock_get_forward_context,
+            self, mock_weak_ref_tensors, mock_envs, mock_current_platform,
+            mock_get_forward_context,
             mock_validate_cudagraph_capturing_enabled, mock_torch):
         """Test __call__ method with debug mode input address checking"""
         mock_envs.VLLM_LOGGING_LEVEL = "DEBUG"  # Enable debug mode
@@ -374,6 +376,9 @@ class TestACLGraphWrapper(TestBase):
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
 
+        # Mock weak_ref_tensors
+        mock_weak_ref_tensors.return_value = "weak_ref_output"
+
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
 
@@ -389,12 +394,11 @@ class TestACLGraphWrapper(TestBase):
             cudagraph_options=self.mock_cudagraph_options)
 
         # First call to capture the graph
-        tensor1 = torch.tensor([1, 2, 3])
-        _ = wrapper(tensor1, "arg2")
+        tensor = torch.tensor([1, 2, 3])  # Create tensor once
+        _ = wrapper(tensor, "arg2")
 
         # Second call with same tensor addresses should work
-        tensor2 = torch.tensor([1, 2, 3])  # Same values
-        _ = wrapper(tensor2, "arg2")
+        _ = wrapper(tensor, "arg2")  # Use the same tensor object
 
         # Should not raise AssertionError
         self.assertTrue(True)
@@ -406,8 +410,10 @@ class TestACLGraphWrapper(TestBase):
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
+    @patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors')
     def test_call_with_debug_mode_input_address_mismatch(
-            self, mock_envs, mock_current_platform, mock_get_forward_context,
+            self, mock_weak_ref_tensors, mock_envs, mock_current_platform,
+            mock_get_forward_context,
             mock_validate_cudagraph_capturing_enabled, mock_torch):
         """Test __call__ method with debug mode input address mismatch raises AssertionError"""
         mock_envs.VLLM_LOGGING_LEVEL = "DEBUG"  # Enable debug mode
@@ -424,6 +430,9 @@ class TestACLGraphWrapper(TestBase):
         mock_torch.npu.graph.return_value = mock_graph_context
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
+
+        # Mock weak_ref_tensors
+        mock_weak_ref_tensors.return_value = "weak_ref_output"
 
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
