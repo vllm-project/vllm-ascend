@@ -323,7 +323,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if get_pp_group().is_last_rank:
                 self.drafter = get_spec_decode_method(
                     self.speculative_config.method, self.vllm_config,
-                    self.device, self,is_torchair_graph)
+                    self.device, self, is_torchair_graph)
                 self.rejection_sampler = AscendRejectionSampler()
 
         # Persistent batch.
