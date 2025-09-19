@@ -19,7 +19,7 @@
 # 1. PR labeled with: '*accuracy-test' (ONLY 1 label valid) & 'ready-for-test'
 # 2. workflow_dispatch with models input
 # See detail rule in strategy.matrix note
-name: Benchmarks / accuracy
+name: ascend test / accuracy
 
 on:
   schedule:
