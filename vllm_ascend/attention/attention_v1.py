@@ -378,7 +378,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # seq_lens_tensor needs to be transferred to the device for 310P.
             attn_metadata.seq_lens = \
                 attn_metadata.seq_lens.to(device=query.device)
-        if self.sliding_window is not None:
+        if self.sliding_window is not None and attn_metadata.seq_lens.shape[
+                0] == query.size(0):
             batch_size = attn_metadata.seq_lens.shape[0]
             block_size = 128
             query = query.view(batch_size, 1, self.num_heads * self.head_size)
