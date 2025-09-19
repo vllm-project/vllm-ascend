@@ -389,12 +389,11 @@ class TestACLGraphWrapper(TestBase):
         )
         
         # First call to capture the graph
-        tensor1 = torch.tensor([1, 2, 3])
-        first_result = wrapper(tensor1, "arg2")
+        tensor = torch.tensor([1, 2, 3])  # Create tensor once
+        first_result = wrapper(tensor, "arg2")
         
         # Second call with same tensor addresses should work
-        tensor2 = torch.tensor([1, 2, 3])  # Same values
-        second_result = wrapper(tensor2, "arg2")
+        second_result = wrapper(tensor, "arg2")  # Use the same tensor object
         
         # Should not raise AssertionError
         self.assertTrue(True)
