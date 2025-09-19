@@ -108,10 +108,17 @@ def test_guided_json_completion(guided_decoding_backend: str,
         "max_tokens": 500,
     })
 
-    with VllmRunner(
-            MODEL_NAME,
-            seed=0,
-    ) as vllm_model:
+    backwoards_compatibility_kwargs = {}
+    if vllm_version_is("0.10.2"):
+        backwoards_compatibility_kwargs["guided_decoding_backend"] = (
+            guided_decoding_backend)
+    else:
+        backwoards_compatibility_kwargs["structured_outputs_config"] = {
+            "backend": guided_decoding_backend
+        }
+
+    with VllmRunner(MODEL_NAME, seed=0,
+                    **backwoards_compatibility_kwargs) as vllm_model:
         prompts = [
             f"Give an example JSON for an employee profile "
             f"that fits this schema: {sample_json_schema}"
@@ -145,11 +152,17 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
         "temperature": 0.8,
         "top_p": 0.95,
     })
+    backwoards_compatibility_kwargs = {}
+    if vllm_version_is("0.10.2"):
+        backwoards_compatibility_kwargs["guided_decoding_backend"] = (
+            guided_decoding_backend)
+    else:
+        backwoards_compatibility_kwargs["structured_outputs_config"] = {
+            "backend": guided_decoding_backend
+        }
 
-    with VllmRunner(
-            MODEL_NAME,
-            seed=0,
-    ) as vllm_model:
+    with VllmRunner(MODEL_NAME, seed=0,
+                    **backwoards_compatibility_kwargs) as vllm_model:
         prompts = [
             f"Give an example IPv4 address with this regex: {sample_regex}"
         ] * 2
