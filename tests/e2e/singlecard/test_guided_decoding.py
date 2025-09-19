@@ -23,7 +23,7 @@ import jsonschema
 import pytest
 import regex as re
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from tests.e2e.conftest import VllmRunner
 
@@ -87,12 +87,12 @@ def test_guided_json_completion(guided_decoding_backend: str,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=500,
-        guided_decoding=GuidedDecodingParams(json=sample_json_schema))
+        structured_outputs=StructuredOutputsParams(json=sample_json_schema))
 
     with VllmRunner(
             MODEL_NAME,
             seed=0,
-            guided_decoding_backend=guided_decoding_backend,
+            structured_outputs_config=dict(backend=guided_decoding_backend),
     ) as vllm_model:
         prompts = [
             f"Give an example JSON for an employee profile "
@@ -125,12 +125,12 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_decoding=GuidedDecodingParams(regex=sample_regex))
+        structured_outputs=StructuredOutputsParams(regex=sample_regex))
 
     with VllmRunner(
             MODEL_NAME,
             seed=0,
-            guided_decoding_backend=guided_decoding_backend,
+            structured_outputs_config=dict(backend=guided_decoding_backend),
     ) as vllm_model:
         prompts = [
             f"Give an example IPv4 address with this regex: {sample_regex}"
