@@ -318,19 +318,6 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
 
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)

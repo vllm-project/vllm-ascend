@@ -491,17 +491,6 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
     dummy_inputs=Qwen2_5_VLDummyInputsBuilder)
 class AscendQwen2_5_VLForConditionalGeneration(
         Qwen2_5_VLForConditionalGeneration):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
