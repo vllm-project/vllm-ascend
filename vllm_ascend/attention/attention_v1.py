@@ -304,9 +304,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
 
-        pta_version_support_compressed_mask = "2.7.1.dev20250918"
-        self.compressed_mask = verify_torch_npu_version(pta_version_support_compressed_mask, "compressed mask")
-
     def _forward_prefill_no_cache(
         self,
         query: torch.Tensor,
@@ -459,7 +456,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.seq_lens = \
                 attn_metadata.seq_lens.to(device=query.device)
 
-        if self.compressed_mask:
+        if torch.version.cann.startswith("8.3"):
             # TODO:The npu_fused_infer_attention_score op is planned to
             # be utilized in a wider range in upcoming versions.
             num_block, block_size, head_num, head_dim = self.key_cache.shape
