@@ -1,11 +1,10 @@
-import types
 
 import torch
 import torch.nn as nn
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
@@ -17,9 +16,7 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
-
-from vllm_ascend.torchair.utils import (
-                                        TorchairCommonAttentionMetadata)
+from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
 from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 PADDING_SLOT_ID = -1
@@ -97,10 +94,10 @@ class MtpProposer(Proposer):
                   num_reqs: int = 0,
                   num_tokens_across_dp=None) -> None:
 
-            # TODO: adapt enable_dbo later
+        # TODO: adapt enable_dbo later
         (num_tokens, num_tokens_across_dp, with_prefill,
-         _) = self.runner._sync_metadata_across_dp(num_tokens,
-                                                   with_prefill, False)
+         _) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill,
+                                                   False)
 
         moe_comm_method = self.runner._select_moe_comm_method(
             num_tokens, with_prefill)
@@ -310,7 +307,7 @@ class MtpProposer(Proposer):
         # )
 
         if (self.runner.use_aclgraph
-              and num_tokens <= self.runner.aclgraph_batch_sizes[-1]):
+                and num_tokens <= self.runner.aclgraph_batch_sizes[-1]):
             # Acl graph mode, add padding to the batch size
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
         else:
@@ -355,9 +352,9 @@ class MtpProposer(Proposer):
         # torch mode need to update num_tokens_across_dp
         # TODO: adapt enable_dbo later
         (num_input_tokens, num_tokens_across_dp, with_prefill,
-         _) = self.runner._sync_metadata_across_dp(
-             num_input_tokens, self.runner.with_prefill, False)
-
+         _) = self.runner._sync_metadata_across_dp(num_input_tokens,
+                                                   self.runner.with_prefill,
+                                                   False)
 
         moe_comm_method = self.runner._select_moe_comm_method(
             num_input_tokens, with_prefill)

@@ -22,7 +22,11 @@ from vllm_ascend.spec_decode.ngram_proposer import NgramProposer
 from vllm_ascend.torchair.mtp_torchair_proposer import MtpTorchairProposer
 
 
-def get_spec_decode_method(method, vllm_config, device, runner,is_torchair_graph=False):
+def get_spec_decode_method(method,
+                           vllm_config,
+                           device,
+                           runner,
+                           is_torchair_graph=False):
     if method == "ngram":
         return NgramProposer(vllm_config, device, runner)
     elif method in ["eagle", "eagle3"]:
