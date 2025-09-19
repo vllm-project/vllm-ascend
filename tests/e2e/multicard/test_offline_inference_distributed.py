@@ -66,8 +66,8 @@ def test_models_distributed_DeepSeek_multistream_moe():
             additional_config={
                 "torchair_graph_config": {
                     "enabled": True,
-                    "enable_multistream_moe": True,
                 },
+                "enable_multistream_moe": True,
                 "ascend_scheduler_config": {
                     "enabled": True,
                 },

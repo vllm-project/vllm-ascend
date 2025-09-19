@@ -43,4 +43,4 @@ vllm serve model_path \
       "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
     }' \
     --additional-config \
-    '{"ascend_scheduler_config": {"enabled": true}, "torchair_graph_config":{"enabled":true,"enable_kv_nz":false, "enable_multistream_moe":false, "graph_batch_size":[28]}, "enable_weight_nz_layout":true}'
+    '{"ascend_scheduler_config": {"enabled": true}, "torchair_graph_config":{"enabled":true,"enable_kv_nz":false, "graph_batch_size":[28]}, "enable_weight_nz_layout":true, "enable_multistream_moe":false}'
