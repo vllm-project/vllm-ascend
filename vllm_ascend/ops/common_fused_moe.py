@@ -120,10 +120,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # NOTE: Currently, this self.use_aclgraph is only used in
-        # UnquantizedFusedMoEMethod.forward_oot to decide whether to use in
-        # ops/fused_moe.py:568 to circumvent torch.randint_like not supported issue.
-        # Once torch.randint_like is supported or removed, this flag can be removed.
         vllm_config = get_current_vllm_config()
         self.use_aclgraph = (vllm_config.compilation_config.level
                              == CompilationLevel.PIECEWISE
@@ -131,8 +127,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.transpose = True
 
     def process_weights_after_loading(self, layer):
-        super(UnquantizedFusedMoEMethod,
-              self).process_weights_after_loading(layer)
+        super().process_weights_after_loading(layer)
         if self.transpose:
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(
                 1, 2).contiguous()
