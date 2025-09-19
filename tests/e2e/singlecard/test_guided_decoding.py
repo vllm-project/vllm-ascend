@@ -28,9 +28,10 @@ from vllm.sampling_params import SamplingParams
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.10.2"):
-    from vllm.sampling_params import StructuredOutputsParams
+    from vllm.sampling_params import \
+        GuidedDecodingParams as StructuredOutputsParams
 else:
-    from vllm.sampling_params import GuidedDecodingParams as StructuredOutputsParams
+    from vllm.sampling_params import StructuredOutputsParams
 
 from tests.e2e.conftest import VllmRunner
 
