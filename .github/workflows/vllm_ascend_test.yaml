@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: 'test'
+name: 'ascend test'
 
 on:
   push:
@@ -43,7 +43,6 @@ jobs:
     uses: ./.github/workflows/pre-commit.yml
 
   changes:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
@@ -123,7 +122,8 @@ jobs:
           --ignore=tests/ut/patch/worker/patch_common/test_patch_minicpm.py
 
       - name: Upload coverage to Codecov
-        if: ${{ matrix.vllm_version != 'v0.10.2' }}
+        # only upload coverage when commits merged
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: codecov/codecov-action@v5
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
@@ -133,132 +133,17 @@ jobs:
           verbose: true
 
   e2e-light:
+    name: e2e-light
+    strategy:
+      matrix:
+        vllm_version: [c60e6137f0bf2034853919b3a9d705d7e06b93cf, v0.10.2]
+    # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
     if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
-    strategy:
-      max-parallel: 2
-      matrix:
-        os: [linux-aarch64-a2-1]
-        vllm_version: [c60e6137f0bf2034853919b3a9d705d7e06b93cf, v0.10.2]
-    name: singlecard e2e test - light
-    runs-on: ${{ matrix.os }}
-    container:
+    uses: ./.github/workflows/_e2e_test.yaml
+    with:
+      vllm: v0.10.2
+      runner: linux-aarch64-a2
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
-      env:
-        VLLM_LOGGING_LEVEL: ERROR
-        VLLM_USE_MODELSCOPE: True
-    steps:
-      - name: Check npu and CANN info
-        run: |
-          npu-smi info
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-
-      - name: Config mirrors
-        run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
-          apt-get update -y
-          apt install git -y
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ matrix.vllm_version }}
-          path: ./vllm-empty
-          fetch-depth: 1
-
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
-        run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
-
-      - name: Install vllm-project/vllm-ascend
-        env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
-
-      - name: Run e2e test
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
-        run: |
-          pytest -sv tests/e2e/singlecard/test_aclgraph.py
-          pytest -sv tests/e2e/singlecard/test_quantization.py
-          pytest -sv tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
-
-  e2e-2-cards-light:
-    needs: [e2e-light]
-    if: ${{ needs.e2e-light.result == 'success' }}
-    strategy:
-      max-parallel: 2
-      matrix:
-        os: [linux-aarch64-a2-2]
-        vllm_version: [c60e6137f0bf2034853919b3a9d705d7e06b93cf, v0.10.2]
-    name: multicard e2e test - light
-    runs-on: ${{ matrix.os }}
-    container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
-      env:
-        VLLM_LOGGING_LEVEL: ERROR
-        VLLM_USE_MODELSCOPE: True
-    steps:
-      - name: Check npu and CANN info
-        run: |
-          npu-smi info
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-
-      - name: Config mirrors
-        run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
-          apt-get update -y
-          apt install git -y
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ matrix.vllm_version }}
-          path: ./vllm-empty
-          fetch-depth: 1
-
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
-        run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
-
-      - name: Install vllm-project/vllm-ascend
-        env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
-
-      - name: Run vllm-project/vllm-ascend test
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
-        run: |
-          pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
+      type: light
