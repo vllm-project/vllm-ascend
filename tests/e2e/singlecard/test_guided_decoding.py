@@ -146,11 +146,6 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
         "top_p": 0.95,
     })
 
-    sampling_params = SamplingParams(
-        temperature=0.8,
-        top_p=0.95,
-        guided_decoding=StructuredOutputsParams(regex=sample_regex))
-
     with VllmRunner(
             MODEL_NAME,
             seed=0,
