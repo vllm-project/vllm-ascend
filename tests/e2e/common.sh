@@ -14,7 +14,7 @@ _err() { _red "Error: $*" && exit 1; }
 
 CURL_TIMEOUT=1
 CURL_COOLDOWN=5
-CURL_MAX_TRIES=180
+CURL_MAX_TRIES=300
 
 function wait_url_ready() {
   local serve_name="$1"
