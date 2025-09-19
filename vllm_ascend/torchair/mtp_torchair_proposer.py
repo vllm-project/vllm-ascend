@@ -18,7 +18,6 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.ops.common_fused_moe import process_weights_after_loading
 from vllm_ascend.spec_decode import MtpProposer
 from vllm_ascend.torchair.models.torchair_deepseek_mtp import TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
@@ -200,7 +199,6 @@ class MtpTorchairProposer(MtpProposer):
                 positions[:num_scheduled_tokens],
                 hidden_states[:num_scheduled_tokens],
                 attn_metadata.slot_mapping[:num_scheduled_tokens],
-                is_torchair_graph=self.runner._build_drafter_prepare_inputs_torchair_param(),
             )
 
         draft_token_ids = self._propose(
@@ -226,7 +224,6 @@ class MtpTorchairProposer(MtpProposer):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         slot_mapping: torch.Tensor,
-        is_torchair_graph: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
                torch.Tensor, torch.Tensor]:
         # cu_target_query_lens: [0, a, a + b, a + b + c]
@@ -241,39 +238,16 @@ class MtpTorchairProposer(MtpProposer):
                              cu_target_query_lens[:-1])
         # [a, b, c] -> [a - n1, b - n2, c - n3]
         num_tokens_per_req = query_len_per_req - num_rejected_tokens
-        if is_torchair_graph:
-            cu_num_tokens = cu_target_query_lens
-            relative_index = query_len_per_req - num_rejected_tokens - 1
-            token_indices = cu_num_tokens[:-1] + relative_index
-            # the seq len of each bath is padded to 1+num_speculative_tokens, thus input is same as the main model
-            target_token_ids = token_ids
-            target_positions = positions
-            target_hidden_states = hidden_states
-            target_slot_mapping = slot_mapping
-        else:
-            cu_num_tokens = torch.empty_like(cu_target_query_lens)
-            torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
-            cu_num_tokens[0] = 0
 
-            # FIXME(woosuk): Avoid synchronization.
-            num_tokens = cu_num_tokens[-1].item()
-            token_indices = torch.zeros(
-                num_tokens,
-                dtype=torch.int32,
-                device=cu_num_tokens.device,
-            )
+        cu_num_tokens = cu_target_query_lens
+        relative_index = query_len_per_req - num_rejected_tokens - 1
+        token_indices = cu_num_tokens[:-1] + relative_index
+        # the seq len of each bath is padded to 1+num_speculative_tokens, thus input is same as the main model
+        target_token_ids = token_ids
+        target_positions = positions
+        target_hidden_states = hidden_states
+        target_slot_mapping = slot_mapping
 
-            BLOCK_SIZE = 1024
-            self._prepare_input_kernel(
-                token_indices,
-                cu_target_query_lens,
-                cu_num_tokens,
-                block_size=BLOCK_SIZE,
-            )
-            target_token_ids = token_ids[token_indices]
-            target_positions = positions[token_indices]
-            target_hidden_states = hidden_states[token_indices]
-            target_slot_mapping = slot_mapping[token_indices]
         return cu_num_tokens, token_indices, target_token_ids, target_positions, target_hidden_states, target_slot_mapping
 
     def _propose(
