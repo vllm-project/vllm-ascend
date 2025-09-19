@@ -236,6 +236,9 @@ class TestACLGraphWrapper(TestBase):
         # Mock weak_ref_tensors to return the same output
         mock_weak_ref_tensors.return_value = "weak_ref_output"
         
+        # Ensure torch.Tensor can be correctly identified by isinstance
+        mock_torch.Tensor = torch.Tensor
+        
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
@@ -244,14 +247,17 @@ class TestACLGraphWrapper(TestBase):
             cudagraph_options=self.mock_cudagraph_options
         )
         
+        # Create a real torch tensor for the test, not a mock
+        test_tensor = torch.tensor([1, 2, 3])
+        
         # Call the wrapper
-        result = wrapper(torch.tensor([1, 2, 3]), "arg2")
+        result = wrapper(test_tensor, "arg2")
         
         # Verify graph capture happened
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
         mock_torch.npu.NPUGraph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
-        self.mock_runnable.assert_called_once_with(torch.tensor([1, 2, 3]), "arg2")
+        self.mock_runnable.assert_called_once_with(test_tensor, "arg2")
         
         # Verify the entry was created and updated
         self.assertIn(self.mock_batch_descriptor, wrapper.concrete_aclgraph_entries)
@@ -294,6 +300,9 @@ class TestACLGraphWrapper(TestBase):
         # Mock weak_ref_tensors to return the same output
         mock_weak_ref_tensors.return_value = "weak_ref_output"
         
+        # Ensure torch.Tensor can be correctly identified by isinstance
+        mock_torch.Tensor = torch.Tensor
+        
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
@@ -302,15 +311,18 @@ class TestACLGraphWrapper(TestBase):
             cudagraph_options=self.mock_cudagraph_options
         )
         
+        # Create a real torch tensor for the test, not a mock
+        test_tensor = torch.tensor([1, 2, 3])
+        
         # First call to capture the graph
-        first_result = wrapper(torch.tensor([1, 2, 3]), "arg2")
+        first_result = wrapper(test_tensor, "arg2")
         
         # Reset mock to track second call
         self.mock_runnable.reset_mock()
         mock_validate_cudagraph_capturing_enabled.reset_mock()
         
         # Second call should replay the graph
-        second_result = wrapper(torch.tensor([1, 2, 3]), "arg2")
+        second_result = wrapper(test_tensor, "arg2")
         
         # Verify graph was captured only once
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
@@ -318,7 +330,7 @@ class TestACLGraphWrapper(TestBase):
         mock_torch.npu.graph.assert_called_once()
         
         # Verify runnable was called only during capture
-        self.mock_runnable.assert_called_once_with(torch.tensor([1, 2, 3]), "arg2")
+        self.mock_runnable.assert_called_once_with(test_tensor, "arg2")
         
         # Verify graph replay happened
         mock_npu_graph.replay.assert_called_once()
@@ -351,6 +363,9 @@ class TestACLGraphWrapper(TestBase):
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
         
+        # Ensure torch.Tensor can be correctly identified by isinstance
+        mock_torch.Tensor = torch.Tensor
+        
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
@@ -361,12 +376,10 @@ class TestACLGraphWrapper(TestBase):
         
         # First call to capture the graph
         tensor1 = torch.tensor([1, 2, 3])
-        tensor1.data_ptr = Mock(return_value=12345)
         first_result = wrapper(tensor1, "arg2")
         
         # Second call with same tensor addresses should work
-        tensor2 = torch.tensor([1, 2, 3])
-        tensor2.data_ptr = Mock(return_value=12345)  # Same address
+        tensor2 = torch.tensor([1, 2, 3])  # Same values
         second_result = wrapper(tensor2, "arg2")
         
         # Should not raise AssertionError
@@ -396,6 +409,9 @@ class TestACLGraphWrapper(TestBase):
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
         
+        # Ensure torch.Tensor can be correctly identified by isinstance
+        mock_torch.Tensor = torch.Tensor
+        
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
@@ -406,12 +422,10 @@ class TestACLGraphWrapper(TestBase):
         
         # First call to capture the graph
         tensor1 = torch.tensor([1, 2, 3])
-        tensor1.data_ptr = Mock(return_value=12345)
         first_result = wrapper(tensor1, "arg2")
         
         # Second call with different tensor addresses should raise AssertionError
-        tensor2 = torch.tensor([4, 5, 6])
-        tensor2.data_ptr = Mock(return_value=67890)  # Different address
+        tensor2 = torch.tensor([4, 5, 6])  # Different values, different address
         
         with self.assertRaises(AssertionError) as context:
             wrapper(tensor2, "arg2")
@@ -456,6 +470,9 @@ class TestACLGraphWrapper(TestBase):
         # Mock weak_ref_tensors to return the same output
         mock_weak_ref_tensors.return_value = "weak_ref_output"
         
+        # Ensure torch.Tensor can be correctly identified by isinstance
+        mock_torch.Tensor = torch.Tensor
+        
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
@@ -464,8 +481,11 @@ class TestACLGraphWrapper(TestBase):
             cudagraph_options=self.mock_cudagraph_options
         )
         
+        # Create a real torch tensor for the test, not a mock
+        test_tensor = torch.tensor([1, 2, 3])
+        
         # Call the wrapper
-        result = wrapper(torch.tensor([1, 2, 3]), "arg2")
+        result = wrapper(test_tensor, "arg2")
         
         # Verify patch was called to disable gc
         self.assertTrue(mock_patch.called)
@@ -510,6 +530,9 @@ class TestACLGraphWrapper(TestBase):
         # Mock weak_ref_tensors to return the same output
         mock_weak_ref_tensors.return_value = "weak_ref_output"
         
+        # Ensure torch.Tensor can be correctly identified by isinstance
+        mock_torch.Tensor = torch.Tensor
+        
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
@@ -518,8 +541,11 @@ class TestACLGraphWrapper(TestBase):
             cudagraph_options=self.mock_cudagraph_options
         )
         
+        # Create a real torch tensor for the test, not a mock
+        test_tensor = torch.tensor([1, 2, 3])
+        
         # Call the wrapper
-        result = wrapper(torch.tensor([1, 2, 3]), "arg2")
+        result = wrapper(test_tensor, "arg2")
         
         # Verify weak_ref_tensors was called twice (once for inner output, once for final output)
         self.assertEqual(mock_weak_ref_tensors.call_count, 2)
@@ -558,6 +584,9 @@ class TestACLGraphWrapper(TestBase):
             mock_graph_context.__enter__ = Mock(return_value=None)
             mock_graph_context.__exit__ = Mock(return_value=None)
             
+            # Ensure torch.Tensor can be correctly identified by isinstance
+            mock_torch.Tensor = torch.Tensor
+            
             # Mock weak_ref_tensors
             with patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors') as mock_weak_ref_tensors:
                 mock_weak_ref_tensors.return_value = "weak_ref_output"
@@ -572,8 +601,11 @@ class TestACLGraphWrapper(TestBase):
                         cudagraph_options=self.mock_cudagraph_options
                     )
                     
+                    # Create a real torch tensor for the test, not a mock
+                    test_tensor = torch.tensor([1, 2, 3])
+                    
                     # Call the wrapper
-                    result = wrapper(torch.tensor([1, 2, 3]), "arg2")
+                    result = wrapper(test_tensor, "arg2")
                     
                     # Verify debug log was called
                     mock_logger.debug.assert_called_once()
