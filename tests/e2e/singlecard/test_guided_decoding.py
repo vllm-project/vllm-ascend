@@ -23,7 +23,7 @@ import jsonschema
 import pytest
 import regex as re
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from tests.e2e.conftest import VllmRunner
 
@@ -87,7 +87,7 @@ def test_guided_json_completion(guided_decoding_backend: str,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=500,
-        guided_decoding=GuidedDecodingParams(json=sample_json_schema))
+        guided_decoding=StructuredOutputsParams(json=sample_json_schema))
 
     with VllmRunner(
             MODEL_NAME,
@@ -125,7 +125,7 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_decoding=GuidedDecodingParams(regex=sample_regex))
+        guided_decoding=StructuredOutputsParams(regex=sample_regex))
 
     with VllmRunner(
             MODEL_NAME,
