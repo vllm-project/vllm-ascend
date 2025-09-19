@@ -2202,12 +2202,50 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.finished_req_ids)
         return None, None
 
-    def _build_attention_metadata(self, with_prefill, num_reqs, skip_attn):
-        if skip_attn:
-            attn_metadata = None
-        else:
-            # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
-            attn_metadata = None
+    def _build_attention_metadata(self, create_mixed_batch, num_reqs,
+                                  num_tokens, max_query_len, force_attention):
+        attn_metadata: Optional[dict[str, Any]] = None
+
+        if force_attention:
+            attn_metadata = {}
+
+            if create_mixed_batch:
+                raise NotImplementedError(
+                    "force_attention=True is not supported for mixed batches.")
+            else:
+                seq_lens = self.model_config.max_model_len
+            self.seq_lens_np[:num_reqs] = seq_lens
+            self.seq_lens_np[num_reqs:] = 0
+
+            num_computed_tokens_cpu = (
+                self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
+
+            for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                    self.kv_cache_config.kv_cache_groups):
+                block_table_tensor = self.input_batch.block_table[
+                    kv_cache_group_id].get_device_tensor()
+                common_attn_metadata = AscendCommonAttentionMetadata(
+                    query_start_loc=self.query_start_loc[:num_reqs + 1],
+                    query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
+                                                                 1],
+                    seq_lens_cpu=self.seq_lens_cpu,
+                    seq_lens=self.seq_lens_cpu[:num_reqs],
+                    num_reqs=num_reqs,
+                    num_actual_tokens=num_tokens,
+                    actual_seq_lengths_q=self.actual_seq_lengths_q,
+                    block_table_tensor=block_table_tensor[:num_reqs],
+                    slot_mapping_cpu=self.slot_mapping_cpu,
+                    num_computed_tokens_cpu=num_computed_tokens_cpu,
+                    max_query_len=max_query_len,
+                    decode_token_per_req=self.decode_token_per_req,
+                )
+
+                for attn_group in self.attn_groups[kv_cache_group_id]:
+                    attn_metadata_i = attn_group.metadata_builder\
+                        .build_for_graph_capture(common_attn_metadata)
+                    for layer_name in kv_cache_group_spec.layer_names:
+                        attn_metadata[layer_name] = attn_metadata_i
+
         return attn_metadata
 
     def _generate_dummy_run_hidden_states(self, with_prefill,
@@ -2293,9 +2331,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.is_kv_producer:
             with_prefill = True
 
-        attn_metadata = self._build_attention_metadata(with_prefill,
-                                                       num_reqs,
-                                                       skip_attn=True)
+        attn_metadata = self._build_attention_metadata(
+            with_prefill,
+            num_reqs,
+            num_tokens,
+            max_query_len,
+            force_attention,
+        )
 
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
@@ -3207,6 +3249,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                 uniform_decode=uniform_decode)
             self._dummy_run(num_tokens,
                             aclgraph_runtime_mode=aclgraph_runtime_mode,
+                            force_attention=force_attention,
                             uniform_decode=uniform_decode)
 
     def _capture_model(self):

@@ -228,7 +228,7 @@ class AscendAttentionMetadataBuilder:
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: nn.Module,
+        model: Optional[nn.Module] = None,
     ):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -273,6 +273,24 @@ class AscendAttentionMetadataBuilder:
             attn_state=attn_state,
             enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
             is_only_prefill=common_attn_metadata.is_only_prefill)
+        return attn_metadata
+
+    def build_for_graph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
+    ):
+        if attn_state == AscendAttentionState.DecodeOnly:
+            attn_metadata = self.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+        else:
+            raise NotImplementedError(
+                "Currently we only support building dummy metadata for DecodeOnly state"
+            )
+
+        attn_metadata.attn_state = attn_state
         return attn_metadata
 
 
