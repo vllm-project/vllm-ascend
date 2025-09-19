@@ -233,10 +233,8 @@ class TestACLGraphWrapper(TestBase):
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
         
-        # Mock weak_ref_tensors to simulate the actual behavior:
-        # 1. First call (inside the graph context) should return "inner_output"
-        # 2. Second call (for entry.output) should return "weak_ref_output"
-        mock_weak_ref_tensors.side_effect = ["inner_output", "weak_ref_output"]
+        # Mock weak_ref_tensors to return the same output
+        mock_weak_ref_tensors.return_value = "weak_ref_output"
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
@@ -302,10 +300,8 @@ class TestACLGraphWrapper(TestBase):
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
         
-        # Mock weak_ref_tensors to simulate the actual behavior:
-        # 1. First call (inside the graph context) should return "inner_output"
-        # 2. Second call (for entry.output) should return "weak_ref_output"
-        mock_weak_ref_tensors.side_effect = ["inner_output", "weak_ref_output"]
+        # Mock weak_ref_tensors to return the same output
+        mock_weak_ref_tensors.return_value = "weak_ref_output"
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
@@ -354,7 +350,8 @@ class TestACLGraphWrapper(TestBase):
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
-    def test_call_with_debug_mode_input_address_check(self, mock_envs, mock_current_platform, 
+    @patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors')
+    def test_call_with_debug_mode_input_address_check(self, mock_weak_ref_tensors, mock_envs, mock_current_platform, 
                                                     mock_get_forward_context, mock_validate_cudagraph_capturing_enabled,
                                                     mock_torch):
         """Test __call__ method with debug mode input address checking"""
@@ -372,6 +369,9 @@ class TestACLGraphWrapper(TestBase):
         mock_torch.npu.graph.return_value = mock_graph_context
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
+        
+        # Mock weak_ref_tensors
+        mock_weak_ref_tensors.return_value = "weak_ref_output"
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
@@ -404,7 +404,8 @@ class TestACLGraphWrapper(TestBase):
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
     @patch('vllm_ascend.compilation.acl_graph.envs')
-    def test_call_with_debug_mode_input_address_mismatch(self, mock_envs, mock_current_platform, 
+    @patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors')
+    def test_call_with_debug_mode_input_address_mismatch(self, mock_weak_ref_tensors, mock_envs, mock_current_platform, 
                                                        mock_get_forward_context, mock_validate_cudagraph_capturing_enabled,
                                                        mock_torch):
         """Test __call__ method with debug mode input address mismatch raises AssertionError"""
@@ -422,6 +423,9 @@ class TestACLGraphWrapper(TestBase):
         mock_torch.npu.graph.return_value = mock_graph_context
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
+        
+        # Mock weak_ref_tensors
+        mock_weak_ref_tensors.return_value = "weak_ref_output"
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
