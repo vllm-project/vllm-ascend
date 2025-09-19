@@ -50,8 +50,7 @@ class AttentionMaskBuilder:
         self._seq_len_cached = attn_mask.shape[0]
         self.attn_mask_cache = attn_mask
         self.device = device
-        if self.device:
-
+        if torch.version.cann.startswith("8.3"):
             assigned_mask_dim = 2048
             self.chunked_prefill_attn_mask = torch.triu(torch.ones(assigned_mask_dim, assigned_mask_dim), diagonal=1
             ).to(torch.int8).to(device)

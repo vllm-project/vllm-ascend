@@ -60,7 +60,6 @@ _IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
-_CURRENT_TORCH_NPU_VERSION = torch_npu.__version__
 
 def is_310p():
     global _IS_310P
