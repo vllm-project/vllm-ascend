@@ -18,6 +18,7 @@
 #
 import json
 import os
+from typing import Any, Dict
 
 import jsonschema
 import pytest
@@ -89,18 +90,27 @@ def sample_json_schema():
     }
 
 
+def construct_sampling_params(
+        struct_param, sampling_kwargs: Dict[str, Any]) -> SamplingParams:
+    if vllm_version_is("0.10.2"):
+        return SamplingParams(guided_decoding=struct_param, **sampling_kwargs)
+    else:
+        return SamplingParams(structured_outputs=struct_param,
+                              **sampling_kwargs)
+
+
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_json_completion(guided_decoding_backend: str,
                                 sample_json_schema):
-    sampling_params = SamplingParams(
-        temperature=1.0,
-        max_tokens=500,
-        guided_decoding=StructuredOutputsParams(json=sample_json_schema))
+    struct_output_params = StructuredOutputsParams(json=sample_json_schema, )
+    sampling_params = construct_sampling_params(struct_output_params, {
+        "temperature": 1.0,
+        "max_tokens": 500,
+    })
 
     with VllmRunner(
             MODEL_NAME,
             seed=0,
-            guided_decoding_backend=guided_decoding_backend,
     ) as vllm_model:
         prompts = [
             f"Give an example JSON for an employee profile "
@@ -130,6 +140,12 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
     if guided_decoding_backend == "outlines":
         pytest.skip("Outlines doesn't support regex-based guided decoding.")
 
+    struct_output_params = StructuredOutputsParams(json=sample_json_schema, )
+    sampling_params = construct_sampling_params(struct_output_params, {
+        "temperature": 0.8,
+        "top_p": 0.95,
+    })
+
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
@@ -138,7 +154,6 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
     with VllmRunner(
             MODEL_NAME,
             seed=0,
-            guided_decoding_backend=guided_decoding_backend,
     ) as vllm_model:
         prompts = [
             f"Give an example IPv4 address with this regex: {sample_regex}"
