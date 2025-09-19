@@ -168,7 +168,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_SP":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_SP", '0'))),
     "VLLM_ASCEND_ENABLE_CP":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CP", '0')))
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CP", '0'))),
+    "VLLM_ASCEND_DENSE_MODEL":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_DENSE_MODEL", '0'))),
 }
 
 # end-env-vars-definition

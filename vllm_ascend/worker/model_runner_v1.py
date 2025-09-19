@@ -327,17 +327,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
                                      MtpProposer]] = None
-        self.actual_seq_lengths_q = []
+        self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
-            self.actual_seq_lengths_q = [
-                len for len in
-                range(self.decode_token_per_req, self.max_num_tokens +
-                      1, self.decode_token_per_req)
-            ]
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
@@ -2223,13 +2218,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
                 hidden_states, aux_hidden_states = hidden_states
 
-        kv_connector_output = None
-        if finished_sending is not None or finished_recving is not None:
-            kv_connector_output = KVConnectorOutput(
-                finished_sending=finished_sending,
-                finished_recving=finished_recving)
-        else:
-            kv_connector_output = None
+        kv_connector_output = KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving)
         finished_sending = None
         finished_recving = None
         with ProfileExecuteDuration().capture_async("post process"):
@@ -2479,8 +2470,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # For the case of no forward caused by receiving remote kv,
             # one round of dummy inference is necessary
             # to prevent hang over the collective calls.
-        if not finished_sending and not finished_recving:
-            return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = KVConnectorOutput(
