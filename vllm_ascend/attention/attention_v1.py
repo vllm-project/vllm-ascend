@@ -568,12 +568,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                    output)
             # Normal V1 situation.
             else:
+                num_tokens = attn_metadata.query_start_loc[-1]
+                query = query[:num_tokens]
                 output = self._forward_v1_style(query, attn_metadata, output)
 
         # to make in-place change to the output tensor
         if hasattr(layer, 'quant_method') and use_kv_cache_int8:
             output = output.view(num_tokens, self.num_heads, self.head_size)
-        ori_output[:, :, :] = output[:num_tokens, :, :]
+        ori_output[:num_tokens, :, :] = output[:num_tokens, :, :]
         return output.view(num_tokens, self.hidden_size)
 
 
