@@ -5,13 +5,9 @@ import torch.nn as nn
 import torchair
 import vllm.envs as envs_vllm
 from torchair import patch_for_hcom
-from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, get_forward_context
-from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.utils import (
-    process_weights_after_loading, set_default_torch_dtype)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -19,10 +15,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
-from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
-from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
-    TorchairDeepSeekMTP
+from vllm_ascend.spec_decode import MtpProposer
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
 from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
@@ -30,7 +23,7 @@ from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 PADDING_SLOT_ID = -1
 
 
-class MtpProposer(Proposer):
+class MtpTorchairProposer(MtpProposer):
 
     def __init__(
         self,
@@ -38,67 +31,9 @@ class MtpProposer(Proposer):
         device,
         runner,
     ):
-        self.name = SpecDcodeType.MTP
-        self.vllm_config = vllm_config
-        self.device = device
-        self.runner = runner
-        self.num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
-
-        # persistent buffers for graph
-        self.input_ids = torch.zeros(self.runner.max_num_tokens,
-                                     dtype=torch.int32,
-                                     device=self.device)
-        self.positions = torch.zeros(self.runner.max_num_tokens,
-                                     dtype=torch.int64,
-                                     device=self.device)
-        self.hidden_states = torch.zeros(
-            (self.runner.max_num_tokens,
-             vllm_config.model_config.get_hidden_size()),
-            dtype=self.runner.dtype,
-            device=self.device)
+        super().__init__(vllm_config, device, runner)
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore
-        self.torchair_graph_enabled = get_ascend_config(
-        ).torchair_graph_config.enabled
-        # We need +1 here because the arange is used to set query_start_loc,
-        # which has one more element than batch_size.
-        self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
-                                   1,
-                                   device=self.runner.device,
-                                   dtype=torch.int32)
-
-    def load_model(self, model) -> None:
-        loader = get_model_loader(self.vllm_config.load_config)
-
-        target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
-        draft_model_config = \
-            self.vllm_config.speculative_config.draft_model_config
-        target_device = self.vllm_config.device_config.device
-
-        with set_default_torch_dtype(
-                draft_model_config.dtype), set_current_vllm_config(
-                    self.vllm_config):
-            if self.torchair_graph_enabled:
-                self.model = TorchairDeepSeekMTP(
-                    vllm_config=self.vllm_config).to(target_device)
-            else:
-                self.model = CustomDeepSeekMTP(
-                    vllm_config=self.vllm_config).to(target_device)
-
-        draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
-            target_attn_layer_names)
-
-        assert len(draft_attn_layer_names) == 1
-        self.attn_layer_name = list(draft_attn_layer_names)
-
-        self.model.load_weights(
-            loader.get_all_weights(
-                self.vllm_config.speculative_config.draft_model_config,
-                self.model))
-        process_weights_after_loading(self.model, draft_model_config,
-                                      target_device)
 
     @torch.inference_mode()
     def dummy_run(self,
@@ -107,19 +42,10 @@ class MtpProposer(Proposer):
                   skip_attn: bool = False,
                   num_reqs: int = 0,
                   num_tokens_across_dp=None) -> None:
-        if not self.torchair_graph_enabled:
-            # TODO: adapt enable_dbo later
-            (num_tokens, num_tokens_across_dp, with_prefill,
-             _) = self.runner._sync_metadata_across_dp(num_tokens,
-                                                       with_prefill, False)
-
         moe_comm_method = self.runner._select_moe_comm_method(
             num_tokens, with_prefill)
 
-        is_running_torchair = self.torchair_graph_enabled and \
-            not with_prefill
-
-        if is_running_torchair:
+        if not with_prefill:
             skip_attn = False
         if skip_attn:
             attn_metadata = None
@@ -149,7 +75,7 @@ class MtpProposer(Proposer):
                     moe_comm_method=moe_comm_method,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=0):
-                if is_running_torchair:
+                if not with_prefill:
                     assert attn_metadata is not None
                     torch._dynamo.mark_static(input_ids)
                     torch._dynamo.mark_static(positions)
@@ -341,7 +267,7 @@ class MtpProposer(Proposer):
         self.input_ids[:num_tokens - 1] = target_token_ids[1:]
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-        if token_indices is not None and self.torchair_graph_enabled:
+        if token_indices is not None:
             last_token_indices = token_indices
 
         self.input_ids[last_token_indices] = next_token_ids
@@ -359,10 +285,8 @@ class MtpProposer(Proposer):
         #     input_batch=self.runner.input_batch,
         #     scheduler_output=self.runner.scheduler_output,
         # )
-        is_running_torchair = self.torchair_graph_enabled and \
-            not self.runner.with_prefill
 
-        if is_running_torchair:
+        if not self.runner.with_prefill:
             # Torchair graph mode, padding is same as the main model
             num_input_tokens = self.runner.graph_pad_size
         elif (self.runner.use_aclgraph
@@ -395,32 +319,19 @@ class MtpProposer(Proposer):
             num_computed_tokens_cpu=None,
             seq_lens=None)
 
-        if not self.torchair_graph_enabled:
-            builder = self.runner.attn_groups[0][0].metadata_builder
-            attn_metadata_mtp = builder.build(0, common_attn_metadata,
-                                              self.runner.get_model())
 
-            attn_metadata = {}
-            for layer_name in self.attn_layer_name:
-                attn_metadata[layer_name] = attn_metadata_mtp
 
-        else:
-            attn_metadata = self.runner.attn_metadata_builder.build(
-                0, common_attn_metadata, self.runner.get_model())
+
+        attn_metadata = self.runner.attn_metadata_builder.build(
+            0, common_attn_metadata, self.runner.get_model())
 
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
 
-        if not self.torchair_graph_enabled:
-            # torch mode need to update num_tokens_across_dp
-            # TODO: adapt enable_dbo later
-            (num_input_tokens, num_tokens_across_dp, with_prefill,
-             _) = self.runner._sync_metadata_across_dp(
-                 num_input_tokens, self.runner.with_prefill, False)
-        else:
-            # torchair mode can reuse self.runner.num_tokens_across_dp
-            num_tokens_across_dp = self.runner.num_tokens_across_dp
-            with_prefill = self.runner.with_prefill
+
+        # torchair mode can reuse self.runner.num_tokens_across_dp
+        num_tokens_across_dp = self.runner.num_tokens_across_dp
+        with_prefill = self.runner.with_prefill
 
         moe_comm_method = self.runner._select_moe_comm_method(
             num_input_tokens, with_prefill)
@@ -444,9 +355,9 @@ class MtpProposer(Proposer):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata
-                    if self.torchair_graph_enabled:
-                        model_kwargs["kv_caches"] = self.runner.kv_caches[-1:]
-                    if is_running_torchair:
+
+                    model_kwargs["kv_caches"] = self.runner.kv_caches[-1:]
+                    if not self.runner.with_prefill:
                         torchair_compiled_model = self._get_torchair_lazy_compiled_model(
                             num_input_tokens)
                         hidden_states = torchair_compiled_model(
@@ -493,16 +404,14 @@ class MtpProposer(Proposer):
 
             # prepare next mtp inputs
             # mtp>1: prefill skip or decode skip last loop
-            if with_prefill and self.torchair_graph_enabled:
+            if with_prefill:
                 for _ in range(self.num_speculative_tokens - 1):
                     draft_token_ids_list.append(draft_token_ids)
             if step == self.num_speculative_tokens - 1 or with_prefill:
                 break
 
-            if not self.torchair_graph_enabled:
-                attn_metadata_i = attn_metadata[self.attn_layer_name[0]]
-            else:
-                attn_metadata_i = attn_metadata
+
+            attn_metadata_i = attn_metadata
 
             if step == 0:
                 positions = target_positions[last_token_indices]
@@ -513,7 +422,7 @@ class MtpProposer(Proposer):
                 last_token_indices = self.arange[:batch_size]
                 if attn_metadata_i.num_decode_tokens != 0:
                     attn_metadata_i.num_decode_tokens = batch_size
-                if is_running_torchair:
+                if not self.runner.with_prefill:
                     attn_metadata_i.num_actual_tokens = batch_size
                     attn_metadata_i.query_lens = [1] * batch_size
 
@@ -628,23 +537,4 @@ class MtpProposer(Proposer):
                     ge_cache=False)
             return self.torchair_compiled_models[batch_size]
 
-    # TODO Using torch instead of triton may result in poor performance
-    def _prepare_input_kernel(self, out_ptr: torch.Tensor,
-                              cu_query_lens: torch.Tensor,
-                              cu_num_tokens: torch.Tensor, block_size: int):
-        device = cu_query_lens.device
-        dtype = out_ptr.dtype
 
-        offsets = torch.arange(block_size, device=device, dtype=dtype)
-        start_pos = cu_num_tokens[:-1]
-        end_pos = cu_num_tokens[1:]
-        num_tokens = end_pos - start_pos
-
-        global_indices = (start_pos.view(-1, 1) + offsets.view(1, -1))
-        values = (cu_query_lens[:-1].view(-1, 1) + offsets.view(1, -1))
-
-        mask = (offsets.view(1, -1) < num_tokens.view(-1, 1))
-
-        global_indices_flat = global_indices[mask]
-        values_flat = values[mask]
-        out_ptr[global_indices_flat] = values_flat
