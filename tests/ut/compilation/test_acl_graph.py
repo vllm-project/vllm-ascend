@@ -233,8 +233,10 @@ class TestACLGraphWrapper(TestBase):
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
         
-        # Mock weak_ref_tensors to return the same output
-        mock_weak_ref_tensors.return_value = "weak_ref_output"
+        # Mock weak_ref_tensors to simulate the actual behavior:
+        # 1. First call (inside the graph context) should return "inner_output"
+        # 2. Second call (for entry.output) should return "weak_ref_output"
+        mock_weak_ref_tensors.side_effect = ["inner_output", "weak_ref_output"]
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
@@ -300,8 +302,10 @@ class TestACLGraphWrapper(TestBase):
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
         
-        # Mock weak_ref_tensors to return the same output
-        mock_weak_ref_tensors.return_value = "weak_ref_output"
+        # Mock weak_ref_tensors to simulate the actual behavior:
+        # 1. First call (inside the graph context) should return "inner_output"
+        # 2. Second call (for entry.output) should return "weak_ref_output"
+        mock_weak_ref_tensors.side_effect = ["inner_output", "weak_ref_output"]
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
@@ -323,20 +327,20 @@ class TestACLGraphWrapper(TestBase):
         # First call to capture the graph
         first_result = wrapper(test_tensor, "arg2")
         
-        # Reset mock to track second call
-        self.mock_runnable.reset_mock()
-        mock_validate_cudagraph_capturing_enabled.reset_mock()
-        
-        # Second call should replay the graph
-        second_result = wrapper(test_tensor, "arg2")
-        
-        # Verify graph was captured only once
+        # Verify graph capture happened during first call
         mock_validate_cudagraph_capturing_enabled.assert_called_once()
         mock_torch.npu.NPUGraph.assert_called_once()
         mock_torch.npu.graph.assert_called_once()
         
-        # Verify runnable was called only during capture
-        self.mock_runnable.assert_called_once_with(test_tensor, "arg2")
+        # Reset mock to track second call
+        self.mock_runnable.reset_mock()
+        mock_npu_graph.reset_mock()
+        
+        # Second call should replay the graph
+        second_result = wrapper(test_tensor, "arg2")
+        
+        # Verify runnable was called only during capture (not during replay)
+        self.mock_runnable.assert_not_called()
         
         # Verify graph replay happened
         mock_npu_graph.replay.assert_called_once()
@@ -371,6 +375,10 @@ class TestACLGraphWrapper(TestBase):
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
+        
+        # Create a mock tensor as the output of runnable
+        mock_output_tensor = torch.tensor([4, 5, 6])
+        self.mock_runnable.return_value = mock_output_tensor
         
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
@@ -418,6 +426,10 @@ class TestACLGraphWrapper(TestBase):
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
         
+        # Create a mock tensor as the output of runnable
+        mock_output_tensor = torch.tensor([4, 5, 6])
+        self.mock_runnable.return_value = mock_output_tensor
+        
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
             vllm_config=self.mock_vllm_config,
@@ -457,6 +469,7 @@ class TestACLGraphWrapper(TestBase):
         
         # Enable gc_disable option
         self.mock_cudagraph_options.gc_disable = True
+        # weak_ref_output is not enabled by default
         
         # Mock torch.npu.NPUGraph
         mock_npu_graph = MagicMock()
@@ -473,8 +486,10 @@ class TestACLGraphWrapper(TestBase):
         mock_patch.return_value = mock_exit_stack
         mock_exit_stack.enter_context = Mock()
         
-        # Mock weak_ref_tensors to return the same output
-        mock_weak_ref_tensors.return_value = "weak_ref_output"
+        # Mock weak_ref_tensors to simulate the actual behavior:
+        # 1. First call (inside the graph context) should return "inner_output"
+        # 2. Second call (for entry.output) should return "weak_ref_output"
+        mock_weak_ref_tensors.side_effect = ["inner_output", "weak_ref_output"]
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
@@ -504,7 +519,7 @@ class TestACLGraphWrapper(TestBase):
         mock_torch.npu.NPUGraph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
         
-        # Should return the original output (not weak ref)
+        # Should return the original output (not weak ref) since weak_ref_output is not enabled
         self.assertEqual(result, "test_output")
 
     @patch('vllm_ascend.compilation.acl_graph.torch')
@@ -536,8 +551,10 @@ class TestACLGraphWrapper(TestBase):
         mock_graph_context.__enter__ = Mock(return_value=None)
         mock_graph_context.__exit__ = Mock(return_value=None)
         
-        # Mock weak_ref_tensors to return the same output
-        mock_weak_ref_tensors.return_value = "weak_ref_output"
+        # Mock weak_ref_tensors to simulate the actual behavior:
+        # 1. First call (inside the graph context with weak_ref_output=True) should return "weak_ref_output"
+        # 2. Second call (for entry.output) should return "weak_ref_output"
+        mock_weak_ref_tensors.side_effect = ["weak_ref_output", "weak_ref_output"]
         
         # Ensure torch.Tensor can be correctly identified by isinstance
         mock_torch.Tensor = torch.Tensor
@@ -567,8 +584,8 @@ class TestACLGraphWrapper(TestBase):
         mock_torch.npu.NPUGraph.assert_called_once()
         mock_torch.npu.graph.assert_called_once_with(mock_npu_graph, pool=self.mock_graph_pool)
         
-        # Should return the original output (not weak ref)
-        self.assertEqual(result, "test_output")
+        # Should return the weak ref output when weak_ref_output option is enabled
+        self.assertEqual(result, "weak_ref_output")
 
     @patch('vllm_ascend.compilation.acl_graph.get_forward_context')
     @patch('vllm_ascend.compilation.acl_graph.current_platform')
@@ -583,6 +600,7 @@ class TestACLGraphWrapper(TestBase):
         
         # Enable debug logging
         self.mock_cudagraph_options.debug_log_enable = True
+        # weak_ref_output is not enabled by default
         
         # Mock torch
         with patch('vllm_ascend.compilation.acl_graph.torch') as mock_torch:
@@ -601,7 +619,10 @@ class TestACLGraphWrapper(TestBase):
             
             # Mock weak_ref_tensors
             with patch('vllm_ascend.compilation.acl_graph.weak_ref_tensors') as mock_weak_ref_tensors:
-                mock_weak_ref_tensors.return_value = "weak_ref_output"
+                # Mock weak_ref_tensors to simulate the actual behavior:
+                # 1. First call (inside the graph context) should return "inner_output"
+                # 2. Second call (for entry.output) should return "weak_ref_output"
+                mock_weak_ref_tensors.side_effect = ["inner_output", "weak_ref_output"]
                 
                 # Mock validate_cudagraph_capturing_enabled
                 with patch('vllm_ascend.compilation.acl_graph.validate_cudagraph_capturing_enabled'):
@@ -640,8 +661,11 @@ class TestACLGraphWrapper(TestBase):
 
     def test_getattr_attribute_not_exists(self):
         """Test __getattr__ method raises AttributeError for non-existent attributes"""
-        mock_runnable = MagicMock()
-        # Don't set any attributes on mock_runnable
+        # Create a simple object without any attributes
+        class EmptyRunnable:
+            pass
+            
+        mock_runnable = EmptyRunnable()
         
         wrapper = ACLGraphWrapper(
             runnable=mock_runnable,
