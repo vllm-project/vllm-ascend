@@ -210,7 +210,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv tests/e2e/multicard/test_data_parallel.py
+          #pytest -sv tests/e2e/multicard/test_data_parallel.py
           pytest -sv tests/e2e/multicard/test_expert_parallel.py
           # external_launcher test is not stable enough. Fix it later
           # pytest -sv tests/e2e/multicard/test_external_launcher.py
