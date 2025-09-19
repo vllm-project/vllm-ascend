@@ -495,11 +495,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.ring_mla_mask_size = 512
         self.prefill_mask = None
 
-        # Adapt torch air graph mode with spec decoding.
-        speculative_config = vllm_config.speculative_config
-        if speculative_config is not None:
-            self.spec_token_num = speculative_config.num_speculative_tokens
-            assert self.spec_token_num > 0
+        self.speculative_config = vllm_config.speculative_config
 
     def _v_up_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -811,7 +807,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                              self.qk_rope_head_dim)
             input_layout = "BNSD"
 
-        if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
+        if attn_metadata.attn_state in [
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.ChunkedPrefill
+        ] and self.speculative_config is not None:
+            # Use TND layout for pure SpecDecoding and SpecDecoding in ChunkedPrefill
             input_layout = "TND"
             # [bs * q_seq_len, num_heads_per_rank, dim]
             q_nope = q_nope.view(num_tokens, self.num_heads, -1)
