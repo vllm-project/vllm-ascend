@@ -72,6 +72,7 @@ class ServerConfig:
     ) -> None:
         self.data_parallel_address = get_net_interface()[0]
         if not is_disaggregate_prefill and not is_leader:
+            # For multi node dp, the workers connect to the leader server.
             self.headless = True
             self.data_parallel_start_rank = dp_size // world_size
             self.data_parallel_address = get_leader_ip()

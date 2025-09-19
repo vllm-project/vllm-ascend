@@ -189,7 +189,12 @@ class RemoteOpenAIServer:
         return self.proc.poll()
 
     def hang_until_terminated(self) -> None:
-        """Wait until the server process terminates."""
+        """
+        Wait until the server process terminates.
+        This is for headless mode, where the api server
+        process only exits in the leader node.
+        """
+        pass
 
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
