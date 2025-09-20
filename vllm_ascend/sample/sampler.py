@@ -1,12 +1,15 @@
 import torch
 import torch_npu
-from vllm.config import LogprobsMode
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler, random_sample
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
 
-DEFAULT_LOGPROBS_MODE = LogprobsMode.RAW_LOGPROBS
+if vllm_version_is("0.10.2"):
+    from vllm.config import LogprobsMode
+    DEFAULT_LOGPROBS_MODE = LogprobsMode.RAW_LOGPROBS
+else:
+    DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 
 
 class AscendSampler(Sampler):
@@ -65,10 +68,18 @@ class AscendTopKTopPSampler(TopKTopPSampler):
         """Override pytorch native implementation to torch_npu"""
         logits = self._apply_top_k_top_p(logits, k, p)
         logits_to_return = None
-        if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
-            logits_to_return = logits
-        elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
-            logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
+        if vllm_version_is("0.10.2"):
+            if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
+                logits_to_return = logits
+            elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
+                logits_to_return = logits.log_softmax(dim=-1,
+                                                      dtype=torch.float32)
+        else:
+            if self.logprobs_mode == "processed_logits":
+                logits_to_return = logits
+            elif self.logprobs_mode == "processed_logprobs":
+                logits_to_return = logits.log_softmax(dim=-1,
+                                                      dtype=torch.float32)
 
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators), logits_to_return
