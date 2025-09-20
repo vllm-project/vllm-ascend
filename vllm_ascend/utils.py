@@ -454,3 +454,16 @@ def delete_torchair_cache_file():
         shutil.rmtree(torch_air_abs_path)
     except FileNotFoundError:
         pass
+
+
+def npu_stream_switch(target_stream: torch.npu.Stream,
+                      *,
+                      enabled: bool = True):
+    """
+    Switch to the target stream if enabled is True.
+    Otherwise, do nothing.
+    """
+    if not enabled:
+        return nullcontext()
+    assert target_stream is not None
+    return torch.npu.stream(target_stream)
