@@ -420,9 +420,10 @@ def get_column_parallel_op(
     ]] = None
     if "gate_up_proj" in prefix and mlp_tp_enable():
         custom_op = MLPColumnParallelOp(layer)
-    elif "gate_up_proj" in prefix and dense_optim_enable():
+    elif "gate_up_proj" in prefix and "shared_experts" not in prefix and dense_optim_enable(
+    ):
         custom_op = DenseOptimMergedColumnParallelOp(layer)
-    elif dense_optim_enable():
+    elif "shared_experts" not in prefix and dense_optim_enable():
         custom_op = DenseOptimQKVParallelOp(layer, prefix)
 
     if custom_op is not None:
@@ -448,7 +449,7 @@ def get_row_parallel_op(
         custom_op = OProjRowParallelOp(layer)
     elif matmul_allreduce_enable():
         custom_op = MatmulAllreduceRowParallelOp(layer)
-    elif dense_optim_enable():
+    elif "shared_experts" not in prefix and dense_optim_enable():
         custom_op = DenseOptimRowParallelOp(layer, prefix)
 
     if custom_op is not None:
