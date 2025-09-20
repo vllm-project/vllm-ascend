@@ -175,7 +175,7 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: nn.Module,
+        model: Optional[nn.Module] = None,
     ):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
