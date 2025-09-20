@@ -303,7 +303,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if torch.version.cann.startswith("8.3"):
             self.attn_mask_builder = AttentionMaskBuilder(
-                self.scheduler_config.max_num_batched_tokens, self.dtype, self.device)
+                self.scheduler_config.max_num_batched_tokens, self.dtype,
+                self.device)
         else:
             self.attn_mask_builder = AttentionMaskBuilder(
                 self.model_config.max_model_len, self.dtype)

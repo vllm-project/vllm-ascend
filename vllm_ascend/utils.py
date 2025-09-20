@@ -61,6 +61,7 @@ _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
+
 def is_310p():
     global _IS_310P
     if _IS_310P is None:

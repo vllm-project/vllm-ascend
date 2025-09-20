@@ -37,7 +37,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d, nd_to_nz_spec, verify_torch_npu_version)
+                               nd_to_nz_2d, nd_to_nz_spec)
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):
@@ -477,20 +477,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_heads=self.num_heads,
                 scale=self.scale,
                 sparse_mode=3,
-                )
+            )
         else:
             torch_npu._npu_paged_attention_splitfuse(
-                        query=query,
-                        key_cache=self.key_cache,
-                        value_cache=self.value_cache,
-                        mask=attn_metadata.attn_mask,
-                        block_table=attn_metadata.block_tables,
-                        seq_len=attn_metadata.query_lens,
-                        context_lens=attn_metadata.seq_lens,
-                        num_kv_heads=self.num_kv_heads,
-                        num_heads=self.num_heads,
-                        scale_value=self.scale,
-                        out=output)
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                mask=attn_metadata.attn_mask,
+                block_table=attn_metadata.block_tables,
+                seq_len=attn_metadata.query_lens,
+                context_lens=attn_metadata.seq_lens,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                out=output)
         return output
 
     def forward(

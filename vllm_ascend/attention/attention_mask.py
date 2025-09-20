@@ -41,7 +41,7 @@ class AttentionMaskBuilder:
         dtype: torch.dtype,
         device: torch.device = None,
     ):
-        # NOTE: The device argument specifies the target NPU 
+        # NOTE: The device argument specifies the target NPU
         # to be used for the newly added FIA operator.
         # Only pass this parameter when using the new FIA operator.
 
@@ -52,8 +52,9 @@ class AttentionMaskBuilder:
         self.device = device
         if torch.version.cann.startswith("8.3"):
             assigned_mask_dim = 2048
-            self.chunked_prefill_attn_mask = torch.triu(torch.ones(assigned_mask_dim, assigned_mask_dim), diagonal=1
-            ).to(torch.int8).to(device)
+            self.chunked_prefill_attn_mask = torch.triu(
+                torch.ones(assigned_mask_dim, assigned_mask_dim),
+                diagonal=1).to(torch.int8).to(device)
 
     @staticmethod
     def get_mask_scale_factor(dtype: torch.dtype = torch.float16):
@@ -91,14 +92,13 @@ class AttentionMaskBuilder:
             self._update_attn_cache(max_seq_len, dtype)
             # FIXME: Currently the mask value of chunked-prefill situation and Prefill-Only situation
             # is not the same. Fix this in the future when kernel is ready.
-            mask_scale_factor = AttentionMaskBuilder.get_mask_scale_factor(dtype)
+            mask_scale_factor = AttentionMaskBuilder.get_mask_scale_factor(
+                dtype)
             attn_mask = torch.index_select(self.attn_mask_cache,
-                                        dim=0,
-                                        index=position)[:, :max_seq_len]
+                                           dim=0,
+                                           index=position)[:, :max_seq_len]
             attn_mask *= mask_scale_factor
             return attn_mask.contiguous().to(device, non_blocking=True)
-
-
 
     def _update_attn_cache(self, seqlen: int, dtype: torch.dtype):
         if seqlen > self._seq_len_cached:
