@@ -82,7 +82,7 @@ class AttentionMaskBuilder:
         dtype: torch.dtype = None,
         device: torch.device = None,
     ) -> torch.Tensor:
-        if self.device:
+        if torch.version.cann.startswith("8.3"):
             return self.chunked_prefill_attn_mask
         else:
             if dtype not in [torch.float16, torch.bfloat16]:
