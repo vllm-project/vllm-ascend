@@ -50,7 +50,8 @@ from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
                                get_ascend_soc_version,
-                               get_rm_router_logits_state, is_310p)
+                               get_rm_router_logits_state, is_310p,
+                               vllm_version_is)
 
 
 def torchair_fused_experts_with_mc2(
@@ -1057,16 +1058,26 @@ class TorchairAscendFusedMoE(FusedMoE):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
-        self.moe = FusedMoEConfig.make(
-            num_experts=self.global_num_experts,
-            experts_per_token=top_k,
-            hidden_dim=hidden_size,
-            num_local_experts=self.local_num_experts,
-            moe_parallel_config=self.moe_parallel_config,
-            # TODO (bnell): this needs to be fixed for quantized types.
-            in_dtype=params_dtype,
-            quant_config=quant_config)
 
+        if vllm_version_is("0.10.2"):
+            self.moe = FusedMoEConfig.make(
+                num_experts=self.global_num_experts,
+                experts_per_token=top_k,
+                hidden_dim=hidden_size,
+                num_local_experts=self.local_num_experts,
+                moe_parallel_config=self.moe_parallel_config,
+                # TODO (bnell): this needs to be fixed for quantized types.
+                in_dtype=params_dtype,
+                quant_config=quant_config)
+        else:
+            self.moe = FusedMoEConfig(
+                num_experts=self.global_num_experts,
+                experts_per_token=top_k,
+                hidden_dim=hidden_size,
+                num_local_experts=self.local_num_experts,
+                moe_parallel_config=self.moe_parallel_config,
+                in_dtype=params_dtype,
+            )
         if quant_config is None:
             self.quant_method = TorchairAscendUnquantizedFusedMoEMethod(
                 self.moe)
