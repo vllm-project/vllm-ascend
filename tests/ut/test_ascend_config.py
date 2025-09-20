@@ -16,7 +16,7 @@
 import os
 
 from transformers import PretrainedConfig
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (_check_torchair_supported,
@@ -46,6 +46,7 @@ class TestAscendConfig(TestBase):
 
         torchair_graph_config = ascend_config.torchair_graph_config
         self.assertFalse(torchair_graph_config.enabled)
+        self.assertEqual(torchair_graph_config.mode, '')
         self.assertFalse(torchair_graph_config.use_cached_graph)
         self.assertEqual(torchair_graph_config.graph_batch_sizes, [])
         self.assertFalse(torchair_graph_config.graph_batch_sizes_init)
@@ -75,7 +76,7 @@ class TestAscendConfig(TestBase):
                 "enabled": True
             },
             "expert_map_path": "test_expert_map_path",
-            "refresh": True
+            "refresh": True,
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
@@ -261,6 +262,40 @@ class TestAscendConfig(TestBase):
             }
             init_ascend_config(test_vllm_config)
 
+        # use_cached_kv_cache_bytes should not be enabled without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "use_cached_kv_cache_bytes": True,
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
+        # graph_batch_sizes should not be set without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "graph_batch_sizes": [1, 2, 4],
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
+        # use_cached_kv_cache_bytes is valid only when torchair graph mode and use_cached_graph are enabled
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": True,
+                    "use_cached_graph": False,
+                    "use_cached_kv_cache_bytes": True,
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
         # graph_batch_sizes_init should not be enabled without torchair graph mode
         with self.assertRaises(RuntimeError):
             test_vllm_config.additional_config = {
@@ -294,6 +329,17 @@ class TestAscendConfig(TestBase):
             }
             init_ascend_config(test_vllm_config)
 
+        # mode should not be configured without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "mode": 'max-autotune',
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
         # enable_kv_nz should not be enabled without torchair graph mode
         with self.assertRaises(RuntimeError):
             test_vllm_config.additional_config = {
@@ -303,4 +349,37 @@ class TestAscendConfig(TestBase):
                 },
                 "refresh": True
             }
+            init_ascend_config(test_vllm_config)
+
+        with self.assertRaises(AssertionError):
+            test_vllm_config.additional_config = {
+                "lmhead_tensor_parallel_size": 2,
+                "refresh": True
+            }
+            test_vllm_config.parallel_config = ParallelConfig(
+                data_parallel_size=4, tensor_parallel_size=2)
+            init_ascend_config(test_vllm_config)
+
+        with self.assertRaises(AssertionError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": True,
+                },
+                "oproj_tensor_parallel_size": 2,
+                "refresh": True
+            }
+            test_vllm_config.parallel_config = ParallelConfig(
+                data_parallel_size=4, tensor_parallel_size=2)
+            init_ascend_config(test_vllm_config)
+
+        with self.assertRaises(AssertionError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                },
+                "oproj_tensor_parallel_size": 2,
+                "refresh": True
+            }
+            test_vllm_config.parallel_config = ParallelConfig(
+                data_parallel_size=4, tensor_parallel_size=1)
             init_ascend_config(test_vllm_config)

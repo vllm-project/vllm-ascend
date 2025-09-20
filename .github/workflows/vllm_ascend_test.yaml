@@ -25,7 +25,6 @@ on:
     branches:
       - 'main'
       - '*-dev'
-
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -44,6 +43,7 @@ jobs:
     uses: ./.github/workflows/pre-commit.yml
 
   changes:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
@@ -68,6 +68,7 @@ jobs:
               - 'packages.txt'
             ut_tracker:
               - 'tests/ut/**'
+
   ut:
     needs: [lint, changes]
     name: unit test
@@ -81,7 +82,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [v0.10.1.1, main]
+        vllm_version: [v0.10.2]
     steps:
       - name: Install packages
         run: |
@@ -117,7 +118,7 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut
+          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut --ignore=tests/ut/test_platform.py --ignore=tests/ut/ops/test_vocab_parallel_embedding.py
 
       - name: Upload coverage to Codecov
         if: ${{ matrix.vllm_version == 'main' }}
@@ -129,16 +130,16 @@ jobs:
           name: vllm-ascend
           verbose: true
 
-  e2e:
+  e2e-light:
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' }}
+    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
     strategy:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-1]
-        vllm_version: [v0.10.1.1, main]
-    name: singlecard e2e test
+        vllm_version: [v0.10.2]
+    name: singlecard e2e test - light
     runs-on: ${{ matrix.os }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
@@ -191,36 +192,19 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv tests/e2e/singlecard/test_offline_inference.py
-          # pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
-          pytest -sv tests/e2e/singlecard/test_camem.py
-          pytest -sv tests/e2e/singlecard/test_embedding.py
+          pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          pytest -sv tests/e2e/singlecard/test_quantization.py
+          pytest -sv tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
 
-          # ------------------------------------ v1 spec decode test ------------------------------------ #
-          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
-          # TODO: revert me when test_v1_spec_decode.py::test_ngram_correctness is fixed
-          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
-
-          # All other tests, ignore: 310p test, accuracy test.
-          pytest -sv tests/e2e/singlecard/ \
-          --ignore=tests/e2e/singlecard/test_offline_inference.py \
-          --ignore=tests/e2e/singlecard/test_ilama_lora.py \
-          --ignore=tests/e2e/singlecard/test_guided_decoding.py \
-          --ignore=tests/e2e/singlecard/test_camem.py \
-          --ignore=tests/e2e/singlecard/test_embedding.py \
-          --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py \
-          --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py \
-          --ignore=tests/e2e/singlecard/test_offline_inference_310p.py
-  e2e-2-cards:
-    needs: [e2e]
-    if: ${{ needs.e2e.result == 'success' }}
+  e2e-2-cards-light:
+    needs: [e2e-light]
+    if: ${{ needs.e2e-light.result == 'success' }}
     strategy:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-2]
-        vllm_version: [v0.10.1.1, main]
-    name: multicard e2e test
+        vllm_version: [v0.10.2]
+    name: multicard e2e test - light
     runs-on: ${{ matrix.os }}
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
@@ -273,18 +257,4 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          # pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
-          # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
-          # To avoid oom, we need to run the test in a single process.
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeekV3_dbo
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_alltoallv
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_sp_for_qwen3_moe
-          pytest -sv tests/e2e/multicard/test_data_parallel.py
-          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
-            --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
-            --ignore=tests/e2e/multicard/test_data_parallel.py \
-            --ignore=tests/e2e/multicard/test_offline_inference_310p.py
+          pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP

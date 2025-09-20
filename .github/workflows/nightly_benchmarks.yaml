@@ -51,7 +51,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - vllm_branch: v0.10.0
+          - vllm_branch: v0.10.2
             vllm_ascend_branch: main
             vllm_use_v1: 1
       max-parallel: 1

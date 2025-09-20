@@ -492,17 +492,17 @@ class AscendMLATorchairMetadataBuilder:
         graph_pad_size = common_attn_metadata.graph_pad_size
         use_torchair_graph = graph_pad_size != -1
         if num_decodes > 0:
-            actual_seq_lengths_q = query_start_loc[1:].tolist()
+            actual_seq_lengths_q = query_start_loc[1:num_decodes + 1].tolist()
             max_seq_lens = seq_lens[:num_decodes].max().item()
             seq_lens = seq_lens[:num_decode_tokens]
             input_positions = input_positions[:num_decode_tokens]
             block_table = block_table[:num_decode_tokens, ...]
+            num_token_pad_size = 0
             if use_torchair_graph and common_attn_metadata.attn_state in [
                     AscendAttentionState.DecodeOnly,
                     AscendAttentionState.SpecDecoding
             ]:
                 num_reqs_pad_size = 0
-                num_token_pad_size = 0
                 if graph_pad_size != 0:
                     pad_value = 0
                     num_token_pad_size = graph_pad_size - num_decode_tokens
@@ -535,13 +535,14 @@ class AscendMLATorchairMetadataBuilder:
                                                device=input_positions.device)
                 input_positions = torch.cat(
                     [input_positions, position_padding])
-                actual_seq_lengths_q = query_start_loc[1:].tolist(
-                ) + common_attn_metadata.actual_seq_lengths_q[
-                    num_reqs:num_reqs + num_reqs_pad_size]
+                actual_seq_lengths_q = (
+                    actual_seq_lengths_q + common_attn_metadata.
+                    actual_seq_lengths_q[num_reqs:num_reqs +
+                                         num_reqs_pad_size])
             else:
                 seq_lens_list = seq_lens.tolist()
             # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to batch_size(num_tokens)
-            batch_size = slot_mapping.size(0)
+            batch_size = num_decode_tokens + num_token_pad_size
             if actual_seq_lengths_q[-1] != batch_size \
                 and common_attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
                 actual_seq_lengths_q[-1] = batch_size
@@ -627,6 +628,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        self.running_in_graph = False
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -1018,7 +1020,6 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                 input_layout = "BNSD"
 
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
-                assert num_tokens % self.spec_token_num == 0
                 input_layout = "TND"
                 # [bs * q_seq_len, num_heads_per_rank, dim]
                 q_nope = q_nope.view(num_tokens, self.num_heads, -1)
@@ -1197,9 +1198,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
             else:
                 decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
                     attn_metadata.decode.input_positions,
-                    decode_q_pe.contiguous(),
-                    decode_k_pe,
-                    max_seq_len=attn_metadata.decode.max_seq_lens)
+                    decode_q_pe.contiguous(), decode_k_pe)
         if has_prefill:
             assert attn_metadata.prefill is not None
             prefill_q = self.q_proj(prefill_hs_or_q_c)[0]\
@@ -1224,9 +1223,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
             else:
                 prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
                     attn_metadata.prefill.input_positions,
-                    prefill_q_pe.contiguous(),
-                    prefill_k_pe,
-                    max_seq_len=attn_metadata.prefill.max_seq_lens)
+                    prefill_q_pe.contiguous(), prefill_k_pe)
 
         assert len(
             kv_cache

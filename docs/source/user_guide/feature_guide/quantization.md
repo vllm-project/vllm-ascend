@@ -11,11 +11,10 @@ To quantize a model, users should install [ModelSlim](https://gitee.com/ascend/m
 Install modelslim:
 
 ```bash
-git clone https://gitee.com/ascend/msit
-cd msit/msmodelslim
+# The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
+git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitee.com/ascend/msit
 
-# Optional, this commit has been verified
-git checkout f8ab35a772a6c1ee7675368a2aa4bafba3bedd1a
+cd msit/msmodelslim
 
 bash install.sh
 pip install accelerate
@@ -100,12 +99,12 @@ Enable quantization by specifying `--quantization ascend`, for more details, see
 
 ### 1. How to solve the KeyError: 'xxx.layers.0.self_attn.q_proj.weight' problem?
 
-First, make sure you specify `ascend` quantization method. Second, check if your model is converted by this `modelslim-VLLM-8.1.RC1.b020_001` modelslim version. Finally, if it still doesn't work, please
+First, make sure you specify `ascend` quantization method. Second, check if your model is converted by this `br_release_MindStudio_8.1.RC2_TR5_20260624` modelslim version. Finally, if it still doesn't work, please
 submit a issue, maybe some new models need to be adapted.
 
 ### 2. How to solve the error "Could not locate the configuration_deepseek.py"?
 
-Please convert DeepSeek series models using `modelslim-VLLM-8.1.RC1.b020_001` modelslim, this version has fixed the missing configuration_deepseek.py error.
+Please convert DeepSeek series models using `br_release_MindStudio_8.1.RC2_TR5_20260624` modelslim, this version has fixed the missing configuration_deepseek.py error.
 
 ### 3. When converting deepseek series models with modelslim, what should you pay attention?
 

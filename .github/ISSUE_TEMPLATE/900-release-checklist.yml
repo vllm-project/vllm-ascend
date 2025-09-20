@@ -30,6 +30,8 @@ body:
 
         - [ ] Add release note to docs/source/user_guide/release_notes.md
 
+        - [ ] Update release version in README.md and README.zh.md
+
         - [ ] Update version info in docs/source/community/versioning_policy.md
 
         - [ ] Update contributor info in docs/source/community/contributors.md

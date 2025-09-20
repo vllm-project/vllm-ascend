@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
@@ -8,9 +8,10 @@ import torch
 class AscendCommonLongSequenceMetadata:
     cp_kv_recover_idx: torch.Tensor = None
 
-    num_actual_tokens_cp_full: int = None
+    num_actual_tokens_cp_full: Optional[int] = None
 
-    num_computed_tokens_of_cp_sp: list[list[list[int]]] = None
+    num_computed_tokens_of_cp_sp: Optional[list[Optional[list[Optional[
+        list[int]]]]]] = None
 
     q_head_idx_tensor: torch.Tensor = None
 
@@ -83,7 +84,7 @@ class AscendCommonAttentionMetadata:
 
     graph_pad_size: int = -1
 
-    common_long_seq_metadata: AscendCommonLongSequenceMetadata = None
+    common_long_seq_metadata: Optional[AscendCommonLongSequenceMetadata] = None
 
 
 def split_decodes_and_prefills(
