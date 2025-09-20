@@ -92,12 +92,13 @@ def sample_json_schema():
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_json_completion(guided_decoding_backend: str,
                                 sample_json_schema):
+    runner_kwargs: Dict[str, Any] = {}
     if vllm_version_is("0.10.2"):
         sampling_params = SamplingParams(
             temperature=1.0,
             max_tokens=500,
             guided_decoding=GuidedDecodingParams(json=sample_json_schema))
-        runner_kwargs: Dict[str, Any] = {
+        runner_kwargs = {
             "seed": 0,
             "guided_decoding_backend": guided_decoding_backend,
         }
@@ -107,7 +108,7 @@ def test_guided_json_completion(guided_decoding_backend: str,
             max_tokens=500,
             structured_outputs=StructuredOutputsParams(
                 json=sample_json_schema))
-        runner_kwargs: Dict[str, Any] = {
+        runner_kwargs = {
             "seed": 0,
             "structured_outputs_config": {
                 "backend": guided_decoding_backend
@@ -141,12 +142,13 @@ def test_guided_json_completion(guided_decoding_backend: str,
 def test_guided_regex(guided_decoding_backend: str, sample_regex):
     if guided_decoding_backend == "outlines":
         pytest.skip("Outlines doesn't support regex-based guided decoding.")
+    runner_kwargs: Dict[str, Any] = {}
     if vllm_version_is("0.10.2"):
         sampling_params = SamplingParams(
             temperature=0.8,
             top_p=0.95,
             guided_decoding=GuidedDecodingParams(regex=sample_regex))
-        runner_kwargs: Dict[str, Any] = {
+        runner_kwargs = {
             "seed": 0,
             "guided_decoding_backend": guided_decoding_backend,
         }
@@ -155,7 +157,7 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
             temperature=0.8,
             top_p=0.95,
             structured_outputs=StructuredOutputsParams(regex=sample_regex))
-        runner_kwargs: Dict[str, Any] = {
+        runner_kwargs = {
             "seed": 0,
             "structured_outputs_config": {
                 "backend": guided_decoding_backend
