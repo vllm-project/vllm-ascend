@@ -3,6 +3,7 @@ from torch.nn import functional as F
 from vllm.distributed import (get_tensor_model_parallel_world_size,
                               get_tp_group, tensor_model_parallel_all_gather,
                               tensor_model_parallel_reduce_scatter)
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.platform import NPUPlatform
 
