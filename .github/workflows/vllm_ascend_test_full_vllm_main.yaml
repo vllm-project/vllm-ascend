@@ -14,14 +14,12 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-name: 'ascend test / full'
+name: 'ascend test / vllm main'
 
 on:
-  pull_request:
-    branches:
-      - 'main'
-      - '*-dev'
-    types: [ labeled, synchronize ]
+  schedule:
+    - cron: '0 */2 * * *'
+  workflow_dispatch:
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -37,43 +35,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
-    outputs:
-      e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
-      ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            e2e_tracker:
-              - '.github/workflows/vllm_ascend_test.yaml'
-              - 'vllm_ascend/**'
-              - 'csrc/**'
-              - 'cmake/**'
-              - 'tests/e2e/**'
-              - 'CMakeLists.txt'
-              - 'setup.py'
-              - 'requirements.txt'
-              - 'requirements-dev.txt'
-              - 'requirements-lint.txt'
-              - 'packages.txt'
-            ut_tracker:
-              - 'tests/ut/**'
-
   e2e-test:
-    name: e2e-full
-    strategy:
-      matrix:
-        vllm_version: [6d8246aaffff3ebec84767e373212a7b8da328e2, v0.10.2]
-    needs: [changes]
-    if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
-      vllm: ${{ matrix.vllm_version }}
+      vllm: main
       runner: linux-aarch64-a2
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
       type: full
