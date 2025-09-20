@@ -22,9 +22,10 @@ from vllm.config import CacheConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 
 from vllm_ascend.torchair.models.torchair_deepseek_v2 import (
-    TorchairDeepseekV2DecoderLayer, TorchairDeepseekV2MergedReplicatedLinear,
-    TorchairDeepseekV2MLAAttention, TorchairDeepseekV2MLP,
-    TorchairDeepseekV2MoE, TorchairDeepseekV2RowParallelLinear,
+    TorchairDeepseekV2DecoderLayer, TorchairDeepseekV2ForCausalLM,
+    TorchairDeepseekV2MergedReplicatedLinear, TorchairDeepseekV2MLAAttention,
+    TorchairDeepseekV2MLP, TorchairDeepseekV2MoE,
+    TorchairDeepseekV2RowParallelLinear,
     TorchairDeepseekV2RowParallelLinearReplaceAllreduce,
     TorchairDeepseekV2SiluAndMul)
 
@@ -309,3 +310,22 @@ def test_torchair_deepseek_v2_decoder_layer(mock_maybe_chunk_residual,
         model_config=vllm_config.model_config,
         quant_config=None)
     assert isinstance(layer.mlp, TorchairDeepseekV2MLP)
+
+
+def test_torchair_deepseek_v2_for_causal_lm(mock_distributed, vllm_config):
+    model = TorchairDeepseekV2ForCausalLM(vllm_config=vllm_config)
+
+    input_ids = torch.randint(0, 10000, (2, 4))
+    positions = torch.arange(4).repeat(2, 1)
+    with patch.object(model.model,
+                      "forward",
+                      return_value=torch.randn(2, 4, 128)):
+        output = model(input_ids, positions)
+        assert output.shape == (2, 4, 128)
+
+    weights = [("model.embed_tokens.weight", torch.randn(10000, 128))]
+    with patch(
+            "vllm.model_executor.model_loader.weight_utils.default_weight_loader"
+    ):
+        loaded = model.load_weights(weights)
+        assert loaded is not None
