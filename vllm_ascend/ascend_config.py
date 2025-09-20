@@ -221,10 +221,6 @@ def check_ascend_config(vllm_config, enforce_eager):
                     raise NotImplementedError(
                         "Torchair graph mode only works with following model types:"
                         f"{TORCHAIR_MODEL_LIST}.")
-            if ascend_config.enable_shared_expert_dp:
-                logger.warning(
-                    "enable_shared_expert_dp is not supported for torchair graph mode currently, "
-                    "it has been disabled automatically.")
         # aclgraph case
         else:
             if vllm_config.model_config:

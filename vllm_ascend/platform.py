@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import vllm.envs as envs_vllm
 from torch.distributed import ProcessGroup
-from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -34,12 +33,9 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, is_310p,
                                update_aclgraph_sizes, vllm_version_is)
 
 if TYPE_CHECKING:
+    from torch.distributed.distributed_c10d import PrefixStore
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
-else:
-    ModelConfig = None
-    VllmConfig = None
-    FlexibleArgumentParser = None
 
 
 class NPUPlatform(Platform):
@@ -58,9 +54,8 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
-    def pre_register_and_update(cls,
-                                parser: Optional[FlexibleArgumentParser] = None
-                                ) -> None:
+    def pre_register_and_update(
+            cls, parser: Optional["FlexibleArgumentParser"] = None) -> None:
         # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch
         adapt_patch(is_global_patch=True)
@@ -117,13 +112,16 @@ class NPUPlatform(Platform):
         torch.npu.reset_peak_memory_stats()
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        # should lazy load vllm.config, otherwise cycle import error will raise.
+        from vllm.config import CompilationLevel
+        from vllm.config.compilation import CUDAGraphMode
+
         if not envs_vllm.VLLM_USE_V1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
+
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
-
-        from vllm.config import CompilationLevel  # noqa: E402
         compilation_config = vllm_config.compilation_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -135,6 +133,99 @@ class NPUPlatform(Platform):
         else:
             structured_outputs_config = vllm_config.structured_outputs_config
 
+        # 1. Update the kv cache type here, it's doesn't support int8 in vLLM.
+        kv_cache_dtype = vllm_config.additional_config.get(
+            "kv_cache_dtype", None)
+        if kv_cache_dtype is not None:
+            vllm_config.cache_config.cache_dtype = kv_cache_dtype
+
+        # 2. Update eager mode and check ascend config is set as expect.
+        if model_config is None:
+            logger.warning("Model config is missing. This may indicate "
+                           "that you are running a test case")
+            enforce_eager = False
+        else:
+            enforce_eager = getattr(model_config, "enforce_eager", False)
+        check_ascend_config(vllm_config, enforce_eager)
+
+        # 3. Update compilation config for aclgraph
+        if enforce_eager:
+            logger.info("Compilation disabled, using eager mode by default")
+            compilation_config.level = CompilationLevel.NO_COMPILATION
+        compilation_config.cudagraph_num_of_warmups = 1
+        # TODO: make vllm support oot platform to set `compilation_config.cudagraph_mode`
+        # if cudagraph_mode is not explicitly set by users, set default value
+        if compilation_config.level == CompilationLevel.PIECEWISE:
+            compilation_config.cudagraph_mode = \
+                CUDAGraphMode.PIECEWISE
+        elif compilation_config.level not in [
+                CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE
+        ]:
+            logger.warning(
+                "NPU does not support %s compilation level. Setting CUDAGraphMode to NONE",
+                compilation_config.level)
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        else:
+            logger.warning(
+                "compilation_config.level = CompilationLevel.NO_COMPILATION is set, Setting CUDAGraphMode to NONE"
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        if ascend_config.torchair_graph_config.enabled:
+            logger.info(
+                "Torchair compilation enabled on NPU. Setting CUDAGraphMode to NONE"
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        # set cudaprah sizes before extending `compilation_config.splitting_ops`
+        vllm_config._set_cudagraph_sizes()
+        if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+            compilation_config.level = CompilationLevel.NO_COMPILATION
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            logger.info(
+                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
+                "using only ACL Graph mode")
+            assert compilation_config.level == CompilationLevel.PIECEWISE, \
+                "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
+            compilation_config.set_splitting_ops_for_v1()
+            compilation_config.use_inductor = False
+            compilation_config.splitting_ops.extend([
+                "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
+            ])
+            update_aclgraph_sizes(vllm_config)
+        else:
+            logger.info(
+                "%s cudagraph_mode is not support on NPU. falling back to NONE",
+                compilation_config.cudagraph_mode)
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            compilation_config.level = CompilationLevel.NO_COMPILATION
+        # Activate custom ops for v1, except on 310P
+        if not is_310p():
+            compilation_config.custom_ops = ["all"]
+        if compilation_config.pass_config.enable_sequence_parallelism:
+            if not parallel_config.enable_expert_parallel or vllm_config.model_config.hf_config.model_type != "qwen3_moe":
+                raise NotImplementedError(
+                    "Sequence Parallel only works on qwen moe models with expert parallel enabled currently."
+                )
+
+        # 4. Override worker cls
+        if parallel_config and parallel_config.worker_cls == "auto":
+            if ascend_config.torchair_graph_config.enabled or (
+                    model_config is not None and model_config.use_mla
+                    and ascend_config.enable_shared_expert_dp):
+                parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
+            else:
+                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
+
+        # 5. Override block size
+        if cache_config:
+            if cache_config.block_size is None:
+                cache_config.block_size = 128
+            if cache_config.enable_prefix_caching and cache_config.block_size != 128:
+                logger.warning(
+                    "If prefix caching is enabled, block size must be set to 128."
+                )
+                cache_config.block_size = 128
+
+        # 6. Override scheduler cls to AscendScheduler
         if model_config is not None and not model_config.use_mla:
             logger.info(
                 "Non-MLA LLMs forcibly disable the chunked prefill feature,"
@@ -160,49 +251,15 @@ class NPUPlatform(Platform):
                         and not chunked_prefill_enabled_in_ascend_scheduler):
                     scheduler_config.max_num_batched_tokens = scheduler_config.max_model_len
 
-        kv_cache_dtype = vllm_config.additional_config.get(
-            "kv_cache_dtype", None)
-        if kv_cache_dtype is not None:
-            vllm_config.cache_config.cache_dtype = kv_cache_dtype
-        if model_config is None:
-            logger.warning("Model config is missing. This may indicate "
-                           "that we are running a test case")
-            enforce_eager = False
-        else:
-            enforce_eager = getattr(model_config, "enforce_eager", False)
-
-        check_ascend_config(vllm_config, enforce_eager)
-        from vllm.config.compilation import CUDAGraphMode
-        if enforce_eager:
-            logger.info("Compilation disabled, using eager mode by default")
-            compilation_config.level = CompilationLevel.NO_COMPILATION
-
-        compilation_config.cudagraph_num_of_warmups = 1
-
-        # TODO: make vllm support oot platform to set `compilation_config.cudagraph_mode`
-        # if cudagraph_mode is not explicitly set by users, set default value
-        if compilation_config.level == CompilationLevel.PIECEWISE:
-            compilation_config.cudagraph_mode = \
-                CUDAGraphMode.PIECEWISE
-        elif compilation_config.level not in [
-                CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE
-        ]:
-            logger.warning(
-                "NPU does not support %s compilation level. Setting CUDAGraphMode to NONE",
-                compilation_config.level)
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            logger.warning(
-                "compilation_config.level = CompilationLevel.NO_COMPILATION is set, Setting CUDAGraphMode to NONE"
-            )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
-        # set CUDAGraphMode to None when torchair is enabled, no mather what compilation_config.level is.
-        if ascend_config.torchair_graph_config.enabled:
-            logger.info(
-                "Torchair compilation enabled on NPU. Setting CUDAGraphMode to NONE"
-            )
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        # 7. clean up torchair cache
+        # If ascend_scheduler_config is enabled,
+        # extents original scheduler_config to use AscendScheduler.
+        if ascend_config.ascend_scheduler_config.enabled:
+            from vllm_ascend.core.schedule_config import AscendSchedulerConfig
+            ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
+                vllm_config.scheduler_config,
+                ascend_config.ascend_scheduler_config)
+            vllm_config.scheduler_config = ascend_scheduler_config
             # Note: We delete the torchair cache folder here to prevent runtime issues caused by dimension
             # mismatches or configuration inconsistencies when users reuse cached computation graphs. Though
             # this will increase graph compilation duration, it significantly enhances robustness and decreases
@@ -215,65 +272,6 @@ class NPUPlatform(Platform):
                     "In order to decrease torchair graph compilation time, users can enable both use_cached_graph "
                     "and use_cached_kv_cache_bytes in torchair_graph_config.")
                 delete_torchair_cache_file()
-
-        # set cudaprah sizes before extending `compilation_config.splitting_ops`
-        vllm_config._set_cudagraph_sizes()
-
-        if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            compilation_config.level = CompilationLevel.NO_COMPILATION
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-            logger.info(
-                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
-                "using only ACL Graph mode")
-            assert compilation_config.level == CompilationLevel.PIECEWISE, \
-                "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
-            compilation_config.set_splitting_ops_for_v1()
-            compilation_config.use_inductor = False
-            compilation_config.splitting_ops.extend([
-                "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
-            ])
-            update_aclgraph_sizes(vllm_config)
-        else:
-            logger.info(
-                "%s cudagraph_mode is not support on NPU. falling back to NONE",
-                compilation_config.cudagraph_mode)
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            compilation_config.level = CompilationLevel.NO_COMPILATION
-
-        if parallel_config and parallel_config.worker_cls == "auto":
-            if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
-                parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
-            else:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
-
-        if cache_config:
-            if cache_config.block_size is None:
-                cache_config.block_size = 128
-
-            if cache_config.enable_prefix_caching and cache_config.block_size != 128:
-                logger.warning(
-                    "If prefix caching is enabled, block size must be set to 128."
-                )
-                cache_config.block_size = 128
-
-        # Activate custom ops for v1, except on 310P
-        if not is_310p():
-            compilation_config.custom_ops = ["all"]
-
-        # If ascend_scheduler_config is enabled,
-        # extents original scheduler_config to use AscendScheduler.
-        if ascend_config.ascend_scheduler_config.enabled:
-            from vllm_ascend.core.schedule_config import AscendSchedulerConfig
-            ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
-                vllm_config.scheduler_config,
-                ascend_config.ascend_scheduler_config)
-            vllm_config.scheduler_config = ascend_scheduler_config
-
-        if compilation_config.pass_config.enable_sequence_parallelism:
-            if not parallel_config.enable_expert_parallel or vllm_config.model_config.hf_config.model_type != "qwen3_moe":
-                raise NotImplementedError(
-                    "For better performance in Qwen3 MoE, SP only works exclusively with MC2, AllToAll, and AllToAllV."
-                )
 
     @classmethod
     def get_attn_backend_cls(cls,
@@ -289,11 +287,9 @@ class NPUPlatform(Platform):
             raise ValueError("vLLM Ascend does not support V0 engine.")
 
         ascend_config = get_ascend_config()
+        use_torchair = ascend_config.torchair_graph_config.enabled or (
+            use_mla and ascend_config.enable_shared_expert_dp)
 
-        if use_mla and ascend_config.enable_shared_expert_dp:
-            return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
-
-        use_torchair = ascend_config.torchair_graph_config.enabled
         # choose attention backend based on use_mla and use_torchair
         backend_map = {
             (True, True):
@@ -327,7 +323,7 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
+    def supports_v1(cls, model_config: "ModelConfig") -> bool:
         """Returns whether the current platform can support v1 for the supplied
         model configuration.
         """
@@ -344,7 +340,7 @@ class NPUPlatform(Platform):
     def stateless_init_device_torch_dist_pg(
         cls,
         backend: str,
-        prefix_store: PrefixStore,
+        prefix_store: "PrefixStore",
         group_rank: int,
         group_size: int,
         timeout: timedelta,
