@@ -55,6 +55,8 @@ def test_external_launcher(model):
         "--proc-per-node",
         "2",
         "--trust-remote-code",
+        "--gpu-memory-utilization",
+        "0.6",
     ]
 
     print(f"Running subprocess: {' '.join(cmd)}")
@@ -131,6 +133,8 @@ def test_external_launcher_and_sleepmode():
         "0",
         "--model-weight-gib",
         "16",
+        "--gpu-memory-utilization",
+        "0.6",
     ]
 
     print(f"Running subprocess: {' '.join(cmd)}")
