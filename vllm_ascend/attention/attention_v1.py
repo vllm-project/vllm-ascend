@@ -460,8 +460,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # TODO:The npu_fused_infer_attention_score op is planned to
             # be utilized in a wider range in upcoming versions.
             num_block, block_size, head_num, head_dim = self.key_cache.shape
-            key = self.key_cache.view(num_block, block_size, -1)  # type: ignore
-            value = self.value_cache.view(num_block, block_size, -1)  # type: ignore
+            key = self.key_cache.view(  # type: ignore
+                num_block, block_size, -1)
+            value = self.value_cache.view(  # type: ignore
+                num_block, block_size, -1)
 
             output, _ = torch_npu.npu_fused_infer_attention_score(
                 query=query,
