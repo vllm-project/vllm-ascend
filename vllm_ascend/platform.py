@@ -31,7 +31,7 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, is_310p,
-                               update_aclgraph_sizes)
+                               update_aclgraph_sizes, vllm_version_is)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -128,9 +128,12 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
-        decoding_config = vllm_config.decoding_config
         scheduler_config = vllm_config.scheduler_config
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
+        if vllm_version_is("0.10.2"):
+            structured_outputs_config = vllm_config.decoding_config
+        else:
+            structured_outputs_config = vllm_config.structured_outputs_config
 
         if model_config is not None and not model_config.use_mla:
             logger.info(
@@ -138,7 +141,7 @@ class NPUPlatform(Platform):
                 "as the performance of operators supporting this feature "
                 "functionality is currently suboptimal.")
             if not model_config.is_multimodal_model and \
-                decoding_config.backend == "auto" and \
+                structured_outputs_config.backend == "auto" and \
                 not scheduler_config.delay_factor > 0 and \
                 not scheduler_config.send_delta_data and \
                 scheduler_config.policy == "fcfs":

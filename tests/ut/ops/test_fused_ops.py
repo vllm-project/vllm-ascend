@@ -231,6 +231,9 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
               expert_weights: torch.Tensor) -> torch.Tensor:
         pass
 
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
+        pass
+
 
 class TestAscendFusedMoe:
 

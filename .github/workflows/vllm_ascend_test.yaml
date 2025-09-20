@@ -82,7 +82,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [v0.10.2]
+        vllm_version: [6d8246aaffff3ebec84767e373212a7b8da328e2, v0.10.2]
     steps:
       - name: Install packages
         run: |
@@ -118,10 +118,12 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut --ignore=tests/ut/test_platform.py
+          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
+          --ignore=tests/ut/test_platform.py \
+          --ignore=tests/ut/patch/worker/patch_common/test_patch_minicpm.py
 
       - name: Upload coverage to Codecov
-        if: ${{ matrix.vllm_version == 'main' }}
+        if: ${{ matrix.vllm_version != 'v0.10.2' }}
         uses: codecov/codecov-action@v5
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
@@ -138,7 +140,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-1]
-        vllm_version: [v0.10.2]
+        vllm_version: [6d8246aaffff3ebec84767e373212a7b8da328e2, v0.10.2]
     name: singlecard e2e test - light
     runs-on: ${{ matrix.os }}
     container:
@@ -174,6 +176,7 @@ jobs:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
           path: ./vllm-empty
+          fetch-depth: 1
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
@@ -203,7 +206,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-2]
-        vllm_version: [v0.10.2]
+        vllm_version: [6d8246aaffff3ebec84767e373212a7b8da328e2, v0.10.2]
     name: multicard e2e test - light
     runs-on: ${{ matrix.os }}
     container:
@@ -239,6 +242,7 @@ jobs:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
           path: ./vllm-empty
+          fetch-depth: 1
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty

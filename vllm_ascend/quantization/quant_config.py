@@ -404,6 +404,10 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
+        # TODO: implement this function
+        pass
+
 
 class AscendEmbeddingMethod(AscendLinearMethod):
     """Embedding method for Ascend quantization.
