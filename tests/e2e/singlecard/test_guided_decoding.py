@@ -18,12 +18,20 @@
 #
 import json
 import os
+from typing import Any, Dict
 
 import jsonschema
 import pytest
 import regex as re
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.10.2"):
+    from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+else:
+    from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 
@@ -84,16 +92,29 @@ def sample_json_schema():
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_json_completion(guided_decoding_backend: str,
                                 sample_json_schema):
-    sampling_params = SamplingParams(
-        temperature=1.0,
-        max_tokens=500,
-        guided_decoding=GuidedDecodingParams(json=sample_json_schema))
-
-    with VllmRunner(
-            MODEL_NAME,
-            seed=0,
-            guided_decoding_backend=guided_decoding_backend,
-    ) as vllm_model:
+    runner_kwargs: Dict[str, Any] = {}
+    if vllm_version_is("0.10.2"):
+        sampling_params = SamplingParams(
+            temperature=1.0,
+            max_tokens=500,
+            guided_decoding=GuidedDecodingParams(json=sample_json_schema))
+        runner_kwargs = {
+            "seed": 0,
+            "guided_decoding_backend": guided_decoding_backend,
+        }
+    else:
+        sampling_params = SamplingParams(
+            temperature=1.0,
+            max_tokens=500,
+            structured_outputs=StructuredOutputsParams(
+                json=sample_json_schema))
+        runner_kwargs = {
+            "seed": 0,
+            "structured_outputs_config": {
+                "backend": guided_decoding_backend
+            },
+        }
+    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
         prompts = [
             f"Give an example JSON for an employee profile "
             f"that fits this schema: {sample_json_schema}"
@@ -121,17 +142,29 @@ def test_guided_json_completion(guided_decoding_backend: str,
 def test_guided_regex(guided_decoding_backend: str, sample_regex):
     if guided_decoding_backend == "outlines":
         pytest.skip("Outlines doesn't support regex-based guided decoding.")
+    runner_kwargs: Dict[str, Any] = {}
+    if vllm_version_is("0.10.2"):
+        sampling_params = SamplingParams(
+            temperature=0.8,
+            top_p=0.95,
+            guided_decoding=GuidedDecodingParams(regex=sample_regex))
+        runner_kwargs = {
+            "seed": 0,
+            "guided_decoding_backend": guided_decoding_backend,
+        }
+    else:
+        sampling_params = SamplingParams(
+            temperature=0.8,
+            top_p=0.95,
+            structured_outputs=StructuredOutputsParams(regex=sample_regex))
+        runner_kwargs = {
+            "seed": 0,
+            "structured_outputs_config": {
+                "backend": guided_decoding_backend
+            },
+        }
 
-    sampling_params = SamplingParams(
-        temperature=0.8,
-        top_p=0.95,
-        guided_decoding=GuidedDecodingParams(regex=sample_regex))
-
-    with VllmRunner(
-            MODEL_NAME,
-            seed=0,
-            guided_decoding_backend=guided_decoding_backend,
-    ) as vllm_model:
+    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
         prompts = [
             f"Give an example IPv4 address with this regex: {sample_regex}"
         ] * 2

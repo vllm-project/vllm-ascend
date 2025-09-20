@@ -47,7 +47,8 @@ from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
                                get_all_reduce_merge_state,
-                               get_rm_router_logits_state, is_310p)
+                               get_rm_router_logits_state, is_310p,
+                               vllm_version_is)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -278,16 +279,25 @@ class AscendFusedMoE(FusedMoE):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
-        moe = FusedMoEConfig.make(
-            num_experts=self.global_num_experts,
-            experts_per_token=top_k,
-            hidden_dim=hidden_size,
-            num_local_experts=self.local_num_experts,
-            moe_parallel_config=self.moe_parallel_config,
-            # TODO (bnell): this needs to be fixed for quantized types.
-            in_dtype=params_dtype,
-            quant_config=quant_config)
-
+        if vllm_version_is("0.10.2"):
+            moe = FusedMoEConfig.make(
+                num_experts=self.global_num_experts,
+                experts_per_token=top_k,
+                hidden_dim=hidden_size,
+                num_local_experts=self.local_num_experts,
+                moe_parallel_config=self.moe_parallel_config,
+                # TODO (bnell): this needs to be fixed for quantized types.
+                in_dtype=params_dtype,
+                quant_config=quant_config)
+        else:
+            moe = FusedMoEConfig(
+                num_experts=self.global_num_experts,
+                experts_per_token=top_k,
+                hidden_dim=hidden_size,
+                num_local_experts=self.local_num_experts,
+                moe_parallel_config=self.moe_parallel_config,
+                in_dtype=params_dtype,
+            )
         self.moe_config = moe
 
         if quant_config is None:
