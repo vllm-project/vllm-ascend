@@ -25,7 +25,8 @@ from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
-from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
+from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
+                               vllm_version_is)
 
 PADDING_SLOT_ID = -1
 
@@ -396,7 +397,10 @@ class MtpProposer(Proposer):
             seq_lens=None)
 
         if not self.torchair_graph_enabled:
-            builder = self.runner.attn_groups[0][0].metadata_builder
+            if vllm_version_is("0.10.2"):
+                builder = self.runner.attn_groups[0][0].metadata_builder
+            else:
+                builder = self.runner.attn_groups[0][0].get_metadata_builder()
             attn_metadata_mtp = builder.build(0, common_attn_metadata,
                                               self.runner.get_model())
 
