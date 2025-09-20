@@ -81,29 +81,39 @@ class MetadataForPadding:
         return padded_data_reduce_scatter
 
 
-def init_metadata_for_sp(input_ids,
-                         enable_sequence_parallelism,
-                         is_perifll: bool = True):
+def init_metadata_for_sp(input_ids, enable_sequence_parallelism):
     if not enable_sequence_parallelism:
         return MetadataForPadding(padding_flag=False,
                                   not_dummy_and_is_prefill=False)
-    tp_size = get_tensor_model_parallel_world_size()
-    if is_perifll:
-        lengths_sum_unpadding = input_ids.shape[0]
-        lengths_sum_padding = (
-            (lengths_sum_unpadding + tp_size - 1) // tp_size) * tp_size
-        if lengths_sum_unpadding == lengths_sum_padding:
-            padding_flag = False
-        else:
-            padding_flag = True
-        pad_size = lengths_sum_padding - lengths_sum_unpadding
-        _metadata_for_padding = MetadataForPadding(
-            lengths_sum_unpadding=lengths_sum_unpadding,
-            lengths_sum_padding=lengths_sum_padding,
-            padding_flag=padding_flag,
-            pad_size=pad_size,
-            not_dummy_and_is_prefill=True)
 
-        return _metadata_for_padding
+    is_perifll = 0
+    attn_metadata = get_forward_context().attn_metadata
+    tp_size = get_tensor_model_parallel_world_size()
+    if attn_metadata is not None:
+        if hasattr(attn_metadata,
+                   'is_only_prefill') and attn_metadata.is_only_prefill:
+            is_perifll = 1
+        if hasattr(attn_metadata,
+                   'num_prefills') and attn_metadata.num_prefills > 0:
+            is_perifll = 1
+
+        if is_perifll:
+            lengths_sum_unpadding = input_ids.shape[0]
+            lengths_sum_padding = (
+                (lengths_sum_unpadding + tp_size - 1) // tp_size) * tp_size
+            if lengths_sum_unpadding == lengths_sum_padding:
+                padding_flag = False
+            else:
+                padding_flag = True
+            pad_size = lengths_sum_padding - lengths_sum_unpadding
+            _metadata_for_padding = MetadataForPadding(
+                lengths_sum_unpadding=lengths_sum_unpadding,
+                lengths_sum_padding=lengths_sum_padding,
+                padding_flag=padding_flag,
+                pad_size=pad_size,
+                not_dummy_and_is_prefill=True)
+
+            return _metadata_for_padding
+
     return MetadataForPadding(padding_flag=False,
                               not_dummy_and_is_prefill=False)
