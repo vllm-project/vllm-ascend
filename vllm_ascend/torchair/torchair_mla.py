@@ -1221,17 +1221,9 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         assert len(
             kv_cache
         ) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
-        if self.torchair_graph_enabled:
-            if kv_cache[0].numel() > 0 and has_prefill:
-                slots = attn_metadata.slot_mapping
-                # NOTE: Separate the kv cache in advance to avoid OOM or other issues
-                torch_npu._npu_reshape_and_cache(
-                    key=kv_c_normed.view(num_tokens, self.num_kv_heads, -1),
-                    value=prefill_k_pe,
-                    key_cache=kv_cache[0],
-                    value_cache=kv_cache[1],
-                    slot_indices=slots[num_decode_tokens:])
-        else:
+        # NOTE: Since CP/SP and shared_expert_dp features temporarily depend on torchair modeling
+        # and attention backend, cases without torchair_graph_enabled should be considered here.
+        if not self.torchair_graph_enabled:
             kv_c_normed = kv_c_normed.view(
                 [num_actual_toks, self.num_kv_heads, -1])
             torch_npu._npu_reshape_and_cache(
