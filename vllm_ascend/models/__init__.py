@@ -44,3 +44,6 @@ def register_model():
     ModelRegistry.register_model(
         "Qwen3NextForCausalLM",
         "vllm_ascend.models.qwen3_next:Qwen3NextForCausalLM")
+    ModelRegistry.register_model(
+            "Step3TextForCausalLM",
+            "vllm_ascend.models.step3_text:CustomStep3TextForCausalLM")
