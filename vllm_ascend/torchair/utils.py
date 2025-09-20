@@ -201,13 +201,18 @@ def torchair_quant_method_register():
 def torchair_ops_patch():
     from vllm_ascend.ops.activation import AscendSiluAndMul
     from vllm_ascend.ops.layernorm import AscendRMSNorm
+    from vllm_ascend.ops.linear import AscendRowParallelLinear
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     from vllm_ascend.torchair.ops import (torchair_activation,
                                           torchair_layernorm)
+    from vllm_ascend.torchair.ops.torchair_linear import \
+        torchair_oproj_tp_forward
     from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
         deepseek_rope_init_func, native_rope_deepseek_forward,
         qwen_rope_init_func, rope_forward)
+
+    AscendRowParallelLinear._forward_oproj_tp = torchair_oproj_tp_forward  # type: ignore[method-assign]
 
     AscendRotaryEmbedding.__init__ = qwen_rope_init_func  # type: ignore[method-assign]
     AscendRotaryEmbedding.forward_oot = rope_forward  # type: ignore[method-assign]

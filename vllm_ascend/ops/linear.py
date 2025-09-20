@@ -22,10 +22,12 @@ AscendRowParallelLinear and AscendColumnParallelLinear.
 
 from typing import Optional, Union
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from vllm.distributed import divide
+from vllm.lora.utils import LinearBase
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear, LinearBase,
     MergedColumnParallelLinear, QKVParallelLinear, QuantizeMethodBase,
