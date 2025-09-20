@@ -459,7 +459,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if torch.version.cann.startswith("8.3"):
             # TODO:The npu_fused_infer_attention_score op is planned to
             # be utilized in a wider range in upcoming versions.
-            num_block, block_size, head_num, head_dim = self.key_cache.shape
+            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
             key = self.key_cache.view(  # type: ignore
                 num_block, block_size, -1)
             value = self.value_cache.view(  # type: ignore
