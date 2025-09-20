@@ -62,7 +62,7 @@ class AttentionMaskBuilder:
                       device: torch.device):
         self._update_attn_cache(max_seq_len, dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
-        ).to(device)
+        ).to(device, non_blocking=True)
 
     def get_splitfuse_attn_mask(
         self,
@@ -79,11 +79,10 @@ class AttentionMaskBuilder:
         # FIXME: Currently the mask value of chunked-prefill situation and Prefill-Only situation
         # is not the same. Fix this in the future when kernel is ready.
         mask_scale_factor = AttentionMaskBuilder.get_mask_scale_factor(dtype)
-        attn_mask = torch.index_select(self.attn_mask_cache,
-                                       dim=0,
-                                       index=position)[:, :max_seq_len]
+        attn_mask = self.attn_mask_cache[position, :max_seq_len].to(
+            device, non_blocking=True)
         attn_mask *= mask_scale_factor
-        return attn_mask.contiguous().to(device, non_blocking=True)
+        return attn_mask
 
     def _update_attn_cache(self, seqlen: int, dtype: torch.dtype):
         if seqlen > self._seq_len_cached:
