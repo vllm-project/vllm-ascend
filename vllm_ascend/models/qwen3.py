@@ -28,7 +28,7 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend import envs
 from vllm_ascend.ops.layernorm import AddRMSNormW8A8Quant
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import npu_stream_switch_aclgraph
 
 
 def pad(tensor, x):
@@ -158,7 +158,7 @@ class CustomQwen3Attention(Qwen3Attention):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        with npu_stream_switch(self.alt_stream):
+        with npu_stream_switch_aclgraph(self.alt_stream):
             # Add qk-norm
             q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
                                self.head_dim)

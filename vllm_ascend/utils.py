@@ -456,7 +456,7 @@ def delete_torchair_cache_file():
         pass
 
 
-def npu_stream_switch(target_stream: torch.npu.Stream,
+def npu_stream_switch_aclgraph(target_stream: torch.npu.Stream,
                       *,
                       enabled: bool = True):
     """
