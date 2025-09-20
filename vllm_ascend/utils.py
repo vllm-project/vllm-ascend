@@ -22,7 +22,6 @@ import functools
 import math
 import os
 from contextlib import contextmanager, nullcontext
-from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
@@ -540,34 +539,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
-
-
-# TODO(zzzzwwjj): Currently there is no clear SOC_VERSION policy for A2 and A3 in CANN.
-# So we get the version dynamically. In the future, we should get the version info from _build_info like 310p does.
-class AscendSocVersion(Enum):
-    A2 = 0
-    A3 = 1
-    UNDEFINED = 2
-
-
-_ascend_soc_version = None
-
-
-def init_ascend_soc_version():
-    soc_version = torch_npu.npu.get_soc_version()
-    global _ascend_soc_version
-    if 220 <= soc_version <= 225:
-        _ascend_soc_version = AscendSocVersion.A2
-    elif 250 <= soc_version <= 255:
-        _ascend_soc_version = AscendSocVersion.A3
-    else:
-        _ascend_soc_version = AscendSocVersion.UNDEFINED
-
-
-def get_ascend_soc_version():
-    global _ascend_soc_version
-    assert _ascend_soc_version is not None
-    return _ascend_soc_version
 
 
 def lmhead_tp_enable() -> bool:
