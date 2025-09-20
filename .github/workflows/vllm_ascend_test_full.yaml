@@ -134,7 +134,7 @@ jobs:
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_chunked.py
           pytest -sv tests/e2e/singlecard/test_embedding.py
-          #pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           #pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_profile_execute_duration.py
           pytest -sv tests/e2e/singlecard/test_quantization.py
