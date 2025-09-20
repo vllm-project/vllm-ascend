@@ -71,7 +71,7 @@ evalscope eval \
  --model Qwen/Qwen2.5-7B-Instruct \
  --api-url http://localhost:8000/v1 \
  --api-key EMPTY \
- --eval-type service \
+ --eval-type server \
  --datasets gsm8k \
  --limit 10
 ```
