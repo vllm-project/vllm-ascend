@@ -84,7 +84,6 @@ class TestAscendConfig(TestBase):
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
         self.assertTrue(ascend_config.enable_kv_nz)
-        
 
         torchair_graph_config = ascend_config.torchair_graph_config
         self.assertTrue(torchair_graph_config.enabled)
