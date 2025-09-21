@@ -27,7 +27,7 @@ from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -72,8 +72,13 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import \
     reorder_batch_to_split_decodes_and_prefills
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
-from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheSpec, MambaSpec)
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.v1.kv_cache_interface import (AttentionSpec,
+                                        FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec, KVCacheSpec,
+                                        MambaSpec, UniformTypeKVCacheSpecs)
+# yapf: enable
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -2576,10 +2581,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
         kv_caches: Dict[str, torch.Tensor] = {}
-        for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
-        ):
-            attn_backend = kv_cache_group.backend
-            for layer_name in kv_cache_group.layer_names:
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            attn_backend = group.backend
+            for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 tensor_size = kv_cache_sizes[layer_name]
@@ -2721,10 +2726,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )), "Some layers are not correctly initialized"
 
         kv_caches: Dict[str, torch.Tensor] = {}
-        for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
+        for group in self._kv_cache_spec_attn_group_iterator(
         ):
-            attn_backend = kv_cache_group.backend
-            for layer_name in kv_cache_group.layer_names:
+            kv_cache_spec = group.kv_cache_spec
+            attn_backend = group.backend
+            for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
 
@@ -2821,7 +2827,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return kv_caches
 
-    def _kv_cache_spec_attn_group_iterator(
+    def _kv_cache_spec_attn_group_iterator_v0102(
             self) -> Iterator[tuple[KVCacheSpec, AttentionGroup]]:
         if not self.kv_cache_config.kv_cache_groups:
             return
@@ -2908,13 +2914,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         assert len(self.attn_groups) == 0, \
             "Attention backends are already initialized"
+        class AttentionGroupKey(NamedTuple):
+            attn_backend: type[AttentionBackend]
+            kv_cache_spec: KVCacheSpec
 
-        def get_attn_backends_for_layers(
-                layer_names: list[str]
-        ) -> dict[type[AttentionBackend], list[str]]:
-            layers = get_layers_from_vllm_config(self.vllm_config,
-                                                 AttentionLayerBase,
-                                                 layer_names)
+        def get_attn_backends_for_group(
+            kv_cache_group_spec: KVCacheGroupSpec,
+        ) -> dict[AttentionGroupKey, list[str]]:
+            layers = get_layers_from_vllm_config(
+                self.vllm_config, AttentionLayerBase,
+                kv_cache_group_spec.layer_names)
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
             # Dedupe based on full class name; this is a bit safer than
@@ -2922,40 +2931,28 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
             # they are cached correctly, there will be different objects per
             # layer.
-            for layer_name in layer_names:
+            for layer_name in kv_cache_group_spec.layer_names:
                 attn_backend = layers[layer_name].get_attn_backend()
-                key = attn_backend.full_cls_name()
-                attn_backends[key] = attn_backend
+                full_cls_name = attn_backend.full_cls_name()
+                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+                if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
+                        layer_name]
+                key = (full_cls_name, layer_kv_cache_spec)
+                attn_backends[key] = AttentionGroupKey(attn_backend,
+                                                       layer_kv_cache_spec)
                 attn_backend_layers[key].append(layer_name)
             return {
                 attn_backends[k]: v
                 for k, v in attn_backend_layers.items()
             }
 
-        def create_attn_groups_v0102(
-            attn_backends_map: dict[AttentionBackend, list[str]],
-            kv_cache_spec: KVCacheSpec,
-        ) -> list[AttentionGroup]:
-            attn_groups: list[AttentionGroup] = []
-            for attn_backend, layer_names in attn_backends_map.items():
-                attn_metadata_builder_i = attn_backend.get_builder_cls()(
-                    kv_cache_spec,
-                    layer_names,
-                    self.vllm_config,
-                    self.device,
-                )
-                attn_group = AttentionGroup(attn_backend,
-                                            attn_metadata_builder_i,
-                                            layer_names)
-                attn_groups.append(attn_group)
-            return attn_groups
-
         def create_attn_groups(
             attn_backends_map: dict[AttentionBackend, list[str]],
-            kv_cache_spec: KVCacheSpec,
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
-            for attn_backend, layer_names in attn_backends_map.items():
+            for (attn_backend,
+                 kv_cache_spec), layer_names in attn_backends_map.items():
                 attn_metadata_builders = []
                 attn_metadata_builders.append(attn_backend.get_builder_cls()(
                     kv_cache_spec,
@@ -2965,26 +2962,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 ))
                 attn_group = AttentionGroup(attn_backend,
                                             attn_metadata_builders,
-                                            layer_names)
+                                            layer_names, kv_cache_spec)
                 attn_groups.append(attn_group)
             return attn_groups
 
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            attn_backends = get_attn_backends_for_layers(
-                kv_cache_group_spec.layer_names)
-            if vllm_version_is("0.10.2"):
-                self.attn_groups.append(
-                    create_attn_groups_v0102(attn_backends, kv_cache_spec))
-            else:
-                self.attn_groups.append(
-                    create_attn_groups(attn_backends, kv_cache_spec))
+            attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
+            self.attn_groups.append(create_attn_groups(attn_backends))
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
         return itertools.chain.from_iterable(self.attn_groups)
+
+    def _kv_cache_spec_attn_group_iterator(self) -> Iterator[AttentionGroup]:
+        if not self.kv_cache_config.kv_cache_groups:
+            return
+        for attn_groups in self.attn_groups:
+            yield from attn_groups
 
     def calculate_reorder_batch_threshold(self) -> None:
         """
