@@ -50,6 +50,8 @@ class AscendConfig:
             weight_prefetch_config)
 
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
+
+        self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
         self.expert_map_record_path = additional_config.get(
@@ -158,7 +160,6 @@ class TorchairGraphConfig:
             "enable_view_optimize", True)
         self.enable_frozen_parameter = torchair_graph_config.get(
             "enable_frozen_parameter", True)
-        self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
         self.enable_super_kernel = torchair_graph_config.get(
             "enable_super_kernel", False)
 
@@ -191,10 +192,6 @@ class TorchairGraphConfig:
             if self.enable_multistream_mla:
                 raise RuntimeError(
                     "enable_multistream_mla is valid only when Torchair graph mode is enabled"
-                )
-            if self.enable_kv_nz:
-                raise RuntimeError(
-                    "enable_kv_nz is valid only when Torchair graph mode is enabled"
                 )
             if self.enable_super_kernel:
                 raise RuntimeError(
