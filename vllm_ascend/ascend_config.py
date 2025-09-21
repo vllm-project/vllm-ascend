@@ -82,6 +82,8 @@ class AscendConfig:
             weight_prefetch_config)
 
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
+
+        self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
         self.expert_map_record_path = additional_config.get(
