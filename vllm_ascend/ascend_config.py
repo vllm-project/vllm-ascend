@@ -44,6 +44,8 @@ class AscendConfig:
         self.ascend_scheduler_config = AscendSchedulerConfig(
             ascend_scheduler_config)
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
+
+        self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.expert_map_record_path = additional_config.get(
             "expert_map_record_path",
@@ -116,7 +118,6 @@ class TorchairGraphConfig:
             "enable_view_optimize", True)
         self.enable_frozen_parameter = torchair_graph_config.get(
             "enable_frozen_parameter", True)
-        self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
 
         if not isinstance(self.graph_batch_sizes, list):
             raise TypeError("graph_batch_sizes must be list[int]")
@@ -147,10 +148,6 @@ class TorchairGraphConfig:
             if self.enable_multistream_mla:
                 raise RuntimeError(
                     "enable_multistream_mla is valid only when Torchair graph mode is enabled"
-                )
-            if self.enable_kv_nz:
-                raise RuntimeError(
-                    "enable_kv_nz is valid only when Torchair graph mode is enabled"
                 )
         if self.use_cached_kv_cache_bytes and not self.use_cached_graph:
             raise RuntimeError(

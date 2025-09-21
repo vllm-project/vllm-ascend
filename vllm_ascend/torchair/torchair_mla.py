@@ -670,7 +670,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
+        self.enable_kv_nz = ascend_config.enable_kv_nz
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.running_in_graph = False
         self.prefill_mask = None
