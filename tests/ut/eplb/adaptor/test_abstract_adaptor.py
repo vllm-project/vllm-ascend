@@ -1,8 +1,10 @@
 import pytest
+
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 
 
 class DummyAdaptor(EplbAdaptor):
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.args = kwargs
@@ -16,7 +18,8 @@ class DummyAdaptor(EplbAdaptor):
     def do_update_expert_map(self, layer_id, updated_expert_map):
         return {"layer_id": layer_id, "map": updated_expert_map}
 
-    def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
+    def do_update_expert_weight(self, layer_id, local_expert_to_replace,
+                                buffer_tensor_id):
         return {
             "layer_id": layer_id,
             "replace": local_expert_to_replace,
