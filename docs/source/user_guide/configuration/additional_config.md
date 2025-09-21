@@ -36,6 +36,7 @@ The following table lists the additional configuration options available in vLLM
 | `lmhead_tensor_parallel_size` | int | `None` | The custom tensor parallel size of lmhead. |
 | `oproj_tensor_parallel_size` | int | `None` | The custom tensor parallel size of oproj. |
 | `multistream_overlap_shared_expert`| bool | `False` | Whether to enable multistream shared expert. This option only takes effects on moe models with shared experts. |
+| `enable_kv_nz`| bool | `False` | Whether to enable kvcache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek). |
 
 The details of each config option are as follows:
 
@@ -51,7 +52,6 @@ The details of each config option are as follows:
 | `use_cached_graph` | bool | `False` | Whether to use cached graph |
 | `graph_batch_sizes` | list[int] | `[]` | The batch size for torchair graph cache |
 | `graph_batch_sizes_init` | bool | `False` | Init graph batch size dynamically if `graph_batch_sizes` is empty |
-| `enable_kv_nz`| bool | `False` | Whether to enable kvcache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek). |
 
 **ascend_scheduler_config**
 
