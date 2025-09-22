@@ -21,7 +21,7 @@ from unittest import mock
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
+from vllm_ascend.eplb.expert_load_balancer import ExpertLoadBalancer
 
 
 class Device(TypedDict):

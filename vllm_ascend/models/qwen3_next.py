@@ -58,10 +58,11 @@ from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm_ascend.ops.casual_conv1d import (causal_conv1d_fn,
-                                           causal_conv1d_update_npu)
-from vllm_ascend.ops.fla import RMSNormGated, fused_gdn_gating
-from vllm_ascend.ops.sigmoid_gating import fused_recurrent_gated_delta_rule
+from vllm_ascend.ops.triton.casual_conv1d import (causal_conv1d_fn,
+                                                  causal_conv1d_update_npu)
+from vllm_ascend.ops.triton.fla import RMSNormGated, fused_gdn_gating
+from vllm_ascend.ops.triton.sigmoid_gating import \
+    fused_recurrent_gated_delta_rule
 
 
 def torch_chunk_gated_delta_rule(
