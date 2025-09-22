@@ -480,7 +480,7 @@ class MtpProposer(Proposer):
                     (0, max_num_reqs_across_dp - num_indices))
 
             sample_hidden_states = hidden_states[last_token_indices]
-            logits = self.model.compute_logits(sample_hidden_states, None)
+            logits = self.model.compute_logits(sample_hidden_states)
             if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
             draft_token_ids = logits.argmax(dim=-1)

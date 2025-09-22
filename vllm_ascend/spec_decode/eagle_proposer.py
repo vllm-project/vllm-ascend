@@ -471,7 +471,7 @@ class EagleProposer(Proposer):
                 hidden_states=self.hidden_states[:num_input_tokens],
             )
         sample_hidden_states = last_hidden_states[last_token_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+        logits = self.model.compute_logits(sample_hidden_states)
         draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
@@ -578,7 +578,7 @@ class EagleProposer(Proposer):
                 )
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
-                                               None)
+                                               )
 
             # TODO(wenlong): get more than one token for tree attention
             draft_token_ids = logits.argmax(dim=-1)
