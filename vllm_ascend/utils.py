@@ -21,7 +21,7 @@ import atexit
 import functools
 import math
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
@@ -321,7 +321,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     if os.getenv("HCCL_OP_EXPANSION_MODE") == 'AIV':
         # TODO: Find out whether we need to take into account the pp_size
         parallel_factor = 1 + num_comm_groups + int(
-            parallel_config.enable_expert_parallel)
+            parallel_config.enable_expert_parallel) + int(
+                vllm_config.additional_config.get(
+                    "multistream_overlap_shared_expert", False))
         if is_moe_model(vllm_config):
             parallel_factor += (parallel_config.data_parallel_size > 1)
         # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device
@@ -496,7 +498,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+    from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
+                                                  AscendSharedFusedMoE)
     from vllm_ascend.ops.layernorm import AscendQuantRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
@@ -523,6 +526,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "LogitsProcessor": AscendLogitsProcessor,
         "RMSNorm": AscendRMSNorm,
         "FusedMoE": AscendFusedMoE,
+        "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
 
@@ -617,3 +621,16 @@ def weak_ref_tensors(
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
     raise ValueError("Invalid type for tensors")
+
+
+def npu_stream_switch(target_stream: torch.npu.Stream,
+                      *,
+                      enabled: bool = True):
+    """
+    Switch to the target stream if enabled is True.
+    Otherwise, do nothing.
+    """
+    if not enabled:
+        return nullcontext()
+    assert target_stream is not None
+    return torch.npu.stream(target_stream)

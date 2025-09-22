@@ -639,6 +639,10 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
             self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank,
                 self.num_global_tokens_per_local_expert.ravel())
+        else:
+            # TODO: This full synchronization can be a performance bottleneck.
+            # A more granular sync (e.g., blocking D2H copies) should be investigated.
+            torch.npu.synchronize()
 
         return num_tokens_per_local_expert
 

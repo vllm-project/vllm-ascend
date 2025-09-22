@@ -15,8 +15,9 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
-from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
-from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
+from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata)
+from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
+                               vllm_version_is)
 
 PADDING_SLOT_ID = -1
 
@@ -331,10 +332,12 @@ class MtpProposer(Proposer):
             num_computed_tokens_cpu=None,
             seq_lens=None)
 
-        builder = self.runner.attn_groups[0][0].metadata_builder
+        if vllm_version_is("0.10.2"):
+            builder = self.runner.attn_groups[0][0].metadata_builder
+        else:
+            builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata_mtp = builder.build(0, common_attn_metadata,
                                           self.runner.get_model())
-
         attn_metadata = {}
         for layer_name in self.attn_layer_name:
             attn_metadata[layer_name] = attn_metadata_mtp

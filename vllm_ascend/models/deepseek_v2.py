@@ -320,12 +320,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
 
 class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
-    # add `packed_modules_mapping` in `DeepseekV2ForCausalLM` to support weight merging
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-        "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
