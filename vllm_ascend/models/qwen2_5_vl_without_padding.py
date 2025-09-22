@@ -48,8 +48,7 @@ from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLDummyInputsBuilder, Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor, Qwen3VLProcessingInfo)
 from vllm.model_executor.models.qwen3_vl_moe import (
-    Qwen3MoeLLMForCausalLM, Qwen3VLMoeForConditionalGeneration,
-    Qwen3VLMoeProcessingInfo)
+    Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeProcessingInfo)
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
