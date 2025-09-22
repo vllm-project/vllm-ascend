@@ -241,7 +241,7 @@ def group_based_adaptive_bloating_kernel(
         high = min(num_remain_slice, M - 1)
 
         while (int(high) - int(low)) > 1:
-            mid = (high + low) // 2
+            mid = int((high + low) // 2)
             keep = M - mid
             current_group = window[:, :keep]
             current_pieces = compute_piece_counts(current_group, M, stage_weights)
