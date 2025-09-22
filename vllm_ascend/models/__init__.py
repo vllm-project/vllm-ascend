@@ -15,7 +15,8 @@ def register_model():
 
     ModelRegistry.register_model(
         "Qwen3VLForConditionalGeneration",
-        "vllm_ascend.models.qwen2_5_vl_without_padding:AscendQwen3VLForConditionalGeneration")
+        "vllm_ascend.models.qwen2_5_vl_without_padding:AscendQwen3VLForConditionalGeneration"
+    )
 
     if envs_ascend.USE_OPTIMIZED_MODEL:
         ModelRegistry.register_model(

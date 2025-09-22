@@ -38,9 +38,6 @@ from vllm.model_executor.layers.activation import (_ACTIVATION_REGISTRY,
                                                    get_act_and_mul_fn)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.interfaces import (SupportsLoRA,
-                                                   SupportsMultiModal,
-                                                   SupportsPP)
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionAttention, Qwen2_5_VisionBlock, Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionTransformer, Qwen2_5_VLDummyInputsBuilder,
@@ -339,6 +336,7 @@ class AscendQwen3_VisionPatchEmbed(Qwen3_VisionPatchEmbed):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.matmul(
             self.proj.weight.data.view(self.hidden_size, -1).transpose(0, 1))
+        x = x + self.proj.bias
         return x
 
 
@@ -578,14 +576,10 @@ class AscendQwen3VLMoeForConditionalGeneration(
         })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        nn.Module.__init__(self)
-        SupportsMultiModal.__init__(self)
-        SupportsLoRA.__init__(self)
-        SupportsPP.__init__(self)
+        super.__init__(vllm_config=vllm_config, prefix=prefix)
         config: Qwen3VLMoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        self.config = config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
@@ -596,25 +590,3 @@ class AscendQwen3VLMoeForConditionalGeneration(
             prefix=maybe_prefix(prefix, "visual"),
             use_data_parallel=self.use_data_parallel,
         )
-
-        self.language_model = Qwen3MoeLLMForCausalLM(vllm_config=vllm_config,
-                                                     prefix=maybe_prefix(
-                                                         prefix,
-                                                         "language_model"))
-
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors)
-
-        self.use_deepstack = hasattr(config.vision_config,
-                                     'deepstack_visual_indexes')
-        self.deepstack_num_level = len(
-            config.vision_config.deepstack_visual_indexes
-        ) if self.use_deepstack else 0
-        # register buffer for deepstack
-        self.deepstack_input_embeds = [
-            torch.zeros(vllm_config.scheduler_config.max_num_batched_tokens,
-                        config.text_config.hidden_size)
-            for _ in range(self.deepstack_num_level)
-        ] if self.use_deepstack else None
-        self.visual_dim = config.vision_config.out_hidden_size
-        self.multiscale_dim = self.visual_dim * self.deepstack_num_level
