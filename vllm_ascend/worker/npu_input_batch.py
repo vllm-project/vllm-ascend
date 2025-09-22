@@ -48,9 +48,6 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: Optional[list[int]]
-    mm_kwargs: list[MultiModalKwargsItem]
-    mm_positions: list[PlaceholderRange]
-    mm_hashes: list[str]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
