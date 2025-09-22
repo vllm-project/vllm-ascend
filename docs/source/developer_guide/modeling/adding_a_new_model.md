@@ -61,7 +61,6 @@ from torch import nn
 from vllm.attention import Attention
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 class CustomAttention(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str):
