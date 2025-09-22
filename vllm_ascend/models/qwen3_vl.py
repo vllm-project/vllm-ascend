@@ -23,29 +23,32 @@ from typing import Callable, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_npu
 from transformers.models.qwen3_vl.configuration_qwen3_vl import (
     Qwen3VLConfig, Qwen3VLVisionConfig)
 from vllm.config import VllmConfig
 from vllm.distributed import utils as dist_utils
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.qwen3_vl import (
     Qwen3_VisionBlock, Qwen3_VisionPatchEmbed, Qwen3_VisionTransformer,
     Qwen3VLDummyInputsBuilder, Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor, Qwen3VLProcessingInfo)
-from vllm_ascend.models.qwen2_5_vl_without_padding import AscendQwen2_5_VisionAttention_Without_Padding
-from vllm.model_executor.models.utils import maybe_prefix, WeightsMapper
+from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
+from vllm_ascend.models.qwen2_5_vl_without_padding import \
+    AscendQwen2_5_VisionAttention_Without_Padding
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
 class AscendQwen3_VisionPatchEmbed(Qwen3_VisionPatchEmbed):
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.matmul(
             self.proj.weight.data.view(self.hidden_size, -1).transpose(0, 1))
         return x
 
+
 class AscendQwen3_VisionBlock(Qwen3_VisionBlock):
+
     def __init__(
         self,
         dim: int,
@@ -59,23 +62,18 @@ class AscendQwen3_VisionBlock(Qwen3_VisionBlock):
     ) -> None:
         super().__init__(dim, num_heads, mlp_hidden_dim, act_fn, norm_layer,
                          quant_config, prefix, use_data_parallel)
-        self.attn = AscendQwen2_5_VisionAttention_Without_Padding(embed_dim=dim,
-                                                                num_heads=num_heads,
-                                                                projection_size=dim,
-                                                                quant_config=quant_config,
-                                                                prefix=f"{prefix}.attn",
-                                                                use_data_parallel=use_data_parallel)
-    def forward(
-            self,
-            x: torch.Tensor,
-            cu_seqlens: torch.Tensor,
-            cos: torch.Tensor,
-            sin: torch.Tensor
-    ) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x),
-                          cu_seqlens=cu_seqlens,
-                          cos=cos,
-                          sin=sin)
+        self.attn = AscendQwen2_5_VisionAttention_Without_Padding(
+            embed_dim=dim,
+            num_heads=num_heads,
+            projection_size=dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            use_data_parallel=use_data_parallel)
+        
+    def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
+            cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+        x = x + self.attn(
+            self.norm1(x), cu_seqlens=cu_seqlens, cos=cos, sin=sin)
 
         x = x + self.mlp(self.norm2(x))
         return x
@@ -89,7 +87,8 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
-        super().__init__(vision_config, norm_eps, quant_config, prefix, use_data_parallel)
+        super().__init__(vision_config, norm_eps, quant_config, prefix,
+                         use_data_parallel)
         norm_layer = partial(nn.LayerNorm, eps=norm_eps)
         self.patch_embed = AscendQwen3_VisionPatchEmbed(
             patch_size=self.patch_size,
@@ -135,8 +134,9 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        cu_seqlens = torch.repeat_interleave(
-            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cpu().to(torch.int32)
+        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
+                                             grid_thw[:,
+                                                      0]).cpu().to(torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         hidden_states = hidden_states.unsqueeze(1)
@@ -198,5 +198,4 @@ class AscendQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=self._maybe_ignore_quant_config(quant_config),
             prefix=maybe_prefix(prefix, "visual"),
-            use_data_parallel=self.use_data_parallel
-        )
+            use_data_parallel=self.use_data_parallel)

@@ -22,25 +22,32 @@ from typing import Callable
 
 import torch
 import torch.nn as nn
-from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeConfig
-from vllm.config import VllmConfig
-from vllm.distributed import get_pp_group, get_ep_group
+from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import \
+    Qwen3VLMoeConfig
 from vllm.compilation.decorators import support_torch_compile
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.config import VllmConfig
+from vllm.distributed import get_ep_group, get_pp_group
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.models.interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP, MixtureOfExperts)
+from vllm.model_executor.models.interfaces import (MixtureOfExperts,
+                                                   SupportsLoRA,
+                                                   SupportsMultiModal,
+                                                   SupportsPP)
 from vllm.model_executor.models.qwen3_moe import (Qwen3MoeDecoderLayer,
                                                   Qwen3MoeSparseMoeBlock)
 from vllm.model_executor.models.qwen3_vl_moe import (
-    Qwen3MoeLLMModel, Qwen3MoeLLMForCausalLM, Qwen3VLDummyInputsBuilder,
-    Qwen3VLMoeForConditionalGeneration, Qwen3VLMultiModalProcessor, Qwen3VLMoeProcessingInfo)
-from vllm_ascend.models.qwen3_vl import AscendQwen3_VisionTransformer
+    Qwen3MoeLLMForCausalLM, Qwen3MoeLLMModel, Qwen3VLDummyInputsBuilder,
+    Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeProcessingInfo, 
+    Qwen3VLMultiModalProcessor)
 from vllm.model_executor.models.utils import (
-    make_empty_intermediate_tensors_factory, make_layers, PPMissingLayer, maybe_prefix, WeightsMapper)
+    PPMissingLayer, WeightsMapper, make_empty_intermediate_tensors_factory,
+    make_layers, maybe_prefix)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+
+from vllm_ascend.models.qwen3_vl import AscendQwen3_VisionTransformer
 
 
 @support_torch_compile(
@@ -101,7 +108,8 @@ class AscendQwen3MoeLLMModel(Qwen3MoeLLMModel):
         ep_size = ep_group.size()
         local_experts_num = (num_experts // ep_size)
         weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-        for expert_id in range(ep_rank * local_experts_num, (ep_rank + 1) * local_experts_num):
+        for expert_id in range(ep_rank * local_experts_num,
+                               (ep_rank + 1) * local_experts_num):
             curr_expert_weight = loaded_weight[expert_id]
             success = weight_loader(param,
                                     curr_expert_weight,
@@ -137,7 +145,8 @@ class AscendQwen3MoeLLMForCausalLM(Qwen3MoeLLMForCausalLM):
         self.config = vllm_config.model_config.hf_config.text_config
         self.quant_config = vllm_config.quant_config
         self.model = AscendQwen3MoeLLMModel(vllm_config=vllm_config,
-                                            prefix=maybe_prefix(prefix, "model"))
+                                            prefix=maybe_prefix(
+                                                prefix, "model"))
         self.lm_head = ParallelLMHead(self.config.vocab_size,
                                       self.config.hidden_size,
                                       quant_config=self.quant_config)
@@ -170,7 +179,8 @@ class AscendQwen3MoeLLMForCausalLM(Qwen3MoeLLMForCausalLM):
 @MULTIMODAL_REGISTRY.register_processor(Qwen3VLMultiModalProcessor,
                                         info=Qwen3VLMoeProcessingInfo,
                                         dummy_inputs=Qwen3VLDummyInputsBuilder)
-class AscendQwen3VLMoeForConditionalGeneration(Qwen3VLMoeForConditionalGeneration):
+class AscendQwen3VLMoeForConditionalGeneration(
+        Qwen3VLMoeForConditionalGeneration):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -192,6 +202,7 @@ class AscendQwen3VLMoeForConditionalGeneration(Qwen3VLMoeForConditionalGeneratio
             "lm_head.": "language_model.lm_head.",
             "model.language_model.": "language_model.model.",
         })
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         SupportsMultiModal.__init__(self)
@@ -213,8 +224,9 @@ class AscendQwen3VLMoeForConditionalGeneration(Qwen3VLMoeForConditionalGeneratio
             use_data_parallel=self.use_data_parallel,
         )
 
-        self.language_model = AscendQwen3MoeLLMForCausalLM(vllm_config=vllm_config,
-                                                           prefix=maybe_prefix(prefix, "language_model"))
+        self.language_model = AscendQwen3MoeLLMForCausalLM(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"))
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
