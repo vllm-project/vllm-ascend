@@ -112,7 +112,7 @@ class AscendQwen3MoeLLMModel(Qwen3MoeLLMModel):
         weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
         if self.use_ep:
             for expert_id in range(ep_rank * local_experts_num,
-                                    (ep_rank + 1) * local_experts_num):
+                                   (ep_rank + 1) * local_experts_num):
                 curr_expert_weight = loaded_weight[expert_id]
                 success = weight_loader(param,
                                         curr_expert_weight,
