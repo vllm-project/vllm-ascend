@@ -109,17 +109,29 @@ class AscendQwen3MoeLLMModel(Qwen3MoeLLMModel):
         ep_size = ep_group.size()
         local_experts_num = (num_experts // ep_size)
         weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-        for expert_id in range(ep_rank * local_experts_num,
-                               (ep_rank + 1) * local_experts_num):
-            curr_expert_weight = loaded_weight[expert_id]
-            success = weight_loader(param,
-                                    curr_expert_weight,
-                                    name,
-                                    shard_id,
-                                    expert_id,
-                                    return_success=True)
-            if not success:
-                return False
+        if ep_size > 1:
+            for expert_id in range(ep_rank * local_experts_num,
+                                (ep_rank + 1) * local_experts_num):
+                curr_expert_weight = loaded_weight[expert_id]
+                success = weight_loader(param,
+                                        curr_expert_weight,
+                                        name,
+                                        shard_id,
+                                        expert_id,
+                                        return_success=True)
+                if not success:
+                    return False
+        else:
+            for expert_id in range(num_experts):
+                curr_expert_weight = loaded_weight[expert_id]
+                success = weight_loader(param,
+                                        curr_expert_weight,
+                                        name,
+                                        shard_id,
+                                        expert_id,
+                                        return_success=True)
+                if not success:
+                    return False            
         return True
 
 
