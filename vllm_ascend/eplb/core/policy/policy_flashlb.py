@@ -441,7 +441,7 @@ class FlashLB(EplbPolicy):
             ) = self.group_based_adaptive_bloating(X,
                                                    P,
                                                    M,
-                                                   stage_weights, 
+                                                   stage_weights,
                                                    recorsive=False)
         else:
             simulated_pieces = compute_piece_counts(X, P, stage_weights)
@@ -581,9 +581,6 @@ class FlashLB(EplbPolicy):
         return change, layers_need_update, deployment
 
 
-
-
-
 def generate_layered_experts(num_layers=58,
                              layer_shape=(32, 9),
                              expert_min=0,
@@ -640,6 +637,7 @@ def generate_layered_experts(num_layers=58,
 
     # 4. Stack all layers to get the final tensor
     return torch.stack(layers, dim=0)  # shape (58,32,9)
+
 
 def warm_up():
     exam_config = DynamicConfig()
