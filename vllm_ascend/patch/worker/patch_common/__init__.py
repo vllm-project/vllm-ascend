@@ -17,6 +17,6 @@
 
 import vllm_ascend.patch.worker.patch_common.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_logits  # noqa
-
+import vllm_ascend.ops.sigmoid_gating
 # TODO: revert me when triton import is fixed
 # import vllm_ascend.patch.worker.patch_common.patch_minicpm  # noqa
