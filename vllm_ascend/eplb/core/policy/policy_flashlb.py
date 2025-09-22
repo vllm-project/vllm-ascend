@@ -381,6 +381,8 @@ class FlashLB(EplbPolicy):
 
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
+        self.par_history = defaultdict(float)
+        self.hotness_window = {}
         self.max_stage_window = (
             config.max_stage_window if hasattr(config, "max_stage_window") else 1
         )
