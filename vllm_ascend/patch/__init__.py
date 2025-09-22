@@ -96,6 +96,7 @@
 #    Related PR (if no, explain why):
 #       Need a PR to vllm to support a dictionary as input while initializing distributed
 #       environment (e.g., Dict[str, torch.distributed.ProcessGroupHCCL.Options])
+#       https://github.com/vllm-project/vllm/pull/25417
 #    Future Plan:
 #       Remove this patch when vllm merges this PR.
 #   (2) all_to_all()
