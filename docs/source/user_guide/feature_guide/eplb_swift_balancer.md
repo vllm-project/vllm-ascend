@@ -51,4 +51,3 @@ vllm serve Qwen/Qwen3-235B-A22 \
   --enable-expert-parallel \
   --additional-config '{ "expert_map_path": "/path/to/eplb.json"}'
 ```
-
