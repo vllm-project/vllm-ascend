@@ -284,7 +284,7 @@ class LLMDataDistCMgrConnectorScheduler():
                         len(computed_block_ids), request.request_id)
             # Prefill request on remote. It will be read from D upon completion
             self._reqs_need_send[request.request_id] = time.perf_counter(
-            ) + envs.VLLM_LLMDD_ABORT_REQUEST_TIMEOUT
+            ) + envs_ascend.VLLM_LLMDD_ABORT_REQUEST_TIMEOUT
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
