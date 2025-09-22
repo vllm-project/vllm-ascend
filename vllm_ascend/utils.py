@@ -36,7 +36,7 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import VllmConfig, get_cached_compilation_config
 else:
     VllmConfig = None
 
@@ -586,6 +586,9 @@ def matmul_allreduce_enable() -> bool:
 
 def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
+
+def enable_sp() -> bool:
+    return get_cached_compilation_config().pass_config.enable_sequence_parallelism or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM
 
 
 def is_moe_model(vllm_config: VllmConfig):

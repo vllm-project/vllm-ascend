@@ -1441,7 +1441,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
-        if get_forward_context().flashcomm_v1_enabled:
+        if get_forward_context().sp_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             pad_size = get_forward_context().pad_size
             if pad_size > 0:
