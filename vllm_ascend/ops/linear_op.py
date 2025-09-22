@@ -307,7 +307,7 @@ class OProjRowParallelOp(CustomRowParallelOp):
         # Only fuse bias add for rank 0 to avoid duplicate bias addition in TP>1
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
         assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self,
+        output_parallel = self.quant_method.apply(self.layer,
                                                   input_parallel,
                                                   bias=bias_)
 
