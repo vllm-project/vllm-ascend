@@ -27,6 +27,8 @@ from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -595,6 +597,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 del eye
                 # standardize to (output, input)
                 return dequant_weights.T
+            # Weight will be reshaped next. To be on the safe side, the format
+            # of the weight should be reverted to ND.
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_ND)
             return layer.weight
 
         # we currently do not have quantized bmm's which are needed for

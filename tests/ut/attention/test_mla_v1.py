@@ -11,6 +11,7 @@ from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLAImpl, AscendMLAMetadata,
                                           AscendMLAMetadataBuilder,
                                           AscendMLAPrefillMetadata)
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 
 
 class TestAscendMLABackend(TestBase):
