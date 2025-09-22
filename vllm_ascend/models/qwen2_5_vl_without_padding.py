@@ -1,6 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Adapted from vllm/model_executor/models/qwen2_5_vl.py
 # Copyright 2023 The vLLM team.
 #
 # This file is a part of the vllm-ascend project.
@@ -47,12 +46,16 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer, Qwen2_5_VLDummyInputsBuilder,
     Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLMultiModalProcessor,
     Qwen2_5_VLProcessingInfo)
-from vllm.model_executor.models.qwen3_vl import (
-    Qwen3_VisionBlock, Qwen3_VisionPatchEmbed, Qwen3_VisionTransformer,
-    Qwen3VLDummyInputsBuilder, Qwen3VLForConditionalGeneration,
-    Qwen3VLMultiModalProcessor, Qwen3VLProcessingInfo)
-from vllm.model_executor.models.qwen3_vl_moe import (
-    Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeProcessingInfo)
+
+try:
+    from vllm.model_executor.models.qwen3_vl import (
+        Qwen3_VisionBlock, Qwen3_VisionPatchEmbed, Qwen3_VisionTransformer,
+        Qwen3VLDummyInputsBuilder, Qwen3VLForConditionalGeneration,
+        Qwen3VLMultiModalProcessor, Qwen3VLProcessingInfo)
+    from vllm.model_executor.models.qwen3_vl_moe import (
+        Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeProcessingInfo)
+except ImportError:
+    pass
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
