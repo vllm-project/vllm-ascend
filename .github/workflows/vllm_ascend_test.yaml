@@ -42,7 +42,7 @@ jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
     with:
-      vllm: 9607d5eb449711b349d4c2bee0a9c94afcc7ed14
+      vllm: 5aeb9254521023f97aca292b3478aa7ff485ffb2
 
   changes:
     runs-on: ubuntu-latest
@@ -83,7 +83,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [9607d5eb449711b349d4c2bee0a9c94afcc7ed14, v0.10.2]
+        vllm_version: [5aeb9254521023f97aca292b3478aa7ff485ffb2, v0.10.2]
     steps:
       - name: Install packages
         run: |
@@ -138,7 +138,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [9607d5eb449711b349d4c2bee0a9c94afcc7ed14, v0.10.2]
+        vllm_version: [5aeb9254521023f97aca292b3478aa7ff485ffb2, v0.10.2]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
