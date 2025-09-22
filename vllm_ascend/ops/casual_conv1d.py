@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 import triton
 import triton.language as tl
+import vllm.model_executor.layers.mamba.ops.causal_conv1d
 
 PAD_SLOT_ID = -1
 
@@ -595,3 +596,6 @@ def causal_conv1d_update_npu(
     if unsqueeze:
         out = out.squeeze(-1)
     return out
+
+
+vllm.model_executor.layers.mamba.ops.causal_conv1d.causal_conv1d_update = causal_conv1d_update_npu

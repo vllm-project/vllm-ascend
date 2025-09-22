@@ -36,6 +36,8 @@ from vllm.model_executor.layers.mamba.mamba_mixer2 import \
     mamba_v2_sharded_weight_loader
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import \
+    causal_conv1d_update
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
@@ -61,8 +63,7 @@ from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm_ascend.ops.casual_conv1d import (causal_conv1d_fn,
-                                           causal_conv1d_update_npu)
+from vllm_ascend.ops.casual_conv1d import causal_conv1d_fn
 from vllm_ascend.ops.fla import RMSNormGated
 
 
@@ -470,7 +471,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 query_start_loc=non_spec_query_start_loc,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
-            mixed_qkv_non_spec = causal_conv1d_update_npu(
+            mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
                 conv_weights,
