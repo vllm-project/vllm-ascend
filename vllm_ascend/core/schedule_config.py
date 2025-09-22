@@ -74,7 +74,3 @@ class AscendSchedulerConfig(SchedulerConfig):
         if self.send_delta_data:
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support send_delta_data.")
-        if self.delay_factor > 0:
-            raise NotImplementedError(
-                "currently AscendScheduler doesn't support scheduler_delay_factor."
-            )

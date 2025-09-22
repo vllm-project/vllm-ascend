@@ -52,7 +52,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -68,6 +67,7 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
+from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
@@ -945,7 +945,7 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
+        self.sampler = Sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

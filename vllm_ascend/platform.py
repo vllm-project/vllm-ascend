@@ -142,7 +142,6 @@ class NPUPlatform(Platform):
                 "functionality is currently suboptimal.")
             if not model_config.is_multimodal_model and \
                 structured_outputs_config.backend == "auto" and \
-                not scheduler_config.delay_factor > 0 and \
                 not scheduler_config.send_delta_data and \
                 scheduler_config.policy == "fcfs":
                 ascend_scheduler_config.enabled = True

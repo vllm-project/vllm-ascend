@@ -45,7 +45,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
+from vllm.v1.sample.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -53,12 +53,17 @@ from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
     extract_layer_index, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.10.2"):
+    from vllm.model_executor.layers.sampler import SamplerOutput
+else:
+    from vllm.v1.sample.sampler import SamplerOutput
 
 _ROUTER_SCALE = None
 
@@ -937,7 +942,7 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        sampling_metadata, # type: ignore
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
@@ -946,7 +951,7 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
     def sample(
         self,
         logits: Optional[torch.Tensor],
-        sampling_metadata: SamplingMetadata,
+        sampling_metadata, # type: ignore
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens

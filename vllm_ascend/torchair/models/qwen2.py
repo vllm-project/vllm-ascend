@@ -40,11 +40,11 @@ from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM  # noqa: F401
 from vllm.model_executor.models.qwen2 import Qwen2MLP, Qwen2Model
 from vllm.model_executor.models.utils import (AutoWeightsLoader,
                                               PPMissingLayer, maybe_prefix)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
 
 
 def all_gather_and_maybe_unpad(
@@ -345,7 +345,7 @@ class CustomQwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        sampling_metadata, # type: ignore
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
