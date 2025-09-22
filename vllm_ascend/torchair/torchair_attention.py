@@ -185,11 +185,7 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
             block_table[:num_reqs])
 
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        slot_mapping = common_attn_metadata.slot_mapping_cpu[:
-                                                             num_actual_tokens].to(
-                                                                 self.device,
-                                                                 non_blocking=
-                                                                 True)
+        slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
 
         attn_state = common_attn_metadata.attn_state
