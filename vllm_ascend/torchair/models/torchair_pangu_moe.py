@@ -936,9 +936,14 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
+        # For version compatibility, we still keep this argument here.
+        sampling_metadata  # type: ignore
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        return logits
+        from vllm_ascend.utils import vllm_version_is
+        if vllm_version_is("0.10.2"):
+            return self.logits_processor(self.lm_head, hidden_states,
+                                         sampling_metadata)
+        return self.logits_processor(self.lm_head, hidden_states)
 
     def sample(
         self,
