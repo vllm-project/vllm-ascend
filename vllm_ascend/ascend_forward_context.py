@@ -144,12 +144,7 @@ def set_ascend_forward_context(
             forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
             forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
         forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
-        is_shared_fused_moe = hasattr(vllm_config.model_config.hf_config,
-                                      'n_shared_experts')
-        if is_shared_fused_moe:
-            forward_context.n_shared_experts = vllm_config.model_config.hf_config.n_shared_experts
-        else:
-            forward_context.n_shared_experts = 0
+        
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
 

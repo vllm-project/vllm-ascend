@@ -311,9 +311,8 @@ class AscendFusedMoE(FusedMoE):
         """
         forward_context = get_forward_context()
         moe_comm_method_name = forward_context.moe_comm_method_name
-        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
         if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
-            if flashcomm_v1_enabled:
+            if forward_context.flashcomm_v1_enabled:
                 pad_size = forward_context.pad_size
                 if pad_size > 0:
                     final_hidden_states = F.pad(final_hidden_states,
@@ -333,9 +332,8 @@ class AscendFusedMoE(FusedMoE):
 
         forward_context = get_forward_context()
         moe_comm_method_name = forward_context.moe_comm_method_name
-        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
-        n_shared_experts = forward_context.n_shared_experts
-        if n_shared_experts == 0 and flashcomm_v1_enabled:
+
+        if self._shared_experts is None and forward_context.flashcomm_v1_enabled:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states, True)
             router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
@@ -445,8 +443,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         use_overlapped: bool = True,
         **kwargs,
     ):
-        AscendFusedMoE.__init__(self, **kwargs)
         self._shared_experts = shared_experts
+        AscendFusedMoE.__init__(self, **kwargs)
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
         ascend_config = get_ascend_config()
@@ -460,8 +458,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         forward_context = get_forward_context()
-        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
-        if flashcomm_v1_enabled:
+        if forward_context.flashcomm_v1_enabled:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states, True)
             router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
