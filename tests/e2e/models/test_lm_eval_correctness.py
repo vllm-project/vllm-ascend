@@ -69,6 +69,8 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
     if model_args.get('enable_expert_parallel', False):
         parallel_mode += " + EP"
 
+    execution_model = f"{'Eager' if model_args.get('enforce_eager', False) else 'ACLGraph'}"
+
     report_content = template.render(
         vllm_version=env_config.vllm_version,
         vllm_commit=env_config.vllm_commit,
@@ -77,6 +79,7 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         cann_version=env_config.cann_version,
         torch_version=env_config.torch_version,
         torch_npu_version=env_config.torch_npu_version,
+        hardware=eval_config.get("hardware", "unknown"),
         model_name=eval_config["model_name"],
         model_args=f"'{','.join(f'{k}={v}' for k, v in model_args.items())}'",
         model_type=eval_config.get("model", "vllm"),
@@ -87,7 +90,8 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         batch_size=eval_config.get("batch_size", "auto"),
         num_fewshot=eval_config.get("num_fewshot", "N/A"),
         rows=report_data["rows"],
-        parallel_mode=parallel_mode)
+        parallel_mode=parallel_mode,
+        execution_model=execution_model)
 
     report_output = os.path.join(
         report_dir, f"{os.path.basename(eval_config['model_name'])}.md")

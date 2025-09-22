@@ -1,3 +1,4 @@
+DeepSeek-V2-Lite.yaml
 Qwen3-8B-Base.yaml
 Qwen2.5-VL-7B-Instruct.yaml
 Qwen3-30B-A3B.yaml
