@@ -385,7 +385,7 @@ class MtpProposer(Proposer):
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=self.runner.input_batch.block_table[0].
             get_device_tensor(),
-            slot_mapping_cpu=target_slot_mapping,
+            slot_mapping=target_slot_mapping,
             positions=target_positions,
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
