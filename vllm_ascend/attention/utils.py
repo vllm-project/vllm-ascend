@@ -41,7 +41,7 @@ class AscendCommonAttentionMetadata:
 
     block_table_tensor: torch.Tensor
 
-    slot_mapping_cpu: torch.Tensor
+    slot_mapping: torch.Tensor
 
     actual_seq_lengths_q: list[int]
 

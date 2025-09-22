@@ -292,11 +292,7 @@ class AscendMLAMetadataBuilder:
         device = self.device
 
         block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
-        slot_mapping = common_attn_metadata.slot_mapping_cpu[:
-                                                             num_actual_tokens].to(
-                                                                 device,
-                                                                 non_blocking=
-                                                                 True)
+        slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         input_positions = common_attn_metadata.positions[:
                                                          num_actual_tokens].long(
                                                          )
