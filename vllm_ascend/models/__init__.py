@@ -35,9 +35,6 @@ def register_model():
         "Qwen3MoeForCausalLM",
         "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
 
-    ModelRegistry.register_model(
-        "Qwen3ForCausalLM", "vllm_ascend.models.qwen3:CustomQwen3ForCausalLM")
-
     # There is no PanguProMoEForCausalLM in vLLM, so we should register it before vLLM config initialization
     # to make sure the model can be loaded correctly. This register step can be removed once vLLM support PanguProMoEForCausalLM.
     ModelRegistry.register_model(

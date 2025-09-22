@@ -61,6 +61,8 @@ class AscendConfig:
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp", False
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
+        self.multistream_overlap_shared_expert = additional_config.get(
+            "multistream_overlap_shared_expert", False)
         self.enable_prefetch = additional_config.get("enable_prefetch", False)
         self.lmhead_tensor_parallel_size = additional_config.get(
             "lmhead_tensor_parallel_size", None)
@@ -110,10 +112,10 @@ class TorchairGraphConfig:
             "graph_batch_sizes_init", False)
         self.enable_multistream_mla = torchair_graph_config.get(
             "enable_multistream_mla", False)
-        self.enable_multistream_moe = torchair_graph_config.get(
-            "enable_multistream_moe", False)
         self.enable_view_optimize = torchair_graph_config.get(
             "enable_view_optimize", True)
+        self.enable_frozen_parameter = torchair_graph_config.get(
+            "enable_frozen_parameter", True)
         self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
 
         if not isinstance(self.graph_batch_sizes, list):
@@ -145,10 +147,6 @@ class TorchairGraphConfig:
             if self.enable_multistream_mla:
                 raise RuntimeError(
                     "enable_multistream_mla is valid only when Torchair graph mode is enabled"
-                )
-            if self.enable_multistream_moe:
-                raise RuntimeError(
-                    "enable_multistream_moe is valid only when Torchair graph mode is enabled"
                 )
             if self.enable_kv_nz:
                 raise RuntimeError(

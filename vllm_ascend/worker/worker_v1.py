@@ -28,8 +28,7 @@ from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
@@ -111,6 +110,9 @@ class NPUWorker(WorkerBase):
             init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
+        if sleep_mode_enabled():
+            # Buffers saved before sleep
+            self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
     def sleep(self, level: int = 1) -> None:
         if not sleep_mode_enabled():
@@ -118,6 +120,13 @@ class NPUWorker(WorkerBase):
                 "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
             )
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
+        # Save the buffers before level 2 sleep
+        if level == 2:
+            model = self.model_runner.model
+            self._sleep_saved_buffers = {
+                name: buffer.cpu().clone()
+                for name, buffer in model.named_buffers()
+            }
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
         free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
@@ -136,6 +145,14 @@ class NPUWorker(WorkerBase):
             )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
+
+        # Restore the buffers after level 2 sleep
+        if len(self._sleep_saved_buffers):
+            model = self.model_runner.model
+            for name, buffer in model.named_buffers():
+                if name in self._sleep_saved_buffers:
+                    buffer.data.copy_(self._sleep_saved_buffers[name].data)
+            self._sleep_saved_buffers = {}
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
@@ -205,34 +222,36 @@ class NPUWorker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
         intermediate_tensors = None
-        if not get_pp_group().is_first_rank:
+        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        if forward_pass and not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
+        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
+            return output
+
+        assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
-        if parallel_config.distributed_executor_backend != "external_launcher" \
-            and not get_pp_group().is_last_rank:
-            assert isinstance(output, IntermediateTensors)
-            get_pp_group().send_tensor_dict(output.tensors,
-                                            all_gather_group=get_tp_group())
-            if not has_kv_transfer_group():
-                return None
+        assert parallel_config.distributed_executor_backend != (
+            "external_launcher") and not get_pp_group().is_last_rank
 
-            kv_connector_output = output.kv_connector_output
-            finished_sending = kv_connector_output.finished_sending
-            finished_recving = kv_connector_output.finished_recving
+        get_pp_group().send_tensor_dict(output.tensors,
+                                        all_gather_group=get_tp_group())
 
-            if not finished_sending and not finished_recving:
-                return EMPTY_MODEL_RUNNER_OUTPUT
+        kv_connector_output = output.kv_connector_output
+        if not kv_connector_output:
+            return None
 
-            new_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-            new_output.kv_connector_output = kv_connector_output
-            return new_output
-
-        assert isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput))
+        # In case of PP with kv transfer, we need to pass through the
+        # kv_connector_output
+        if (not kv_connector_output.finished_sending
+                and not kv_connector_output.finished_recving):
+            return EMPTY_MODEL_RUNNER_OUTPUT
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.kv_connector_output = kv_connector_output
         return output
 
     def load_model(self) -> None:

@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.ops.vocab_parallel_embedding import (
     AscendLogitsProcessor, AscendParallelLMHead, AscendVocabParallelEmbedding)
 
@@ -31,6 +32,9 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.embedding_dim = 10
         self.org_num_embeddings = 40
         self.padding_size = 8
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.additional_config = {}
+        init_ascend_config(mock_vllm_config)
 
     def _create_layer(self):
         # Patch methods and dependencies for VocabParallelEmbedding

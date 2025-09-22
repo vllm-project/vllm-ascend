@@ -112,7 +112,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                get_ascend_soc_version, is_310p,
-                               lmhead_tp_enable)
+                               lmhead_tp_enable, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -280,6 +280,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
+        # use_hybrid_blocks: if hybrid blocks is used.
+        self.use_hybrid_blocks: bool = False
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.is_pooling_model = self.model_config.pooler_config is not None
@@ -306,17 +308,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
                                      MtpProposer]] = None
-        self.actual_seq_lengths_q = []
+        self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             assert spec_token_num > 0
             self.decode_token_per_req = 1 + spec_token_num
-            self.actual_seq_lengths_q = [
-                len for len in
-                range(self.decode_token_per_req, self.max_num_tokens +
-                      1, self.decode_token_per_req)
-            ]
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
@@ -572,11 +569,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 to_update = model.pooler.get_pooling_updates(task)
                 to_update.apply(pooling_params)
 
+            backward_kwargs = {}
+            if vllm_version_is("0.10.2"):
+                backward_kwargs["mm_kwargs"] = new_req_data.mm_kwargs
+                backward_kwargs["mm_hashes"] = new_req_data.mm_hashes
+                backward_kwargs["mm_positions"] = new_req_data.mm_positions
+            else:
+                backward_kwargs["mm_features"] = new_req_data.mm_features
+
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_kwargs=new_req_data.mm_kwargs,
-                mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
                 generator=generator,
@@ -584,46 +587,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
-                mm_hashes=new_req_data.mm_hashes,
+                **backward_kwargs,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
-                image_grid_thw = []
-                video_grid_thw = []
-                second_per_grid_ts = []
-                audio_feature_lengths = []
-                use_audio_in_video = False
-                for mm_item in self.requests[req_id].mm_kwargs:
-                    mm_input = mm_item.get_data()
-                    if mm_input.get("image_grid_thw") is not None:
-                        image_grid_thw.append(
-                            mm_input["image_grid_thw"].tolist())
-                    if mm_input.get("video_grid_thw") is not None:
-                        video_grid_thw.append(
-                            mm_input["video_grid_thw"].tolist())
-                    if mm_input.get("second_per_grid_ts") is not None:
-                        second_per_grid_ts.append(
-                            mm_input["second_per_grid_ts"])
-                    if mm_input.get("audio_feature_lengths") is not None:
-                        audio_feature_lengths.append(
-                            mm_input["audio_feature_lengths"])
-                    if mm_input.get("use_audio_in_video") is True:
-                        use_audio_in_video = True
-
-                hf_config = self.model_config.hf_config
-
-                self.requests[req_id].mrope_positions, \
-                    self.requests[req_id].mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions_tensor(
-                        self.requests[req_id].prompt_token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
-                    )
+                if vllm_version_is("0.10.2"):
+                    self._init_mrope_positions_0102(self.requests[req_id])
+                else:
+                    self._init_mrope_positions(self.requests[req_id])
 
             req_ids_to_add.append(req_id)
 
@@ -720,6 +692,73 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
+
+    def _init_mrope_positions(self, req_state: CachedRequestState):
+        image_grid_thw = []
+        video_grid_thw = []
+        second_per_grid_ts = []
+        audio_feature_lengths = []
+        use_audio_in_video = False
+        assert req_state.mm_features is not None
+        for mm_feature in req_state.mm_features:
+            mm_item = mm_feature.data
+            if mm_item is None:
+                continue
+            mm_input = mm_item.get_data()
+            if (t := mm_input.get("image_grid_thw")) is not None:
+                image_grid_thw.append(t.tolist())
+            if (t := mm_input.get("video_grid_thw")) is not None:
+                video_grid_thw.append(t.tolist())
+            if (t := mm_input.get("second_per_grid_ts")) is not None:
+                second_per_grid_ts.append(t)
+            if (t := mm_input.get("audio_feature_lengths")) is not None:
+                audio_feature_lengths.append(t)
+            if mm_input.get("use_audio_in_video") is True:
+                use_audio_in_video = True
+
+        req_state.mrope_positions, req_state.mrope_position_delta = \
+            MRotaryEmbedding.get_input_positions_tensor(
+                req_state.prompt_token_ids,
+                hf_config=self.model_config.hf_config,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+                audio_feature_lengths=audio_feature_lengths,
+                use_audio_in_video=use_audio_in_video,
+            )
+
+    def _init_mrope_positions_0102(self, req_state: CachedRequestState):
+        image_grid_thw = []
+        video_grid_thw = []
+        second_per_grid_ts = []
+        audio_feature_lengths = []
+        use_audio_in_video = False
+        assert req_state.mm_kwargs is not None
+        for mm_item in req_state.mm_kwargs:
+            mm_input = mm_item.get_data()
+            if mm_input.get("image_grid_thw") is not None:
+                image_grid_thw.append(mm_input["image_grid_thw"].tolist())
+            if mm_input.get("video_grid_thw") is not None:
+                video_grid_thw.append(mm_input["video_grid_thw"].tolist())
+            if mm_input.get("second_per_grid_ts") is not None:
+                second_per_grid_ts.append(mm_input["second_per_grid_ts"])
+            if mm_input.get("audio_feature_lengths") is not None:
+                audio_feature_lengths.append(mm_input["audio_feature_lengths"])
+            if mm_input.get("use_audio_in_video") is True:
+                use_audio_in_video = True
+
+        hf_config = self.model_config.hf_config
+
+        req_state.mrope_positions, req_state.mrope_position_delta = \
+            MRotaryEmbedding.get_input_positions_tensor(
+                req_state.prompt_token_ids,
+                hf_config=hf_config,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+                audio_feature_lengths=audio_feature_lengths,
+                use_audio_in_video=use_audio_in_video,
+            )
 
     def _sync_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
@@ -891,23 +930,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return
 
         # Batch the multi-modal inputs.
-        mm_kwargs = list[MultiModalKwargsItem]()
-        mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
-        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
-            req_state = self.requests[req_id]
-            for mm_input_id in encoder_input_ids:
-                mm_hash = req_state.mm_hashes[mm_input_id]
-                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
-                mm_hashes_pos.append(
-                    (mm_hash, req_state.mm_positions[mm_input_id]))
-        # Batch mm inputs as much as we can: if a request in the batch has
-        # multiple modalities or a different modality than the previous one,
-        # we process it separately to preserve item order.
-        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
-        # in the same batch while still being able to benefit from batching
-        # multimodal inputs. The proper solution should be reordering the
-        # encoder outputs.
+        if vllm_version_is("0.10.2"):
+            mm_kwargs, mm_hashes_pos = self._batch_mm_kwargs_from_scheduler_0102(
+                scheduler_output)
+        else:
+            mm_kwargs, mm_hashes_pos = self._batch_mm_kwargs_from_scheduler(
+                scheduler_output)
         encoder_outputs = []
+
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
@@ -937,32 +967,100 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 is_embed=pos_info.is_embed,
             )
 
+    # TODO: remove this once we drop support for vLLM 0.10.2
+    def _batch_mm_kwargs_from_scheduler_0102(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[list[MultiModalKwargsItem], list[tuple[str, PlaceholderRange]]]:
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        if not scheduled_encoder_inputs:
+            return [], []
+        # Batch the multi-modal inputs.
+        mm_kwargs = list[MultiModalKwargsItem]()
+        # list of tuple (mm_hash, position_info)
+        mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
+        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
+            req_state = self.requests[req_id]
+            assert req_state.mm_hashes is not None
+            assert req_state.mm_kwargs is not None
+            assert req_state.mm_positions is not None
+            for mm_input_id in encoder_input_ids:
+                mm_hash = req_state.mm_hashes[mm_input_id]
+                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
+                mm_hashes_pos.append(
+                    (mm_hash, req_state.mm_positions[mm_input_id]))
+
+        return mm_kwargs, mm_hashes_pos
+
+    def _batch_mm_kwargs_from_scheduler(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[list[MultiModalKwargsItem], list[tuple[str, PlaceholderRange]]]:
+        """Batch multimodal kwargs from scheduled encoder inputs.
+
+        Args:
+            scheduler_output: The scheduler output containing scheduled encoder
+              inputs.
+
+        Returns:
+            A tuple of (mm_kwargs, req_ids_pos) where:
+            - mm_kwargs: List of multimodal kwargs items to be batched
+            - mm_hashes_pos: List of (mm_hash, position_info) tuples
+        """
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        if not scheduled_encoder_inputs:
+            return [], []
+        # Batch the multi-modal inputs.
+        mm_kwargs = list[MultiModalKwargsItem]()
+        # list of tuple (mm_hash, position_info)
+        mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
+        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
+            req_state = self.requests[req_id]
+            assert req_state.mm_features is not None
+            for mm_input_id in encoder_input_ids:
+                mm_feature = req_state.mm_features[mm_input_id]
+                mm_hash = mm_feature.identifier
+                mm_kwargs.append(mm_feature.data)
+                mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
+
+        return mm_kwargs, mm_hashes_pos
+
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> list[torch.Tensor]:
+
+        def _iter_mm_features(req_state: CachedRequestState):
+            if vllm_version_is("0.10.2"):
+                # legacy path (to be removed later)
+                assert req_state.mm_hashes is not None
+                assert req_state.mm_positions is not None
+                for mm_hash, pos_info in zip(req_state.mm_hashes,
+                                             req_state.mm_positions):
+                    yield mm_hash, pos_info, getattr(pos_info, "is_embed",
+                                                     None)
+            else:
+                assert req_state.mm_features is not None
+                for mm_feature in req_state.mm_features:
+                    pos_info = mm_feature.mm_position
+                    yield mm_feature.identifier, pos_info, getattr(
+                        pos_info, "is_embed", None)
+
         mm_embeds: list[torch.Tensor] = []
+
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens
-            mm_positions = req_state.mm_positions
-            mm_hashes = req_state.mm_hashes
-            for i, pos_info in enumerate(mm_positions):
+
+            for mm_hash, pos_info, is_embed in _iter_mm_features(req_state):
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
 
-                # The encoder output is needed if the two ranges overlap:
-                # [num_computed_tokens,
-                #  num_computed_tokens + num_scheduled_tokens) and
-                # [start_pos, start_pos + num_encoder_tokens)
                 if start_pos >= num_computed_tokens + num_scheduled_tokens:
-                    # The encoder output is not needed in this step.
                     break
                 if start_pos + num_encoder_tokens <= num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
                     continue
 
                 start_idx = max(num_computed_tokens - start_pos, 0)
@@ -971,12 +1069,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_encoder_tokens,
                 )
                 assert start_idx < end_idx
-                mm_hash = mm_hashes[i]
+
                 encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None,\
+                assert encoder_output is not None, \
                     f"Encoder cache miss for {mm_hash}."
 
-                if (is_embed := pos_info.is_embed) is not None:
+                if is_embed is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
                 mm_embeds_item = gather_mm_placeholders(
@@ -1396,7 +1494,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 common_prefix_len = 0
                 extra_attn_metadata_args = {}
-                builder = attn_group.metadata_builder
+                if vllm_version_is("0.10.2"):
+                    builder = attn_group.metadata_builder
+                else:
+                    builder = attn_group.get_metadata_builder()
                 if isinstance(builder, GDNAttentionMetadataBuilder):
                     if use_spec_decode:
                         extra_attn_metadata_args = dict(
@@ -1811,13 +1912,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
                 hidden_states, aux_hidden_states = hidden_states
 
-        kv_connector_output = None
-        if finished_sending is not None or finished_recving is not None:
-            kv_connector_output = KVConnectorOutput(
-                finished_sending=finished_sending,
-                finished_recving=finished_recving)
-        else:
-            kv_connector_output = None
+        kv_connector_output = KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving)
         finished_sending = None
         finished_recving = None
         with ProfileExecuteDuration().capture_async("post process"):
@@ -2067,8 +2164,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # For the case of no forward caused by receiving remote kv,
             # one round of dummy inference is necessary
             # to prevent hang over the collective calls.
-        if not finished_sending and not finished_recving:
-            return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = KVConnectorOutput(
@@ -2451,8 +2546,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
-        self.may_reinitialize_input_batch(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
+        self.use_hybrid_blocks = (len(self.attn_groups) > 1)
+        self.may_reinitialize_input_batch(kv_cache_config)
 
         if self.model_config.is_deepseek_mla:
             kv_caches = self.initialize_kv_cache_tensors_deepseek(
@@ -2463,6 +2559,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
+    def _align_memory(self, tensor: torch.Tensor,
+                      alignment: int) -> torch.Tensor:
+        data_ptr = tensor.data_ptr()
+        aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
+        offset = (aligned_addr - data_ptr) // tensor.element_size()
+        return tensor[int(offset):]
+
     def initialize_kv_cache_tensors_deepseek(
             self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         kv_cache_sizes = {}
@@ -2471,12 +2574,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 "KV cache tensor shared by multiple layers is not supported in "
                 "NPU.")
             kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
-
-        def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
-            data_ptr = tensor.data_ptr()
-            aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
-            offset = (aligned_addr - data_ptr) // tensor.element_size()
-            return tensor[int(offset):]
 
         kv_caches: Dict[str, torch.Tensor] = {}
         for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
@@ -2540,10 +2637,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     rope_cache = torch.zeros(rope_allocate_shape_alignment,
                                              dtype=dtype,
                                              device=self.device)
-                    nope_cache = align_memory(
+                    nope_cache = self._align_memory(
                         nope_cache,
                         alignment)[:nope_allocate_shape].view(nope_cache_shape)
-                    rope_cache = align_memory(
+                    rope_cache = self._align_memory(
                         rope_cache,
                         alignment)[:rope_allocate_shape].view(rope_cache_shape)
                 kv_caches[layer_name] = (nope_cache, rope_cache)
@@ -2566,7 +2663,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             corresponding memory buffer for KV cache.
         """
         # init kv cache tensors
-        kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        kv_cache_raw_tensors: dict[str, Union[torch.Tensor,
+                                              Optional[torch.Tensor]]] = {}
+        # llmdatadist need the addr of cache tensor be aligned with 2M
+        alignment = 2 * 1024 * 1024
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # TODO: REFACTOR ME to sharing hybrid cache
             for idx in range(len(kv_cache_tensor.shared_by)):
@@ -2576,15 +2676,40 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         if "self_attn" in layer_name_inner or layer_name_inner in kv_cache_raw_tensors.keys(
                         ):
                             continue
-                        tensor = torch.zeros(kv_cache_tensor.size,
-                                             dtype=torch.int8,
-                                             device=self.device)
+                        if self.vllm_config.kv_transfer_config is None:
+                            tensor = torch.zeros(kv_cache_tensor.size,
+                                                 dtype=torch.int8,
+                                                 device=self.device)
+                        else:
+                            cache_size_aligned = kv_cache_tensor.size + alignment
+                            tensor = torch.zeros(cache_size_aligned,
+                                                 dtype=torch.int8,
+                                                 device=self.device)
+                            tensor = self._align_memory(
+                                tensor, alignment)[:kv_cache_tensor.size]
                         kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "self_attn" in layer_name:
-                    tensor = torch.zeros(kv_cache_tensor.size,
-                                         dtype=torch.int8,
-                                         device=self.device)
-                    kv_cache_raw_tensors[layer_name] = tensor
+                    if self.vllm_config.kv_transfer_config is None:
+                        k_tensor = torch.zeros(kv_cache_tensor.size // 2,
+                                               dtype=torch.int8,
+                                               device=self.device)
+                        v_tensor = torch.zeros(kv_cache_tensor.size // 2,
+                                               dtype=torch.int8,
+                                               device=self.device)
+                    else:
+                        cache_size = kv_cache_tensor.size // 2
+                        cache_size_aligned = kv_cache_tensor.size // 2 + alignment
+                        k_tensor = torch.zeros(cache_size_aligned,
+                                               dtype=torch.int8,
+                                               device=self.device)
+                        v_tensor = torch.zeros(cache_size_aligned,
+                                               dtype=torch.int8,
+                                               device=self.device)
+                        k_tensor = self._align_memory(k_tensor,
+                                                      alignment)[:cache_size]
+                        v_tensor = self._align_memory(v_tensor,
+                                                      alignment)[:cache_size]
+                    kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
@@ -2602,24 +2727,28 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for layer_name in kv_cache_group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
-                raw_tensor = kv_cache_raw_tensors[layer_name]
-
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel(
-                ) // kv_cache_spec.page_size_bytes
-
-                # `num_blocks` is the number of blocks the model runner can use.
-                # `kv_cache_config.num_blocks` is the number of blocks that
-                # KVCacheManager may allocate.
-                # Since different GPUs may have different number of layers and
-                # different memory capacities, `num_blocks` can be different on
-                # different GPUs, and `kv_cache_config.num_blocks` is set to
-                # the min of all `num_blocks`. Verify it here.
-                assert num_blocks >= kv_cache_config.num_blocks
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
+                    raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
+                        layer_name]
+                    assert raw_k_tensor is not None
+                    assert raw_v_tensor is not None
+                    assert (raw_k_tensor.numel() + raw_v_tensor.numel()
+                            ) % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = (raw_k_tensor.numel() + raw_v_tensor.numel()
+                                  ) // kv_cache_spec.page_size_bytes
+
+                    # `num_blocks` is the number of blocks the model runner can use.
+                    # `kv_cache_config.num_blocks` is the number of blocks that
+                    # KVCacheManager may allocate.
+                    # Since different GPUs may have different number of layers and
+                    # different memory capacities, `num_blocks` can be different on
+                    # different GPUs, and `kv_cache_config.num_blocks` is set to
+                    # the min of all `num_blocks`. Verify it here.
+                    assert num_blocks >= kv_cache_config.num_blocks
+
                     if self.vllm_config.additional_config.get(
                             "kv_cache_dtype", None) == 'int8':
                         kv_cache_shape = attn_backend.get_bsh_kv_cache_shape(
@@ -2627,8 +2756,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     elif hasattr(attn_backend, "get_supported_block_size"
-                                 ) and not self.model_config.is_deepseek_mla:
+                                 ) and self.use_hybrid_blocks:
                         block_size = attn_backend.get_supported_block_size()[0]
+
                         block_size_chunk = kv_cache_spec.block_size // block_size
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks * block_size_chunk, block_size,
@@ -2640,11 +2770,28 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
-                    kv_cache = raw_tensor.view(dtype).view(kv_cache_shape)
-                    kv_cache = self._convert_torch_format(kv_cache)
-                    kv_caches[layer_name] = kv_cache
+                    k_cache = raw_k_tensor.view(dtype).view(kv_cache_shape[1:])
+                    k_cache = self._convert_torch_format(k_cache)
+                    v_cache = raw_v_tensor.view(dtype).view(kv_cache_shape[1:])
+                    v_cache = self._convert_torch_format(v_cache)
+                    kv_caches[layer_name] = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
+                    assert raw_tensor is not None
+                    assert raw_tensor.numel(
+                    ) % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel(
+                    ) // kv_cache_spec.page_size_bytes
+
+                    # `num_blocks` is the number of blocks the model runner can use.
+                    # `kv_cache_config.num_blocks` is the number of blocks that
+                    # KVCacheManager may allocate.
+                    # Since different GPUs may have different number of layers and
+                    # different memory capacities, `num_blocks` can be different on
+                    # different GPUs, and `kv_cache_config.num_blocks` is set to
+                    # the min of all `num_blocks`. Verify it here.
+                    assert num_blocks >= kv_cache_config.num_blocks
+
                     state_tensors = []
                     storage_offset_bytes = 0
                     for (shape, dtype) in zip(kv_cache_spec.shapes,
@@ -2713,7 +2860,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_groups = self.attn_groups[kv_cache_group_id]
                 except IndexError:
                     attn_groups = None
-                if attn_groups:
+                if attn_groups and self.use_hybrid_blocks:
                     # Use the backend's supported block size list
                     backend = attn_groups[0].backend
                     supported_sizes = backend.get_supported_block_size()
@@ -2724,13 +2871,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                               [self.cache_config.block_size])
                 else:
                     # Fallback to cache config block_size if no backend found
-                    kernel_block_size_list = [
-                        64
-                    ] if not self.model_config.is_deepseek_mla else [0]
+                    kernel_block_size_list = [self.cache_config.block_size]
                 kernel_block_sizes.append(kernel_block_size_list)
             else:
                 # This is likely Mamba or other non-attention cache,
                 # no splitting.
+                # NOTE: set kernel_block_sizes to 0 to disable slotmapping computation
+                # of mamba block. In this case, BlockTable.block_size will never equal
+                # to kernel_block_sizes[0]
                 kernel_block_sizes.append([0])
         if kernel_block_sizes != [self.cache_config.block_size]:
             assert self.cache_config.cpu_offload_gb == 0, (
@@ -2784,7 +2932,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in attn_backend_layers.items()
             }
 
-        def create_attn_groups(
+        def create_attn_groups_v0102(
             attn_backends_map: dict[AttentionBackend, list[str]],
             kv_cache_spec: KVCacheSpec,
         ) -> list[AttentionGroup]:
@@ -2802,12 +2950,35 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_groups.append(attn_group)
             return attn_groups
 
+        def create_attn_groups(
+            attn_backends_map: dict[AttentionBackend, list[str]],
+            kv_cache_spec: KVCacheSpec,
+        ) -> list[AttentionGroup]:
+            attn_groups: list[AttentionGroup] = []
+            for attn_backend, layer_names in attn_backends_map.items():
+                attn_metadata_builders = []
+                attn_metadata_builders.append(attn_backend.get_builder_cls()(
+                    kv_cache_spec,
+                    layer_names,
+                    self.vllm_config,
+                    self.device,
+                ))
+                attn_group = AttentionGroup(attn_backend,
+                                            attn_metadata_builders,
+                                            layer_names)
+                attn_groups.append(attn_group)
+            return attn_groups
+
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             attn_backends = get_attn_backends_for_layers(
                 kv_cache_group_spec.layer_names)
-            self.attn_groups.append(
-                create_attn_groups(attn_backends, kv_cache_spec))
+            if vllm_version_is("0.10.2"):
+                self.attn_groups.append(
+                    create_attn_groups_v0102(attn_backends, kv_cache_spec))
+            else:
+                self.attn_groups.append(
+                    create_attn_groups(attn_backends, kv_cache_spec))
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
@@ -2821,7 +2992,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         is compatible (e.g., decode threshold is the same)
         """
         for group in self._attn_group_iterator():
-            attn_metadata_builder_i = group.metadata_builder
+            if vllm_version_is("0.10.2"):
+                attn_metadata_builder_i = group.metadata_builder
+            else:
+                attn_metadata_builder_i = group.get_metadata_builder()
             if hasattr(attn_metadata_builder_i, "reorder_batch_threshold"):
                 # check that if any backends reorder batches; that the reordering
                 # is compatible (e.g., decode threshold is the same)

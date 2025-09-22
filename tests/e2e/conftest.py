@@ -32,7 +32,14 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
-from vllm.config import TaskOption, _get_and_verify_dtype
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.10.2"):
+    from vllm.config import TaskOption, _get_and_verify_dtype
+else:
+    from vllm.config.model import TaskOption, _get_and_verify_dtype
+
 from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.utils import maybe_model_redirect
