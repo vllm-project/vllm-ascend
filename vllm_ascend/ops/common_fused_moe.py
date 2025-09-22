@@ -320,7 +320,9 @@ class AscendFusedMoE(FusedMoE):
         forward_context = get_forward_context()
         moe_comm_method_name = forward_context.moe_comm_method_name
 
-        if hasattr(self, '_shared_experts') and forward_context.flashcomm_v1_enabled:
+        if not hasattr(
+                self,
+                '_shared_experts') and forward_context.flashcomm_v1_enabled:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states, True)
             router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
