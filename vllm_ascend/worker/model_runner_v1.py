@@ -124,6 +124,7 @@ else:
 import torch_npu
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.utils import vllm_version_is
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -2525,8 +2526,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         self.model.get_eagle3_aux_hidden_state_layers())
 
             if self.lora_config:
-                self.model = self.load_lora_model(self.model, self.vllm_config,
-                                                  self.device)
+                if vllm_version_is("0.10.2"):
+                    self.model = self.load_lora_model(self.model,
+                                                      self.model_config,
+                                                      self.scheduler_config,
+                                                      self.lora_config,
+                                                      self.device)
+                else:
+                    self.model = self.load_lora_model(self.model,
+                                                      self.vllm_config,
+                                                      self.device)
         logger.info("Loading model weights took %.4f GB",
                     m.consumed_memory / float(2**30))
 
