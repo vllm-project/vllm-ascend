@@ -27,7 +27,6 @@ class TestAscendSchedulerConfig(TestBase):
             max_model_len=8192,
             is_multimodal_model=False,
             send_delta_data=False,
-            scheduler_delay_factor=0,
         )
 
     def test_initialize_from_config_with_default(self):
@@ -87,21 +86,6 @@ class TestAscendSchedulerConfig(TestBase):
             )
         self.assertIn(
             "currently AscendScheduler doesn't support send_delta_data",
-            str(context.exception),
-        )
-
-    def test_not_implemented_delay_factor(self):
-        with self.assertRaises(NotImplementedError) as context:
-            AscendSchedulerConfig.initialize_from_config(
-                self.basic_scheduler_config,
-                AscendSchedulerConfig(
-                    delay_factor=1,
-                    max_num_batched_tokens=2048,
-                    max_model_len=2048,
-                ),
-            )
-        self.assertIn(
-            "currently AscendScheduler doesn't support scheduler_delay_factor",
             str(context.exception),
         )
 

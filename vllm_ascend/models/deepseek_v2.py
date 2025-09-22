@@ -479,4 +479,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         return loaded_params
 
 
+class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
+    pass
+
+
 DeepseekV2DecoderLayer.__init__ = CustomDeepseekV2DecoderLayer.__init__

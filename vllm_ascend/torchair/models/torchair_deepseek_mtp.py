@@ -27,14 +27,12 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.deepseek_mtp import (
     DeepSeekMTP, DeepSeekMultiTokenPredictor, DeepSeekMultiTokenPredictorLayer,
     SharedHead)
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.torchair.models.torchair_deepseek_v2 import \
@@ -172,7 +170,7 @@ class TorchairDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        sampling_metadata,  # type: ignore
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
@@ -198,8 +196,6 @@ class TorchairDeepSeekMTP(DeepSeekMTP):
         self.config = vllm_config.model_config.hf_config
         self.model = TorchairDeepSeekMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
-
-        self.sampler = get_sampler()
 
     def forward(
         self,
