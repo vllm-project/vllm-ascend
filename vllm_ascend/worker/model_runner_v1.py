@@ -297,7 +297,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.is_pooling_model = self.model_config.pooler_config is not None
         self.enable_prompt_embeds = self.model_config.enable_prompt_embeds
-        if self.is_multimodal_model:
+        if self.is_multimodal_model or self.enable_prompt_embeds:
             self.inputs_embeds = self._make_buffer(self.max_num_tokens,
                                                self.model_config.get_hidden_size(),
                                                dtype=self.dtype,
