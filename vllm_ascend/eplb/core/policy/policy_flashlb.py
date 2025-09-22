@@ -651,4 +651,4 @@ def warm_up():
     algo.rebalance_experts(expert_tensor, torch.randint(1, 1000, (58, 32, 9)))
 
 
-warm_up()
+
