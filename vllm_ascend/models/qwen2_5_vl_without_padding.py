@@ -27,6 +27,7 @@ import torch_npu
 from einops import rearrange
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
+
 try:
     from transformers.models.qwen3_vl.configuration_qwen3_vl import (
         Qwen3VLConfig, Qwen3VLVisionConfig)
