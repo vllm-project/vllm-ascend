@@ -27,7 +27,6 @@ from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.deepseek_mtp import (
@@ -198,8 +197,6 @@ class TorchairDeepSeekMTP(DeepSeekMTP):
         self.config = vllm_config.model_config.hf_config
         self.model = TorchairDeepSeekMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
-
-        self.sampler = get_sampler()
 
     def forward(
         self,
