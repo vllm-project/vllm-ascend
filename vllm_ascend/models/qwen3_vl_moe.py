@@ -40,7 +40,7 @@ from vllm.model_executor.models.qwen3_moe import (Qwen3MoeDecoderLayer,
                                                   Qwen3MoeSparseMoeBlock)
 from vllm.model_executor.models.qwen3_vl_moe import (
     Qwen3MoeLLMForCausalLM, Qwen3MoeLLMModel, Qwen3VLDummyInputsBuilder,
-    Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeProcessingInfo, 
+    Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeProcessingInfo,
     Qwen3VLMultiModalProcessor)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, WeightsMapper, make_empty_intermediate_tensors_factory,
@@ -62,6 +62,7 @@ from vllm_ascend.models.qwen3_vl import AscendQwen3_VisionTransformer
         "deepstack_input_embeds": 0
     })
 class AscendQwen3MoeLLMModel(Qwen3MoeLLMModel):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config.get_text_config()

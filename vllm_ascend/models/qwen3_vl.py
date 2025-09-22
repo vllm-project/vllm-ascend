@@ -40,7 +40,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
 class AscendQwen3_VisionPatchEmbed(Qwen3_VisionPatchEmbed):
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.matmul(
             self.proj.weight.data.view(self.hidden_size, -1).transpose(0, 1))
@@ -71,14 +71,16 @@ class AscendQwen3_VisionBlock(Qwen3_VisionBlock):
             use_data_parallel=use_data_parallel)
         
     def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
-            cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+                cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x), cu_seqlens=cu_seqlens, cos=cos, sin=sin)
 
         x = x + self.mlp(self.norm2(x))
         return x
 
+
 class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
+
     def __init__(
         self,
         vision_config: Qwen3VLVisionConfig,
