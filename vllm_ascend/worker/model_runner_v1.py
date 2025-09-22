@@ -2289,8 +2289,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 )
 
                 for attn_group in self.attn_groups[kv_cache_group_id]:
-                    attn_metadata_i = attn_group.metadata_builder\
-                        .build_for_graph_capture(common_attn_metadata)
+                    if vllm_version_is("0.10.2"):
+                        builder = attn_group.metadata_builder
+                    else:
+                        builder = attn_group.get_metadata_builder()
+                    attn_metadata_i = builder.build_for_graph_capture(
+                        common_attn_metadata)
                     for layer_name in kv_cache_group_spec.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
@@ -3196,7 +3200,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         min_ag_builder_name = None
 
         for attn_group in self._attn_group_iterator():
-            builder = attn_group.metadata_builder
+            if vllm_version_is("0.10.2"):
+                builder = attn_group.metadata_builder
+            else:
+                builder = attn_group.get_metadata_builder()
             if builder.cudagraph_support.value < min_ag_support.value:
                 min_ag_support = builder.cudagraph_support
                 min_ag_builder_name = builder.__class__.__name__
