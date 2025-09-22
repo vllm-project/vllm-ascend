@@ -196,6 +196,18 @@ class AscendMetadata:
     is_only_prefill: bool = False
 
 
+@dataclass
+class AscendAttentionMetadataBuildInfo:
+    num_actual_tokens: int
+    block_table: torch.Tensor
+    query_start_loc: torch.Tensor
+    query_lens: torch.Tensor
+    seq_lens: torch.Tensor
+    slot_mapping: torch.Tensor
+    attn_mask: torch.Tensor
+    attn_state: AscendAttentionState
+
+
 class AscendAttentionMetadataBuilder:
     reorder_batch_threshold: ClassVar[int] = 1
 
@@ -217,10 +229,61 @@ class AscendAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
+    def _assemble_build_info(
+        self,
+        num_actual_tokens,
+        block_table,
+        query_start_loc,
+        query_lens,
+        seq_lens,
+        slot_mapping,
+        attn_mask,
+        attn_state: "AscendAttentionState",
+    ) -> "AscendAttentionMetadataBuildInfo":
+        if is_310p():
+            if attn_state == AscendAttentionState.PrefillNoCache:
+                mask_nz = nd_to_nz_2d(attn_mask)
+                attn_mask = torch_npu.npu_format_cast(mask_nz.contiguous(),
+                                                      ACL_FORMAT_FRACTAL_NZ)
+            elif attn_state == AscendAttentionState.ChunkedPrefill:
+                mask_nz = nd_to_nz_spec(attn_mask)
+                attn_mask = torch_npu.npu_format_cast(mask_nz.contiguous(),
+                                                      ACL_FORMAT_FRACTAL_NZ)
+
+        build_info = AscendAttentionMetadataBuildInfo(
+            num_actual_tokens=num_actual_tokens,
+            block_table=block_table,
+            query_start_loc=query_start_loc,
+            query_lens=query_lens,
+            seq_lens=seq_lens,
+            slot_mapping=slot_mapping,
+            attn_mask=attn_mask,
+            attn_state=attn_state)
+        return build_info
+
+    def _assemble_attn_metadata(
+        self,
+        build_info: "AscendAttentionMetadataBuildInfo",
+        common_attn_metadata: "AscendCommonAttentionMetadata",
+    ) -> "AscendMetadata":
+        attn_metadata = AscendMetadata(
+            num_actual_tokens=build_info.num_actual_tokens,
+            block_tables=build_info.block_table,
+            query_start_loc=build_info.query_start_loc,
+            query_lens=build_info.query_lens,
+            seq_lens=build_info.seq_lens,
+            max_query_len=common_attn_metadata.max_query_len,
+            slot_mapping=build_info.slot_mapping,
+            attn_mask=build_info.attn_mask,
+            attn_state=build_info.attn_state,
+            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
+            is_only_prefill=common_attn_metadata.is_only_prefill)
+        return attn_metadata
+
     def build(
         self,
         common_prefix_len: int,
-        common_attn_metadata: AscendCommonAttentionMetadata,
+        common_attn_metadata: "AscendCommonAttentionMetadata",
         model: nn.Module,
     ):
         num_reqs = common_attn_metadata.num_reqs
@@ -244,28 +307,12 @@ class AscendAttentionMetadataBuilder:
         query_start_loc = query_start_loc_cpu.to(self.device,
                                                  non_blocking=True)
 
-        if is_310p():
-            if attn_state == AscendAttentionState.PrefillNoCache:
-                mask_nz = nd_to_nz_2d(attn_mask)
-                attn_mask = torch_npu.npu_format_cast(mask_nz.contiguous(),
-                                                      ACL_FORMAT_FRACTAL_NZ)
-            elif attn_state == AscendAttentionState.ChunkedPrefill:
-                mask_nz = nd_to_nz_spec(attn_mask)
-                attn_mask = torch_npu.npu_format_cast(mask_nz.contiguous(),
-                                                      ACL_FORMAT_FRACTAL_NZ)
-
-        attn_metadata = AscendMetadata(
-            num_actual_tokens=num_actual_tokens,
-            block_tables=block_table,
-            query_start_loc=query_start_loc,
-            query_lens=query_lens,
-            seq_lens=seq_lens,
-            max_query_len=common_attn_metadata.max_query_len,
-            slot_mapping=slot_mapping,
-            attn_mask=attn_mask,
-            attn_state=attn_state,
-            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
-            is_only_prefill=common_attn_metadata.is_only_prefill)
+        build_info = self._assemble_build_info(num_actual_tokens, block_table,
+                                               query_start_loc, query_lens,
+                                               seq_lens, slot_mapping,
+                                               attn_mask, attn_state)
+        attn_metadata = self._assemble_attn_metadata(build_info,
+                                                     common_attn_metadata)
         return attn_metadata
 
 
