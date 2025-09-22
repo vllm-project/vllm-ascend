@@ -136,10 +136,11 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
-                                             grid_thw[:,
-                                                      0]).cpu().to(torch.int32)
+        grid_thw_tensor = torch.tensor(grid_thw,
+                                       device=self.device,
+                                       dtype=torch.int32)
+        cu_seqlens = torch.repeat_interleave(grid_thw_tensor[:, 1] * grid_thw_tensor[:, 2],
+                                             grid_thw_tensor[:, 0]).cpu().to(torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         hidden_states = hidden_states.unsqueeze(1)
