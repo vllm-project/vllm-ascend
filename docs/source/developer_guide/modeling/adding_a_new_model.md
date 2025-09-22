@@ -123,8 +123,7 @@ class CustomModelForCausalLM(nn.Module):
         ...
 
     def compute_logits(self,
-                      hidden_states: torch.Tensor,
-                      sampling_metadata: SamplingMetadata) -> torch.Tensor:
+                      hidden_states: torch.Tensor) -> torch.Tensor:
         ...
 
     def load_weights(self, 
