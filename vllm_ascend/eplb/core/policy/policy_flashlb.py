@@ -224,7 +224,7 @@ def group_based_adaptive_bloating_kernel(
                 group_boundary_indices[i - 1] = j
                 break
 
-    slices_used_per_group = np.empty(num_group, dtype=np.int32)
+    slices_used_per_group = np.zeros(num_group, dtype=np.int32)
     slices_used_per_group[0] = group_boundary_indices[0]
     for i in range(1, num_group):
         slices_used_per_group[i] = group_boundary_indices[i] - group_boundary_indices[i - 1]
@@ -242,7 +242,7 @@ def group_based_adaptive_bloating_kernel(
 
         while (int(high) - int(low)) > 1:
             mid = int((high + low) // 2)
-            keep = M - mid
+            keep = int(M - mid)
             current_group = window[:, :keep]
             current_pieces = compute_piece_counts(current_group, M, stage_weights)
             current_pieces = np.maximum(current_pieces, 1)
