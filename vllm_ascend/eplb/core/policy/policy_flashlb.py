@@ -649,6 +649,3 @@ def warm_up():
                                              layer_shape=(32, 9))
 
     algo.rebalance_experts(expert_tensor, torch.randint(1, 1000, (58, 32, 9)))
-
-
-
