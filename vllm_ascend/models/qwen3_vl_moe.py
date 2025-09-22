@@ -72,6 +72,7 @@ class AscendQwen3MoeLLMModel(Qwen3MoeLLMModel):
         parallel_config = vllm_config.parallel_config
         enable_eplb = parallel_config.enable_eplb
         eplb_config = parallel_config.eplb_config
+        self.use_ep = parallel_config.enable_expert_parallel
         self.num_redundant_experts = eplb_config.num_redundant_experts
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -109,7 +110,7 @@ class AscendQwen3MoeLLMModel(Qwen3MoeLLMModel):
         ep_size = ep_group.size()
         local_experts_num = (num_experts // ep_size)
         weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-        if ep_size > 1:
+        if self.use_ep:
             for expert_id in range(ep_rank * local_experts_num,
                                 (ep_rank + 1) * local_experts_num):
                 curr_expert_weight = loaded_weight[expert_id]
@@ -131,7 +132,7 @@ class AscendQwen3MoeLLMModel(Qwen3MoeLLMModel):
                                         expert_id,
                                         return_success=True)
                 if not success:
-                    return False            
+                    return False
         return True
 
 
