@@ -18,6 +18,7 @@ import torch
 import zmq
 from llm_datadist import (BlocksCacheKey, CacheDesc, LLMConfig, LLMDataDist,
                           LLMException, LLMRole)
+from vllm import envs
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -284,7 +285,7 @@ class LLMDataDistCMgrConnectorScheduler():
                         len(computed_block_ids), request.request_id)
             # Prefill request on remote. It will be read from D upon completion
             self._reqs_need_send[request.request_id] = time.perf_counter(
-            ) + envs_ascend.VLLM_LLMDD_ABORT_REQUEST_TIMEOUT
+            ) + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -861,7 +862,7 @@ class LLMDataDistCMgrConnectorWorker():
                     break
                 logger.warning(
                     "Some requests in prefill node fail to receive KV Cache transfer done signal. "
-                    "If a greater mean TTFT is acceptable, you can 'export VLLM_LLMDD_ABORT_REQUEST_TIMEOUT=600' (10 minutes) to relax the timeout condition. "
+                    "If a greater mean TTFT is acceptable, you can 'export VLLM_NIXL_ABORT_REQUEST_TIMEOUT=600' (10 minutes) to relax the timeout condition. "
                 )
                 if req_id in self.reqs_to_send:
                     self.finished_reqs.add(req_id)
