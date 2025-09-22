@@ -8,6 +8,7 @@ import logging
 
 from numba import njit # type: ignore
 from collections import defaultdict, deque
+from typing import Dict, List
 from .policy_abstract import DynamicConfig, EplbPolicy
 
 numba_logger = logging.getLogger("numba")
@@ -236,11 +237,10 @@ def group_based_adaptive_bloating_kernel(
 
     for g in range(num_group):
         window = X_sorted[:, current_idx: current_idx + 2 * M]
-        slices_g = slices_used_per_group[g]
         low = max(0, current_idx + M - N)
         high = min(num_remain_slice, M - 1)
 
-        while high - low > 1:
+        while (high - low) > 1:
             mid = (high + low) // 2
             keep = M - mid
             current_group = window[:, :keep]
@@ -249,7 +249,7 @@ def group_based_adaptive_bloating_kernel(
             current_slice_sorted = np.sort(current_slice)
             current_loads = loads + current_slice_sorted
             current_slope = (np.max(current_loads) - np.min(current_loads)) / M
-            next_slope = np.max(simulated_slopes[current_idx + keep:])
+            next_slope:np.float32 = np.max(simulated_slopes[current_idx + keep:])
 
             if abs(current_slope) > abs(next_slope):
                 low = mid
@@ -376,13 +376,11 @@ def auto_fix_new_placement(old_placement, new_placement):
 
 
 class FlashLB(EplbPolicy):
-    par_history = defaultdict(float)
-    hotness_window = {}
 
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
-        self.par_history = defaultdict(float)
-        self.hotness_window = {}
+        self.par_history: Dict[int, float] = {} 
+        self.hotness_window: Dict[int, deque[float]] = {} 
         self.max_stage_window = (
             config.max_stage_window if hasattr(config, "max_stage_window") else 1
         )
@@ -616,7 +614,6 @@ def warm_up():
     expert_tensor = generate_layered_experts(num_layers=58, layer_shape=(32, 9))
 
     algo.rebalance_experts(expert_tensor, torch.randint(1, 1000, (58, 32, 9)))
-    FlashLB.par_history = defaultdict(float)
-    FlashLB.hotness_window = {}
+
 
 warm_up()
