@@ -27,10 +27,13 @@ import torch_npu
 from einops import rearrange
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
-from transformers.models.qwen3_vl.configuration_qwen3_vl import (
-    Qwen3VLConfig, Qwen3VLVisionConfig)
-from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import \
-    Qwen3VLMoeConfig
+try:
+    from transformers.models.qwen3_vl.configuration_qwen3_vl import (
+        Qwen3VLConfig, Qwen3VLVisionConfig)
+    from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import \
+        Qwen3VLMoeConfig
+except ImportError:
+    pass
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
