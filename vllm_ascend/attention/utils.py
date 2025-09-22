@@ -1,7 +1,9 @@
+import functools
 from dataclasses import dataclass
 from typing import Any, List
 
 import torch
+import torch_npu
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
@@ -135,3 +137,17 @@ def maybe_save_kv_layer_to_connector(
         return
     # TODO: assert ascendMetadata
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
+
+
+@functools.cache
+def version_check():
+    import re
+    torch_npu_version = torch_npu.version.__version__
+    date_pattern = r'dev(\d{8})'
+
+    match = re.search(date_pattern, torch_npu_version)
+    if match:
+        full_date = match.group(1)
+        if full_date >= "20250919":
+            return True
+    return False
