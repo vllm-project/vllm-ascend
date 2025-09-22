@@ -53,10 +53,14 @@ class AscendQwen2_5_VisionAttention_Without_Padding(Qwen2_5_VisionAttention):
         projection_size: int,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
-        super().__init__(embed_dim, num_heads, projection_size, quant_config,
-                         prefix, use_data_parallel)
+        super().__init__(
+            embed_dim,
+            num_heads,
+            projection_size,
+            quant_config,
+            prefix,
+        )
         self.embed_dim = embed_dim
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)

@@ -68,8 +68,7 @@ class AscendQwen3_VisionBlock(Qwen3_VisionBlock):
             num_heads=num_heads,
             projection_size=dim,
             quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            use_data_parallel=use_data_parallel)
+            prefix=f"{prefix}.attn")
 
     def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
                 cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
