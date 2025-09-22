@@ -48,7 +48,7 @@ from vllm.distributed.parallel_state import get_tp_group
 
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
-from vllm_ascend.utils import (dense_optim_enable, matmul_allreduce_enable,
+from vllm_ascend.utils import (enable_sp, matmul_allreduce_enable,
                                mlp_tp_enable, oproj_tp_enable)
 
 
@@ -139,7 +139,7 @@ class MLPColumnParallelOp(CustomColumnParallelOp):
         return output, output_bias
 
 
-class DenseOptimMergedColumnParallelOp(CustomColumnParallelOp):
+class SequenceMergedColumnParallelOp(CustomColumnParallelOp):
 
     def apply(
         self, input_: torch.Tensor
@@ -169,7 +169,7 @@ class DenseOptimMergedColumnParallelOp(CustomColumnParallelOp):
         return output, output_bias
 
 
-class DenseOptimQKVParallelOp(CustomColumnParallelOp):
+class SequenceQKVParallelOp(CustomColumnParallelOp):
 
     def __init__(self, layer, prefix):
         super().__init__(layer)
@@ -359,7 +359,7 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
         self.weight_t = self.layer.weight.t()
 
 
-class DenseOptimRowParallelOp(CustomRowParallelOp):
+class SequenceRowParallelOp(CustomRowParallelOp):
 
     def __init__(self, layer, prefix):
         super().__init__(layer)
@@ -408,22 +408,22 @@ class DenseOptimRowParallelOp(CustomRowParallelOp):
 def get_column_parallel_op(
     disable_tp, prefix, layer
 ) -> Tuple[
-        Optional[Union[MLPColumnParallelOp, DenseOptimMergedColumnParallelOp,
-                       DenseOptimQKVParallelOp]], int, int]:
+        Optional[Union[MLPColumnParallelOp, SequenceMergedColumnParallelOp,
+                       SequenceQKVParallelOp]], int, int]:
     if disable_tp:
         return None, 0, 1
 
     custom_op: Optional[Union[
         MLPColumnParallelOp,
-        DenseOptimMergedColumnParallelOp,
-        DenseOptimQKVParallelOp,
+        SequenceMergedColumnParallelOp,
+        SequenceQKVParallelOp,
     ]] = None
     if "gate_up_proj" in prefix and mlp_tp_enable():
         custom_op = MLPColumnParallelOp(layer)
-    elif "gate_up_proj" in prefix and dense_optim_enable():
-        custom_op = DenseOptimMergedColumnParallelOp(layer)
-    elif dense_optim_enable():
-        custom_op = DenseOptimQKVParallelOp(layer, prefix)
+    elif "gate_up_proj" in prefix and enable_sp():
+        custom_op = SequenceMergedColumnParallelOp(layer)
+    elif enable_sp():
+        custom_op = SequenceQKVParallelOp(layer, prefix)
 
     if custom_op is not None:
         return custom_op, custom_op.tp_rank, custom_op.tp_size
@@ -435,21 +435,21 @@ def get_row_parallel_op(
     disable_tp, prefix, layer
 ) -> Tuple[Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                           MatmulAllreduceRowParallelOp,
-                          DenseOptimRowParallelOp]], int, int]:
+                          SequenceRowParallelOp]], int, int]:
     if disable_tp:
         return None, 0, 1
 
     custom_op: Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                               MatmulAllreduceRowParallelOp,
-                              DenseOptimRowParallelOp]] = None
+                              SequenceRowParallelOp]] = None
     if "down_proj" in prefix and mlp_tp_enable():
         custom_op = MLPRowParallelOp(layer)
     elif "o_proj" in prefix and oproj_tp_enable():
         custom_op = OProjRowParallelOp(layer)
     elif matmul_allreduce_enable():
         custom_op = MatmulAllreduceRowParallelOp(layer)
-    elif dense_optim_enable():
-        custom_op = DenseOptimRowParallelOp(layer, prefix)
+    elif enable_sp():
+        custom_op = SequenceRowParallelOp(layer, prefix)
 
     if custom_op is not None:
         return custom_op, custom_op.tp_rank, custom_op.tp_size

@@ -193,7 +193,6 @@ class AscendMetadata:
 
     # *************************** Other Properties *************************** #
     enable_dbo_across_dp: bool = False
-    is_only_prefill: bool = False
 
 
 class AscendAttentionMetadataBuilder:
@@ -264,8 +263,7 @@ class AscendAttentionMetadataBuilder:
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
-            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
-            is_only_prefill=common_attn_metadata.is_only_prefill)
+            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp)
         return attn_metadata
 
 

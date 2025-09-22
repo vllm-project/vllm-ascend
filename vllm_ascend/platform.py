@@ -270,9 +270,9 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config = ascend_scheduler_config
 
         if compilation_config.pass_config.enable_sequence_parallelism:
-            if not parallel_config.enable_expert_parallel or vllm_config.model_config.hf_config.model_type != "qwen3_moe":
+            if not parallel_config.enable_expert_parallel:
                 raise NotImplementedError(
-                    "For better performance in Qwen3 MoE, SP only works exclusively with MC2, AllToAll, and AllToAllV."
+                    "For better performance in MoE model, SP only works exclusively with MC2, AllToAll, and AllToAllV."
                 )
 
     @classmethod
