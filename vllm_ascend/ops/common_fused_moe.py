@@ -347,8 +347,7 @@ class AscendFusedMoE(FusedMoE):
             logical_to_physical_map=self.logical_to_physical_map,
             logical_replica_count=self.logical_replica_count,
             log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num
-        )
+            global_redundant_expert_num=self.global_redundant_expert_num)
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
 

@@ -15,10 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove eplb utils.
-import random
-
 import torch
-from vllm.logger import logger
 
 
 def determine_default_expert_map(global_expert_num, world_size, rank_id,
@@ -72,7 +69,8 @@ def generate_log2phy_map(expert_map):
 
     # Step 1: linear mapping based on rank
     log2phy_map = expert_map.clone()
-    row_indices = torch.arange(num_ranks, device=device).view(-1, 1) * num_local_experts
+    row_indices = torch.arange(num_ranks, device=device).view(
+        -1, 1) * num_local_experts
     mask = log2phy_map != -1
     # broadcast addition
     log2phy_map = log2phy_map + row_indices * mask.long()
@@ -103,8 +101,11 @@ def generate_log2phy_map(expert_map):
             neg_rows = torch.nonzero(negative_mask[:, col_idx])[:, 0]
             if len(neg_rows) > 0:
                 # random assignment from available positive ranks
-                rand_idx = torch.randint(0, len(pos_rows), (len(neg_rows),), device=device)
-                log2phy_map[neg_rows, col_idx] = log2phy_map[pos_rows[rand_idx], col_idx]
+                rand_idx = torch.randint(0,
+                                         len(pos_rows), (len(neg_rows), ),
+                                         device=device)
+                log2phy_map[neg_rows,
+                            col_idx] = log2phy_map[pos_rows[rand_idx], col_idx]
 
     return log2phy_map
 

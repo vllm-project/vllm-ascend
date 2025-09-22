@@ -37,11 +37,11 @@ The following table lists the additional configuration options available in vLLM
 | `oproj_tensor_parallel_size` | int | `None` | The custom tensor parallel size of oproj. |
 | `multistream_overlap_shared_expert`| bool | `False` | Whether to enable multistream shared expert. This option only takes effects on moe models with shared experts. |
 | `dynamic_eplb`              | bool | `False` | Whether to enable dynamic eplb                                                                                                                |
-|`num_iterations_eplb_update`| int  | `400  ` | Forward iterations when eplb would begin                                                                                                      |
+|`num_iterations_eplb_update`| int  | `400` | Forward iterations when eplb would begin                                                                                                      |
 |`gate_eplb`| bool | `False` | Whether to enale eplb only once.                                                                                                              |
-|`num_wait_worker_iterations`| int  | `30  `  | The  forward iterations when eplb worker will finish cpu task. In our test default value 30 would cover most cases.                           |
-|`expert_map_record_path`| str  | `None`  |              When dynamic eplb is completed, save the current expert load heatmap to the specified path.                                                                                                                                 |
-|`init_redundancy_expert`| int  | `0`     |Specify redundant experts during initialization.|
+|`num_wait_worker_iterations`| int  | `30` | The  forward iterations when eplb worker will finish cpu task. In our test default value 30 would cover most cases.                           |
+|`expert_map_record_path`| str  | `None` |              When dynamic eplb is completed, save the current expert load heatmap to the specified path.                                                                                                                                 |
+|`init_redundancy_expert`| int  | `0`  |Specify redundant experts during initialization.|
 
 The details of each config option are as follows:
 
