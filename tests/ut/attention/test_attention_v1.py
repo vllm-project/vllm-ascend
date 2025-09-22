@@ -101,7 +101,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             max_query_len=5,
             decode_token_per_req=torch.tensor([1, 1]),
             block_table_tensor=torch.zeros((10, 10)),
-            slot_mapping_cpu=torch.tensor(range(20)),
+            slot_mapping=torch.tensor(range(20)),
             actual_seq_lengths_q=torch.tensor([0, 1]),
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((10, 10)),
@@ -134,7 +134,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             max_query_len=6,
             decode_token_per_req=torch.tensor([1, 1, 1]),
             block_table_tensor=torch.zeros((10, 10)),
-            slot_mapping_cpu=torch.tensor(range(20)),
+            slot_mapping=torch.tensor(range(20)),
             actual_seq_lengths_q=torch.tensor([0, 1, 2]),
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((15, 15)),
@@ -165,7 +165,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             max_query_len=6,
             decode_token_per_req=torch.tensor([1, 1, 1]),
             block_table_tensor=torch.zeros((10, 10)),
-            slot_mapping_cpu=torch.tensor(range(20)),
+            slot_mapping=torch.tensor(range(20)),
             actual_seq_lengths_q=torch.tensor([0, 1, 2]),
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((15, 15)),
@@ -378,10 +378,12 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_flash_attention_qlens.assert_called_once()
         assert output.shape == (10, 8 * 64)
 
+    @patch('vllm_ascend.attention.attention_v1.get_forward_context')
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu._npu_paged_attention')
     def test_forward_decode_only(self, mock_paged_attention,
-                                 mock_npu_reshape_and_cache):
+                                 mock_npu_reshape_and_cache,
+                                 mock_get_forward_context):
         """Test forward pass in DecodeOnly state"""
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
@@ -394,6 +396,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.num_actual_tokens = 10
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         layer = self.layer_no_quant
+
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
 
         output = self.impl.forward(layer,
                                    query,
@@ -435,12 +439,13 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8 * 64)
 
+    @patch('vllm_ascend.attention.attention_v1.get_forward_context')
     @patch('torch_npu._npu_reshape_and_cache')
     @patch('torch_npu._npu_paged_attention')
     @patch('torch_npu.npu_fused_infer_attention_score')
     def test_forward_decode_only_swa_seq_len_mismatch(
             self, mock_fused_infer_attention_score, mock_paged_attention,
-            mock_npu_reshape_and_cache):
+            mock_npu_reshape_and_cache, mock_get_forward_context):
         """Test forward pass in DecodeOnly state when seq)len_mismatch"""
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
@@ -456,6 +461,8 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         mock_fused_infer_attention_score.return_value = (torch.ones(10, 8,
                                                                     64), 1)
+
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
 
         output = self.impl_swa.forward(self.layer_no_quant,
                                        query,
