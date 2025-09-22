@@ -22,7 +22,6 @@ AscendRowParallelLinear and AscendColumnParallelLinear.
 
 from typing import Optional, Union
 
-import numpy as np
 import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
