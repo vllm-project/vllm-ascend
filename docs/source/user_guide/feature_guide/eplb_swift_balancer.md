@@ -21,7 +21,6 @@ The overall workflow involves:
 In our profiling shows experts transforming is hidden in the bubble between forward iterations. Cpu time cost of eplb algo. and other python operator such as log2phy
 would be hidden by eplb worker process too.
 
-
 ## Examples
 ### Dynamic eplb
 Enable dynamic eplb and specify the trigger rounds.
