@@ -526,6 +526,18 @@ def causal_conv1d_fn(
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
+    if query_start_loc is None:
+        raise ValueError(
+            "query_start_loc must be provided for variable length sequences")
+    if cache_indices is None:
+        raise ValueError(
+            "cache_indices must be provided when using conv_states")
+    if has_initial_state is None:
+        raise ValueError(
+            "has_initial_state must be provided when using conv_states")
+    if conv_states is None:
+        raise ValueError("conv_states must be provided for state caching")
+
     out_ref = []
     out_ref_b = []
     seqlens = query_start_loc[1:] - query_start_loc[:-1]
@@ -536,6 +548,7 @@ def causal_conv1d_fn(
         x_s = splits[i]
         if cache_indices[i] == PAD_SLOT_ID:
             continue
+
         out_ref_b.append(
             causal_conv1d_ref(
                 x_s,
