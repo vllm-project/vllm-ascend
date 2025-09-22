@@ -144,7 +144,7 @@ def set_ascend_forward_context(
             forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
             forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
         forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
-        
+
         if num_tokens is None and attn_metadata is not None:
             num_tokens = attn_metadata.num_actual_tokens
 
