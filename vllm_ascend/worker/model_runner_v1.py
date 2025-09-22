@@ -1960,7 +1960,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         num_scheduled_tokens_np, finished_sending,
                         finished_recving, kv_connector_output)
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self._compute_logits_warpper(sample_hidden_states,
+                logits = self._compute_logits_wrapper(sample_hidden_states,
                                                       None)
             if broadcast_pp_output:
                 model_output_broadcast_data = {
@@ -2367,7 +2367,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                             dtype=torch.int32)
 
                 def dummy_compute_logits(hidden_states):
-                    return self._compute_logits_warpper(
+                    return self._compute_logits_wrapper(
                         hidden_states[dummy_indices], None)
 
             with set_ascend_forward_context(
@@ -2437,14 +2437,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logit_indices = np.cumsum(num_scheduled_tokens) - 1
                 # TODO: need to rum a dummy sampler for generate task
                 hidden_states = hidden_states[logit_indices]
-                output = self._compute_logits_warpper(hidden_states, None)
+                output = self._compute_logits_wrapper(hidden_states, None)
 
         NPUPlatform.synchronize()
         del hidden_states, output
         self.encoder_cache.clear()
         gc.collect()
 
-    def _compute_logits_warpper(self, hidden_states, sampling_metadata):
+    def _compute_logits_wrapper(self, hidden_states, sampling_metadata):
         if vllm_version_is("0.10.2"):
             return self.model.compute_logits(hidden_states, sampling_metadata)
         return self.model.compute_logits(hidden_states)
@@ -3321,7 +3321,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc_np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
-            logits = self._compute_logits_warpper(prompt_hidden_states, None)
+            logits = self._compute_logits_wrapper(prompt_hidden_states, None)
 
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want
