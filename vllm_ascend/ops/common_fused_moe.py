@@ -245,6 +245,8 @@ class AscendFusedMoE(FusedMoE):
         self.dynamic_eplb = ascend_config.dynamic_eplb
         self.expert_map_path = ascend_config.expert_map_path
         self.global_redundant_expert_num = ascend_config.init_redundancy_expert
+        self.log2phy = None
+        self.expert_map = None
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
