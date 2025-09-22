@@ -18,7 +18,7 @@
 
 import torch
 import vllm
-from vllm.model_executor.models.utils import (_embedding_count_expression, 
+from vllm.model_executor.models.utils import (_embedding_count_expression,
                                               _flatten_embeddings)
 from vllm.multimodal import NestedTensors
 
