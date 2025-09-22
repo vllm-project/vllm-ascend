@@ -15,10 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove eplb utils.
-import random
-
 import torch
-from vllm.logger import logger
 
 
 def determine_default_expert_map(global_expert_num, world_size, rank_id,
@@ -56,40 +53,59 @@ def determine_default_expert_map(global_expert_num, world_size, rank_id,
 
 
 def generate_log2phy_map(expert_map):
+    """
+    Generate a log-to-physical map for experts in a fully vectorized manner.
+
+    Args:
+        expert_map: Tensor of shape [num_ranks, num_global_expert], with -1 indicating
+                    rank does not hold the expert.
+
+    Returns:
+        log2phy_map: Tensor of same shape, mapping logical experts to physical IDs.
+    """
+    num_ranks, _ = expert_map.shape
     num_local_experts = expert_map.max() + 1
+    device = expert_map.device
+
+    # Step 1: linear mapping based on rank
     log2phy_map = expert_map.clone()
-    num_ranks, num_global_expert = log2phy_map.shape
+    row_indices = torch.arange(num_ranks, device=device).view(
+        -1, 1) * num_local_experts
+    mask = log2phy_map != -1
+    # broadcast addition
+    log2phy_map = log2phy_map + row_indices * mask.long()
 
-    row_indices = torch.arange(num_ranks).view(-1, 1).expand(num_ranks, \
-                                                             num_global_expert) * num_local_experts
-    log2phy_map[log2phy_map != -1] += row_indices[log2phy_map != -1]
+    # Step 2: find positive/negative positions
+    positive_mask = log2phy_map != -1
+    negative_mask = ~positive_mask
 
-    for idx in range(num_global_expert):
-        positive_rank_idx = torch.where(log2phy_map[:, idx] != -1)[0]
-        negative_rank_idx = torch.where(log2phy_map[:, idx] == -1)[0]
-        num_rank_holding_expert = positive_rank_idx.size(0)
+    # Count number of ranks holding each global expert
+    num_positive_per_col = positive_mask.sum(dim=0)  # [num_global_expert]
 
-        if num_rank_holding_expert == 0:
-            log2phy_map[:, idx] = torch.full((num_ranks, ),
-                                             0,
-                                             dtype=log2phy_map.dtype)
+    # Step 3: handle columns with only one rank holding the expert
+    single_pos_mask = num_positive_per_col == 1
+    if single_pos_mask.any():
+        # get row indices for the positive element in these columns
+        # pos_idx = torch.nonzero(positive_mask[:, single_pos_mask], as_tuple=True)
+        # broadcast to fill negative positions
+        for col_idx in torch.nonzero(single_pos_mask, as_tuple=True)[0]:
+            pos_row = torch.nonzero(positive_mask[:, col_idx])[0]
+            neg_rows = torch.nonzero(negative_mask[:, col_idx])[:, 0]
+            log2phy_map[neg_rows, col_idx] = log2phy_map[pos_row, col_idx]
 
-        if num_rank_holding_expert == 1:
-            log2phy_map[negative_rank_idx, idx] = torch.full(
-                (num_ranks - 1, ),
-                log2phy_map[positive_rank_idx, idx].item(),
-                dtype=log2phy_map.dtype)
-        else:
-            try:
-                random_list = [
-                    random.choice(log2phy_map[positive_rank_idx, idx])
-                    for _ in range(num_ranks - num_rank_holding_expert)
-                ]
-                log2phy_map[negative_rank_idx,
-                            idx] = torch.tensor(random_list,
-                                                dtype=log2phy_map.dtype)
-            except Exception as e:
-                logger.error(f"Fail to get log2phy_map: {str(e)}")
+    # Step 4: handle columns with multiple ranks holding the expert
+    multi_pos_mask = num_positive_per_col > 1
+    if multi_pos_mask.any():
+        for col_idx in torch.nonzero(multi_pos_mask, as_tuple=True)[0]:
+            pos_rows = torch.nonzero(positive_mask[:, col_idx])[:, 0]
+            neg_rows = torch.nonzero(negative_mask[:, col_idx])[:, 0]
+            if len(neg_rows) > 0:
+                # random assignment from available positive ranks
+                rand_idx = torch.randint(0,
+                                         len(pos_rows), (len(neg_rows), ),
+                                         device=device)
+                log2phy_map[neg_rows,
+                            col_idx] = log2phy_map[pos_rows[rand_idx], col_idx]
 
     return log2phy_map
 
