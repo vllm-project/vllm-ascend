@@ -18,13 +18,10 @@ import os.path
 from typing import Callable, Optional
 
 import torch
-import torch.nn.functional as F
 import torch_npu
 from vllm.config import CompilationLevel, get_current_vllm_config
-from vllm.distributed import (get_dp_group, get_ep_group,
-                              get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              get_tp_group, tensor_model_parallel_all_reduce)
+from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
+                              tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEParallelConfig  # isort: skip
