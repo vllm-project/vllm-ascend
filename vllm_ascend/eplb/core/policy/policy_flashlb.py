@@ -157,8 +157,12 @@ def jsq_placement(X, pieces, M, stage_weights):
                 # Filter elements from range(N) not in current column
                 available = [x for x in range(N) if x not in current_rank_elements]
                 # Randomly select an available element to fill
-                rand_idx = np.random.randint(0, len(available))
-                deployment[rank, col] = available[rand_idx]
+                if len(available) > 0:
+                    rand_idx = np.random.randint(0, len(available))
+                    deployment[rank, col] = available[rand_idx]
+                elif N > 0:
+                    # All unique experts are already in this rank's column, so we can pick any expert randomly.
+                    deployment[rank, col] = np.random.randint(0, N)
 
     return deployment
 
