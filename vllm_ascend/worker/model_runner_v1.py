@@ -124,7 +124,6 @@ else:
 import torch_npu
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import vllm_version_is
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
