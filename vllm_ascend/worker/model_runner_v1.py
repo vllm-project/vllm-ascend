@@ -3065,9 +3065,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
         # This is a short term mitigation for issue mentioned in
         # https://github.com/vllm-project/vllm/issues/22754.
-        # `tolist` would trigger a cuda wise stream sync, which
-        # would block other copy ops from other cuda streams.
-        # A cuda event sync would avoid such a situation. Since
+        # `tolist` would trigger a npu wise stream sync, which
+        # would block other copy ops from other npu streams.
+        # A npu event sync would avoid such a situation. Since
         # this is in the critical path of every single model
         # forward loop, this has caused perf issue for a disagg
         # setup.
