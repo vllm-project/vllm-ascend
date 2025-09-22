@@ -1078,9 +1078,9 @@ class Qwen3NextForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
             use_v1=True)
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata, # type: ignore
+            self,
+            hidden_states: torch.Tensor,
+            sampling_metadata,  # type: ignore
     ) -> Optional[torch.Tensor]:
         return self.logits_processor(self.lm_head, hidden_states,
                                      sampling_metadata)

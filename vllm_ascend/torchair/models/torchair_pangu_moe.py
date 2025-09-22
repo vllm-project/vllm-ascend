@@ -45,7 +45,6 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.v1.sample.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -55,10 +54,10 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
+from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, vllm_version_is
 
 if vllm_version_is("0.10.2"):
     from vllm.model_executor.layers.sampler import SamplerOutput
@@ -918,7 +917,7 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
+        self.sampler = Sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -940,18 +939,18 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata, # type: ignore
+            self,
+            hidden_states: torch.Tensor,
+            sampling_metadata,  # type: ignore
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
     def sample(
-        self,
-        logits: Optional[torch.Tensor],
-        sampling_metadata, # type: ignore
+            self,
+            logits: Optional[torch.Tensor],
+            sampling_metadata,  # type: ignore
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens

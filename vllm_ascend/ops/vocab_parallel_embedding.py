@@ -259,7 +259,9 @@ class AscendLogitsProcessor(LogitsProcessor):
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
         # keep this for version compatibility
-        sampling_metadata = None, # type: ignore
+        sampling_metadata=None,  # type: ignore
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        return super().forward(lm_head, hidden_states, embedding_bias=embedding_bias)
+        return super().forward(lm_head,
+                               hidden_states,
+                               embedding_bias=embedding_bias)

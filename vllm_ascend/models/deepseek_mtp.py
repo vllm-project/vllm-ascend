@@ -38,7 +38,6 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend.utils import vllm_version_is
 
 class CustomDeepSeekShareHead(SharedHead):
 
@@ -168,7 +167,7 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata, # type: ignore
+        sampling_metadata,  # type: ignore
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = (spec_step_idx % self.num_mtp_layers)

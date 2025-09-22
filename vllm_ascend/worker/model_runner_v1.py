@@ -1960,7 +1960,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         num_scheduled_tokens_np, finished_sending,
                         finished_recving, kv_connector_output)
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self._compute_logits_warpper(sample_hidden_states, None)
+                logits = self._compute_logits_warpper(sample_hidden_states,
+                                                      None)
             if broadcast_pp_output:
                 model_output_broadcast_data = {
                     "logits": logits.contiguous(),
@@ -2367,8 +2368,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 def dummy_compute_logits(hidden_states):
                     return self._compute_logits_warpper(
-                        hidden_states[dummy_indices], None
-                    )
+                        hidden_states[dummy_indices], None)
 
             with set_ascend_forward_context(
                     attn_metadata,

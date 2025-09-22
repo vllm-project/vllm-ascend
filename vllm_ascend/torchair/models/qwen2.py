@@ -46,7 +46,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 
-
 def all_gather_and_maybe_unpad(
     hidden_states: torch.Tensor,
     pad_size: int,
@@ -343,9 +342,9 @@ class CustomQwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata, # type: ignore
+            self,
+            hidden_states: torch.Tensor,
+            sampling_metadata,  # type: ignore
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
