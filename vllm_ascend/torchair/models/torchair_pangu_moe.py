@@ -60,7 +60,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, vllm_version_is
 
 if vllm_version_is("0.10.2"):
-    from vllm.model_executor.layers.sampler import SamplerOutput
+    from vllm.model_executor.layers.sampler import \
+        SamplerOutput  # type: ignore
 else:
     from vllm.v1.sample.sampler import SamplerOutput
 
