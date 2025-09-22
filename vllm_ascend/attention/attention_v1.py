@@ -36,10 +36,10 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.compilation.acl_graph import get_graph_params
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16,
-                               get_graph_params, is_310p, nd_to_nz_2d,
-                               nd_to_nz_spec)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
+                               nd_to_nz_2d, nd_to_nz_spec)
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):
