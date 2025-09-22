@@ -94,8 +94,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
                         output_size=8,
                         prefix="o_proj",
                     )
-                    self.assertEqual(linear.comm_group, parallel_state._OTP)
-                    self.assertEqual(linear.forward_type, "oproj_tp")
+                    self.assertEqual(linear.custom_op.comm_group, parallel_state._OTP)
                     output = linear(input_tensor)
                     outputs.append(output[0])
                     self.assertEqual(output[0].shape[0],
