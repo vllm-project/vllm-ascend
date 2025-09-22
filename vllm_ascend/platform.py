@@ -25,14 +25,13 @@ from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
-from vllm.utils import cdiv
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, is_310p,
-                               update_aclgraph_sizes)
+                               update_aclgraph_sizes, vllm_version_is)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -129,9 +128,12 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
-        decoding_config = vllm_config.decoding_config
         scheduler_config = vllm_config.scheduler_config
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
+        if vllm_version_is("0.10.2"):
+            structured_outputs_config = vllm_config.decoding_config
+        else:
+            structured_outputs_config = vllm_config.structured_outputs_config
 
         if model_config is not None and not model_config.use_mla:
             logger.info(
@@ -139,7 +141,7 @@ class NPUPlatform(Platform):
                 "as the performance of operators supporting this feature "
                 "functionality is currently suboptimal.")
             if not model_config.is_multimodal_model and \
-                decoding_config.backend == "auto" and \
+                structured_outputs_config.backend == "auto" and \
                 not scheduler_config.delay_factor > 0 and \
                 not scheduler_config.send_delta_data and \
                 scheduler_config.policy == "fcfs":
@@ -177,22 +179,12 @@ class NPUPlatform(Platform):
 
         compilation_config.cudagraph_num_of_warmups = 1
 
-        # TODO: make vllm support oot platform to set `compilation_config.cudagraph_mode`
-        # if cudagraph_mode is not explicitly set by users, set default value
-        if compilation_config.level == CompilationLevel.PIECEWISE:
-            compilation_config.cudagraph_mode = \
-                CUDAGraphMode.PIECEWISE
-        elif compilation_config.level not in [
+        if compilation_config.level not in [
                 CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE
         ]:
             logger.warning(
                 "NPU does not support %s compilation level. Setting CUDAGraphMode to NONE",
                 compilation_config.level)
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            logger.warning(
-                "compilation_config.level = CompilationLevel.NO_COMPILATION is set, Setting CUDAGraphMode to NONE"
-            )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # set CUDAGraphMode to None when torchair is enabled, no mather what compilation_config.level is.
@@ -219,7 +211,12 @@ class NPUPlatform(Platform):
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.level = CompilationLevel.NO_COMPILATION
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+        # TODO: Currently MLA does not support FULL_DECODE_ONLY, remove the second condition
+        # after MLA being supported
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE or (
+                compilation_config.cudagraph_mode
+                == CUDAGraphMode.FULL_DECODE_ONLY and model_config is not None
+                and model_config.use_mla):
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
@@ -231,6 +228,24 @@ class NPUPlatform(Platform):
                 "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
             ])
             update_aclgraph_sizes(vllm_config)
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            logger.info(
+                "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
+                "using only ACL Graph mode")
+            compilation_config.use_inductor = False
+            warning_message = """\033[91m
+            **********************************************************************************
+            * WARNING: You have enabled the *full graph* feature.
+            * This is an early experimental stage and may involve various unknown issues.
+            * A known problem is that capturing too many batch sizes can lead to OOM
+            * (Out of Memory) errors or inference hangs. If you encounter such issues,
+            * consider reducing `gpu_memory_utilization` or manually specifying a smaller
+            * batch size for graph capture.
+            * For more details, please refer to:
+            * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
+            **********************************************************************************\033[0m
+            """
+            logger.warning(warning_message)
         else:
             logger.info(
                 "%s cudagraph_mode is not support on NPU. falling back to NONE",
@@ -247,10 +262,6 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
-            else:
-                if not vllm_config.model_config.is_deepseek_mla:
-                    cache_config.block_size = cdiv(cache_config.block_size,
-                                                   64) * 64
 
             if cache_config.enable_prefix_caching and cache_config.block_size != 128:
                 logger.warning(
@@ -380,4 +391,8 @@ class NPUPlatform(Platform):
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
+        return True
+
+    @classmethod
+    def support_static_graph_mode(cls) -> bool:
         return True
