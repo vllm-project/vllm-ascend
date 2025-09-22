@@ -240,7 +240,7 @@ def group_based_adaptive_bloating_kernel(
         low = max(0, current_idx + M - N)
         high = min(num_remain_slice, M - 1)
 
-        while (high - low) > 1:
+        while (int(high) - int(low)) > 1:
             mid = (high + low) // 2
             keep = M - mid
             current_group = window[:, :keep]
@@ -288,7 +288,7 @@ def compute_objective(deployment, X, pieces):
             loads[i] += X[expert] / pieces[expert]
 
     mean_load = np.mean(loads)
-    max_load = np.max(loads)
+    max_load:np.float32 = np.max(loads)
     obj = max_load / mean_load
     return obj, loads
 
