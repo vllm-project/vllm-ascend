@@ -27,7 +27,8 @@ from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
+from typing import (TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional,
+                    Union, cast)
 
 import numpy as np
 import numpy.typing as npt
@@ -73,8 +74,12 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import \
     reorder_batch_to_split_decodes_and_prefills
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheSpec, MambaSpec)
+                                        KVCacheConfig, KVCacheGroupSpec,
+                                        KVCacheSpec, MambaSpec)
+# yapf: enable
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
@@ -113,7 +118,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                get_ascend_soc_version, is_310p,
-                               lmhead_tp_enable)
+                               lmhead_tp_enable, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -134,6 +139,11 @@ if is_310p():
     ACL_FORMAT = ACL_FORMAT_FRACTAL_NZ
 else:
     ACL_FORMAT = ACL_FORMAT_FRACTAL_ND
+
+if not vllm_version_is("0.10.2"):
+    from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+else:
+    UniformTypeKVCacheSpecs = None
 
 
 @dataclass
@@ -305,8 +315,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             use_mla=self.model_config.use_mla,
         )
 
-        self.attn_mask_builder = AttentionMaskBuilder(
-            self.model_config.max_model_len, self.dtype)
+        if torch.version.cann.startswith("8.3"):
+            self.attn_mask_builder = AttentionMaskBuilder(
+                self.scheduler_config.max_num_batched_tokens, self.dtype,
+                self.device)
+        else:
+            self.attn_mask_builder = AttentionMaskBuilder(
+                self.model_config.max_model_len, self.dtype)
 
         # Set up speculative decoding.
         self.spec_attn_mask = None
@@ -573,12 +588,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 to_update = model.pooler.get_pooling_updates(task)
                 to_update.apply(pooling_params)
 
+            backward_kwargs = {}
+            if vllm_version_is("0.10.2"):
+                backward_kwargs["mm_kwargs"] = new_req_data.mm_kwargs
+                backward_kwargs["mm_hashes"] = new_req_data.mm_hashes
+                backward_kwargs["mm_positions"] = new_req_data.mm_positions
+            else:
+                backward_kwargs["mm_features"] = new_req_data.mm_features
+
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 prompt_embeds=new_req_data.prompt_embeds,
-                mm_kwargs=new_req_data.mm_kwargs,
-                mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
                 generator=generator,
@@ -586,46 +607,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
-                mm_hashes=new_req_data.mm_hashes,
+                **backward_kwargs,
             )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
-                image_grid_thw = []
-                video_grid_thw = []
-                second_per_grid_ts = []
-                audio_feature_lengths = []
-                use_audio_in_video = False
-                for mm_item in self.requests[req_id].mm_kwargs:
-                    mm_input = mm_item.get_data()
-                    if mm_input.get("image_grid_thw") is not None:
-                        image_grid_thw.append(
-                            mm_input["image_grid_thw"].tolist())
-                    if mm_input.get("video_grid_thw") is not None:
-                        video_grid_thw.append(
-                            mm_input["video_grid_thw"].tolist())
-                    if mm_input.get("second_per_grid_ts") is not None:
-                        second_per_grid_ts.append(
-                            mm_input["second_per_grid_ts"])
-                    if mm_input.get("audio_feature_lengths") is not None:
-                        audio_feature_lengths.append(
-                            mm_input["audio_feature_lengths"])
-                    if mm_input.get("use_audio_in_video") is True:
-                        use_audio_in_video = True
-
-                hf_config = self.model_config.hf_config
-
-                self.requests[req_id].mrope_positions, \
-                    self.requests[req_id].mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions_tensor(
-                        self.requests[req_id].prompt_token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
-                    )
+                if vllm_version_is("0.10.2"):
+                    self._init_mrope_positions_0102(self.requests[req_id])
+                else:
+                    self._init_mrope_positions(self.requests[req_id])
 
             req_ids_to_add.append(req_id)
 
@@ -722,6 +712,73 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
+
+    def _init_mrope_positions(self, req_state: CachedRequestState):
+        image_grid_thw = []
+        video_grid_thw = []
+        second_per_grid_ts = []
+        audio_feature_lengths = []
+        use_audio_in_video = False
+        assert req_state.mm_features is not None
+        for mm_feature in req_state.mm_features:
+            mm_item = mm_feature.data
+            if mm_item is None:
+                continue
+            mm_input = mm_item.get_data()
+            if (t := mm_input.get("image_grid_thw")) is not None:
+                image_grid_thw.append(t.tolist())
+            if (t := mm_input.get("video_grid_thw")) is not None:
+                video_grid_thw.append(t.tolist())
+            if (t := mm_input.get("second_per_grid_ts")) is not None:
+                second_per_grid_ts.append(t)
+            if (t := mm_input.get("audio_feature_lengths")) is not None:
+                audio_feature_lengths.append(t)
+            if mm_input.get("use_audio_in_video") is True:
+                use_audio_in_video = True
+
+        req_state.mrope_positions, req_state.mrope_position_delta = \
+            MRotaryEmbedding.get_input_positions_tensor(
+                req_state.prompt_token_ids,
+                hf_config=self.model_config.hf_config,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+                audio_feature_lengths=audio_feature_lengths,
+                use_audio_in_video=use_audio_in_video,
+            )
+
+    def _init_mrope_positions_0102(self, req_state: CachedRequestState):
+        image_grid_thw = []
+        video_grid_thw = []
+        second_per_grid_ts = []
+        audio_feature_lengths = []
+        use_audio_in_video = False
+        assert req_state.mm_kwargs is not None
+        for mm_item in req_state.mm_kwargs:
+            mm_input = mm_item.get_data()
+            if mm_input.get("image_grid_thw") is not None:
+                image_grid_thw.append(mm_input["image_grid_thw"].tolist())
+            if mm_input.get("video_grid_thw") is not None:
+                video_grid_thw.append(mm_input["video_grid_thw"].tolist())
+            if mm_input.get("second_per_grid_ts") is not None:
+                second_per_grid_ts.append(mm_input["second_per_grid_ts"])
+            if mm_input.get("audio_feature_lengths") is not None:
+                audio_feature_lengths.append(mm_input["audio_feature_lengths"])
+            if mm_input.get("use_audio_in_video") is True:
+                use_audio_in_video = True
+
+        hf_config = self.model_config.hf_config
+
+        req_state.mrope_positions, req_state.mrope_position_delta = \
+            MRotaryEmbedding.get_input_positions_tensor(
+                req_state.prompt_token_ids,
+                hf_config=hf_config,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+                audio_feature_lengths=audio_feature_lengths,
+                use_audio_in_video=use_audio_in_video,
+            )
 
     def _sync_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
@@ -823,8 +880,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                              attn_state) -> torch.Tensor:
         # Chunk Prefill situation.
         if attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla:
-            return self.attn_mask_builder.get_splitfuse_attn_mask(
-                seq_lens, position, self.dtype, self.device)
+            if torch.version.cann.startswith("8.3"):
+                return self.attn_mask_builder.get_splitfuse_attn_mask()
+            else:
+                return self.attn_mask_builder.get_splitfuse_attn_mask(
+                    seq_lens, position, self.dtype, self.device)
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
             max_seq_len = max(seq_lens, default=0)
@@ -894,23 +954,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return
 
         # Batch the multi-modal inputs.
-        mm_kwargs = list[MultiModalKwargsItem]()
-        mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
-        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
-            req_state = self.requests[req_id]
-            for mm_input_id in encoder_input_ids:
-                mm_hash = req_state.mm_hashes[mm_input_id]
-                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
-                mm_hashes_pos.append(
-                    (mm_hash, req_state.mm_positions[mm_input_id]))
-        # Batch mm inputs as much as we can: if a request in the batch has
-        # multiple modalities or a different modality than the previous one,
-        # we process it separately to preserve item order.
-        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
-        # in the same batch while still being able to benefit from batching
-        # multimodal inputs. The proper solution should be reordering the
-        # encoder outputs.
+        if vllm_version_is("0.10.2"):
+            mm_kwargs, mm_hashes_pos = self._batch_mm_kwargs_from_scheduler_0102(
+                scheduler_output)
+        else:
+            mm_kwargs, mm_hashes_pos = self._batch_mm_kwargs_from_scheduler(
+                scheduler_output)
         encoder_outputs = []
+
         for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
@@ -940,32 +991,100 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 is_embed=pos_info.is_embed,
             )
 
+    # TODO: remove this once we drop support for vLLM 0.10.2
+    def _batch_mm_kwargs_from_scheduler_0102(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[list[MultiModalKwargsItem], list[tuple[str, PlaceholderRange]]]:
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        if not scheduled_encoder_inputs:
+            return [], []
+        # Batch the multi-modal inputs.
+        mm_kwargs = list[MultiModalKwargsItem]()
+        # list of tuple (mm_hash, position_info)
+        mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
+        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
+            req_state = self.requests[req_id]
+            assert req_state.mm_hashes is not None
+            assert req_state.mm_kwargs is not None
+            assert req_state.mm_positions is not None
+            for mm_input_id in encoder_input_ids:
+                mm_hash = req_state.mm_hashes[mm_input_id]
+                mm_kwargs.append(req_state.mm_kwargs[mm_input_id])
+                mm_hashes_pos.append(
+                    (mm_hash, req_state.mm_positions[mm_input_id]))
+
+        return mm_kwargs, mm_hashes_pos
+
+    def _batch_mm_kwargs_from_scheduler(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> tuple[list[MultiModalKwargsItem], list[tuple[str, PlaceholderRange]]]:
+        """Batch multimodal kwargs from scheduled encoder inputs.
+
+        Args:
+            scheduler_output: The scheduler output containing scheduled encoder
+              inputs.
+
+        Returns:
+            A tuple of (mm_kwargs, req_ids_pos) where:
+            - mm_kwargs: List of multimodal kwargs items to be batched
+            - mm_hashes_pos: List of (mm_hash, position_info) tuples
+        """
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        if not scheduled_encoder_inputs:
+            return [], []
+        # Batch the multi-modal inputs.
+        mm_kwargs = list[MultiModalKwargsItem]()
+        # list of tuple (mm_hash, position_info)
+        mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
+        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
+            req_state = self.requests[req_id]
+            assert req_state.mm_features is not None
+            for mm_input_id in encoder_input_ids:
+                mm_feature = req_state.mm_features[mm_input_id]
+                mm_hash = mm_feature.identifier
+                mm_kwargs.append(mm_feature.data)
+                mm_hashes_pos.append((mm_hash, mm_feature.mm_position))
+
+        return mm_kwargs, mm_hashes_pos
+
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> list[torch.Tensor]:
+
+        def _iter_mm_features(req_state: CachedRequestState):
+            if vllm_version_is("0.10.2"):
+                # legacy path (to be removed later)
+                assert req_state.mm_hashes is not None
+                assert req_state.mm_positions is not None
+                for mm_hash, pos_info in zip(req_state.mm_hashes,
+                                             req_state.mm_positions):
+                    yield mm_hash, pos_info, getattr(pos_info, "is_embed",
+                                                     None)
+            else:
+                assert req_state.mm_features is not None
+                for mm_feature in req_state.mm_features:
+                    pos_info = mm_feature.mm_position
+                    yield mm_feature.identifier, pos_info, getattr(
+                        pos_info, "is_embed", None)
+
         mm_embeds: list[torch.Tensor] = []
+
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
             num_computed_tokens = req_state.num_computed_tokens
-            mm_positions = req_state.mm_positions
-            mm_hashes = req_state.mm_hashes
-            for i, pos_info in enumerate(mm_positions):
+
+            for mm_hash, pos_info, is_embed in _iter_mm_features(req_state):
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
 
-                # The encoder output is needed if the two ranges overlap:
-                # [num_computed_tokens,
-                #  num_computed_tokens + num_scheduled_tokens) and
-                # [start_pos, start_pos + num_encoder_tokens)
                 if start_pos >= num_computed_tokens + num_scheduled_tokens:
-                    # The encoder output is not needed in this step.
                     break
                 if start_pos + num_encoder_tokens <= num_computed_tokens:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
                     continue
 
                 start_idx = max(num_computed_tokens - start_pos, 0)
@@ -974,12 +1093,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_encoder_tokens,
                 )
                 assert start_idx < end_idx
-                mm_hash = mm_hashes[i]
+
                 encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None,\
+                assert encoder_output is not None, \
                     f"Encoder cache miss for {mm_hash}."
 
-                if (is_embed := pos_info.is_embed) is not None:
+                if is_embed is not None:
                     is_embed = is_embed[start_idx:end_idx]
 
                 mm_embeds_item = gather_mm_placeholders(
@@ -1449,7 +1568,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 common_prefix_len = 0
                 extra_attn_metadata_args = {}
-                builder = attn_group.metadata_builder
+                if vllm_version_is("0.10.2"):
+                    builder = attn_group.metadata_builder
+                else:
+                    builder = attn_group.get_metadata_builder()
                 if isinstance(builder, GDNAttentionMetadataBuilder):
                     if use_spec_decode:
                         extra_attn_metadata_args = dict(
@@ -2532,10 +2654,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
         kv_caches: Dict[str, torch.Tensor] = {}
-        for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
-        ):
-            attn_backend = kv_cache_group.backend
-            for layer_name in kv_cache_group.layer_names:
+        for group in self._kv_cache_spec_attn_group_iterator_dispatcher():
+            if vllm_version_is("0.10.2"):
+                kv_cache_spec, group = group
+            else:
+                kv_cache_spec = group.kv_cache_spec
+            attn_backend = group.backend
+            for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 tensor_size = kv_cache_sizes[layer_name]
@@ -2677,10 +2802,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )), "Some layers are not correctly initialized"
 
         kv_caches: Dict[str, torch.Tensor] = {}
-        for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
-        ):
-            attn_backend = kv_cache_group.backend
-            for layer_name in kv_cache_group.layer_names:
+        for group in self._kv_cache_spec_attn_group_iterator_dispatcher():
+            if vllm_version_is("0.10.2"):
+                kv_cache_spec, group = group
+            else:
+                kv_cache_spec = group.kv_cache_spec
+            attn_backend = group.backend
+            for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
 
@@ -2777,15 +2905,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return kv_caches
 
-    def _kv_cache_spec_attn_group_iterator(
-            self) -> Iterator[tuple[KVCacheSpec, AttentionGroup]]:
-        if not self.kv_cache_config.kv_cache_groups:
-            return
-        for kv_cache_spec_id, attn_groups in enumerate(self.attn_groups):
-            for attn_group in attn_groups:
-                yield self.kv_cache_config.kv_cache_groups[
-                    kv_cache_spec_id].kv_cache_spec, attn_group
-
     def may_reinitialize_input_batch(self,
                                      kv_cache_config: KVCacheConfig) -> None:
         """
@@ -2865,9 +2984,45 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert len(self.attn_groups) == 0, \
             "Attention backends are already initialized"
 
+        class AttentionGroupKey(NamedTuple):
+            attn_backend: type[AttentionBackend]
+            kv_cache_spec: KVCacheSpec
+
+        def get_attn_backends_for_group(
+            kv_cache_group_spec: KVCacheGroupSpec,
+        ) -> dict[AttentionGroupKey, list[str]]:
+            layers = get_layers_from_vllm_config(
+                self.vllm_config, AttentionLayerBase,
+                kv_cache_group_spec.layer_names)
+            attn_backends = {}
+            attn_backend_layers = defaultdict(list)
+            # Dedupe based on full class name; this is a bit safer than
+            # using the class itself as the key because when we create dynamic
+            # attention backend subclasses (e.g. ChunkedLocalAttention) unless
+            # they are cached correctly, there will be different objects per
+            # layer.
+            for layer_name in kv_cache_group_spec.layer_names:
+                attn_backend = layers[layer_name].get_attn_backend()
+                full_cls_name = attn_backend.full_cls_name()
+                layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+                if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
+                        layer_name]
+                key = (full_cls_name, layer_kv_cache_spec)
+                attn_backends[key] = AttentionGroupKey(attn_backend,
+                                                       layer_kv_cache_spec)
+                attn_backend_layers[key].append(layer_name)
+            return {
+                attn_backends[k]: v
+                for k, v in attn_backend_layers.items()
+            }
+
         def get_attn_backends_for_layers(
                 layer_names: list[str]
         ) -> dict[type[AttentionBackend], list[str]]:
+            """Get attention_backend for all attention layers
+            TODO: Only used in v0.10.2, drop me when 0.10.2 is dropped
+            """
             layers = get_layers_from_vllm_config(self.vllm_config,
                                                  AttentionLayerBase,
                                                  layer_names)
@@ -2888,7 +3043,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in attn_backend_layers.items()
             }
 
-        def create_attn_groups(
+        def create_attn_groups_v0102(
             attn_backends_map: dict[AttentionBackend, list[str]],
             kv_cache_spec: KVCacheSpec,
         ) -> list[AttentionGroup]:
@@ -2906,12 +3061,37 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_groups.append(attn_group)
             return attn_groups
 
-        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-            attn_backends = get_attn_backends_for_layers(
-                kv_cache_group_spec.layer_names)
-            self.attn_groups.append(
-                create_attn_groups(attn_backends, kv_cache_spec))
+        def create_attn_groups(
+            attn_backends_map: dict[AttentionBackend, list[str]],
+        ) -> list[AttentionGroup]:
+            attn_groups: list[AttentionGroup] = []
+            for (attn_backend,
+                 kv_cache_spec), layer_names in attn_backends_map.items():
+                attn_metadata_builders = []
+                attn_metadata_builders.append(attn_backend.get_builder_cls()(
+                    kv_cache_spec,
+                    layer_names,
+                    self.vllm_config,
+                    self.device,
+                ))
+                attn_group = AttentionGroup(attn_backend,
+                                            attn_metadata_builders,
+                                            layer_names, kv_cache_spec)
+                attn_groups.append(attn_group)
+            return attn_groups
+
+        if vllm_version_is("0.10.2"):
+            for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+                kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+                attn_backends = get_attn_backends_for_layers(
+                    kv_cache_group_spec.layer_names)
+                self.attn_groups.append(
+                    create_attn_groups_v0102(attn_backends, kv_cache_spec))
+        else:
+            for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+                attn_backends = get_attn_backends_for_group(  # type: ignore
+                    kv_cache_group_spec)
+                self.attn_groups.append(create_attn_groups(attn_backends))
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
@@ -2919,13 +3099,37 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
         return itertools.chain.from_iterable(self.attn_groups)
 
+    def _kv_cache_spec_attn_group_iterator(self) -> Iterator[AttentionGroup]:
+        if not self.kv_cache_config.kv_cache_groups:
+            return
+        for attn_groups in self.attn_groups:
+            yield from attn_groups
+
+    def _kv_cache_spec_attn_group_iterator_v0102(
+            self) -> Iterator[tuple[KVCacheSpec, AttentionGroup]]:
+        if not self.kv_cache_config.kv_cache_groups:
+            return
+        for kv_cache_spec_id, attn_groups in enumerate(self.attn_groups):
+            for attn_group in attn_groups:
+                yield self.kv_cache_config.kv_cache_groups[
+                    kv_cache_spec_id].kv_cache_spec, attn_group
+
+    def _kv_cache_spec_attn_group_iterator_dispatcher(self):
+        if vllm_version_is("0.10.2"):
+            return self._kv_cache_spec_attn_group_iterator_v0102()
+        else:
+            return self._kv_cache_spec_attn_group_iterator()
+
     def calculate_reorder_batch_threshold(self) -> None:
         """
         Check that if any backends reorder batches; that the reordering
         is compatible (e.g., decode threshold is the same)
         """
         for group in self._attn_group_iterator():
-            attn_metadata_builder_i = group.metadata_builder
+            if vllm_version_is("0.10.2"):
+                attn_metadata_builder_i = group.metadata_builder
+            else:
+                attn_metadata_builder_i = group.get_metadata_builder()
             if hasattr(attn_metadata_builder_i, "reorder_batch_threshold"):
                 # check that if any backends reorder batches; that the reordering
                 # is compatible (e.g., decode threshold is the same)
