@@ -217,7 +217,7 @@ def group_based_adaptive_bloating_kernel(
         acc += simulated_pieces[sort_idx[i]]
         cumulative_slices_used[i] = acc
 
-    group_boundary_indices = np.empty(num_group, dtype=np.int32)
+    group_boundary_indices = np.zeros(num_group, dtype=np.int32)
     for i in range(1, num_group + 1):
         for j in range(N):
             if cumulative_slices_used[j] >= i * M:
