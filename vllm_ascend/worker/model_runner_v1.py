@@ -3286,8 +3286,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 builder = attn_group.metadata_builder
             else:
                 builder = attn_group.get_metadata_builder()
-            if builder.cudagraph_support.value < min_ag_support.value:
-                min_ag_support = builder.cudagraph_support
+            if builder.aclgraph_support.value < min_ag_support.value:
+                min_ag_support = builder.aclgraph_support
                 min_ag_builder_name = builder.__class__.__name__
 
         # This is an imitation of compilation_config.splitting_ops_contain_attention()
