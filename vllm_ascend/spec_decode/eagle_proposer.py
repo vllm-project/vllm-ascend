@@ -347,7 +347,7 @@ class EagleProposer(Proposer):
                 actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
                 block_table_tensor=self.runner.input_batch.block_table[0].
                 get_device_tensor(),
-                slot_mapping_cpu=self.runner.slot_mapping_cpu,
+                slot_mapping=self.runner.slot_mapping,
                 positions=self.runner.positions,
                 attn_mask=self.runner.attn_mask,
                 spec_attn_mask=self.runner.spec_attn_mask,
@@ -434,7 +434,7 @@ class EagleProposer(Proposer):
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=self.runner.input_batch.block_table[0].
             get_device_tensor(),
-            slot_mapping_cpu=target_slot_mapping,
+            slot_mapping=target_slot_mapping,
             positions=target_positions,
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,

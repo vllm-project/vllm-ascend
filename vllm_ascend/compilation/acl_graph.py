@@ -147,6 +147,7 @@ class ACLGraphWrapper:
                         patch("torch.npu.empty_cache", lambda: None))
 
                 # mind-exploding: carefully manage the reference and memory.
+                forward_context.capturing = True
                 with torch.npu.graph(aclgraph, pool=self.graph_pool):
                     # `output` is managed by pytorch's aclgraph pool
                     output = self.runnable(*args, **kwargs)
