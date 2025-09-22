@@ -15,8 +15,12 @@
 # limitations under the License.
 #
 
-import vllm_ascend.ops.casual_conv1d
-import vllm_ascend.ops.sigmoid_gating
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import vllm_ascend.ops.casual_conv1d
+    import vllm_ascend.ops.sigmoid_gating
+
 import vllm_ascend.patch.worker.patch_common.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_logits  # noqa
 
