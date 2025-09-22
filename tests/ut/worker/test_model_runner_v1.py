@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import AscendSocVersion
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -24,21 +25,21 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
     "soc_version, enable_expert_parallel, world_size, num_tokens, mc2_tokens_capacity, quant_type, expected_method",
     [
         # Case 1: Expert parallel is disabled, should always be 'allgather'
-        (AscendSocVersion.A2, False, 8, 100, 256, None, "allgather"),
-        (AscendSocVersion.A3, False, 16, 500, 256, None, "allgather"),
+        (AscendSocVersion.A2, False, 8, 100, 256, None, MoECommType.ALLGATHER),
+        (AscendSocVersion.A3, False, 16, 500, 256, None, MoECommType.ALLGATHER),
 
         # Case 2: A2 SOC with w4a8_dynamic -> use alltoall when not mc2
-        (AscendSocVersion.A2, True, 8, 100, 256, "w4a8_dynamic", "alltoall"),
-        (AscendSocVersion.A2, True, 16, 257, 256, "w4a8_dynamic", "alltoall"),
-        (AscendSocVersion.A2, True, 16, 100, 256, "w4a8_dynamic", "mc2"),  # meets mc2 condition
+        (AscendSocVersion.A2, True, 8, 100, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
+        (AscendSocVersion.A2, True, 16, 257, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
+        (AscendSocVersion.A2, True, 16, 100, 256, "w4a8_dynamic", MoECommType.MC2),  # meets mc2 condition
 
         # Case 3: A2 SOC without w4a8_dynamic -> fallback to allgather
-        (AscendSocVersion.A2, True, 8, 100, 256, None, "allgather"),
-        (AscendSocVersion.A2, True, 16, 257, 256, None, "allgather"),
+        (AscendSocVersion.A2, True, 8, 100, 256, None, MoECommType.ALLGATHER),
+        (AscendSocVersion.A2, True, 16, 257, 256, None, MoECommType.ALLGATHER),
 
         # Case 4: A3 SOC
-        (AscendSocVersion.A3, True, 8, 100, 256, None, "mc2"),
-        (AscendSocVersion.A3, True, 8, 257, 256, None, "alltoall"),
+        (AscendSocVersion.A3, True, 8, 100, 256, None, MoECommType.MC2),
+        (AscendSocVersion.A3, True, 8, 257, 256, None, MoECommType.ALLTOALL),
     ])
 # yapf: enable
 def test_select_moe_comm_method(soc_version, enable_expert_parallel,

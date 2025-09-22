@@ -41,9 +41,7 @@ from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
                                               determine_default_log2phy_map)
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.ops.moe.moe_comm_method import (AllGatherCommImpl,
-                                                 AlltoAllCommImpl, MC2CommImpl,
-                                                 NaiveMulticastCommImpl)
+from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
                                get_all_reduce_merge_state,
@@ -339,13 +337,7 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.mc2_group = get_mc2_group()
         self.moe_config.num_global_redundant_experts = self.global_redundant_expert_num
 
-        for method in {
-                AllGatherCommImpl, AlltoAllCommImpl, MC2CommImpl,
-                NaiveMulticastCommImpl
-        }:
-            setattr(
-                self, method.__name__.lower(),
-                method(moe_config=self.moe_config))  # type: ignore[abstract]
+        setup_moe_comm_method(self.moe_config)
 
     def update_expert_map(self, new_expert_map):
         self.expert_map = new_expert_map
@@ -359,22 +351,6 @@ class AscendFusedMoE(FusedMoE):
     def clear_moe_load(self):
         if self.moe_load is not None:
             self.moe_load.zero_()
-
-    def naive_multicast(self, x: torch.Tensor,
-                        cu_tokens_across_dp_cpu: torch.Tensor):
-        assert (len(x.shape) == 2)
-        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
-                             device=x.device,
-                             dtype=x.dtype)
-        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-            self.dp_rank - 1]
-        end = cu_tokens_across_dp_cpu[self.dp_rank]
-        buffer[start:end, :].copy_(x)
-        for idx in range(self.dp_size):
-            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
-            end = cu_tokens_across_dp_cpu[idx]
-            get_dp_group().broadcast(buffer[start:end, :], idx)
-        return buffer
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -411,9 +387,6 @@ class AscendFusedMoE(FusedMoE):
             chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
             mc2_mask = chunk_mc2_mask[tp_rank]
             replace_allreduce = True
-
-        moe_comm_method_name = forward_context.moe_comm_method_name
-        forward_context.moe_comm_method = getattr(self, moe_comm_method_name)
 
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
