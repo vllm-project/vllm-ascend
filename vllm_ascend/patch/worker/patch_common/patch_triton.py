@@ -3,8 +3,6 @@ from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
-import triton
-import triton.language as tl
 import vllm.model_executor.layers.fla.ops.fused_recurrent
 import vllm.model_executor.layers.mamba.ops.causal_conv1d
 from vllm.triton_utils import tl, tldevice, triton
