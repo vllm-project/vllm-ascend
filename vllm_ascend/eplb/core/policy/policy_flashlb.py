@@ -395,8 +395,8 @@ class FlashLB(EplbPolicy):
     def compute_rank_load(self, deployment: np.ndarray, hotness: np.ndarray):
         n_stage, N = hotness.shape
         if np.any(deployment < 0):
-            print(f"{deployment=}")
-            exit()
+            print(f"Invalid deployment with negative values: {deployment}")
+            raise ValueError("Deployment table contains negative values.")
         unit_hotness = hotness / np.bincount(deployment.reshape(-1))
         stage_par = np.zeros(n_stage)
         for i in range(n_stage):
