@@ -440,7 +440,7 @@ class FlashLB(EplbPolicy):
         deployment = jsq_placement(X, pieces, M, stage_weights)
 
         X_all = X.sum(0)
-        unit_load = X_all / pieces
+        unit_load = np.divide(X_all, pieces, out=np.zeros_like(X_all, dtype=float), where=pieces!=0)
         load = unit_load[deployment].sum(-1)
 
         sim_unit_load = X_all / simulated_pieces
