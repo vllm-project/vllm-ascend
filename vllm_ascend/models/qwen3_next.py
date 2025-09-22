@@ -46,7 +46,9 @@ from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
                                                    SupportsLoRA, SupportsPP)
 from vllm.model_executor.models.mamba_cache import MambaCacheParams
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
-from vllm.model_executor.models.qwen3_next import fused_gdn_gating
+from vllm.model_executor.models.qwen3_next import (Qwen3NextAttention,
+                                                   Qwen3NextSparseMoeBlock,
+                                                   fused_gdn_gating)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader, PPMissingLayer, extract_layer_index,
     is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
