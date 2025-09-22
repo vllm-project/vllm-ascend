@@ -7,7 +7,6 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
-from vllm.logger import logger
 from vllm.utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
@@ -18,7 +17,6 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return residual
 
     if x.size(0) != residual.size(0):
@@ -41,7 +39,6 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return x
 
     flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
@@ -57,7 +54,6 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return tensor_model_parallel_all_reduce(x)
 
     flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
@@ -75,7 +71,6 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return
 
     if not forward_context.prefetch_mlp_enabled:
@@ -106,7 +101,6 @@ def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return
 
     if not forward_context.prefetch_mlp_enabled:
@@ -136,7 +130,6 @@ def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return
 
     if not forward_context.prefetch_mlp_enabled:
