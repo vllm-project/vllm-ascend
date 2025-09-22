@@ -245,9 +245,11 @@ def group_based_adaptive_bloating_kernel(
             keep = M - mid
             current_group = window[:, :keep]
             current_pieces = compute_piece_counts(current_group, M, stage_weights)
+            current_pieces = np.maximum(current_pieces, 1)
             current_slice = slice_values(current_group.sum(0), current_pieces)
             current_slice_sorted = np.sort(current_slice)
             current_loads = loads + current_slice_sorted
+            current_loads = np.nan_to_num(current_loads, nan=0.0, posinf=0.0, neginf=0.0)
             current_slope = (np.max(current_loads) - np.min(current_loads)) / M
             next_slope:np.float32 = np.max(simulated_slopes[current_idx + keep:])
 
