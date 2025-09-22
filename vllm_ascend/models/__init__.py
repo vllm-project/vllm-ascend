@@ -10,11 +10,13 @@ def register_model():
 
     ModelRegistry.register_model(
         "Qwen3VLMoeForConditionalGeneration",
-        "vllm_ascend.models.qwen3_vl_moe:AscendQwen3VLMoeForConditionalGeneration")
+        "vllm_ascend.models.qwen3_vl_moe:AscendQwen3VLMoeForConditionalGeneration"
+    )
 
     ModelRegistry.register_model(
         "Qwen3VLForConditionalGeneration",
-        "vllm_ascend.models.qwen3_vl:AscendQwen3VLForConditionalGeneration")
+        "vllm_ascend.models.qwen3_vl:AscendQwen3VLForConditionalGeneration"
+    )
 
     if envs_ascend.USE_OPTIMIZED_MODEL:
         ModelRegistry.register_model(

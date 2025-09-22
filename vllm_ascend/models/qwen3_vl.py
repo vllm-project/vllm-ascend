@@ -34,9 +34,10 @@ from vllm.model_executor.models.qwen3_vl import (
     Qwen3VLDummyInputsBuilder, Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor, Qwen3VLProcessingInfo)
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
+from vllm.multimodal import MULTIMODAL_REGISTRY
+
 from vllm_ascend.models.qwen2_5_vl_without_padding import \
     AscendQwen2_5_VisionAttention_Without_Padding
-from vllm.multimodal import MULTIMODAL_REGISTRY
 
 
 class AscendQwen3_VisionPatchEmbed(Qwen3_VisionPatchEmbed):
@@ -69,7 +70,7 @@ class AscendQwen3_VisionBlock(Qwen3_VisionBlock):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel)
-        
+
     def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
                 cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(
