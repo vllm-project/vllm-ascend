@@ -41,6 +41,8 @@ concurrency:
 jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
+    with:
+      vllm: c60e6137f0bf2034853919b3a9d705d7e06b93cf
 
   changes:
     runs-on: ubuntu-latest
@@ -143,7 +145,7 @@ jobs:
     if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
-      vllm: v0.10.2
+      vllm: ${{ matrix.vllm_version }}
       runner: linux-aarch64-a2
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
       type: light
