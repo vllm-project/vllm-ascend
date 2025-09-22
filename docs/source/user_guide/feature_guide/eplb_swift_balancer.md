@@ -14,7 +14,7 @@ Expert balancing for MoE models in LLM serving is essential for optimal performa
 
 ## How to Use EPLB
 
-###  Dynamic EPLB
+### Dynamic EPLB
 
 Enable dynamic balancing with auto-tuned parameters. Adjust num_iterations_eplb_update and num_wait_worker_iterations based on workload patterns.
 
