@@ -2,11 +2,11 @@
 # Todo: Once https://github.com/vllm-project/vllm/pull/24069 is merged in vllm. Remove this policy.
 
 import torch
-import numba
+import numba # type: ignore
 import numpy as np
 import logging
 
-from numba import njit
+from numba import njit # type: ignore
 from collections import defaultdict, deque
 from .policy_abstract import DynamicConfig, EplbPolicy
 
@@ -407,7 +407,8 @@ class FlashLB(EplbPolicy):
         if np.any(deployment < 0):
             print(f"Invalid deployment with negative values: {deployment}")
             raise ValueError("Deployment table contains negative values.")
-        unit_hotness = hotness / np.bincount(deployment.reshape(-1))
+        counts = np.bincount(deployment.reshape(-1), minlength=N)
+        unit_hotness = np.divide(hotness, counts, out=np.zeros_like(hotness, dtype=float), where=counts!=0)
         stage_par = np.zeros(n_stage)
         for i in range(n_stage):
             stage_load = unit_hotness[i][deployment].sum(-1)
