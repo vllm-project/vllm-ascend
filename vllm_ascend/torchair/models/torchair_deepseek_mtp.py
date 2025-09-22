@@ -34,7 +34,6 @@ from vllm.model_executor.models.deepseek_mtp import (
     SharedHead)
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.sequence import IntermediateTensors
-from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.torchair.models.torchair_deepseek_v2 import \
     TorchairDeepseekV2DecoderLayer
@@ -197,8 +196,6 @@ class TorchairDeepSeekMTP(DeepSeekMTP):
         self.config = vllm_config.model_config.hf_config
         self.model = TorchairDeepSeekMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
-
-        self.sampler = Sampler()
 
     def forward(
         self,

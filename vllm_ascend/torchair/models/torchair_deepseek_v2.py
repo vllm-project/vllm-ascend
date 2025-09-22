@@ -67,7 +67,6 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
-from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
@@ -945,7 +944,6 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
