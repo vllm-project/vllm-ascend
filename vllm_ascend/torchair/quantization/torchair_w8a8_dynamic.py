@@ -823,6 +823,7 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         try:
             device_group = get_mc2_group().device_group
@@ -936,6 +937,8 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
             )
 
         fused_moe_state = get_forward_context().fused_moe_state
+        if self.enable_shared_expert_dp and fused_moe_state == FusedMoEState.MC2:
+            fused_moe_state = FusedMoEState.All2All
         shared_gate_up, shared_dequant_scale = None, None
         if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
             with npu_stream_switch("moe_secondary", 0):
