@@ -2289,7 +2289,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=np.int32)
 
         # Force dummy run on prefill stage when this node is deemed as kv producer.
-        if self.is_kv_producer:
+        if self.is_kv_producer and not self.is_kv_consumer:
             with_prefill = True
 
         attn_metadata = self._build_attention_metadata(with_prefill,
