@@ -72,8 +72,12 @@ def jsq_placement(X, pieces, M, stage_weights):
     # 1. Compute unit_hotness
     unit_hotness = np.empty((n_stage, N), dtype=np.float32)
     for i in range(N):
-        for s in range(n_stage):
-            unit_hotness[s, i] = X[s, i] / pieces[i]
+        if pieces[i] > 0:
+            for s in range(n_stage):
+                unit_hotness[s, i] = X[s, i] / pieces[i]
+        else:
+            for s in range(n_stage):
+                unit_hotness[s, i] = 0.0
 
     # 2. Sort by total hotness
     scores = np.zeros(N, dtype=np.float32)
