@@ -25,24 +25,30 @@ would be hidden by eplb worker process too.
 ## Examples
 ### Dynamic eplb
 Enable dynamic eplb and specify the trigger rounds.
+
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{ "dynamic_eplb":true,"num_iterations_eplb_update":400, "gate_eplb":true, "num_wait_worker_iterations":30}'
 ```
+
 ### Static eplb
 1. Specify the path for the static eplb initialization file.
+
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{ "expert_map_record_path": "/path/to/eplb.json", "init_redundancy_expert": 16, dynamic_eplb":true,"num_iterations_eplb_update":400, "gate_eplb":true, "num_wait_worker_iterations":30}'
 ```
+
 2. If expert map has been recorded, enable static eplb with expert map path.
+
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --additional-config '{ "expert_map_path": "/path/to/eplb.json"}'
 ```
+
