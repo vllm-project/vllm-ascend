@@ -22,6 +22,13 @@ class FusedMoEState(Enum):
     All2AllSeq = 5
 
 
+class MoECommType(Enum):
+    ALLGATHER = 0
+    MC2 = 1
+    ALLTOALL = 2
+    NAIVE_MULTICAST = 3
+
+
 # TODO(zzzzwwjj): add soc_version to choose branch
 def _get_fused_moe_state(ep_size: int, with_prefill: bool,
                          is_deepseek_v3_r1: bool):
@@ -52,7 +59,7 @@ def set_ascend_forward_context(
         with_prefill: bool = True,
         in_profile_run: bool = False,
         reserved_mc2_mask: Optional[torch.Tensor] = None,
-        moe_comm_method: str = "",
+        moe_comm_type: Optional[MoECommType] = None,
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
@@ -72,7 +79,11 @@ def set_ascend_forward_context(
             batch_descriptor=batch_descriptor,
     ):
         forward_context = get_forward_context()
-        forward_context.moe_comm_method_name = moe_comm_method + "commimpl"
+
+        from vllm_ascend.ops.moe.moe_comm_method import get_moe_comm_method
+        forward_context.moe_comm_type = moe_comm_type
+        forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
+
         forward_context.with_prefill = with_prefill
         tp_world_size = get_tensor_model_parallel_world_size()
         ep_size = (get_ep_group().world_size if
