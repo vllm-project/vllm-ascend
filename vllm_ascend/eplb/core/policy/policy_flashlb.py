@@ -417,7 +417,7 @@ class FlashLB(EplbPolicy):
         unit_hotness = np.divide(hotness,
                                  counts,
                                  out=np.zeros_like(hotness, dtype=float),
-                                 where=counts != 0))
+                                 where=counts != 0)
         stage_par = np.zeros(n_stage)
         for i in range(n_stage):
             stage_load = unit_hotness[i][deployment].sum(-1)
