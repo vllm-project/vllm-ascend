@@ -249,7 +249,7 @@ class OProjRowParallelOp(CustomRowParallelOp):
     @property
     def comm_group(self):
         return get_otp_group()
-    
+
     @property
     def dp_rank(self):
         return get_dp_group().rank_in_group
