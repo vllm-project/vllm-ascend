@@ -528,7 +528,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
-        "LogitsProcessor": AscendLogitsProcessor,
     }
 
     if vllm_config is not None and \
