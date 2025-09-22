@@ -388,6 +388,8 @@ class AscendW4A8DynamicFusedMoEMethod:
             # scale_second is no longer used, release this part of the memory
             del layer.w13_weight_scale_second
             del layer.w2_weight_scale_second
+            del layer.w13_weight_offset_second
+            del layer.w2_weight_offset_second
 
         self.update_bias(layer, w13_bias, w2_bias)
 
