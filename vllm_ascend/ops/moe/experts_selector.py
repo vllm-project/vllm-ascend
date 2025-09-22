@@ -183,29 +183,25 @@ def _select_experts_with_fusion_ops(
         global_num_experts: int = -1):
 
     topk_weights, topk_ids, row_idx = None, None, None
-    # NOTE: now npu_moe_gating_top_k can only support 'group_count=256' pattern
-    is_deepseek_v3_r1 = global_num_experts == 256
-    if is_deepseek_v3_r1:
+    norm_type = 0 if scoring_func == "softmax" else 1
+    if custom_routing_function is None:
+        if e_score_correction_bias is not None and \
+            e_score_correction_bias.dtype != router_logits.dtype:
+            e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
         topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
             router_logits,
-            k=top_k,  # topk currently 8
+            k=top_k,
             bias=e_score_correction_bias,
-            k_group=topk_group,  # fix: 4
-            group_count=num_expert_group,  # fix 8
-            group_select_mode=
-            1,  # 0: the maximum in the group; 1: topk2.sum(fix)
+            k_group=topk_group,
+            group_count=num_expert_group,
+            group_select_mode=1,  # 0: the maximum in the group; 1: topk2.sum(fix)
             renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
-            norm_type=1,  # 0: softmax; 1: sigmoid(fix)
+            norm_type=norm_type,  # 0: softmax; 1: sigmoid
             # out_flag=False, # todo new api; should the third output be output
             # y2_flag=False, # old api; should the third output be output
             routed_scaling_factor=1,
             eps=float(1e-20))
         row_idx = return_row_idx(hidden_states, top_k)
-    if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax":
-        topk_weights, topk_ids, row_idx = torch_npu.npu_moe_gating_top_k_softmax(
-            x=router_logits, finished=None, k=top_k)
-        topk_ids = topk_ids.to(torch.int32)
-        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids, row_idx
 
