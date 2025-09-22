@@ -312,16 +312,6 @@ class AscendFusedMoE(FusedMoE):
         forward_context = get_forward_context()
         moe_comm_method_name = forward_context.moe_comm_method_name
         if moe_comm_method_name in {"alltoallcommimpl", "mc2commimpl"}:
-            if forward_context.flashcomm_v1_enabled:
-                pad_size = forward_context.pad_size
-                if pad_size > 0:
-                    final_hidden_states = F.pad(final_hidden_states,
-                                                (0, 0, 0, pad_size))
-                tp_size = get_tensor_model_parallel_world_size()
-                tp_rank = get_tensor_model_parallel_rank()
-                final_hidden_states = torch.chunk(final_hidden_states,
-                                                  tp_size,
-                                                  dim=0)[tp_rank]
             return final_hidden_states
         else:
             return torch.ops.vllm.maybe_pad_and_reduce(final_hidden_states)
@@ -333,7 +323,7 @@ class AscendFusedMoE(FusedMoE):
         forward_context = get_forward_context()
         moe_comm_method_name = forward_context.moe_comm_method_name
 
-        if self._shared_experts is None and forward_context.flashcomm_v1_enabled:
+        if hasattr(self, '_shared_experts') and forward_context.flashcomm_v1_enabled:
             hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 hidden_states, True)
             router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
@@ -443,8 +433,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         use_overlapped: bool = True,
         **kwargs,
     ):
-        self._shared_experts = shared_experts
         AscendFusedMoE.__init__(self, **kwargs)
+        self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
         ascend_config = get_ascend_config()
