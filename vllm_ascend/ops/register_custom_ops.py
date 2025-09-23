@@ -23,9 +23,8 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
 
     if x.size(0) != residual.size(0):
         sp_enabled = forward_context.sp_enabled
-        assert sp_enabled is True, (
-            "Currently, this situation only occurs "
-            "when sp is enabled")
+        assert sp_enabled is True, ("Currently, this situation only occurs "
+                                    "when sp is enabled")
         pad_size = forward_context.pad_size
         if pad_size > 0:
             residual = F.pad(residual, (0, 0, 0, pad_size))

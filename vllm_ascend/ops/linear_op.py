@@ -407,8 +407,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 
 def get_column_parallel_op(
     disable_tp, prefix, layer
-) -> Tuple[
-        Optional[Union[MLPColumnParallelOp, SequenceMergedColumnParallelOp,
+) -> Tuple[Optional[Union[MLPColumnParallelOp, SequenceMergedColumnParallelOp,
                        SequenceQKVParallelOp]], int, int]:
     if disable_tp:
         return None, 0, 1
