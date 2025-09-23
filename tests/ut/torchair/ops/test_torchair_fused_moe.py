@@ -72,6 +72,7 @@ def mock_dist_env(mocker: MockerFixture):
                return_value=MagicMock(
                    torchair_graph_config=MagicMock(enabled=False),
                    enable_multistream_moe=False,
+                   enable_shared_expert_dp=False,
                    expert_map_path=None
                )), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.determine_expert_map',
