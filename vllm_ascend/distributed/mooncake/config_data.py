@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
+from re import I
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
@@ -164,7 +165,7 @@ class ChunkedTokenDatabase():
     def process_tokens(
         self,
         tokens: Union[torch.Tensor, List[int]],
-        mask: Optional[torch.Tensor] = None,
+        mask: Optional[list[bool]] = None,
     ) -> Iterable[Tuple[int, int, MooncakeEngineKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
@@ -187,7 +188,7 @@ class ChunkedTokenDatabase():
             multiple of the chunk size.
         """
         if mask is not None:
-            num_falses = mask.numel() - mask.long().sum().item()
+            num_falses = len(mask) - sum(mask)
         else:
             num_falses = 0
 
@@ -306,7 +307,7 @@ class ReqMeta:
     # Request id
     req_id: str
     # Request tokens
-    token_ids: torch.Tensor
+    token_ids: list[int]
 
     block_ids: list[int]
     # # Slot mapping if exchange for block_id
@@ -365,7 +366,7 @@ class ReqMeta:
 
         # Calculate the token ids and slot mappings for load and save
         # OPTIMIZATION: pre-allocate the buffer for token ids and block ids
-        token_ids = torch.tensor(input_token_ids)[:num_tokens_to_save]
+        token_ids = input_token_ids[:num_tokens_to_save]
 
         # # For load operation: check whether the request is scheduled to load
         if load_spec is not None and load_spec.can_load:

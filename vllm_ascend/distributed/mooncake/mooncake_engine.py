@@ -167,8 +167,9 @@ class MooncakeEngine:
                 tokens = tokens[:request.load_spec.mooncake_cached_tokens]
             masked_token_count = (request.load_spec.vllm_cached_tokens //
                                   self.block_size * self.block_size)
-            token_mask = torch.ones_like(tokens, dtype=torch.bool)
-            token_mask[:masked_token_count] = False
+            token_mask = [False] * masked_token_count + [True] * (
+                len(tokens) - masked_token_count)
+            assert isinstance(tokens, torch.Tensor)
             if self.use_layerwise:
                 layerwise_retriever = self.retrieve_layer(
                     req_id,
@@ -259,8 +260,6 @@ class MooncakeEngine:
 
             token_ids = request.token_ids
             req_id = request.req_id
-            assert isinstance(token_ids, torch.Tensor)
-            assert token_ids.is_cpu
 
             skip_leading_tokens = max(
                 self.lookup(token_ids, self.use_layerwise),
@@ -275,8 +274,8 @@ class MooncakeEngine:
             skip_leading_tokens = (skip_leading_tokens // self.block_size *
                                    self.block_size)
 
-            store_mask = torch.ones_like(token_ids, dtype=torch.bool)
-            store_mask[:skip_leading_tokens] = False
+            store_mask = [False] * skip_leading_tokens + [True] * (
+                len(token_ids) - skip_leading_tokens)
 
             logger.info(
                 "Storing KV cache for %d out of %d tokens "

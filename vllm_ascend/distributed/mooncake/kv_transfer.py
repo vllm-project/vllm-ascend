@@ -73,9 +73,9 @@ class KVTransferThread(threading.Thread):
     def add_request(
         self,
         req_id: str,
-        tokens: torch.Tensor,
+        tokens: list[int],
         block_ids: list[int],
-        mask: Optional[torch.Tensor] = None,
+        mask: Optional[list[bool]] = None,
         is_last_chunk: Optional[bool] = None,
     ) -> torch.Tensor:
         req = ({
