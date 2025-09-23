@@ -27,7 +27,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
-import torch_npu  # noqa: F401  # noqa: F401
+import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger

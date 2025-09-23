@@ -31,10 +31,12 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, direct_register_custom_op
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.compilation.acl_graph import get_graph_params
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d, nd_to_nz_spec)
@@ -196,6 +198,12 @@ class AscendMetadata:
 
 
 class AscendAttentionMetadataBuilder:
+    # Does this backend/builder support CUDA Graphs for attention (default: no).
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    # Does this backend/builder reorder the batch?
+    # If not, set this to None. Otherwise set it to the query
+    # length that will be pulled into the front of the batch.
     reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(
@@ -220,7 +228,7 @@ class AscendAttentionMetadataBuilder:
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: nn.Module,
+        model: Optional[nn.Module] = None,
     ):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -230,11 +238,7 @@ class AscendAttentionMetadataBuilder:
         block_table = common_attn_metadata.block_table_tensor
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        slot_mapping = common_attn_metadata.slot_mapping_cpu[:
-                                                             num_actual_tokens].to(
-                                                                 self.device,
-                                                                 non_blocking=
-                                                                 True)
+        slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
         attn_state = common_attn_metadata.attn_state
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
@@ -264,6 +268,24 @@ class AscendAttentionMetadataBuilder:
             attn_mask=attn_mask,
             attn_state=attn_state,
             enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp)
+        return attn_metadata
+
+    def build_for_graph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
+    ):
+        if attn_state == AscendAttentionState.DecodeOnly:
+            attn_metadata = self.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+        else:
+            raise NotImplementedError(
+                "Currently we only support building dummy metadata for DecodeOnly state"
+            )
+
+        attn_metadata.attn_state = attn_state
         return attn_metadata
 
 
@@ -404,16 +426,53 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             output = output.view(batch_size, self.num_heads, self.head_size)
         else:
-            torch_npu._npu_paged_attention(
-                query=query,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                num_kv_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale_value=self.scale,
-                block_table=attn_metadata.block_tables,
-                context_lens=attn_metadata.seq_lens,
-                out=output)
+            graph_params = get_graph_params()
+            forward_context: ForwardContext = get_forward_context()
+            num_tokens = query.shape[0]
+            if forward_context.capturing:
+                stream = torch_npu.npu.current_stream()
+
+                event = torch.npu.ExternalEvent()
+                event.wait(stream)
+                event.reset(stream)
+                graph_params.events[num_tokens].append(event)
+
+                graph_params.attn_params[num_tokens].append((
+                    query,
+                    self.key_cache,
+                    self.value_cache,
+                    self.num_kv_heads,
+                    self.num_heads,
+                    self.scale,
+                    attn_metadata.block_tables,
+                    attn_metadata.seq_lens,
+                    output,
+                ))
+
+                torch.npu.graph_task_group_begin(stream)
+                torch_npu._npu_paged_attention(
+                    query=query,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    num_kv_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
+                    block_table=attn_metadata.block_tables,
+                    context_lens=attn_metadata.seq_lens,
+                    out=output)
+                handle = torch.npu.graph_task_group_end(stream)
+                graph_params.handles[num_tokens].append(handle)
+            else:
+                torch_npu._npu_paged_attention(
+                    query=query,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    num_kv_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
+                    block_table=attn_metadata.block_tables,
+                    context_lens=attn_metadata.seq_lens,
+                    out=output)
         return output
 
     def _forward_v1_style(
@@ -454,18 +513,43 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.seq_lens = \
                 attn_metadata.seq_lens.to(device=query.device)
 
-        torch_npu._npu_paged_attention_splitfuse(
-            query=query,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
-            mask=attn_metadata.attn_mask,
-            block_table=attn_metadata.block_tables,
-            seq_len=attn_metadata.query_lens,
-            context_lens=attn_metadata.seq_lens,
-            num_kv_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale_value=self.scale,
-            out=output)
+        if torch.version.cann.startswith("8.3"):
+            # TODO:The npu_fused_infer_attention_score op is planned to
+            # be utilized in a wider range in upcoming versions.
+            num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
+            key = self.key_cache.view(  # type: ignore
+                num_block, block_size, -1)
+            value = self.value_cache.view(  # type: ignore
+                num_block, block_size, -1)
+
+            output, _ = torch_npu.npu_fused_infer_attention_score(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                block_table=attn_metadata.block_tables,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=attn_metadata.query_start_loc[1:],
+                actual_seq_lengths_kv=attn_metadata.seq_lens,
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                sparse_mode=3,
+            )
+        else:
+            torch_npu._npu_paged_attention_splitfuse(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                mask=attn_metadata.attn_mask,
+                block_table=attn_metadata.block_tables,
+                seq_len=attn_metadata.query_lens,
+                context_lens=attn_metadata.seq_lens,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                out=output)
         return output
 
     def forward(
@@ -559,12 +643,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                    output)
             # Normal V1 situation.
             else:
+                if torch.version.cann.startswith("8.3"):
+                    # npu_fused_infer_attention_score does not support cases
+                    # where query.shape[0] != attn_metadata.query_start_loc[-1].
+                    # Thus we need unpad it here.
+                    num_tokens = attn_metadata.query_start_loc[-1]
+                    query = query[:num_tokens]
                 output = self._forward_v1_style(query, attn_metadata, output)
 
         # to make in-place change to the output tensor
         if hasattr(layer, 'quant_method') and use_kv_cache_int8:
             output = output.view(num_tokens, self.num_heads, self.head_size)
-        ori_output[:, :, :] = output[:num_tokens, :, :]
+        ori_output[:num_tokens, :, :] = output[:num_tokens, :, :]
         return output.view(num_tokens, self.hidden_size)
 
 
