@@ -1406,18 +1406,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                  non_blocking=True)
                 return tensor_npu
 
-            # 处理q_head和q_tail相关索引
             q_head_idx_tensor = _list_to_tensor(q_head_idx, self.device)
             q_tail_idx_tensor = _list_to_tensor(q_tail_idx, self.device)
             self.q_head_idx_tensor = q_head_idx_tensor
             self.q_tail_idx_tensor = q_tail_idx_tensor
 
-            # 处理q_full_idx（拼接后排序）
             q_full_idx = torch.cat([q_head_idx_tensor, q_tail_idx_tensor])
             q_full_idx = q_full_idx.to(torch.float32).argsort().to(torch.int32)
             self.q_full_idx = q_full_idx
 
-            # 处理kv相关的各类索引（批量添加到kwargs）
             self.kv_idx_names = {
                 'kv_with_q_head_nomask_idx_tensor': kv_with_q_head_nomask_idx,
                 'kv_with_q_head_mask_idx_tensor': kv_with_q_head_mask_idx,
@@ -1425,11 +1422,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 'kv_with_q_tail_mask_idx_tensor': kv_with_q_tail_mask_idx
             }
             for key, value in self.kv_idx_names.items():
-                # 动态获取变量（假设变量名与key名一致）
                 tensor_npu = _list_to_tensor(value, self.device)
                 self.kv_idx_names[key] = tensor_npu
 
-            # 处理序列长度相关张量
             attn_mask_seqlens = torch.tensor([chunk_seqlens, chunk_seqlens],
                                              dtype=torch.int32)
             head_attn_nomask_seqlens = torch.tensor(
