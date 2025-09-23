@@ -106,8 +106,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         is_prefill: bool = False,
         enable_force_load_balance: bool = False,
         shared_experts: Optional[Any] = None,
-        log2phy: torch.Tensor = None,
-        global_redundant_expert_num: int = 0,
         **kwargs,
     ) -> torch.Tensor:
 

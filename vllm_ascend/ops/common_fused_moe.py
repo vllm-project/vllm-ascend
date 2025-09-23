@@ -327,29 +327,54 @@ class AscendFusedMoE(FusedMoE):
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states, router_logits=router_logits)
 
-        # Matrix multiply.
-        final_hidden_states = self.quant_method.apply(
-            layer=self,
-            x=hidden_states,
-            router_logits=router_logits,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
-            use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
-            expert_map=self.expert_map,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias,
-            activation=self.activation,
-            apply_router_weight_on_input=self.apply_router_weight_on_input,
-            enable_eplb=self.enable_eplb,
-            expert_load_view=self.expert_load_view,
-            logical_to_physical_map=self.logical_to_physical_map,
-            logical_replica_count=self.logical_replica_count,
-            log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num)
+        if isinstance(self.quant_method, UnquantizedFusedMoEMethod):
+            # Matrix multiply.
+            final_hidden_states = self.quant_method.apply(
+                layer=self,
+                x=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                global_num_experts=self.global_num_experts,
+                expert_map=self.expert_map,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                e_score_correction_bias=self.e_score_correction_bias,
+                activation=self.activation,
+                apply_router_weight_on_input=self.apply_router_weight_on_input,
+                enable_eplb=self.enable_eplb,
+                expert_load_view=self.expert_load_view,
+                logical_to_physical_map=self.logical_to_physical_map,
+                logical_replica_count=self.logical_replica_count)
+
+        else:
+            # Matrix multiply.
+            final_hidden_states = self.quant_method.apply(
+                layer=self,
+                x=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                global_num_experts=self.global_num_experts,
+                expert_map=self.expert_map,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                e_score_correction_bias=self.e_score_correction_bias,
+                activation=self.activation,
+                apply_router_weight_on_input=self.apply_router_weight_on_input,
+                enable_eplb=self.enable_eplb,
+                expert_load_view=self.expert_load_view,
+                logical_to_physical_map=self.logical_to_physical_map,
+                logical_replica_count=self.logical_replica_count,
+                log2phy=self.log2phy,
+                global_redundant_expert_num=self.global_redundant_expert_num)
+
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
 
