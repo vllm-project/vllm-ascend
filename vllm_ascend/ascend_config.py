@@ -181,6 +181,7 @@ class AttentionWeightPrefetchConfig:
 @dataclass
 class MoEWeightPrefetchConfig:
     enabled: bool = False
+    prefetch_ratio: float = 0
 
 
 class WeightPrefetchConfig:
@@ -188,7 +189,7 @@ class WeightPrefetchConfig:
     Configuration Object for weight_prefetch_config from additional_config
     """
 
-    def __init__(self, weight_prefetch_config: dict) -> None:
+    def __init__(self, weight_prefetch_config: dict):
         attn_weight_prefetch_config = weight_prefetch_config.get("attn", {})
         self.attn_weight_prefetch_config = AttentionWeightPrefetchConfig(
             enabled=attn_weight_prefetch_config.get("enabled", False)
@@ -196,7 +197,8 @@ class WeightPrefetchConfig:
 
         moe_weight_prefetch_config = weight_prefetch_config.get("moe", {})
         self.moe_weight_prefetch_config = MoEWeightPrefetchConfig(
-            enabled=moe_weight_prefetch_config.get("enabled", False)
+            enabled=moe_weight_prefetch_config.get("enabled", False),
+            prefetch_ratio=moe_weight_prefetch_config.get("prefetch_ratio", 0)
         )
 
 
