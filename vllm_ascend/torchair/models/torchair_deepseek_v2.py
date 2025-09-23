@@ -52,7 +52,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -814,7 +813,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata is not None and isinstance(attn_metadata, dict):
-                attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
+                attn_metadata = next(iter(attn_metadata.values()), None)
             if attn_metadata is not None:
                 num_tokens = attn_metadata.num_actual_tokens
             else:
@@ -945,7 +944,6 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

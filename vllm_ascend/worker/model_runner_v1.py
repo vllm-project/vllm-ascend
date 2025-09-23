@@ -99,7 +99,9 @@ from vllm_ascend.ascend_forward_context import (MoECommType,
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.compilation.acl_graph import ACLGraphWrapper
+from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
+                                               set_graph_params,
+                                               update_attn_params)
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
     D2DExpertWeightLoader
@@ -117,9 +119,8 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
-                               get_ascend_soc_version, get_graph_params,
-                               is_310p, lmhead_tp_enable, set_graph_params,
-                               vllm_version_is)
+                               get_ascend_soc_version, is_310p,
+                               lmhead_tp_enable, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -1571,9 +1572,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            graph_params = get_graph_params()
-            self.update_attn_params(graph_params, forward_context,
-                                    positions.shape[0])
+            update_attn_params(self.update_stream, forward_context,
+                               positions.shape[0])
 
         if get_forward_context().flashcomm_v1_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
@@ -1581,44 +1581,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if pad_size > 0:
                 hidden_states = hidden_states[:-pad_size, :]
         return hidden_states
-
-    def update_attn_params(self, graph_params, forward_context, runtime_shape):
-        # FIXME: Behold! We are using a temporary hack here to update the args
-        # for each layer's attention op in the graph.
-        for key, param, handle, event in zip(
-                forward_context.attn_metadata,
-                graph_params.attn_params[runtime_shape],
-                graph_params.handles[runtime_shape],
-                graph_params.events[runtime_shape],
-        ):
-            (
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                num_heads,
-                scale,
-                block_table,
-                seq_lens,
-                output,
-            ) = param
-            # block_table = forward_context.attn_metadata[key].block_tables
-            seq_lens = forward_context.attn_metadata[key].seq_lens
-
-            with torch.npu.stream(self.update_stream):
-                torch.npu.graph_task_update_begin(self.update_stream, handle)
-                torch_npu._npu_paged_attention(query=query,
-                                               key_cache=key_cache,
-                                               value_cache=value_cache,
-                                               num_kv_heads=num_kv_heads,
-                                               num_heads=num_heads,
-                                               scale_value=scale,
-                                               block_table=block_table,
-                                               context_lens=seq_lens,
-                                               out=output)
-                torch.npu.graph_task_update_end(self.update_stream)
-
-                event.record(self.update_stream)
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
@@ -2022,7 +1984,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         num_scheduled_tokens_np, finished_sending,
                         finished_recving, kv_connector_output)
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states, None)
+                logits = self._compute_logits_wrapper(sample_hidden_states,
+                                                      None)
             if broadcast_pp_output:
                 model_output_broadcast_data = {
                     "logits": logits.contiguous(),
@@ -2469,7 +2432,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                             dtype=torch.int32)
 
                 def dummy_compute_logits(hidden_states):
-                    return self.model.compute_logits(
+                    return self._compute_logits_wrapper(
                         hidden_states[dummy_indices], None)
 
             with set_ascend_forward_context(
@@ -2539,12 +2502,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logit_indices = np.cumsum(num_scheduled_tokens) - 1
                 # TODO: need to rum a dummy sampler for generate task
                 hidden_states = hidden_states[logit_indices]
-                output = self.model.compute_logits(hidden_states, None)
+                output = self._compute_logits_wrapper(hidden_states, None)
 
         NPUPlatform.synchronize()
         del hidden_states, output
         self.encoder_cache.clear()
         gc.collect()
+
+    def _compute_logits_wrapper(self, hidden_states, sampling_metadata):
+        if vllm_version_is("0.10.2"):
+            return self.model.compute_logits(hidden_states, sampling_metadata)
+        return self.model.compute_logits(hidden_states)
 
     def _dummy_pooler_run_task(
         self,
@@ -2646,11 +2614,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         self.model.get_eagle3_aux_hidden_state_layers())
 
             if self.lora_config:
-                self.model = self.load_lora_model(self.model,
-                                                  self.model_config,
-                                                  self.scheduler_config,
-                                                  self.lora_config,
-                                                  self.device)
+                if vllm_version_is("0.10.2"):
+                    self.model = self.load_lora_model(self.model,
+                                                      self.model_config,
+                                                      self.scheduler_config,
+                                                      self.lora_config,
+                                                      self.device)
+                else:
+                    self.model = self.load_lora_model(self.model,
+                                                      self.vllm_config,
+                                                      self.device)
         logger.info("Loading model weights took %.4f GB",
                     m.consumed_memory / float(2**30))
 
@@ -3286,8 +3259,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 builder = attn_group.metadata_builder
             else:
                 builder = attn_group.get_metadata_builder()
-            if builder.cudagraph_support.value < min_ag_support.value:
-                min_ag_support = builder.cudagraph_support
+            if builder.aclgraph_support.value < min_ag_support.value:
+                min_ag_support = builder.aclgraph_support
                 min_ag_builder_name = builder.__class__.__name__
 
         # This is an imitation of compilation_config.splitting_ops_contain_attention()
@@ -3516,7 +3489,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_idx = self.input_batch.req_id_to_index[req_id]
             offset = self.query_start_loc_np[req_idx].item()
             prompt_hidden_states = hidden_states[offset:offset + num_logits]
-            logits = self.model.compute_logits(prompt_hidden_states, None)
+            logits = self._compute_logits_wrapper(prompt_hidden_states, None)
 
             # Get the "target" tokens for each index. For prompt at index i,
             # the token at prompt index i+1 is the "sampled" token we want

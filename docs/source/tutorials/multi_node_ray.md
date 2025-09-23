@@ -91,7 +91,7 @@ After setting up the containers and installing vllm-ascend on each node, follow 
 
 Choose one machine as the head node and the others as worker nodes. Before proceeding, use `ip addr` to check your `nic_name` (network interface name).
 
-Set the `ASCEND_RT_VISIBLE_DEVICES` environment variable to specify the NPU devices to use. For Ray versions above 2.1, also set the `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES` variable to avoid device recognition issues. The `--num-gpus` parameter defines the number of NPUs to be used on each node.
+Set the `ASCEND_RT_VISIBLE_DEVICES` environment variable to specify the NPU devices to use. For Ray versions above 2.1, also set the `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES` variable to avoid device recognition issues.
 
 Below are the commands for the head and worker nodes:
 
@@ -109,7 +109,7 @@ export GLOO_SOCKET_IFNAME={nic_name}
 export TP_SOCKET_IFNAME={nic_name}
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-ray start --head --num-gpus=8
+ray start --head
 ```
 
 **Worker node**:
@@ -125,20 +125,22 @@ export GLOO_SOCKET_IFNAME={nic_name}
 export TP_SOCKET_IFNAME={nic_name}
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-ray start --address='{head_node_ip}:6379' --num-gpus=8 --node-ip-address={local_ip}
+ray start --address='{head_node_ip}:6379' --node-ip-address={local_ip}
 ```
 
 Once the cluster is started on multiple nodes, execute `ray status` and `ray list nodes` to verify the Ray cluster's status. You should see the correct number of nodes and NPUs listed.
 
-## Start the Online Inference Service on multinode
-In the container, you can use vLLM as if all NPUs were on a single node. vLLM will utilize NPU resources across all nodes in the Ray cluster. You only need to run the vllm command on one node.
+## Start the Online Inference Service on multinode scenario
+In the container, you can use vLLM as if all NPUs were on a single node. vLLM will utilize NPU resources across all nodes in the Ray cluster.
+
+**You only need to run the vllm command on one node.**
 
 To set up parallelism, the common practice is to set the `tensor-parallel-size` to the number of NPUs per node, and the `pipeline-parallel-size` to the number of nodes.
 
 For example, with 16 NPUs across 2 nodes (8 NPUs per node), set the tensor parallel size to 8 and the pipeline parallel size to 2:
 
 ```shell
-vllm Qwen/Qwen3-235B-A22B \
+vllm serve Qwen/Qwen3-235B-A22B \
   --distributed-executor-backend ray \
   --pipeline-parallel-size 2 \
   --tensor-parallel-size 8 \
@@ -154,7 +156,7 @@ vllm Qwen/Qwen3-235B-A22B \
 Alternatively, if you want to use only tensor parallelism, set the tensor parallel size to the total number of NPUs in the cluster. For example, with 16 NPUs across 2 nodes, set the tensor parallel size to 16:
 
 ```shell
-vllm Qwen/Qwen3-235B-A22B \
+vllm serve Qwen/Qwen3-235B-A22B \
   --distributed-executor-backend ray \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
