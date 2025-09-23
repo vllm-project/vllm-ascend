@@ -803,6 +803,7 @@ class TorchairAscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         try:
             device_group = get_mc2_group().device_group
@@ -884,6 +885,8 @@ class TorchairAscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         fused_moe_state = get_forward_context().fused_moe_state
+        if self.enable_shared_expert_dp and fused_moe_state == FusedMoEState.MC2:
+            fused_moe_state = FusedMoEState.All2All
 
         if fused_moe_state == FusedMoEState.MC2:
             return torchair_fused_experts_with_mc2(
@@ -1155,6 +1158,8 @@ class TorchairAscendFusedMoE(FusedMoE):
         forward_context = get_forward_context()
         fused_moe_state = forward_context.fused_moe_state
         mc2_mask = forward_context.mc2_mask
+        if self.enable_shared_expert_dp and fused_moe_state == FusedMoEState.MC2:
+            fused_moe_state = FusedMoEState.All2All
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
         quantized_x_for_share, dynamic_scale_for_share = None, None
         from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import \
