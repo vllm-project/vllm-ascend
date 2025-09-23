@@ -61,7 +61,6 @@ class CustomTensorParallelOp:
         self.skip_bias_add = None
         self.return_bias = None
         self.quant_method = None
-        self.prefix = layer.prefix
 
     # Custom communication group, while determining weight sharding
     @property
@@ -84,6 +83,7 @@ class CustomTensorParallelOp:
         self.skip_bias_add = self.layer.skip_bias_add
         self.return_bias = self.layer.return_bias
         self.quant_method = self.layer.quant_method
+        self.prefix = self.layer.prefix
 
     def apply_impl(self, input_):
         raise NotImplementedError
