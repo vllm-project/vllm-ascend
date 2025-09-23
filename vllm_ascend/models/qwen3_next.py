@@ -19,6 +19,7 @@ from vllm.distributed import (divide, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.model_executor.layers.fla.ops import RMSNormGated
 from vllm.model_executor.layers.fla.ops.fused_recurrent import \
     fused_recurrent_gated_delta_rule
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -62,8 +63,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.utils import direct_register_custom_op
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-
-from vllm_ascend.ops.fla import RMSNormGated
 
 
 def torch_chunk_gated_delta_rule(
@@ -278,6 +277,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.norm = RMSNormGated(
             self.head_v_dim,
             eps=self.layer_norm_epsilon,
+            norm_before_gate=True,
+            device="npu",
         )
 
         self.out_proj = RowParallelLinear(self.value_dim,
