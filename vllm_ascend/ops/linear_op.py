@@ -48,8 +48,9 @@ from vllm.distributed.parallel_state import get_tp_group
 
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
-from vllm_ascend.utils import (enable_sp, matmul_allreduce_enable,
-                               mlp_tp_enable, oproj_tp_enable)
+from vllm_ascend.utils import (dense_optim_enable, enable_sp,
+                               matmul_allreduce_enable, mlp_tp_enable,
+                               oproj_tp_enable)
 
 
 class CustomTensorParallelOp:
@@ -60,6 +61,7 @@ class CustomTensorParallelOp:
         self.skip_bias_add = None
         self.return_bias = None
         self.quant_method = None
+        self.prefix = layer.prefix
 
     # Custom communication group, while determining weight sharding
     @property
@@ -83,9 +85,17 @@ class CustomTensorParallelOp:
         self.return_bias = self.layer.return_bias
         self.quant_method = self.layer.quant_method
 
+    def apply_impl(self, input_):
+        raise NotImplementedError
+
     # Replace layer.forward to customize the layer computation process.
     def apply(self, input_):
-        raise NotImplementedError
+        output, output_bias = self.apply_impl(input_)
+        if dense_optim_enable():
+            torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
+        if not self.return_bias:
+            return output
+        return output, output_bias
 
 
 class CustomColumnParallelOp(CustomTensorParallelOp):
@@ -123,7 +133,7 @@ class MLPColumnParallelOp(CustomColumnParallelOp):
     def comm_group(self):
         return get_mlp_tp_group()
 
-    def apply(
+    def apply_impl(
         self,
         input_: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
@@ -134,14 +144,12 @@ class MLPColumnParallelOp(CustomColumnParallelOp):
         output = self.quant_method.apply(self.layer, input_parallel, bias)
 
         output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
         return output, output_bias
 
 
 class SequenceMergedColumnParallelOp(CustomColumnParallelOp):
 
-    def apply(
+    def apply_impl(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         """Linear layer with column parallelism.
@@ -164,8 +172,6 @@ class SequenceMergedColumnParallelOp(CustomColumnParallelOp):
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
         return output, output_bias
 
 
@@ -175,7 +181,7 @@ class SequenceQKVParallelOp(CustomColumnParallelOp):
         super().__init__(layer)
         self.prefix = prefix
 
-    def apply(
+    def apply_impl(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         """Linear layer with column parallelism.
@@ -201,8 +207,6 @@ class SequenceQKVParallelOp(CustomColumnParallelOp):
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
         return output, output_bias
 
 
@@ -215,7 +219,7 @@ class MLPRowParallelOp(CustomRowParallelOp):
     def comm_group(self):
         return get_mlp_tp_group()
 
-    def apply(
+    def apply_impl(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.input_is_parallel:
@@ -234,8 +238,6 @@ class MLPRowParallelOp(CustomRowParallelOp):
         output = self.comm_group.reduce_scatter(output_parallel, 0)
 
         output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
         return output, output_bias
 
 
@@ -248,7 +250,7 @@ class OProjRowParallelOp(CustomRowParallelOp):
     def comm_group(self):
         return get_otp_group()
 
-    def apply(
+    def apply_impl(
         self,
         input_: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
@@ -294,8 +296,6 @@ class OProjRowParallelOp(CustomRowParallelOp):
 
         # Handle bias return based on configuration
         output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
         return output, output_bias
 
     def update_attrs(self):
@@ -311,7 +311,7 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
         super().__init__(layer)
         self.hcomm_info = self.get_hcomm_info(self.comm_group.device_group)
 
-    def apply(
+    def apply_impl(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.input_is_parallel:
@@ -335,8 +335,6 @@ class MatmulAllreduceRowParallelOp(CustomRowParallelOp):
                                              bias=bias_)
 
         output_bias = self.bias if self.skip_bias_add else None
-        if not self.return_bias:
-            return output
         return output, output_bias
 
     @classmethod
@@ -365,7 +363,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         super().__init__(layer)
         self.prefix = prefix
 
-    def apply(
+    def apply_impl(
         self, input_: torch.Tensor
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         """Linear layer with column parallelism.
@@ -391,12 +389,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                                                       input_parallel,
                                                       bias=bias_)
             output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
-            torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
 
         output_bias = self.bias if self.skip_bias_add else None
-
-        if not self.return_bias:
-            return output
         return output, output_bias
 
     def update_attrs(self):
