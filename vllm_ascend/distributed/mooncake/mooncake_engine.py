@@ -169,7 +169,6 @@ class MooncakeEngine:
                                   self.block_size * self.block_size)
             token_mask = [False] * masked_token_count + [True] * (
                 len(tokens) - masked_token_count)
-            assert isinstance(tokens, torch.Tensor)
             if self.use_layerwise:
                 layerwise_retriever = self.retrieve_layer(
                     req_id,
