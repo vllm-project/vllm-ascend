@@ -3,7 +3,6 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
-from re import I
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
