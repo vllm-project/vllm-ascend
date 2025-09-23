@@ -61,9 +61,10 @@ async def client(server):
 async def test_models(model: str, tp_size: int, pp_size: int,
                       distributed_executor_backend: str) -> None:
     server_args = [
-        "--tensor-parallel-size", tp_size, "--pipeline-parallel-size", pp_size,
-        "--distributed-executor-backend", distributed_executor_backend,
-        "--gpu-memory-utilization", 0.7
+        "--tensor-parallel-size",
+        str(tp_size), "--pipeline-parallel-size",
+        str(pp_size), "--distributed-executor-backend",
+        distributed_executor_backend, "--gpu-memory-utilization", "0.7"
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
