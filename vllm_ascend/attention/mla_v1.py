@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Type, TypeVar
+from typing import (TYPE_CHECKING, ClassVar, NamedTuple, Optional, Tuple, Type,
+                    TypeVar)
 
 import torch
 import torch_npu
@@ -12,6 +13,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -163,6 +165,9 @@ M = TypeVar("M", bound=AscendMLAMetadata)
 
 
 class AscendMLAMetadataBuilder:
+    # Does this backend/builder support ACL Graphs for attention (default: no).
+    aclgraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.NEVER
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
