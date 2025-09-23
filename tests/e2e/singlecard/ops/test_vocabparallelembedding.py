@@ -1,3 +1,4 @@
+import gc
 from typing import Tuple
 
 import pytest
@@ -71,7 +72,7 @@ def test_get_masked_input_and_mask(
 
     # Get custom op result
     print("input_tensor:", input_tensor)
-    custom_masked_input, custom_mask = torch.ops._C.get_masked_input_and_mask(
+    custom_masked_input, custom_mask = torch.ops._C_ascend.get_masked_input_and_mask(
         input_tensor, test_case["org_start"], test_case["org_end"],
         test_case["padding"], test_case["added_start"], test_case["added_end"])
 
@@ -92,3 +93,6 @@ def test_get_masked_input_and_mask(
                                rtol=1e-5,
                                atol=1e-5,
                                msg=f"Mask mismatch for case: {test_case}")
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

@@ -24,13 +24,10 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.layers.experts_selector import select_experts
-from vllm_ascend.quantization.w8a8_dynamic import (fused_experts_with_all2all,
-                                                   fused_experts_with_mc2)
-from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
+from vllm_ascend.ops.fused_moe import unified_fused_experts_eager
+from vllm_ascend.ops.moe.experts_selector import select_experts
 
 
 class AscendW4A8DynamicLinearMethod:
@@ -132,9 +129,6 @@ class AscendW4A8DynamicFusedMoEMethod:
         self.transpose_weight = True
 
         self.ep_group = get_ep_group()
-
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get(
@@ -268,7 +262,7 @@ class AscendW4A8DynamicFusedMoEMethod:
             1] == global_num_experts, "Number of global experts mismatch"
 
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-        topk_weights, topk_ids = select_experts(
+        topk_weights, topk_ids, row_idx = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=top_k,
@@ -284,12 +278,10 @@ class AscendW4A8DynamicFusedMoEMethod:
         fused_moe_state = get_forward_context().fused_moe_state
         shared_gate_up, shared_dequant_scale = None, None
         if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
-            with npu_stream_switch("moe_secondary", 0):
-                npu_wait_tensor(quantized_x_for_share, router_logits)
-                share_up_out, _ = shared_experts.gate_up_proj(
-                    (quantized_x_for_share, dynamic_scale_for_share))
-                shared_gate_up, shared_dequant_scale = share_up_out[
-                    0], share_up_out[1]
+            share_up_out, _ = shared_experts.gate_up_proj(
+                (quantized_x_for_share, dynamic_scale_for_share))
+            shared_gate_up, shared_dequant_scale = share_up_out[
+                0], share_up_out[1]
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
@@ -298,48 +290,26 @@ class AscendW4A8DynamicFusedMoEMethod:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         topk_weights = topk_weights.to(x.dtype)
-        if fused_moe_state == FusedMoEState.MC2:
-            return fused_experts_with_mc2(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                w1_scale=layer.w13_weight_scale_second,
-                w2_scale=layer.w2_weight_scale_second,
-                w1_scale_bias=layer.w13_scale_bias,
-                w2_scale_bias=layer.w2_scale_bias,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                top_k=top_k,
-                expert_map=expert_map,
-                moe_all_to_all_group_name=self.moe_all_to_all_group_name,
-                log2phy=log2phy,
-                global_redundant_expert_num=global_redundant_expert_num,
-                shared_experts=shared_experts,
-                is_torchair=self.torchair_graph_enabled,
-                quantized_x_for_share=shared_gate_up,
-                dynamic_scale_for_share=shared_dequant_scale,
-                mc2_mask=kwargs.get("mc2_mask", None))
-        else:
-            # The current implementation of deepseek moe splits hidden_states
-            # according to tp_size before they are feed into layers module.
-            # Therefore, all2all is needed no matter how dp/tp is set so as to
-            # dispatch/combine tokens.
-            return fused_experts_with_all2all(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                w1_scale=layer.w13_weight_scale_second,
-                w2_scale=layer.w2_weight_scale_second,
-                w1_scale_bias=layer.w13_scale_bias,
-                w2_scale_bias=layer.w2_scale_bias,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                top_k=top_k,
-                expert_map=expert_map,
-                ep_group=self.ep_group,
-                log2phy=log2phy,
-                global_redundant_expert_num=global_redundant_expert_num,
-            )
+
+        return unified_fused_experts_eager(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            w1_scale=layer.w13_weight_scale_second,
+            w2_scale=layer.w2_weight_scale_second,
+            w1_scale_bias=layer.w13_scale_bias,
+            w2_scale_bias=layer.w2_scale_bias,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            row_idx=row_idx,
+            expert_map=expert_map,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            shared_experts=shared_experts,
+            shared_gate_up=shared_gate_up,
+            shared_dequant_scale=shared_dequant_scale,
+            mc2_mask=kwargs.get("mc2_mask", None),
+            with_quant=True)
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         group_num, k, n = weight.shape

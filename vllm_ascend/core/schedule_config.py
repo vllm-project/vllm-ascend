@@ -25,9 +25,10 @@ from vllm.config import SchedulerConfig
 class AscendSchedulerConfig(SchedulerConfig):
     enable_chunked_prefill: bool = False
     policy: str = "fcfs"
-    num_scheduler_steps: int = 1
     scheduler_cls: Union[str, Type[object]] = (
         "vllm_ascend.core.scheduler.AscendScheduler")
+    enable_pd_transfer: bool = False
+    decode_max_num_seqs: int = 0
 
     @classmethod
     def initialize_from_config(
@@ -42,9 +43,10 @@ class AscendSchedulerConfig(SchedulerConfig):
         # Override default values into original SchedulerConfig
         scheduler_config["enable_chunked_prefill"] = False
         scheduler_config["policy"] = "fcfs"
-        scheduler_config["num_scheduler_steps"] = 1
         scheduler_config["scheduler_cls"] = (
             "vllm_ascend.core.scheduler.AscendScheduler")
+        scheduler_config["enable_pd_transfer"] = False
+        scheduler_config["decode_max_num_seqs"] = 0
         # Override params in original SchedulerConfig with params in ascend_scheduler_config
         for k, _ in scheduler_config.items():
             if hasattr(ascend_scheduler_config, k):
@@ -55,16 +57,24 @@ class AscendSchedulerConfig(SchedulerConfig):
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
         self.chunked_prefill_enabled = self.enable_chunked_prefill
+        if self.enable_sequence_parallel:
+            model_len_per_sp_cp = self.max_model_len // self.context_parallel_size // self.tensor_parallel_size
+        else:
+            model_len_per_sp_cp = self.max_model_len // self.context_parallel_size
+        if (self.max_num_batched_tokens < model_len_per_sp_cp
+                and not self.chunked_prefill_enabled):
+            raise ValueError(
+                "Ascend scheduler is enabled without chunked prefill feature. "
+                f"Argument max_num_batched_tokens ({self.max_num_batched_tokens}) is "
+                f"smaller than max_model_len ({self.max_model_len}). "
+                "This effectively limits the maximum sequence length to "
+                "max_num_batched_tokens and makes vLLM reject longer "
+                "sequences. Please increase max_num_batched_tokens or "
+                "decrease max_model_len.")
         if self.policy != "fcfs":
             raise NotImplementedError(
                 f"currently AscendScheduler only supports fcfs policy, got {self.policy}"
             )
-        if self.is_multimodal_model:
-            raise NotImplementedError(
-                "currently AscendScheduler only supports LLM models.")
-        if self.num_scheduler_steps > 1:
-            raise NotImplementedError(
-                "currently AscendScheduler doesn't support multi-step.")
         if self.send_delta_data:
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support send_delta_data.")

@@ -42,7 +42,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5559
+export VLLM_ASCEND_LLMDD_RPC_PORT=5559
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
@@ -85,7 +85,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5659
+export VLLM_ASCEND_LLMDD_RPC_PORT=5659
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
@@ -131,7 +131,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5759
+export VLLM_ASCEND_LLMDD_RPC_PORT=5759
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
@@ -173,7 +173,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5859
+export VLLM_ASCEND_LLMDD_RPC_PORT=5859
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \

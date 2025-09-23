@@ -286,6 +286,18 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
             "vllm_ascend.models.qwen2_5_vl.parallel_state.get_tensor_model_parallel_world_size",
             return_value=2,
         )
+        mocker.patch(
+            "vllm_ascend.ops.linear.divide",
+            return_value=2,
+        )
+
+        mock_group = mocker.MagicMock()
+        mock_group.rank_in_group = 0
+        mock_group.world_size = 2
+        mocker.patch(
+            "vllm_ascend.ops.linear.get_tp_group",
+            return_value=mock_group,
+        )
 
         vision_transformer = AscendQwen2_5_VisionTransformer(
             vision_config,
@@ -340,6 +352,46 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         vision_transformer.hidden_size_per_attention_head = 4
         cos_new, _ = vision_transformer.cal_cos_sin(self.input_data)
         assert cos_new.shape == (1, 32, 1, 2)
+
+    def test_pad_qkv_bias(self, mocker: MockerFixture):
+        attention = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        res = attention.pad_qkv_bias(torch.rand((300)))
+        assert res.shape[0] == 384
+
+    def test_pad_qkv_weight(self, mocker: MockerFixture):
+        attention = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        res = attention.pad_qkv_weight(torch.rand((300, 300)))
+        assert res.shape == (384, 300)
+
+    def test_pad_proj_weight(self, mocker: MockerFixture):
+        attention = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        res = attention.pad_proj_weight(torch.rand((300, 300)))
+        assert res.shape == (300, 384)
+
+    def test_pad_qkv_weight_scale_offset(self, mocker: MockerFixture):
+        attention = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        res = attention.pad_qkv_weight_scale_offset(torch.rand((300, 1)))
+        assert res.shape == (384, 1)
+
+    def test_pad_qkv_deq_scale_quant_bias(self, mocker: MockerFixture):
+        attention = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        res = attention.pad_qkv_deq_scale_quant_bias(torch.rand((300)))
+        assert res.shape[0] == 384
 
     def test_forward(self, mocker: MockerFixture):
         vision_transformer = self.init_vision_transformer(mocker)

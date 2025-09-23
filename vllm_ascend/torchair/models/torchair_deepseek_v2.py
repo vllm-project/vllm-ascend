@@ -70,10 +70,11 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
-from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import dispose_tensor, npu_prefetch
+from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
+from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import \
+    TorchairAscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import dispose_tensor, npu_prefetch, oproj_tp_enable
 
 
 class TorchairDeepseekV2SiluAndMul(SiluAndMul):
@@ -261,8 +262,9 @@ class TorchairDeepseekV2MLP(nn.Module):
         quant_method = self.gate_up_proj.quant_method
         if isinstance(quant_method, UnquantizedLinearMethod):
             self.act_fn = TorchairDeepseekV2SiluAndMul()
-        elif (isinstance(quant_method, AscendLinearMethod) and isinstance(
-                quant_method.quant_method, AscendW8A8DynamicLinearMethod)):
+        elif (isinstance(quant_method, AscendLinearMethod)
+              and isinstance(quant_method.quant_method,
+                             TorchairAscendW8A8DynamicLinearMethod)):
             # TODO(sdmyzlp): Currently preserved as before:
             # 1. The only quantization supported for silu is W8A8Dynamic
             # 2. Output dtype of gate_up/down is fixed to be int32/bfloat16
@@ -335,7 +337,7 @@ class TorchairDeepseekV2MoE(nn.Module):
         else:
             self.gate.e_score_correction_bias = None
 
-        self.experts = AscendFusedMoE(
+        self.experts = TorchairAscendFusedMoE(
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -512,11 +514,18 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
-        if (config.n_routed_experts is not None
-                and self.debug_layer_idx >= config.first_k_dense_replace
-                and self.debug_layer_idx % config.moe_layer_freq == 0
-                and (ascend_config.torchair_graph_config.enable_multistream_moe
-                     or self.enable_shared_expert_dp)):
+
+        if oproj_tp_enable():
+            self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
+                                            self.hidden_size,
+                                            bias=False,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.o_proj")
+        elif (config.n_routed_experts is not None
+              and self.debug_layer_idx >= config.first_k_dense_replace
+              and self.debug_layer_idx % config.moe_layer_freq == 0
+              and (ascend_config.torchair_graph_config.enable_multistream_moe
+                   or self.enable_shared_expert_dp)):
             self.o_proj = TorchairDeepseekV2RowParallelLinearReplaceAllreduce(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
@@ -951,7 +960,7 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = AscendFusedMoE.make_expert_params_mapping(
+        expert_params_mapping = TorchairAscendFusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",

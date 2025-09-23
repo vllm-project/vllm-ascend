@@ -13,11 +13,10 @@ from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.platforms import current_platform
-from vllm.utils import weak_ref_tensors
 
-logger = init_logger(__name__)
+from ..utils import weak_ref_tensors
 
 
 @dataclasses.dataclass
@@ -37,10 +36,10 @@ class ACLGraphWrapper:
 
     The workflow of this wrapper in the aclgraph dispatching is as follows:
     1. At initialization, a runtime mode is assigned to the wrapper (FULL or
-    PIECEWISE). 
-    2. At runtime, the wrapper receives a runtime_mode and a 
+    PIECEWISE).
+    2. At runtime, the wrapper receives a runtime_mode and a
     batch_descriptor(key) from the forward context and blindly trust them
-    for aclgraph dispatching. 
+    for aclgraph dispatching.
     3. If runtime_mode is NONE or runtime_mode does not match the mode of the
     wrapper, just call the runnable directly.
     4. Otherwise, i.e., the runtime_mode matches the mode of the wrapper,
@@ -49,9 +48,9 @@ class ACLGraphWrapper:
 
     Note: ACLGraphWrapper does not store persistent buffers or copy any
     runtime inputs into that buffers for replay. We assume implementing them
-    is done outside of the wrapper. That is because we do not make any 
+    is done outside of the wrapper. That is because we do not make any
     assumption on the dynamic shape (batch size) of the runtime inputs, as a
-    trade-off for staying orthogonal to compilation logic. Nevertheless, 
+    trade-off for staying orthogonal to compilation logic. Nevertheless,
     tracing and checking the input addresses to be consistent during replay is
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
@@ -182,5 +181,6 @@ class ACLGraphWrapper:
                 f"during replay. Expected {entry.input_addresses}, "
                 f"got {new_input_addresses}")
 
+        logger.info_once("Replaying aclgraph")
         entry.aclgraph.replay()
         return entry.output

@@ -10,6 +10,7 @@ import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.utils import sha256
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -18,8 +19,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
-
-from vllm_ascend.utils import vllm_version_is
 
 EOS_TOKEN_ID = 50256
 os.environ["VLLM_USE_V1"] = "1"
@@ -131,10 +130,10 @@ def create_request(
     """Make dummy request for testing."""
     global _none_hash_initialized
     if not _none_hash_initialized:
-        init_none_hash(hash)
+        init_none_hash(sha256)
         _none_hash_initialized = True
 
-    block_hasher = get_request_block_hasher(block_size, hash)
+    block_hasher = get_request_block_hasher(block_size, sha256)
 
     kv_transfer_params: Optional[dict[str, Any]] = None
 
@@ -164,12 +163,7 @@ def create_request(
         request_id=f"id-{request_id}",
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
-        multi_modal_kwargs=None,
-        multi_modal_placeholders=None,
-        multi_modal_hashes=None,
-        **({
-            "pooling_params": []
-        } if not vllm_version_is("0.9.1") else {}),
+        pooling_params=[],
         eos_token_id=EOS_TOKEN_ID,
         block_hasher=block_hasher,
     )
@@ -200,26 +194,15 @@ def create_model_runner_output(
     kv_connector_output = KVConnectorOutput(finished_sending=finished_sending,
                                             finished_recving=finished_recving)
     extra_args = {"kv_connector_output": kv_connector_output}
-    if vllm_version_is("0.10.1.1"):
-        model_runner_output = ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index=req_id_to_index,
-            sampled_token_ids=sampled_token_ids,
-            spec_token_ids=None,
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-            **extra_args,
-        )
-    else:
-        model_runner_output = ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index=req_id_to_index,
-            sampled_token_ids=sampled_token_ids,
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-            **extra_args,
-        )
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_id_to_index,
+        sampled_token_ids=sampled_token_ids,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        **extra_args,
+    )
 
     return model_runner_output

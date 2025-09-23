@@ -16,24 +16,29 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-from collections.abc import Sequence
-from typing import Optional
-
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
-from tests.e2e.conftest import HfRunner
-from tests.e2e.utils import check_embeddings_close, matryoshka_fy
+from tests.e2e.conftest import HfRunner, VllmRunner
+from tests.e2e.utils import check_embeddings_close
 
 
-def run_embedding_correctness_test(
-    hf_model: "HfRunner",
-    inputs: list[str],
-    vllm_outputs: Sequence[list[float]],
-    dimensions: Optional[int] = None,
-):
-    hf_outputs = hf_model.encode(inputs)
-    if dimensions:
-        hf_outputs = matryoshka_fy(hf_outputs, dimensions)
+def test_embed_models_correctness():
+    queries = ['What is the capital of China?', 'Explain gravity']
+
+    model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B")
+    with VllmRunner(
+            model_name,
+            task="embed",
+            enforce_eager=True,
+    ) as vllm_runner:
+        vllm_outputs = vllm_runner.encode(queries)
+
+    with HfRunner(
+            model_name,
+            dtype="float32",
+            is_sentence_transformer=True,
+    ) as hf_runner:
+        hf_outputs = hf_runner.encode(queries)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
@@ -42,27 +47,3 @@ def run_embedding_correctness_test(
         name_1="vllm",
         tol=1e-2,
     )
-
-
-# dummy to avoid pytest collect nothing and exit code 5
-def test_dummy():
-    assert True
-
-
-def test_embed_models_correctness(hf_runner, vllm_runner):
-    queries = ['What is the capital of China?', 'Explain gravity']
-
-    model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B")
-    with vllm_runner(
-            model_name,
-            task="embed",
-            enforce_eager=True,
-    ) as vllm_model:
-        vllm_outputs = vllm_model.encode(queries)
-
-    with hf_runner(
-            model_name,
-            dtype="float32",
-            is_sentence_transformer=True,
-    ) as hf_model:
-        run_embedding_correctness_test(hf_model, queries, vllm_outputs)

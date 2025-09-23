@@ -25,6 +25,7 @@ on:
       - 'cmake/**'
       - 'CMakeLists.txt'
       - 'csrc/**'
+    types: [ labeled ]
   push:
     # Publish image when tagging, the Dockerfile in tag will be build as tag image
     branches:
@@ -42,14 +43,25 @@ on:
       - 'cmake/**'
       - 'CMakeLists.txt'
       - 'csrc/**'
+
+# only cancel in-progress runs of the same workflow
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
 
   build:
     name: vllm-ascend image build
+    # Only arm64 build on openEuler arm64, only amd64 build on Ubuntu amd64
+    # Push event or PR with both 'ready' and 'ready-for-test' labels
     runs-on: ubuntu-latest
-
+    if: ${{ github.event_name == 'push' || (contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test')) }}
     steps:
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        persist-credentials: false
 
     - name: Print
       run: |

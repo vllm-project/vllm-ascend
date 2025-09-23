@@ -22,12 +22,11 @@ from vllm.config import CacheConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 
 from vllm_ascend.models.deepseek_v2 import (
-    CustomDeepseekV2DecoderLayer, CustomDeepseekV2ForCausalLM,
     CustomDeepseekV2MergedReplicatedLinear, CustomDeepseekV2MLAAttention,
     CustomDeepseekV2MLP, CustomDeepseekV2MoE,
     CustomDeepseekV2RowParallelLinear,
     CustomDeepseekV2RowParallelLinearReplaceAllreduce,
-    CustomDeepseekV2SiluAndMul)
+    CustomDeepseekV2SiluAndMul, LogitsProcessor, ParallelLMHead)
 
 
 @pytest.fixture
@@ -115,7 +114,8 @@ def mock_distributed():
             patch("vllm_ascend.ops.fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
             patch.dict("vllm.distributed.parallel_state.__dict__", _TP=tp_group, _EP=ep_group, _DP=dp_group,
                        _PP=pp_group), \
-            patch.dict("vllm_ascend.distributed.parallel_state.__dict__", _MC2=ep_group):
+            patch.dict("vllm_ascend.distributed.parallel_state.__dict__", _MC2=ep_group), \
+            patch("torch.npu.current_device", return_value=0):
         yield
 
 
@@ -174,7 +174,6 @@ def test_row_parallel_linear(cls, mock_distributed):
     linear = cls(input_size=128, output_size=64, bias=False, quant_config=None)
     linear.quant_method = Mock()
     linear.quant_method.apply.return_value = torch.randn(2, 4, 64)
-
     input_ = torch.randn(2, 4, 128)
     with patch("vllm_ascend.models.deepseek_v2.split_tensor_along_last_dim",
                return_value=[torch.randn(2, 4, 64)]):
@@ -268,52 +267,28 @@ def test_custom_deepseek_v2_mla_attention(mock_rms_norm, mock_distributed,
     assert hasattr(attn, "q_proj")
 
 
-@patch("torch_npu.npu_add_rms_norm")
-@patch("torch_npu.npu_rms_norm")
-def test_custom_deepseek_v2_decoder_layer(mock_rms_norm, mock_add_norm,
-                                          mock_distributed, base_config,
-                                          vllm_config):
-    mock_rms_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128))
-    mock_add_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128),
-                                  torch.randn(2, 128))
-    base_config.n_routed_experts = 4
-    layer = CustomDeepseekV2DecoderLayer(config=base_config,
-                                         prefix="layers.0",
-                                         model_config=vllm_config.model_config,
-                                         cache_config=CacheConfig(),
-                                         quant_config=None)
-    assert isinstance(layer.mlp, CustomDeepseekV2MoE)
+def test_deepseek_v2_lmhead(mock_distributed, vllm_config):
+    # 创建一个简单的配置对象
+    class SimpleConfig:
 
-    x = torch.randn(2, 4, 128)
-    positions = torch.arange(4).repeat(2, 1)
+        def __init__(self):
+            self.vocab_size = 10000
+            self.hidden_size = 128
 
-    with patch.object(layer.self_attn, "forward", Mock(return_value=torch.randn(2, 4, 128))), \
-            patch.object(layer.mlp, "forward", Mock(return_value=torch.randn(2, 4, 128))):
-        hidden_states, residual = layer(positions, x, None)
-        assert hidden_states.shape == (2, 4, 128)
+    config = SimpleConfig()
 
-    base_config.n_routed_experts = None
-    layer = CustomDeepseekV2DecoderLayer(config=base_config,
-                                         prefix="layers.0",
-                                         model_config=vllm_config.model_config,
-                                         quant_config=None)
-    assert isinstance(layer.mlp, CustomDeepseekV2MLP)
+    # 直接创建lmhead和logits_processor
+    lmhead = ParallelLMHead(config.vocab_size, config.hidden_size)
+    logits_processor = LogitsProcessor(config.vocab_size)
 
+    # 创建模拟输出
+    mock_output = torch.randn(2, 4, config.hidden_size)
+    mock_logits = torch.randn(2, 4, config.vocab_size)
 
-def test_custom_deepseek_v2_for_causal_lm(mock_distributed, vllm_config):
-    model = CustomDeepseekV2ForCausalLM(vllm_config=vllm_config)
-
-    input_ids = torch.randint(0, 10000, (2, 4))
-    positions = torch.arange(4).repeat(2, 1)
-    with patch.object(model.model,
-                      "forward",
-                      return_value=torch.randn(2, 4, 128)):
-        output = model(input_ids, positions)
-        assert output.shape == (2, 4, 128)
-
-    weights = [("model.embed_tokens.weight", torch.randn(10000, 128))]
-    with patch(
-            "vllm.model_executor.model_loader.weight_utils.default_weight_loader"
-    ):
-        loaded = model.load_weights(weights)
-        assert loaded is not None
+    # 直接测试logits_processor
+    with patch.object(lmhead.quant_method, "apply", return_value=mock_logits):
+        with patch.object(logits_processor,
+                          "_gather_logits",
+                          return_value=mock_logits):
+            logits = logits_processor(lmhead, mock_output)
+    assert logits.shape == (2, 4, config.vocab_size)

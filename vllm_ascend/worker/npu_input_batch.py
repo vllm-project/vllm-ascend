@@ -47,6 +47,7 @@ class CachedRequestState:
     prompt_token_ids: list[int]
     mm_kwargs: list[MultiModalKwargsItem]
     mm_positions: list[PlaceholderRange]
+    mm_hashes: list[str]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
@@ -62,7 +63,7 @@ class CachedRequestState:
 
     # cp param
     kv_rank: Optional[tuple[int]] = None
-    num_computed_tokens_of_cp_sp: Optional[list[list[int]]] = None
+    num_computed_tokens_of_cp_sp: Optional[list[Optional[list[int]]]] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -266,9 +267,15 @@ class InputBatch:
 
         self.pooling_params: dict[str, PoolingParams] = {}
 
+        # Cached reference to the GPU tensor of previously sampled tokens
+        self.prev_sampled_token_ids: Optional[torch.Tensor] = None
+        self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
+        self.prev_req_id_to_index: Optional[dict[str, int]] = None
+
         # cp param
-        self.kv_rank: list[tuple[int]] = [None] * max_num_reqs
-        self.num_computed_tokens_of_cp_sp: list[list[list[int]]] = [None] * max_num_reqs
+        self.kv_rank: list[Optional[tuple[int]]] = [None] * max_num_reqs
+        self.num_computed_tokens_of_cp_sp: list[Optional[list[Optional[
+            list[int]]]]] = [None] * max_num_reqs
 
     @property
     def req_ids(self) -> list[str]:
@@ -318,7 +325,8 @@ class InputBatch:
 
         # cp param
         self.kv_rank[req_index] = request.kv_rank
-        self.num_computed_tokens_of_cp_sp[req_index] = request.num_computed_tokens_of_cp_sp
+        self.num_computed_tokens_of_cp_sp[
+            req_index] = request.num_computed_tokens_of_cp_sp
 
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = len(request.prompt_token_ids)
@@ -737,7 +745,7 @@ class InputBatch:
 
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(
-                self.num_prompt_tokens[:self.num_reqs]).to(self.device),
+                self.num_prompt_tokens[:self.num_reqs]),
             prompt_token_ids=self.sampling_metadata.prompt_token_ids,
             pooling_params=pooling_params,
         )
