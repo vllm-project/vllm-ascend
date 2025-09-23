@@ -109,7 +109,7 @@ class KVCacheTaskTracker:
             request_id = next(iter(self.delayed_free_requests))
             delay_start_time = self.delayed_free_requests[request_id]
             if (current_time - delay_start_time
-                    > envs_ascend.VLLM_NIXL_ABORT_REQUEST_TIMEOUT):
+                    > envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT):
                 self.delayed_free_requests.popitem(last=False)
                 expired_requests.add(request_id)
                 logger.info("Force freed request: %s", request_id)
