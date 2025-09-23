@@ -2777,6 +2777,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
                 if "linear_attn" in layer_name:
+                    # for mamba linear attention
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         if "self_attn" in layer_name_inner or layer_name_inner in kv_cache_raw_tensors.keys(
                         ):
@@ -2793,7 +2794,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             tensor = self._align_memory(
                                 tensor, alignment)[:kv_cache_tensor.size]
                         kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "self_attn" in layer_name:
+                elif "attn" in layer_name:
+                    # for other attentions, e.g., self_attn, sliding window attn
                     if self.vllm_config.kv_transfer_config is None:
                         k_tensor = torch.zeros(kv_cache_tensor.size // 2,
                                                dtype=torch.int8,
