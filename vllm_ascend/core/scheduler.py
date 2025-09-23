@@ -201,7 +201,7 @@ class AscendScheduler(Scheduler):
                                 self.block_size]
                         request.num_computed_tokens_of_cp_sp[i][j] = len(
                             request.token_ids_of_cp_sp[i][j]
-                        ) + num_computed_tokens  #  实际存kv cache的数量，不包含pad，用于prefill slot计算，decode分配block和slot计算
+                        ) + num_computed_tokens
                         start_id += request.num_blocks_of_cp_sp[i][
                             j] * self.block_size
 

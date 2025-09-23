@@ -876,7 +876,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_mask_seqlens: torch.Tensor, attn_nomask_seqlens: torch.Tensor,
             mask: torch.Tensor):
         attn_output = torch.empty(
-            q_nope.shape[0],  # 长度现在是每个req的cp_block求和
+            q_nope.shape[0],
             self.num_heads,
             self.v_head_dim,
             dtype=k_pe.dtype,
