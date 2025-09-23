@@ -186,10 +186,10 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
                                 self.moe_config.tp_group.device_group)
                 hidden_states = torch.cat(self.split_hidden_states, dim=0)
 
-                # TODO: It is a quick bugfix for the single-operator memory explosion issue
-                # that requires further restructuring. 
-                # If the cache is not cleared after `self.split_hidden_states` is created, 
-                # it can lead to the single-operator memory explosion.
+                # TODO: It is a quick bugfix for the memory explosion issue in eager mode
+                # that requires further restructuring.
+                # If the cache is not cleared after `self.split_hidden_states` is created,
+                # it can lead to the memory explosion in eager mode.
                 del self.split_hidden_states
 
             # Unpad if necessary
@@ -276,10 +276,10 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
                                 self.moe_config.tp_group.device_group)
                 hidden_states = torch.cat(self.split_hidden_states, dim=0)
 
-                # TODO: It is a quick bugfix for the single-operator memory explosion issue
-                # that requires further restructuring. 
-                # If the cache is not cleared after `self.split_hidden_states` is created, 
-                # it can lead to the single-operator memory explosion.
+                # TODO: It is a quick bugfix for the memory explosion issue in eager mode
+                # that requires further restructuring.
+                # If the cache is not cleared after `self.split_hidden_states` is created,
+                # it can lead to the memory explosion in eager mode.
                 del self.split_hidden_states
 
             if self.num_tokens < hidden_states.shape[0]:
