@@ -314,7 +314,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             use_mla=self.model_config.use_mla,
         )
 
-        if torch.version.cann.startswith("8.3"):
+        if torch.version.cann > "8.3.RC1.alpha002":
             self.attn_mask_builder = AttentionMaskBuilder(
                 self.scheduler_config.max_num_batched_tokens, self.dtype,
                 self.device)
@@ -881,7 +881,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                              attn_state) -> torch.Tensor:
         # Chunk Prefill situation.
         if attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla:
-            if torch.version.cann.startswith("8.3"):
+            if torch.version.cann > "8.3.RC1.alpha002":
                 return self.attn_mask_builder.get_splitfuse_attn_mask()
             else:
                 return self.attn_mask_builder.get_splitfuse_attn_mask(

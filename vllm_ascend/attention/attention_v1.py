@@ -483,7 +483,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             attn_metadata.seq_lens = \
                 attn_metadata.seq_lens.to(device=query.device)
 
-        if torch.version.cann.startswith("8.3"):
+        if torch.version.cann > "8.3.RC1.alpha002":
             # TODO:The npu_fused_infer_attention_score op is planned to
             # be utilized in a wider range in upcoming versions.
             num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
@@ -613,7 +613,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                    output)
             # Normal V1 situation.
             else:
-                if torch.version.cann.startswith("8.3"):
+                if torch.version.cann > "8.3.RC1.alpha002":
                     # npu_fused_infer_attention_score does not support cases
                     # where query.shape[0] != attn_metadata.query_start_loc[-1].
                     # Thus we need unpad it here.
