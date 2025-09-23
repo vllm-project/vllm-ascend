@@ -25,6 +25,7 @@ import torch.nn as nn
 import torch_npu
 import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
+from torch_npu.profiler import dynamic_profile
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -42,6 +43,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.worker.worker_base import WorkerBase
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
@@ -204,6 +206,10 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+        # enable msMonitor to monitor the performance of vllm-ascend
+        if envs_ascend.MSMONITOR_USE_DAEMON:
+            dynamic_profile.step()
+
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
@@ -331,6 +337,10 @@ class NPUWorker(WorkerBase):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs_vllm.VLLM_TORCH_PROFILER_DIR:
+            if envs_ascend.MSMONITOR_USE_DAEMON:
+                raise RuntimeError(
+                    "MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time."
+                )
             torch_profiler_trace_dir = envs_vllm.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)

@@ -164,6 +164,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # are not freed within this timeout, they will be forcibly released.
     "VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT":
     lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
+    # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
+    "MSMONITOR_USE_DAEMON":
+    lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
 }
 
 # end-env-vars-definition
