@@ -19,29 +19,29 @@
 
 import contextlib
 import gc
+import json
 import os
 import subprocess
-import time
-import httpx
-import openai
-import requests
 import sys
+import time
 from typing import Any, List, Optional, Tuple, TypeVar, Union
-import json
 
+import httpx
 import numpy as np
+import openai
 import pytest
+import requests
 import torch
-from vllm.entrypoints.cli.serve import ServeSubcommand
-from vllm.model_executor.model_loader import get_model_loader
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
 from torch import nn
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, BatchFeature)
-from vllm.utils import (FlexibleArgumentParser, get_open_port)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
+from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.utils import FlexibleArgumentParser, get_open_port
 
 from vllm_ascend.utils import vllm_version_is
 
@@ -50,10 +50,10 @@ if vllm_version_is("0.10.2"):
 else:
     from vllm.config.model import TaskOption, _get_and_verify_dtype
 
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.engine.arg_utils import AsyncEngineArgs
 
 from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
@@ -243,6 +243,7 @@ class RemoteOpenAIServer:
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
                                   **kwargs)
+
 
 class VllmRunner:
 
