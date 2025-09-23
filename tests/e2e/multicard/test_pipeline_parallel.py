@@ -17,6 +17,7 @@
 import pytest
 
 from tests.e2e.conftest import VllmRunner
+from tests.e2e.conftest import RemoteOpenAIServer
 
 MODELS = [
     "Qwen/Qwen3-0.6B",
@@ -38,6 +39,10 @@ prompts = [
 @pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
 def test_models(model: str, tp_size: int, pp_size: int,
                 distributed_executor_backend: str) -> None:
+    with RemoteOpenAIServer(model) as server:
+        server.start()
+
+
     with VllmRunner(model,
                     tensor_parallel_size=tp_size,
                     pipeline_parallel_size=pp_size,
