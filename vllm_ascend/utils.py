@@ -594,8 +594,7 @@ def enable_sp() -> bool:
 
     return (
         get_cached_compilation_config().pass_config.enable_sequence_parallelism
-        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM
-    )
+        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM)
 
 
 def is_moe_model(vllm_config: VllmConfig):
