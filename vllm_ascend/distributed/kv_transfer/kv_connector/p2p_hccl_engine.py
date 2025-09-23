@@ -306,6 +306,21 @@ class P2pHcclEngine:
                             self.zmq_address, remote_address.decode(), rank)
             elif data["cmd"] == "PUT":
                 tensor_id = data["tensor_id"]
+                shape: torch.Tensor = torch.tensor(data["shape"])
+                recv_tensor_size = shape.prod().item() * torch.empty([1],
+                    getattr(torch, data["dtype"])).element_size()
+                while (self.buffer_size + recv_tensor_size > self.buffer_size_threshold):
+                    if recv_tensor_size > self.buffer_size_threshold:
+                        raise RuntimeError(
+                            f"recv_tensor_size {recv_tensor_size} is larger than buffer_size_threshold {self.buffer_size_threshold}, cannot recv")
+                    
+                    newest_tensor_id = list(self.recv_store.keys())[-1]
+                    newest_tensor = self.recv_store.pop(newest_tensor_id)
+                    newest_tensor_size = newest_tensor.element_size() * newest_tensor.numel()
+                    addr = self.pool.store_tensor(newest_tensor)
+                    newest_tensor = (addr, newest_tensor.dtype, newest_tensor.shape)
+                    self.recv_store[newest_tensor_id] = newest_tensor
+                    self.buffer_size -= newest_tensor_size
                 try:
                     with torch_npu.npu.Stream(self.recv_stream):
                         tensor = torch.empty(data["shape"],
