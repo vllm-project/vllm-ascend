@@ -19,6 +19,7 @@ import numpy.typing as npt
 import torch
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -100,7 +101,7 @@ class KVCacheTaskTracker:
         while self.delayed_free_requests:
             request_id, delay_start_time = self.delayed_free_requests[0]
             if (current_time - delay_start_time
-                    > envs_ascend.VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT):
+                    > envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT):
                 self.delayed_free_requests.popleft()
                 expired_requests.add(request_id)
                 logger.info("Force freed request: %s", request_id)
