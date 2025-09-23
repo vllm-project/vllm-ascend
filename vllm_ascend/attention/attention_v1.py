@@ -199,8 +199,8 @@ class AscendMetadata:
 
 
 class AscendAttentionMetadataBuilder:
-    # Does this backend/builder support CUDA Graphs for attention (default: no).
-    cudagraph_support: ClassVar[AttentionCGSupport] = \
+    # Does this backend/builder support ACL Graphs for attention (default: no).
+    aclgraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
