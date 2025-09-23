@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from dataclasses import dataclass
 from typing import Optional
 
 from vllm.logger import logger
@@ -170,6 +171,33 @@ class AscendSchedulerConfig:
         for k, v in ascend_scheduler_config.items():
             if not hasattr(self, k):
                 setattr(self, k, v)
+
+
+@dataclass
+class AttentionWeightPrefetchConfig:
+    enabled: bool = False
+
+
+@dataclass
+class MoEWeightPrefetchConfig:
+    enabled: bool = False
+
+
+class WeightPrefetchConfig:
+    """
+    Configuration Object for weight_prefetch_config from additional_config
+    """
+
+    def __init__(self, weight_prefetch_config: dict) -> None:
+        attn_weight_prefetch_config = weight_prefetch_config.get("attn", {})
+        self.attn_weight_prefetch_config = AttentionWeightPrefetchConfig(
+            enabled=attn_weight_prefetch_config.get("enabled", False)
+        )
+
+        moe_weight_prefetch_config = weight_prefetch_config.get("moe", {})
+        self.moe_weight_prefetch_config = MoEWeightPrefetchConfig(
+            enabled=moe_weight_prefetch_config.get("enabled", False)
+        )
 
 
 _ASCEND_CONFIG: Optional[AscendConfig] = None
