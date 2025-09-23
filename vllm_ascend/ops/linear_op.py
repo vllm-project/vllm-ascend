@@ -91,8 +91,6 @@ class CustomTensorParallelOp:
     # Replace layer.forward to customize the layer computation process.
     def apply(self, input_):
         output, output_bias = self.apply_impl(input_)
-        if dense_optim_enable():
-            torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
         if not self.return_bias:
             return output
         return output, output_bias
@@ -122,6 +120,14 @@ class CustomRowParallelOp(CustomTensorParallelOp):
         self.input_is_parallel = self.layer.input_is_parallel
         self.reduce_results = self.layer.reduce_results
         self.input_size_per_partition = self.layer.input_size_per_partition
+
+    def apply(self, input_):
+        output, output_bias = self.apply_impl(input_)
+        if dense_optim_enable():
+            torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
+        if not self.return_bias:
+            return output
+        return output, output_bias
 
 
 class MLPColumnParallelOp(CustomColumnParallelOp):
