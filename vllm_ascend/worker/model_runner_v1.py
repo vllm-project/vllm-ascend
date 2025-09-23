@@ -75,9 +75,11 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheGroupSpec,
-                                        KVCacheSpec, MambaSpec)
+from vllm.v1.kv_cache_interface import (AttentionSpec,
+                                        EncoderOnlyAttentionSpec,
+                                        FullAttentionSpec, KVCacheConfig,
+                                        KVCacheGroupSpec, KVCacheSpec,
+                                        MambaSpec)
 # yapf: enable
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, LogprobsTensors, ModelRunnerOutput)
@@ -317,10 +319,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if torch.version.cann.startswith("8.3"):
             self.attn_mask_builder = AttentionMaskBuilder(
                 self.scheduler_config.max_num_batched_tokens, self.dtype,
-                self.device)
+                self.device, self.model_config.runner_type == "generate")
         else:
             self.attn_mask_builder = AttentionMaskBuilder(
-                self.model_config.max_model_len, self.dtype)
+                self.model_config.max_model_len,
+                self.dtype,
+                tril=self.model_config.runner_type == "generate")
 
         # Set up speculative decoding.
         self.spec_attn_mask = None
@@ -1477,14 +1481,29 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-            blk_table = self.input_batch.block_table[kv_cache_group_id]
-            blk_table_tensor = blk_table.get_device_tensor()
-            slot_mapping = blk_table.slot_mapping_cpu[:
-                                                      total_num_scheduled_tokens]
-            self.slot_mapping[:total_num_scheduled_tokens].copy_(
-                slot_mapping[:total_num_scheduled_tokens],
-                non_blocking=True,
-            )
+            if isinstance(kv_cache_group_spec.kv_cache_spec,
+                          EncoderOnlyAttentionSpec):
+                # Encoder-only layers do not have KV cache, so we need to
+                # create a dummy block table and slot mapping for them.
+                blk_table_tensor = torch.zeros(
+                    (num_reqs, 1),
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                slot_mapping = torch.zeros(
+                    (total_num_scheduled_tokens, ),
+                    dtype=torch.int64,
+                    device=self.device,
+                )
+            else:
+                blk_table = self.input_batch.block_table[kv_cache_group_id]
+                blk_table_tensor = blk_table.get_device_tensor()
+                slot_mapping = blk_table.slot_mapping_cpu[:
+                                                          total_num_scheduled_tokens]
+                self.slot_mapping[:total_num_scheduled_tokens].copy_(
+                    slot_mapping[:total_num_scheduled_tokens],
+                    non_blocking=True,
+                )
 
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
@@ -1529,6 +1548,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             num_draft_tokens=self.num_draft_tokens.
                             gpu[:num_reqs],
                         )
+                    attn_metadata_i = builder.build(
+                        common_prefix_len=common_prefix_len,
+                        common_attn_metadata=common_attn_metadata,
+                        **extra_attn_metadata_args)
+                elif self.model_config.runner_type == "pooling":
                     attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
                         common_attn_metadata=common_attn_metadata,
@@ -2639,6 +2663,33 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT)
         return tensor
 
+    def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
+        """
+        Add encoder-only layers to the KV cache config.
+        """
+        block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
+        encoder_only_attn_specs: dict[AttentionSpec,
+                                      list[str]] = defaultdict(list)
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        for layer_name, attn_module in attn_layers.items():
+            if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+                attn_spec: AttentionSpec = EncoderOnlyAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=self.kv_cache_dtype,
+                    use_mla=use_mla)
+                encoder_only_attn_specs[attn_spec].append(layer_name)
+                self.runner_only_attn_layers.add(layer_name)
+        if len(encoder_only_attn_specs) > 0:
+            assert len(
+                encoder_only_attn_specs
+            ) == 1, "Only support one encoder-only attention spec now"
+            spec, layer_names = encoder_only_attn_specs.popitem()
+            self.kv_cache_config.kv_cache_groups.append(
+                KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec))
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -2648,9 +2699,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        self.may_reinitialize_input_batch(kv_cache_config)
+        self.may_add_encoder_only_layers_to_kv_cache_config()
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = (len(self.attn_groups) > 1)
-        self.may_reinitialize_input_batch(kv_cache_config)
 
         if self.model_config.is_deepseek_mla:
             kv_caches = self.initialize_kv_cache_tensors_deepseek(

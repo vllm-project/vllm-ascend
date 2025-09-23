@@ -294,6 +294,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
 
+    def _forward_encoder(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attn_metadata: AscendMetadata,
+        output: Optional[torch.Tensor] = None,
+        num_tokens=0,
+    ) -> torch.Tensor:
+        torch_npu._npu_flash_attention(query=query,
+                                       key=key,
+                                       value=value,
+                                       mask=attn_metadata.attn_mask,
+                                       seq_len=attn_metadata.seq_lens,
+                                       scale_value=self.scale,
+                                       num_heads=self.num_heads,
+                                       num_kv_heads=self.num_kv_heads,
+                                       out=output)
+        assert output is not None
+        return output[:num_tokens, :, :]
+
     def _forward_prefill_no_cache(
         self,
         query: torch.Tensor,
@@ -577,10 +598,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_actual_tokens = attn_metadata.num_actual_tokens
             assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
             attn_type = self.attn_type
-            if attn_type != AttentionType.DECODER:
-                raise NotImplementedError("Encoder self-attention and "
-                                          "encoder/decoder cross-attention "
-                                          "are not implemented for "
+            if attn_type not in [
+                    AttentionType.DECODER, AttentionType.ENCODER_ONLY
+            ]:
+                raise NotImplementedError("Encoder/Decoder cross-attention "
+                                          "is not implemented for "
                                           "PallasAttentionBackendImpl")
             # View q k v to BSH.
             query = query.view(-1, self.num_heads, self.head_size)
@@ -601,7 +623,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     slot_indices=slots)
 
             # V0-Style scheduler situation.
-            if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            if attn_type == AttentionType.ENCODER_ONLY:
+                output = self._forward_encoder(query, key, value,
+                                               attn_metadata, output,
+                                               num_tokens)
+            elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 output = self._forward_prefill_no_cache(
                     query, key, value, attn_metadata, output, num_tokens)
             elif attn_metadata.attn_state == \

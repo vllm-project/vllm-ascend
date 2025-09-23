@@ -144,7 +144,8 @@ class NPUPlatform(Platform):
                 structured_outputs_config.backend == "auto" and \
                 not getattr(scheduler_config, "scheduler_delay_factor", 0) > 0 and \
                 not scheduler_config.send_delta_data and \
-                scheduler_config.policy == "fcfs":
+                scheduler_config.policy == "fcfs" and \
+                model_config.runner_type == "generate":
                 ascend_scheduler_config.enabled = True
                 chunked_prefill_enabled_in_ascend_scheduler = getattr(
                     ascend_scheduler_config, "enable_chunked_prefill", False)
