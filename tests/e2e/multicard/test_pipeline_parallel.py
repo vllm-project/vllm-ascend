@@ -18,7 +18,6 @@ from typing import Any
 
 import openai
 import pytest
-import pytest_asyncio
 
 from tests.e2e.conftest import RemoteOpenAIServer
 
@@ -47,12 +46,6 @@ api_keyword_args = {
 }
 
 
-@pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
-        yield async_client
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
@@ -76,5 +69,5 @@ async def test_models(model: str, tp_size: int, pp_size: int,
             prompt=prompts,
             **request_keyword_args,
         )
-        choices: openai.types.CompletionChoice = batch.choices
+        choices: list[openai.types.CompletionChoice] = batch.choices
         print(choices)
