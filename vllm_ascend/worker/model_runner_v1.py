@@ -2590,6 +2590,33 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+        # Initialize the memory buffer for KV cache
+        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+        # Change the memory buffer to the desired shape
+        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
+                                                   kv_cache_raw_tensors)
+        bind_kv_cache(kv_caches,
+                      self.compilation_config.static_forward_context,
+                      self.kv_caches)
+        return kv_caches
+
+    def _allocate_kv_cache_tensors(
+            self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+        """
+        Initializes the KV cache buffer with the correct size. The buffer needs
+        to be reshaped to the desired shape before being used by the models.
+
+        NOTE: To support prefill disaggregation, we need to split kvcache tensor into
+        k_cahce and v cache, and the addr of both are aligned by 2M
+
+        Args:
+            kv_cache_config: The KV cache config
+        Returns:
+            dict[str, torch.Tensor]: A map between layer names to their
+            corresponding memory buffer for KV cache.
+            dict[str, tuple(torch.Tensor, torch.Tensor)] A map between layer names
+            to their corresponding memory buffer for K cache and V cache.
+         """
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, Union[torch.Tensor,
                                               Optional[torch.Tensor]]] = {}
@@ -2666,6 +2693,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert layer_names == set(kv_cache_raw_tensors.keys(
         )), "Some layers are not correctly initialized"
 
+        return kv_cache_raw_tensors
+
+    def _reshape_kv_cache_tensors(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kv_cache_raw_tensors: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """
+        Reshape the KV cache tensors to the desired shape and dtype.
+
+        Args:
+            kv_cache_config: The KV cache config
+            kv_cache_raw_tensors: The KV cache buffer of each layer, with
+                correct size but uninitialized shape.
+        Returns:
+            Dict[str, torch.Tensor]: A map between layer names to their
+            corresponding memory buffer for KV cache.
+        """
         kv_caches: Dict[str, torch.Tensor] = {}
         for group in self._kv_cache_spec_attn_group_iterator_dispatcher():
             if vllm_version_is("0.10.2"):
@@ -2781,10 +2826,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     kv_caches[layer_name] = state_tensors
                 else:
                     raise ValueError("Unknown KV cache spec type.")
-
-        bind_kv_cache(kv_caches,
-                      self.compilation_config.static_forward_context,
-                      self.kv_caches)
 
         return kv_caches
 
