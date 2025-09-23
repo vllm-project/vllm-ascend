@@ -79,7 +79,7 @@ def run_prefill(prefill_done, process_close):
 
 
 def run_decode(prefill_done):
-    os.environ['VLLM_LLMDD_RPC_PORT'] = '6634'
+    os.environ['VLLM_ASCEND_LLMDD_RPC_PORT'] = '6634'
     # ranktable.json needs be generated using gen_ranktable.sh
     # from the examples/disaggregated_prefill_v1 module in the main branch.
     os.environ['DISAGGREGATED_PREFILL_RANK_TABLE_PATH'] = "./ranktable.json"
