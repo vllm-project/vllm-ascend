@@ -194,7 +194,8 @@ def _select_experts_with_fusion_ops(
             bias=e_score_correction_bias,
             k_group=topk_group,
             group_count=num_expert_group,
-            group_select_mode=1,  # 0: the maximum in the group; 1: topk2.sum(fix)
+            group_select_mode=
+            1,  # 0: the maximum in the group; 1: topk2.sum(fix)
             renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
             norm_type=norm_type,  # 0: softmax; 1: sigmoid
             # out_flag=False, # todo new api; should the third output be output
@@ -277,3 +278,4 @@ def _native_select_experts(
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
+
