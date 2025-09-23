@@ -589,6 +589,7 @@ def matmul_allreduce_enable() -> bool:
 def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
 
+
 def enable_sp() -> bool:
     from vllm.config import get_cached_compilation_config
 
