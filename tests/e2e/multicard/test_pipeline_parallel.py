@@ -65,16 +65,15 @@ async def test_models(model: str, tp_size: int, pp_size: int,
         "--distributed-executor-backend", distributed_executor_backend,
         "--gpu-memory-utilization", 0.7
     ]
-    for prompt in prompts:
-        request_keyword_args: dict[str, Any] = {
-            **api_keyword_args,
-        }
-        with RemoteOpenAIServer(model, server_args) as server:
-            client = server.get_async_client()
-            batch = await client.completions.create(
-                model=model,
-                prompt=prompt,
-                **request_keyword_args,
-            )
-            choices: openai.types.CompletionChoice = batch.choices
-            print(choices)
+    request_keyword_args: dict[str, Any] = {
+        **api_keyword_args,
+    }
+    with RemoteOpenAIServer(model, server_args) as server:
+        client = server.get_async_client()
+        batch = await client.completions.create(
+            model=model,
+            prompt=prompts,
+            **request_keyword_args,
+        )
+        choices: openai.types.CompletionChoice = batch.choices
+        print(choices)
