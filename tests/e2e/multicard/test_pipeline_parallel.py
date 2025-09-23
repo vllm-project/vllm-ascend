@@ -14,9 +14,12 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import pytest
+from typing import Any
 
-from tests.e2e.conftest import VllmRunner
+import openai
+import pytest
+import pytest_asyncio
+
 from tests.e2e.conftest import RemoteOpenAIServer
 
 MODELS = [
@@ -32,20 +35,46 @@ prompts = [
     "The future of AI is",
 ]
 
+# General request argument values for these tests
+api_keyword_args = {
+    # Greedy sampling ensures that requests which receive the `target_token`
+    # arg will decode it in every step
+    "temperature": 0.0,
+    # Since EOS will never be decoded (unless `target_token` is EOS)
+    "max_tokens": 20,
+    # Return decoded token logprobs (as a way of getting token id)
+    "logprobs": 0,
+}
 
+
+@pytest_asyncio.fixture
+async def client(server):
+    async with server.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
 @pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
-def test_models(model: str, tp_size: int, pp_size: int,
-                distributed_executor_backend: str) -> None:
-    with RemoteOpenAIServer(model) as server:
-        server.start()
-
-
-    with VllmRunner(model,
-                    tensor_parallel_size=tp_size,
-                    pipeline_parallel_size=pp_size,
-                    distributed_executor_backend=distributed_executor_backend,
-                    gpu_memory_utilization=0.7) as vllm_model:
-        vllm_model.generate_greedy(prompts, 64)
+async def test_models(model: str, tp_size: int, pp_size: int,
+                      distributed_executor_backend: str) -> None:
+    server_args = [
+        "--tensor-parallel-size", tp_size, "--pipeline-parallel-size", pp_size,
+        "--distributed-executor-backend", distributed_executor_backend,
+        "--gpu-memory-utilization", 0.7
+    ]
+    for prompt in prompts:
+        request_keyword_args: dict[str, Any] = {
+            **api_keyword_args,
+        }
+        with RemoteOpenAIServer(model, server_args) as server:
+            client = server.get_async_client()
+            batch = await client.completions.create(
+                model=model,
+                prompt=prompt,
+                **request_keyword_args,
+            )
+            choices: openai.types.CompletionChoice = batch.choices
+            print(choices)
