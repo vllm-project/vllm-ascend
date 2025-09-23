@@ -1,3 +1,4 @@
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -103,7 +104,7 @@ def test_invalid_state_asyn_update(mock_adaptor):
     loader_obj = loader.D2DExpertWeightLoader(mock_adaptor)
 
     loader_obj.state = loader.ExpertWeightUpdateState.WAITING
-    reqs = []
+    reqs: list[Any] = []
     loader_obj.asyn_expert_weight_transfer(reqs)
     assert reqs == []
 

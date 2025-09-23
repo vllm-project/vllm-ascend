@@ -1,3 +1,5 @@
+from typing import Any
+
 import numpy as np
 import pytest
 
@@ -79,7 +81,7 @@ def test_prepare_expert_list():
 def test_non_redundant_expert_information():
     origin_deployment = np.array([[0, 1]])
     updated_weights = [(0, 10), (1, 5)]
-    rendun_pos = [[]]
+    rendun_pos: dict[Any, Any] = {}
     assignments, weights, loads, counts = DynamicEplbV2.non_redundant_expert_information(
         origin_deployment, updated_weights, rendun_pos)
     assert assignments[0] == [0, 1]
