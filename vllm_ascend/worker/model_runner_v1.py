@@ -43,7 +43,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
-                         get_layers_from_vllm_config)
+                         get_layers_from_vllm_config, update_config)
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -56,7 +56,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -861,6 +861,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if isinstance(self.model, ACLGraphWrapper):
             return self.model.unwrap()
         return self.model
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        allowed_config_names = {"load_config", "model_config"}
+        for config_name, config_overrides in overrides.items():
+            assert config_name in allowed_config_names, \
+                f"Config `{config_name}` not supported. " \
+                f"Allowed configs: {allowed_config_names}"
+            config = getattr(self, config_name)
+            new_config = update_config(config, config_overrides)
+            setattr(self, config_name, new_config)
+
+    def reload_weights(self) -> None:
+        assert getattr(self, "model", None) is not None, \
+            "Cannot reload weights before model is loaded."
+        model_loader = get_model_loader(self.load_config)
+        logger.info("Reloading weights inplace...")
+        model = self.get_model()
+        model_loader.load_weights(model, model_config=self.model_config)
 
     def get_supported_generation_tasks(self) -> "list[GenerationTask]":
         model = self.get_model()
@@ -2626,9 +2644,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Starting to load model %s...", self.model_config.model)
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
-            self.model = get_model(vllm_config=self.vllm_config)
+            model_loader = get_model_loader(self.load_config)
+            logger.info("Loading model from scratch...")
+            self.model = model_loader.load_model(
+                vllm_config=self.vllm_config, model_config=self.model_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
+            if self.lora_config:
+                if vllm_version_is("0.10.2"):
+                    self.model = self.load_lora_model(self.model,
+                                                      self.model_config,
+                                                      self.scheduler_config,
+                                                      self.lora_config,
+                                                      self.device)
+                else:
+                    self.model = self.load_lora_model(self.model,
+                                                      self.vllm_config,
+                                                      self.device)
             if is_310p():
                 from vllm.model_executor.layers.linear import (
                     MergedColumnParallelLinear, QKVParallelLinear,
@@ -2646,17 +2678,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.model.set_aux_hidden_state_layers(
                         self.model.get_eagle3_aux_hidden_state_layers())
 
-            if self.lora_config:
-                if vllm_version_is("0.10.2"):
-                    self.model = self.load_lora_model(self.model,
-                                                      self.model_config,
-                                                      self.scheduler_config,
-                                                      self.lora_config,
-                                                      self.device)
-                else:
-                    self.model = self.load_lora_model(self.model,
-                                                      self.vllm_config,
-                                                      self.device)
         logger.info("Loading model weights took %.4f GB",
                     m.consumed_memory / float(2**30))
 
