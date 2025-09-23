@@ -155,8 +155,8 @@ class NPUPlatform(Platform):
                         "would lead to performance degradation.")
                 # In this situation, max_num_batched_tokens would have been rewritten.
                 # So we must make sure max_num_batched_tokens is not smaller than max_model_len.
-                if (scheduler_config.max_num_batched_tokens
-                        < scheduler_config.max_model_len
+                if (scheduler_config.max_num_batched_tokens <
+                        scheduler_config.max_model_len
                         and not chunked_prefill_enabled_in_ascend_scheduler):
                     scheduler_config.max_num_batched_tokens = scheduler_config.max_model_len
 
@@ -281,7 +281,6 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config,
                 ascend_config.ascend_scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
-
 
     @classmethod
     def get_attn_backend_cls(cls,
