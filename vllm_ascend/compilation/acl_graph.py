@@ -3,10 +3,12 @@
 
 import dataclasses
 from contextlib import ExitStack
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 from unittest.mock import patch
 
 import torch
+import torch_npu
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
@@ -15,7 +17,8 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
-from vllm.utils import weak_ref_tensors
+
+from ..utils import weak_ref_tensors
 
 
 @dataclasses.dataclass
@@ -35,10 +38,10 @@ class ACLGraphWrapper:
 
     The workflow of this wrapper in the aclgraph dispatching is as follows:
     1. At initialization, a runtime mode is assigned to the wrapper (FULL or
-    PIECEWISE). 
-    2. At runtime, the wrapper receives a runtime_mode and a 
+    PIECEWISE).
+    2. At runtime, the wrapper receives a runtime_mode and a
     batch_descriptor(key) from the forward context and blindly trust them
-    for aclgraph dispatching. 
+    for aclgraph dispatching.
     3. If runtime_mode is NONE or runtime_mode does not match the mode of the
     wrapper, just call the runnable directly.
     4. Otherwise, i.e., the runtime_mode matches the mode of the wrapper,
@@ -47,9 +50,9 @@ class ACLGraphWrapper:
 
     Note: ACLGraphWrapper does not store persistent buffers or copy any
     runtime inputs into that buffers for replay. We assume implementing them
-    is done outside of the wrapper. That is because we do not make any 
+    is done outside of the wrapper. That is because we do not make any
     assumption on the dynamic shape (batch size) of the runtime inputs, as a
-    trade-off for staying orthogonal to compilation logic. Nevertheless, 
+    trade-off for staying orthogonal to compilation logic. Nevertheless,
     tracing and checking the input addresses to be consistent during replay is
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
@@ -146,6 +149,7 @@ class ACLGraphWrapper:
                         patch("torch.npu.empty_cache", lambda: None))
 
                 # mind-exploding: carefully manage the reference and memory.
+                forward_context.capturing = True
                 with torch.npu.graph(aclgraph, pool=self.graph_pool):
                     # `output` is managed by pytorch's aclgraph pool
                     output = self.runnable(*args, **kwargs)
@@ -183,3 +187,74 @@ class ACLGraphWrapper:
         logger.info_once("Replaying aclgraph")
         entry.aclgraph.replay()
         return entry.output
+
+
+def update_attn_params(update_stream, forward_context, runtime_shape):
+    graph_params = get_graph_params()
+    # FIXME: Behold! We are using a temporary hack here to update the args
+    # for each layer's attention op in the graph.
+    for key, param, handle, event in zip(
+            forward_context.attn_metadata,
+            graph_params.attn_params[runtime_shape],
+            graph_params.handles[runtime_shape],
+            graph_params.events[runtime_shape],
+    ):
+        (
+            query,
+            key_cache,
+            value_cache,
+            num_kv_heads,
+            num_heads,
+            scale,
+            block_table,
+            seq_lens,
+            output,
+        ) = param
+        # block_table = forward_context.attn_metadata[key].block_tables
+        seq_lens = forward_context.attn_metadata[key].seq_lens
+
+        with torch.npu.stream(update_stream):
+            torch.npu.graph_task_update_begin(update_stream, handle)
+            torch_npu._npu_paged_attention(query=query,
+                                           key_cache=key_cache,
+                                           value_cache=value_cache,
+                                           num_kv_heads=num_kv_heads,
+                                           num_heads=num_heads,
+                                           scale_value=scale,
+                                           block_table=block_table,
+                                           context_lens=seq_lens,
+                                           out=output)
+            torch.npu.graph_task_update_end(update_stream)
+
+            event.record(update_stream)
+
+
+@dataclass
+class GraphParams:
+    events: dict[int, list[torch.npu.ExternalEvent]]
+    workspaces: dict[int, torch.Tensor]
+    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
+    attn_params: dict[int, list[tuple]]
+
+
+_graph_params: Optional[GraphParams] = None
+
+
+def set_graph_params(aclgraph_capture_sizes: set[int]):
+    global _graph_params
+    if _graph_params is not None:
+        raise ValueError("Graph parameters have already been set!")
+    _graph_params = GraphParams(
+        {size: []
+         for size in aclgraph_capture_sizes},
+        {size: None
+         for size in aclgraph_capture_sizes},
+        {size: []
+         for size in aclgraph_capture_sizes},
+        {size: []
+         for size in aclgraph_capture_sizes},
+    )
+
+
+def get_graph_params():
+    return _graph_params

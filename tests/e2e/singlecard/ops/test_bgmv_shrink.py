@@ -33,7 +33,7 @@ def test_bgmv_shrink():
     y_npu = y.npu()
 
     y = bgmv_shrink_cpu_impl(x, w, indices, y, 0.5)
-    torch.ops._C.bgmv_shrink(x_npu, w_npu, indices_npu, y_npu, 0.5)
+    torch.ops._C_ascend.bgmv_shrink(x_npu, w_npu, indices_npu, y_npu, 0.5)
 
     # Compare the results.
     torch.testing.assert_close(y_npu.cpu(),

@@ -25,7 +25,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-import vllm.envs as envs_vllm
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_dp_group
@@ -49,8 +48,21 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 class NPUTorchairModelRunner(NPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        super().__init__(vllm_config, device)
         ascend_config = get_ascend_config()
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        super().__init__(vllm_config, device)
+        if self.speculative_config:
+            self.actual_seq_lengths_q = list(
+                range(self.decode_token_per_req, self.max_num_tokens + 1,
+                      self.decode_token_per_req))
+        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
+            None, None, vllm_config, device)
+
+        register_torchair_model()
+        torchair_ops_patch()
+        torchair_quant_method_register()
+        if self.enable_shared_expert_dp:
+            return
         self.new_kv_cache_bytes = -1
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore
@@ -69,14 +81,14 @@ class NPUTorchairModelRunner(NPUModelRunner):
             recompiles=envs_ascend.VLLM_ASCEND_TRACE_RECOMPILES)
 
         self._check_batch_sizes_consistency()
-        register_torchair_model()
-        torchair_ops_patch()
-        torchair_quant_method_register()
 
     def _sync_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         """Override from NPUModelRunner to pad num_tokens"""
+        if self.enable_shared_expert_dp:
+            # Padding is not required for shared_expert_dp cases in eager mode.
+            return num_tokens, None, with_prefill, enable_dbo
         if self.dp_size == 1:
             if not with_prefill:
                 maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
@@ -109,10 +121,15 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
 
-    def _build_attention_metadata(self, with_prefill, num_reqs, skip_attn):
+    def _build_attention_metadata(self, with_prefill, num_reqs, num_tokens,
+                                  max_query_len, force_attention):
         # NOTE: If torchair graph mode and not with_prefill,
         # we can't skip_attn, it will cause graph recompile.
-        if not with_prefill:
+        if with_prefill or self.enable_shared_expert_dp:
+            attn_metadata = super()._build_attention_metadata(
+                with_prefill, num_reqs, num_tokens, max_query_len,
+                force_attention)
+        else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
                 num_actual_tokens=1,
@@ -123,17 +140,19 @@ class NPUTorchairModelRunner(NPUModelRunner):
             )
             attn_metadata = self.attn_metadata_builder.build_torchair_graph_dummy(
                 common_attn_metadata)
-        else:
-            attn_metadata = super()._build_attention_metadata(
-                with_prefill, num_reqs, skip_attn)
         return attn_metadata
 
     def _generate_dummy_run_hidden_states(self, with_prefill,
                                           is_torchair_compile, input_ids,
                                           positions, attn_metadata, num_tokens,
                                           intermediate_tensors, inputs_embeds):
-
-        if not with_prefill:
+        if with_prefill or self.enable_shared_expert_dp:
+            if is_310p():
+                converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
+            hidden_states = super()._generate_dummy_run_hidden_states(
+                with_prefill, is_torchair_compile, input_ids, positions,
+                attn_metadata, num_tokens, intermediate_tensors, inputs_embeds)
+        else:
             # Only mark static while compiling
             if is_torchair_compile:
                 torch._dynamo.mark_static(input_ids)
@@ -165,15 +184,11 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 inputs_embeds=None,
                 **model_kwargs,
             )
-        else:
-            if is_310p():
-                converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
-            hidden_states = super()._generate_dummy_run_hidden_states(
-                with_prefill, is_torchair_compile, input_ids, positions,
-                attn_metadata, num_tokens, intermediate_tensors, inputs_embeds)
         return hidden_states
 
     def _convert_torch_format(self, kv_cache):
+        if self.enable_shared_expert_dp:
+            return super()._convert_torch_format(kv_cache)
         kv_cache = torch_npu.npu_format_cast(kv_cache, ACL_FORMAT_FRACTAL_ND)
         return kv_cache
 
@@ -191,6 +206,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
     def _capture_model(self):
         """Override from NPUModelRunner to use torchair graph capture."""
+        if self.enable_shared_expert_dp:
+            return super()._capture_model()
         # TODO(NeverRaR): Calling graph_capture(device=self.device) in
         # torchair graph capture can cause some issues, so now we just
         # temporarily split the codepath for the two different graph patterns.
@@ -230,6 +247,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                          self.new_kv_cache_bytes)
 
     def _use_aclgraph(self) -> bool:
+        if self.enable_shared_expert_dp:
+            return super()._use_aclgraph()
         return False
 
     def _check_batch_sizes_consistency(self) -> None:
@@ -255,10 +274,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
             )
 
     def _update_graph_pad_size(self, with_prefill, graph_pad_size):
-        if not with_prefill:
-            self.graph_pad_size = graph_pad_size
-        else:
+        if with_prefill or self.enable_shared_expert_dp:
             super()._update_graph_pad_size(with_prefill, graph_pad_size)
+        else:
+            self.graph_pad_size = graph_pad_size
 
     def _update_input_ids_and_positions(self, input_ids, positions,
                                         num_input_tokens, with_prefill,
@@ -268,7 +287,9 @@ class NPUTorchairModelRunner(NPUModelRunner):
             input_ids, positions, num_input_tokens, with_prefill,
             padded_num_tokens_across_dp)
 
-        if not with_prefill:
+        if with_prefill or self.enable_shared_expert_dp:
+            return input_ids, positions
+        else:
             input_ids = self.input_ids[:padded_num_tokens_across_dp]
             positions = self.positions[:padded_num_tokens_across_dp]
         return input_ids, positions
@@ -278,6 +299,13 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds):
+        if attn_metadata is not None and isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
+
+        if self.enable_shared_expert_dp:
+            return super()._generate_process_reqs_hidden_states(
+                attn_metadata, with_prefill, padded_num_tokens_across_dp,
+                input_ids, positions, intermediate_tensors, inputs_embeds)
         model_kwargs = {
             "kv_caches": self.kv_caches,
             "attn_metadata": attn_metadata
@@ -336,7 +364,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
         config = torchair.CompilerConfig()
         if get_ascend_config().torchair_graph_config.mode:
             config.mode = get_ascend_config().torchair_graph_config.mode
-        config.experimental_config.frozen_parameter = True
+        config.experimental_config.frozen_parameter = \
+        get_ascend_config().torchair_graph_config.enable_frozen_parameter
         # enabling tiling_schedule_optimize on 300I Duo has some bugs, so we have to
         # disable it on 300I Duo platform now.
         config.experimental_config.tiling_schedule_optimize = not is_310p()
@@ -345,11 +374,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
         torch.npu.set_compile_mode(jit_compile=False)
         if not self.use_cached_npu_graph:
             npu_backend = torchair.get_npu_backend(compiler_config=config)
-            self.torchair_compiled_model = torch.compile(
-                self.model,
-                dynamic=True,
-                fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=npu_backend)
+            self.torchair_compiled_model = torch.compile(self.model,
+                                                         dynamic=True,
+                                                         fullgraph=True,
+                                                         backend=npu_backend)
             return self.torchair_compiled_model
         else:
             # Generate a new forward proxy code object to prevent the invalidation of
@@ -371,7 +399,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 batch_size] = torchair.inference.cache_compile(
                     self.model.__dict__[forward_proxy_name],
                     dynamic=True,
-                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    fullgraph=True,
                     cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
                     ge_cache=False)
@@ -401,7 +429,13 @@ class NPUTorchairModelRunner(NPUModelRunner):
     def update_torchair_graph_batch_sizes(self):
         # return graph_batch_sizes according to the max number of tokens
         # first pad according to the number of requests
-        if len(self.torchair_graph_batch_sizes) == 0:
+        if self.is_kv_consumer and self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+            # pd disaggregation scenario may incorrectly calculate the batch in mtp scenario, so we force set it to max_num_reqs
+            self.torchair_graph_batch_sizes = [self.max_num_reqs]
+            logger.warning(
+                "is kv_consumer, torch_graph_batch_sizes sets to [max_num_seqs]"
+            )
+        elif len(self.torchair_graph_batch_sizes) == 0:
             self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
         else:
             self.torchair_graph_batch_sizes = sorted(
@@ -462,8 +496,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             self.torchair_graph_batch_sizes = new_graph_batch_sizes
 
     def _build_drafter_prepare_inputs_torchair_param(self):
-        return True
-
-    def get_dp_padding(self, num_tokens):
-        """Override from NPUModelRunner to get dp padding"""
-        return 0, None
+        if self.enable_shared_expert_dp:
+            return super()._build_drafter_prepare_inputs_torchair_param()
+        else:
+            return True

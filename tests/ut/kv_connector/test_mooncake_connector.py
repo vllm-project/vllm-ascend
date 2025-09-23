@@ -986,6 +986,46 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for p in self.patches:
             p.stop()  # type: ignore
 
+    def test_worker_use_ascend_direct(self):
+        test_case = [True, False]
+
+        for use_ascend_direct in test_case:
+            with self.subTest(use_ascend_direct=use_ascend_direct):
+                config = MagicMock()
+                config.kv_transfer_config = MagicMock()
+                config.kv_transfer_config.get_from_extra_config.side_effect = (
+                    lambda k, d: {
+                        "prefill": {
+                            "tp_size": 2,
+                            "dp_size": 1
+                        },
+                        "decode": {
+                            "tp_size": 2,
+                            "dp_size": 1
+                        },
+                        "use_ascend_direct": use_ascend_direct,
+                    }.get(k, d))
+
+                config.parallel_config = MagicMock()
+                config.parallel_config.tensor_parallel_size = 2
+                config.parallel_config.data_parallel_rank_local = 0
+                config.parallel_config.data_parallel_size_local = 1
+                config.kv_transfer_config.kv_port = 8000
+                config.kv_transfer_config.kv_role = 'worker'
+
+                with patch(
+                        "vllm_ascend.distributed.mooncake_connector.get_tensor_model_parallel_rank",
+                        return_value=0):
+                    with patch(
+                            "vllm_ascend.distributed.mooncake_connector.get_tp_group",
+                            return_value=None):
+                        with patch(
+                                "vllm_ascend.distributed.mooncake_connector.get_ip",
+                                return_value="127.0.0.1"):
+                            worker = MooncakeConnectorWorker(
+                                config, self.engine_id)
+                            self.assertIsNotNone(worker)
+
     def test_register_kv_caches_producer(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
         worker.register_kv_caches(self.kv_caches)

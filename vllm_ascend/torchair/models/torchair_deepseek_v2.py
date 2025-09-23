@@ -52,7 +52,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -322,8 +321,8 @@ class TorchairDeepseekV2MoE(nn.Module):
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        self.enable_multistream_moe = \
-            ascend_config.torchair_graph_config.enable_multistream_moe and \
+        self.multistream_overlap_shared_expert = \
+            ascend_config.multistream_overlap_shared_expert and \
             self.torchair_graph_enabled
 
         self.gate = ReplicatedLinear(config.hidden_size,
@@ -364,7 +363,7 @@ class TorchairDeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=reduce_results,
-                force_replicate=self.enable_multistream_moe
+                force_replicate=self.multistream_overlap_shared_expert
                 or enable_shared_expert_dp,
                 prefix=f"{prefix}.shared_experts",
             )
@@ -406,7 +405,7 @@ class TorchairDeepseekV2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits = None
-        if not self.rm_router_logits and not self.enable_multistream_moe:
+        if not self.rm_router_logits and not self.multistream_overlap_shared_expert:
             router_logits, _ = self.gate(hidden_states)
 
         experts_hidden_states = self.experts(
@@ -524,7 +523,7 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         elif (config.n_routed_experts is not None
               and self.debug_layer_idx >= config.first_k_dense_replace
               and self.debug_layer_idx % config.moe_layer_freq == 0
-              and (ascend_config.torchair_graph_config.enable_multistream_moe
+              and (ascend_config.multistream_overlap_shared_expert
                    or self.enable_shared_expert_dp)):
             self.o_proj = TorchairDeepseekV2RowParallelLinearReplaceAllreduce(
                 self.num_heads * self.v_head_dim,
@@ -697,7 +696,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            self.mla_moe_communication = ascend_config.torchair_graph_config.enable_multistream_moe \
+            self.mla_moe_communication = ascend_config.multistream_overlap_shared_expert \
                 and model_config.use_mla and self.tp_size > 1
         else:
             self.mlp = TorchairDeepseekV2MLP(
@@ -813,6 +812,8 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             residual = get_tp_group().all_gather(residual, 0)
 
             attn_metadata = get_forward_context().attn_metadata
+            if attn_metadata is not None and isinstance(attn_metadata, dict):
+                attn_metadata = next(iter(attn_metadata.values()), None)
             if attn_metadata is not None:
                 num_tokens = attn_metadata.num_actual_tokens
             else:
@@ -928,6 +929,8 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.num_dense_layers = self.config.first_k_dense_replace
+        self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
         self.quant_config = quant_config
         self.model = TorchairDeepseekV2Model(vllm_config=vllm_config,
                                              prefix=maybe_prefix(
@@ -941,7 +944,6 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

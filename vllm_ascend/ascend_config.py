@@ -43,13 +43,26 @@ class AscendConfig:
             "ascend_scheduler_config", {})
         self.ascend_scheduler_config = AscendSchedulerConfig(
             ascend_scheduler_config)
-
+        # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
         self.expert_map_path = additional_config.get("expert_map_path", None)
+        self.expert_map_record_path = additional_config.get(
+            "expert_map_record_path",
+            None)  # Provide path to export expert map
+        self.init_redundancy_expert = additional_config.get(
+            "init_redundancy_expert", 0)
+        self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
+        self.num_iterations_eplb_update = additional_config.get(
+            "num_iterations_eplb_update", 400)
+        self.gate_eplb = additional_config.get("gate_eplb", False)
+        self.num_wait_worker_iterations = additional_config.get(
+            "num_wait_worker_iterations", 30)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp", False
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
+        self.multistream_overlap_shared_expert = additional_config.get(
+            "multistream_overlap_shared_expert", False)
         self.enable_prefetch = additional_config.get("enable_prefetch", False)
         self.lmhead_tensor_parallel_size = additional_config.get(
             "lmhead_tensor_parallel_size", None)
@@ -99,10 +112,10 @@ class TorchairGraphConfig:
             "graph_batch_sizes_init", False)
         self.enable_multistream_mla = torchair_graph_config.get(
             "enable_multistream_mla", False)
-        self.enable_multistream_moe = torchair_graph_config.get(
-            "enable_multistream_moe", False)
         self.enable_view_optimize = torchair_graph_config.get(
             "enable_view_optimize", True)
+        self.enable_frozen_parameter = torchair_graph_config.get(
+            "enable_frozen_parameter", True)
         self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
 
         if not isinstance(self.graph_batch_sizes, list):
@@ -134,10 +147,6 @@ class TorchairGraphConfig:
             if self.enable_multistream_mla:
                 raise RuntimeError(
                     "enable_multistream_mla is valid only when Torchair graph mode is enabled"
-                )
-            if self.enable_multistream_moe:
-                raise RuntimeError(
-                    "enable_multistream_moe is valid only when Torchair graph mode is enabled"
                 )
             if self.enable_kv_nz:
                 raise RuntimeError(
@@ -218,14 +227,8 @@ def check_ascend_config(vllm_config, enforce_eager):
                     "it has been disabled automatically.")
         # aclgraph case
         else:
-            # aclgraph doesn't work with deepseek model and only qwen model is well tested.
             if vllm_config.model_config:
                 model_type = vllm_config.model_config.hf_config.model_type
-                if "deepseek" in model_type:
-                    raise NotImplementedError(
-                        "ACL Graph does not support deepseek. Please "
-                        "try torchair graph mode to serve deepseek models on vllm-ascend."
-                        " Or set `enforce_eager=True` to use eager mode.")
                 if "qwen" not in model_type:
                     logger.warning(
                         "ACL Graph is currently experimental. Please "

@@ -21,13 +21,13 @@ import atexit
 import functools
 import math
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
-import torch_npu  # noqa: F401  # noqa: F401
+import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
@@ -188,7 +188,7 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
 
 def enable_custom_op():
     """
-    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component. 
+    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
     global _CUSTOM_OP_ENABLED
@@ -321,7 +321,9 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     if os.getenv("HCCL_OP_EXPANSION_MODE") == 'AIV':
         # TODO: Find out whether we need to take into account the pp_size
         parallel_factor = 1 + num_comm_groups + int(
-            parallel_config.enable_expert_parallel)
+            parallel_config.enable_expert_parallel) + int(
+                vllm_config.additional_config.get(
+                    "multistream_overlap_shared_expert", False))
         if is_moe_model(vllm_config):
             parallel_factor += (parallel_config.data_parallel_size > 1)
         # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device
@@ -486,7 +488,7 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
 def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
-    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`, 
+    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
     and ensure this will execute after model config is initilazed.
     """
     global _ASCEND_CUSTOMOP_IS_REIGISTERED
@@ -496,7 +498,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+    from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
+                                                  AscendSharedFusedMoE)
     from vllm_ascend.ops.layernorm import AscendQuantRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
@@ -523,6 +526,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "LogitsProcessor": AscendLogitsProcessor,
         "RMSNorm": AscendRMSNorm,
         "FusedMoE": AscendFusedMoE,
+        "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
 
@@ -589,3 +593,44 @@ def dense_optim_enable() -> bool:
 def is_moe_model(vllm_config: VllmConfig):
     config = vllm_config.model_config.hf_config
     return any('experts' in key.lower() for key in config.to_dict())
+
+
+def weak_ref_tensor(tensor: Any) -> Any:
+    """
+    Create a weak reference to a tensor.
+    The new tensor will share the same data as the original tensor,
+    but will not keep the original tensor alive.
+    """
+    if isinstance(tensor, torch.Tensor):
+        return torch.ops._C_ascend.weak_ref_tensor(tensor)
+    else:
+        return tensor
+
+
+def weak_ref_tensors(
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
+    """
+    Convenience function to create weak references to tensors,
+    for single tensor, list of tensors or tuple of tensors.
+    """
+    if isinstance(tensors, torch.Tensor):
+        return weak_ref_tensor(tensors)
+    if isinstance(tensors, list):
+        return [weak_ref_tensor(t) for t in tensors]
+    if isinstance(tensors, tuple):
+        return tuple(weak_ref_tensor(t) for t in tensors)
+    raise ValueError("Invalid type for tensors")
+
+
+def npu_stream_switch(target_stream: torch.npu.Stream,
+                      *,
+                      enabled: bool = True):
+    """
+    Switch to the target stream if enabled is True.
+    Otherwise, do nothing.
+    """
+    if not enabled:
+        return nullcontext()
+    assert target_stream is not None
+    return torch.npu.stream(target_stream)

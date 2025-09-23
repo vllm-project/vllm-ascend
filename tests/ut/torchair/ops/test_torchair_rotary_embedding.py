@@ -104,7 +104,7 @@ class TestRopeForwardOot(TestBase):
         self.assertTrue(torch.equal(result_q, self.query))
         self.assertTrue(torch.equal(result_k, self.key))
 
-    @patch('torch.ops._C')
+    @patch('torch.ops._C_ascend')
     @patch(
         'vllm_ascend.torchair.ops.torchair_rotary_embedding.get_ascend_config')
     @patch('vllm_ascend.torchair.ops.torchair_rotary_embedding.is_310p',

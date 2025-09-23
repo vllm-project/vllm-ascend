@@ -30,12 +30,12 @@ The following table lists the additional configuration options available in vLLM
 | `ascend_scheduler_config`     | dict | `{}` | The config options for ascend scheduler                                                       |
 | `refresh`                     | bool | `false` | Whether to refresh global ascend config content. This value is usually used by rlhf or ut/e2e test case.     |
 | `expert_map_path`             | str  | `None` | When using expert load balancing for the MOE model, an expert map path needs to be passed in. |
-| `chunked_prefill_for_mla`     | bool | `False` | Whether to enable the fused operator-like chunked_prefill. |
 | `enable_prefetch`     | bool | `False` | Whether to enable weight prefetch. |
 | `kv_cache_dtype`     | str | `None` | When using the kv cache quantization method, kv cache dtype needs to be set, currently only int8 is supported. |
 | `enable_shared_expert_dp`     | bool | `False` | When the shared expert in DP, it has better performance but consumes more memory. Currently only DeepSeek series models are supported to use. |
 | `lmhead_tensor_parallel_size` | int | `None` | The custom tensor parallel size of lmhead. |
 | `oproj_tensor_parallel_size` | int | `None` | The custom tensor parallel size of oproj. |
+| `multistream_overlap_shared_expert`| bool | `False` | Whether to enable multistream shared expert. This option only takes effects on moe models with shared experts. |
 
 The details of each config option are as follows:
 
@@ -46,8 +46,8 @@ The details of each config option are as follows:
 | `enabled` | bool | `False` | Whether to enable torchair graph mode. Currently only DeepSeek series models and PanguProMoE are supported to use torchair graph mode |
 | `mode` | str | `None` | When using reduce-overhead mode for torchair, mode needs to be set |
 | `enable_multistream_mla`| bool | `False` | Whether to put vector ops of MLA to another stream. This option only takes effects on models using MLA (e.g., DeepSeek). |
-| `enable_multistream_moe`| bool | `False` | Whether to enable multistream shared expert. This option only takes effects on DeepSeek moe models. |
 | `enable_view_optimize` | bool | `True` | Whether to enable torchair view optimization |
+| `enable_frozen_parameter` | bool | `True` | Whether to fix the memory address of weights during inference to reduce the input address refresh time during graph execution. |
 | `use_cached_graph` | bool | `False` | Whether to use cached graph |
 | `graph_batch_sizes` | list[int] | `[]` | The batch size for torchair graph cache |
 | `graph_batch_sizes_init` | bool | `False` | Init graph batch size dynamically if `graph_batch_sizes` is empty |
@@ -74,13 +74,13 @@ An example of additional configuration is as follows:
         "use_cached_graph": True,
         "graph_batch_sizes": [1, 2, 4, 8],
         "graph_batch_sizes_init": False,
-        "enable_multistream_moe": False,
         "enable_kv_nz": False
     },
     "ascend_scheduler_config": {
         "enabled": True,
         "enable_chunked_prefill": True,
     },
+    "multistream_overlap_shared_expert": True,
     "refresh": False,
 }
 ```
