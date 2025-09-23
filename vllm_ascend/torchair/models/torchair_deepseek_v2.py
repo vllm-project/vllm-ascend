@@ -813,7 +813,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata is not None and isinstance(attn_metadata, dict):
-                attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
+                attn_metadata = next(iter(attn_metadata.values()), None)
             if attn_metadata is not None:
                 num_tokens = attn_metadata.num_actual_tokens
             else:
