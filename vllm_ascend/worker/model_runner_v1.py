@@ -1965,7 +1965,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logits_dtype = logits.dtype
                 logits = logits.to("cpu").float()
                 apply_grammar_bitmask(scheduler_output, self.input_batch,
-                                      logits, self.device)
+                                      logits, torch.device("cpu"))
                 logits = logits.to(self.device).to(logits_dtype)
 
             # Sample the next token and get logprobs if needed.
