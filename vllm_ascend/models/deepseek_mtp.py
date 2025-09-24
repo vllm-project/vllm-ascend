@@ -166,7 +166,7 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata,  # type: ignore
+        sampling_metadata=None,  # type: ignore
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
