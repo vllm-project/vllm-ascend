@@ -298,6 +298,10 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
             "vllm_ascend.ops.linear_op.get_tp_group",
             return_value=mock_group,
         )
+        mocker.patch(
+            "vllm.distributed.parallel_state.get_tp_group",
+            return_value=mock_group,
+        )
 
         vision_transformer = AscendQwen2_5_VisionTransformer(
             vision_config,
