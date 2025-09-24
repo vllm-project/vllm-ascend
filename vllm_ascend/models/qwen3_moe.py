@@ -17,7 +17,7 @@
 # Adapted from vllm/model_executor/models/qwen3_moe.py
 # This file is a part of the vllm-ascend project.
 
-from typing import Optional
+from typing import Optional, Any
 
 import torch
 from torch import nn
@@ -48,6 +48,28 @@ from vllm.model_executor.models.utils import (
 
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 
+class CustomQwen3MoeAttention(Qwen3MoeAttention):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        sizes = [self.q_size, self.kv_size, self.kv_size]
+        q, k, v = torch.split_with_sizes_copy(qkv, sizes, dim=-1)
+
+        # Add qk-norm
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                           self.head_dim)
+        q_by_head = self.q_norm(q_by_head)
+        q = q_by_head.view(q.shape)
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                           self.head_dim)
+        k_by_head = self.k_norm(k_by_head)
+        k = k_by_head.view(k.shape)
+
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
 
@@ -137,7 +159,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        self.self_attn = Qwen3MoeAttention(
+        self.self_attn = CustomQwen3MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
