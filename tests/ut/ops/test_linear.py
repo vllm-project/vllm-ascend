@@ -33,6 +33,10 @@ class BaseLinearTest(unittest.TestCase):
                   return_value=self.mock_group),
             patch("vllm_ascend.ops.linear_op.get_tp_group",
                   return_value=self.mock_group),
+            patch(
+                "vllm.distributed.parallel_state.get_tp_group",
+                return_value=self.mock_group,
+            ),
             patch("vllm_ascend.utils.mlp_tp_enable", return_value=True),
             patch("vllm_ascend.utils.oproj_tp_enable", return_value=True)
         ]
