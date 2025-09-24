@@ -44,19 +44,20 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, sharded_weight_loader)
 from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
-from vllm.model_executor.models.qwen3_next import (Qwen3NextAttention,
-                                                   Qwen3NextDecoderLayer,
-                                                   Qwen3NextForCausalLM,
-                                                   Qwen3NextGatedDeltaNet,
-                                                   Qwen3NextModel,
-                                                   Qwen3NextSparseMoeBlock,
-                                                   fused_gdn_gating)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, extract_layer_index, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
+
+from vllm.model_executor.models.qwen3_next import Qwen3NextAttention  # isort: skip
+from vllm.model_executor.models.qwen3_next import Qwen3NextDecoderLayer  # isort: skip
+from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM  # isort: skip
+from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet  # isort: skip
+from vllm.model_executor.models.qwen3_next import Qwen3NextModel  # isort: skip
+from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock  # isort: skip
+from vllm.model_executor.models.qwen3_next import fused_gdn_gating  # isort: skip
 
 
 class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
