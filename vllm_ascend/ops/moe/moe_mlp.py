@@ -22,6 +22,7 @@ from torch.nn.functional import pad
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.weight_prefetch import PrefetchManager, MoEWeightPrefetchMethod
 from vllm_ascend.utils import dispose_tensor, is_310p
 
 
@@ -77,6 +78,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     bias1, bias2 = None, None
     _output_dtype = w2_scale.dtype
 
+    PrefetchManager.get_prefetch_obj(MoEWeightPrefetchMethod).maybe_weight_prefetch_postprocess()
     is_mc2 = get_forward_context().moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and is_mc2:
         if w1_scale.dtype != torch.float32:

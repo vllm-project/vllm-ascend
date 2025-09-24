@@ -4,13 +4,15 @@ from enum import Enum
 from typing import Any, Optional
 
 import torch
+import vllm_ascend.envs as envs_ascend
+
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size)
 from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
+from vllm_ascend.ops.weight_prefetch import PrefetchManager
 
-import vllm_ascend.envs as envs_ascend
 
 
 class FusedMoEState(Enum):
@@ -139,7 +141,13 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
-
+        
+        # moe weight prefetch
+        forward_context.num_tokens = num_tokens
+        forward_context.model_instance = model_instance
+        forward_context.with_prefill = with_prefill
+        forward_context.ep_size = ep_size
+        PrefetchManager.init_forward_prefetch(vllm_config)
         # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
         # It will be improved later by implementing operator fusion through the FX graph.
         #
