@@ -1,5 +1,4 @@
 import torch
-import vllm
 from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
 # yapf: disable
@@ -57,4 +56,5 @@ def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int,
 
 
 if not vllm_version_is("0.10.2"):
-    vllm.model_executor.layers.linear.UnquantizedLinearMethod.create_weights = create_weights
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+    UnquantizedLinearMethod.create_weights = create_weights
