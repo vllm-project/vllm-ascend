@@ -53,4 +53,4 @@ def register_model():
     )
     ModelRegistry.register_model(
         "Qwen3NextForCausalLM",
-        "vllm_ascend.models.qwen3_next:Qwen3NextForCausalLM")
+        "vllm_ascend.models.qwen3_next:CustomQwen3NextForCausalLM")
