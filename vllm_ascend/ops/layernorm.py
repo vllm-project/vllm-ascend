@@ -131,6 +131,7 @@ class AscendQuantRMSNorm(AscendRMSNorm):
             return x.add_(self.bias), residual
         return cast(torch.Tensor, super().forward_oot(x)).add_(self.bias)
 
+
 class AscendGemmaRMSNorm(GemmaRMSNorm):
 
     def forward_oot(
