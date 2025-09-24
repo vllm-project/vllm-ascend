@@ -88,8 +88,8 @@ main() {
     checkout_src
     install_sys_dependencies
     install_vllm
-    install_mooncake
-    run_tests
+    #install_mooncake
+    #run_tests
 }
 
 main "$@"

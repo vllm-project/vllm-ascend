@@ -28,7 +28,7 @@ spec:
               - -c
               - |
                 git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"
-                bash /root/.cache/tests/scripts/run.sh
+                bash /root/.cache/tests/run.sh
                 tail -f /dev/null
             resources:
               limits:
@@ -81,7 +81,7 @@ spec:
               - -c
               - |
                 git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"
-                bash /root/.cache/tests/scripts/run.sh
+                bash /root/.cache/tests/run.sh
                 tail -f /dev/null
             resources:
               limits:
