@@ -163,6 +163,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
         # See https://github.com/huggingface/transformers/pull/29402
         x = x * (1.0 + weight.float())
+        x = x.to(orig_dtype)
         return x if residual is None else (x, residual)
 
     @staticmethod
@@ -170,7 +171,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         self,
         variance_epsilon: float,
         x: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward()."""
         return self.forward_static(self.weight.data, self.variance_epsilon, x,
