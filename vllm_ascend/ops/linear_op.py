@@ -417,12 +417,13 @@ def get_column_parallel_op(
         SequenceMergedColumnParallelOp,
         SequenceQKVParallelOp,
     ]] = None
-    if "gate_up_proj" in prefix and mlp_tp_enable():
+    if mlp_tp_enable() and "gate_up_proj" in prefix:
         custom_op = MLPColumnParallelOp(layer)
-    elif "gate_up_proj" in prefix and enable_sp():
-        custom_op = SequenceMergedColumnParallelOp(layer)
     elif enable_sp():
-        custom_op = SequenceQKVParallelOp(layer, prefix)
+        if "gate_up_proj" in prefix or "in_proj" in prefix:
+            custom_op = SequenceMergedColumnParallelOp(layer)
+        if "qkv_proj" in prefix:
+            custom_op = SequenceQKVParallelOp(layer, prefix)
 
     if custom_op is not None:
         return custom_op, custom_op.tp_rank, custom_op.tp_size
@@ -447,7 +448,7 @@ def get_row_parallel_op(
         custom_op = OProjRowParallelOp(layer)
     elif matmul_allreduce_enable():
         custom_op = MatmulAllreduceRowParallelOp(layer)
-    elif enable_sp():
+    elif ("o_proj" in prefix or "out_proj" in prefix) and enable_sp():
         custom_op = SequenceRowParallelOp(layer, prefix)
 
     if custom_op is not None:
