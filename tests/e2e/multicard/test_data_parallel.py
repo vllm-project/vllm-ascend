@@ -27,6 +27,8 @@ from unittest.mock import patch
 
 import pytest
 
+os.environ["HCCL_BUFFSIZE"] = 500
+
 MODELS = ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B"]
 
 
