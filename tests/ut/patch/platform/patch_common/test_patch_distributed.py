@@ -1,19 +1,20 @@
 import unittest
-from unittest.mock import patch, MagicMock, PropertyMock
-import torch
-import vllm.distributed
+from unittest.mock import patch
+
 from vllm.config import ParallelConfig
-import vllm_ascend.utils as utils
 
 
 class TestNullHandle(unittest.TestCase):
+
     def test_null_handle_initialization(self):
-        from vllm_ascend.patch.platform.patch_common.patch_distributed import NullHandle
+        from vllm_ascend.patch.platform.patch_common.patch_distributed import \
+            NullHandle
         handle = NullHandle()
         self.assertIsInstance(handle, NullHandle)
 
     def test_null_handle_wait(self):
-        from vllm_ascend.patch.platform.patch_common.patch_distributed import NullHandle
+        from vllm_ascend.patch.platform.patch_common.patch_distributed import \
+            NullHandle
         handle = NullHandle()
         handle.wait()
 
@@ -47,16 +48,17 @@ class TestParallelConfigGetDpPort(unittest.TestCase):
 
 
 class TestCommunicationAdaptation(unittest.TestCase):
+
     def setUp(self):
         import torch.distributed as dist
         self.original_broadcast = dist.broadcast
         self.original_all_reduce = dist.all_reduce
 
-
     def test_communication_adaptation_310p(self):
         import torch.distributed as dist
+
         from vllm_ascend.patch.platform.patch_common.patch_distributed import (
-            is_310p, communication_adaptation_310p)
+            communication_adaptation_310p, is_310p)
         if is_310p():
             communication_adaptation_310p()
             self.assertNotEqual(dist.broadcast, self.original_broadcast)
