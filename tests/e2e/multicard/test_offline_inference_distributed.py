@@ -36,8 +36,8 @@ QWEN_DENSE_MODELS = [
 ]
 
 DEEPSEEK_W4A8_MODELS = [
-    "vllm-ascend/DeepSeek-V3.1-W4A8-puring",
-    "vllm-ascend/DeepSeek-V3-W4A8-Pruing"
+    "vllm-ascend/DeepSeek-V3-W4A8-Pruing",
+    "vllm-ascend/DeepSeek-V3.1-W4A8-puring"
 ]
 
 
