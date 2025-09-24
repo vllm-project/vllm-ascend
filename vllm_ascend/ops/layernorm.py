@@ -19,7 +19,7 @@ from typing import Optional, Tuple, Union, cast
 
 import torch
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
 def _addrmsnorm_forward_oot(
@@ -131,7 +131,7 @@ class AscendQuantRMSNorm(AscendRMSNorm):
             return x.add_(self.bias), residual
         return cast(torch.Tensor, super().forward_oot(x)).add_(self.bias)
 
-class AscendGemmaRMSNorm(RMSNorm):
+class AscendGemmaRMSNorm(GemmaRMSNorm):
 
     def forward_oot(
         self,
