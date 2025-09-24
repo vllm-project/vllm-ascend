@@ -50,6 +50,8 @@ class TestAscendSchedulerConfig(TestBase):
                 scheduler_cls="vllm_ascend.core.scheduler.AscendScheduler",
                 max_num_batched_tokens=2048,
                 max_model_len=2048,
+                max_long_partial_prefills=1,
+                long_prefill_token_threshold=512,
             ),
         )
         self.assertEqual(ascend_config.enable_chunked_prefill, False)
@@ -58,6 +60,8 @@ class TestAscendSchedulerConfig(TestBase):
                          "vllm_ascend.core.scheduler.AscendScheduler")
         self.assertEqual(ascend_config.max_num_batched_tokens, 2048)
         self.assertEqual(ascend_config.encoder_cache_size, 2048)
+        self.assertEqual(ascend_config.max_long_partial_prefills, 1)
+        self.assertEqual(ascend_config.long_prefill_token_threshold, 512)
 
     def test_not_implemented_policy(self):
         with self.assertRaises(NotImplementedError) as context:

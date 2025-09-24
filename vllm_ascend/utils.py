@@ -590,6 +590,14 @@ def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
 
 
+def enable_sp() -> bool:
+    from vllm.config import get_cached_compilation_config
+
+    return (
+        get_cached_compilation_config().pass_config.enable_sequence_parallelism
+        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM)
+
+
 def is_moe_model(vllm_config: VllmConfig):
     config = vllm_config.model_config.hf_config
     return any('experts' in key.lower() for key in config.to_dict())
