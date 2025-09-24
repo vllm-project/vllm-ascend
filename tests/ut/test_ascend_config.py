@@ -43,6 +43,7 @@ class TestAscendConfig(TestBase):
         # No additional config given, check the default value here.
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertIsNone(ascend_config.expert_map_path)
+        self.assertFalse(ascend_config.multistream_overlap_shared_expert)
 
         torchair_graph_config = ascend_config.torchair_graph_config
         self.assertFalse(torchair_graph_config.enabled)
@@ -51,8 +52,8 @@ class TestAscendConfig(TestBase):
         self.assertEqual(torchair_graph_config.graph_batch_sizes, [])
         self.assertFalse(torchair_graph_config.graph_batch_sizes_init)
         self.assertFalse(torchair_graph_config.enable_multistream_mla)
-        self.assertFalse(torchair_graph_config.enable_multistream_moe)
         self.assertTrue(torchair_graph_config.enable_view_optimize)
+        self.assertTrue(torchair_graph_config.enable_frozen_parameter)
         self.assertFalse(torchair_graph_config.enable_kv_nz)
 
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
@@ -68,10 +69,11 @@ class TestAscendConfig(TestBase):
                 "graph_batch_sizes": [1, 2, 4],
                 "graph_batch_sizes_init": False,
                 "enable_multistream_mla": True,
-                "enable_multistream_moe": True,
                 "enable_view_optimize": True,
+                "enable_frozen_parameter": True,
                 "enable_kv_nz": True
             },
+            "multistream_overlap_shared_expert": True,
             "ascend_scheduler_config": {
                 "enabled": True
             },
@@ -80,6 +82,7 @@ class TestAscendConfig(TestBase):
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
+        self.assertTrue(ascend_config.multistream_overlap_shared_expert)
 
         torchair_graph_config = ascend_config.torchair_graph_config
         self.assertTrue(torchair_graph_config.enabled)
@@ -87,8 +90,8 @@ class TestAscendConfig(TestBase):
         self.assertEqual(torchair_graph_config.graph_batch_sizes, [1, 2, 4])
         self.assertFalse(torchair_graph_config.graph_batch_sizes_init)
         self.assertTrue(torchair_graph_config.enable_multistream_mla)
-        self.assertTrue(torchair_graph_config.enable_multistream_moe)
         self.assertTrue(torchair_graph_config.enable_view_optimize)
+        self.assertTrue(torchair_graph_config.enable_frozen_parameter)
         self.assertTrue(torchair_graph_config.enable_kv_nz)
 
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
@@ -298,17 +301,6 @@ class TestAscendConfig(TestBase):
                 "torchair_graph_config": {
                     "enabled": False,
                     "enable_multistream_mla": True,
-                },
-                "refresh": True
-            }
-            init_ascend_config(test_vllm_config)
-
-        # enable_multistream_moe should not be enabled without torchair graph mode
-        with self.assertRaises(RuntimeError):
-            test_vllm_config.additional_config = {
-                "torchair_graph_config": {
-                    "enabled": False,
-                    "enable_multistream_moe": True,
                 },
                 "refresh": True
             }

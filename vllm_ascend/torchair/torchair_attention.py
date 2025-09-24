@@ -175,7 +175,7 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
         self,
         common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
-        model: nn.Module,
+        model: Optional[nn.Module] = None,
     ):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
@@ -185,11 +185,7 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
             block_table[:num_reqs])
 
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        slot_mapping = common_attn_metadata.slot_mapping_cpu[:
-                                                             num_actual_tokens].to(
-                                                                 self.device,
-                                                                 non_blocking=
-                                                                 True)
+        slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
 
         attn_state = common_attn_metadata.attn_state
@@ -439,17 +435,24 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             block_size = key_cache.shape[1]
             query = query.view(num_tokens, 1,
                                self.num_heads * self.head_size).contiguous()
-            output = torch_npu.npu_incre_flash_attention(
-                query,
-                key_cache,
-                value_cache,
-                num_key_value_heads=self.num_kv_heads,
+            output, _ = torch_npu.npu_fused_infer_attention_score(
+                query=query,
+                key=key_cache,
+                value=value_cache,
+                query_rope=None,
+                key_rope=None,
                 num_heads=self.num_heads,
-                actual_seq_lengths=seq_lens,
-                scale_value=self.scale,
-                block_table=block_table,
+                num_key_value_heads=self.num_kv_heads,
                 input_layout='BSH',
-                block_size=block_size)
+                atten_mask=decode_meta.attn_mask,
+                sparse_mode=0,
+                scale=self.scale,
+                antiquant_mode=0,
+                antiquant_scale=None,
+                block_table=block_table,
+                block_size=block_size,
+                actual_seq_lengths_kv=seq_lens,
+            )
         else:
             raise NotImplementedError(
                 "Torchair graph mode with non-MLA attention backend is still experimental."

@@ -24,6 +24,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.moe.experts_selector import select_experts
 
@@ -136,6 +137,7 @@ class AscendW4A8DynamicFusedMoEMethod:
         # NOTE: new quantize weights: 2 int4 pack into int8
         self.new_quant_version = quant_version == "1.0.0"
         self.tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else self.ep_group.world_size
+        self.dynamic_eplb = get_ascend_config().dynamic_eplb
         if self.new_quant_version and self.tp_size > 16:
             raise ValueError(
                 "The current weight does not support moe part tp>16.")
@@ -299,7 +301,8 @@ class AscendW4A8DynamicFusedMoEMethod:
             global_redundant_expert_num=global_redundant_expert_num,
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
-            dynamic_scale_for_share=dynamic_scale_for_share)
+            dynamic_scale_for_share=dynamic_scale_for_share,
+            dynamic_eplb=self.dynamic_eplb)
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         group_num, k, n = weight.shape

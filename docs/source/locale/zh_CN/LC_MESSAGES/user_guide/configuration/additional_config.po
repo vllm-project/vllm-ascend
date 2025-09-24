@@ -149,10 +149,6 @@ msgid ""
 msgstr "在为MOE模型使用专家负载均衡时，需要传入专家映射路径。"
 
 #: ../../user_guide/configuration/additional_config.md
-msgid "`chunked_prefill_for_mla`"
-msgstr "`chunked_prefill_for_mla`"
-
-#: ../../user_guide/configuration/additional_config.md
 msgid "`False`"
 msgstr "`False`"
 
@@ -199,8 +195,8 @@ msgid ""
 msgstr "是否将MLA的向量操作放到另一个流中。此选项仅对使用MLA的模型（例如，DeepSeek）有效。"
 
 #: ../../user_guide/configuration/additional_config.md
-msgid "`enable_multistream_moe`"
-msgstr "`enable_multistream_moe`"
+msgid "`multistream_overlap_shared_expert`"
+msgstr "`multistream_overlap_shared_expert`"
 
 #: ../../user_guide/configuration/additional_config.md
 msgid ""

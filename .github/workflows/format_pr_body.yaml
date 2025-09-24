@@ -33,16 +33,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          path: ./vllm-empty
 
       - name: Get vLLM version
-        working-directory: ./vllm-empty
         run: |
-          VLLM_COMMIT=$(git rev-parse HEAD)
+          VLLM_COMMIT=f225ea7dd98e9f29752e5c032cd4a8ee1d712f16
           echo "VLLM_COMMIT=https://github.com/vllm-project/vllm/commit/$VLLM_COMMIT" >> $GITHUB_ENV
 
       - name: Checkout repository

@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: 'e2e test / doctest'
+name: 'ascend test / doctest'
 
 on:
   workflow_dispatch:

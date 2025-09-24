@@ -25,7 +25,6 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-import vllm.envs as envs_vllm
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_dp_group
@@ -52,6 +51,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         super().__init__(vllm_config, device)
+        if self.speculative_config:
+            self.actual_seq_lengths_q = list(
+                range(self.decode_token_per_req, self.max_num_tokens + 1,
+                      self.decode_token_per_req))
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             None, None, vllm_config, device)
 
@@ -84,8 +87,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         """Override from NPUModelRunner to pad num_tokens"""
         if self.enable_shared_expert_dp:
-            return super()._sync_metadata_across_dp(num_tokens, with_prefill,
-                                                    enable_dbo)
+            # Padding is not required for shared_expert_dp cases in eager mode.
+            return num_tokens, None, with_prefill, enable_dbo
         if self.dp_size == 1:
             if not with_prefill:
                 maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
@@ -118,12 +121,14 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
 
-    def _build_attention_metadata(self, with_prefill, num_reqs, skip_attn):
+    def _build_attention_metadata(self, with_prefill, num_reqs, num_tokens,
+                                  max_query_len, force_attention):
         # NOTE: If torchair graph mode and not with_prefill,
         # we can't skip_attn, it will cause graph recompile.
         if with_prefill or self.enable_shared_expert_dp:
             attn_metadata = super()._build_attention_metadata(
-                with_prefill, num_reqs, skip_attn)
+                with_prefill, num_reqs, num_tokens, max_query_len,
+                force_attention)
         else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
@@ -359,7 +364,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
         config = torchair.CompilerConfig()
         if get_ascend_config().torchair_graph_config.mode:
             config.mode = get_ascend_config().torchair_graph_config.mode
-        config.experimental_config.frozen_parameter = True
+        config.experimental_config.frozen_parameter = \
+        get_ascend_config().torchair_graph_config.enable_frozen_parameter
         # enabling tiling_schedule_optimize on 300I Duo has some bugs, so we have to
         # disable it on 300I Duo platform now.
         config.experimental_config.tiling_schedule_optimize = not is_310p()
@@ -368,11 +374,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
         torch.npu.set_compile_mode(jit_compile=False)
         if not self.use_cached_npu_graph:
             npu_backend = torchair.get_npu_backend(compiler_config=config)
-            self.torchair_compiled_model = torch.compile(
-                self.model,
-                dynamic=True,
-                fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=npu_backend)
+            self.torchair_compiled_model = torch.compile(self.model,
+                                                         dynamic=True,
+                                                         fullgraph=True,
+                                                         backend=npu_backend)
             return self.torchair_compiled_model
         else:
             # Generate a new forward proxy code object to prevent the invalidation of
@@ -394,7 +399,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 batch_size] = torchair.inference.cache_compile(
                     self.model.__dict__[forward_proxy_name],
                     dynamic=True,
-                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    fullgraph=True,
                     cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
                     ge_cache=False)
@@ -424,7 +429,13 @@ class NPUTorchairModelRunner(NPUModelRunner):
     def update_torchair_graph_batch_sizes(self):
         # return graph_batch_sizes according to the max number of tokens
         # first pad according to the number of requests
-        if len(self.torchair_graph_batch_sizes) == 0:
+        if self.is_kv_consumer and self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+            # pd disaggregation scenario may incorrectly calculate the batch in mtp scenario, so we force set it to max_num_reqs
+            self.torchair_graph_batch_sizes = [self.max_num_reqs]
+            logger.warning(
+                "is kv_consumer, torch_graph_batch_sizes sets to [max_num_seqs]"
+            )
+        elif len(self.torchair_graph_batch_sizes) == 0:
             self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
         else:
             self.torchair_graph_batch_sizes = sorted(

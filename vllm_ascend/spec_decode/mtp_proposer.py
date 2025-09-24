@@ -3,12 +3,11 @@ import types
 import torch
 import torch.nn as nn
 import torchair
-import vllm.envs as envs_vllm
 from torchair import patch_for_hcom
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
@@ -25,7 +24,8 @@ from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
-from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
+from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
+                               vllm_version_is)
 
 PADDING_SLOT_ID = -1
 
@@ -60,6 +60,8 @@ class MtpProposer(Proposer):
         self.torchair_compiled_models = {}  # type: ignore
         self.torchair_graph_enabled = get_ascend_config(
         ).torchair_graph_config.enabled
+        self.enable_shared_expert_dp = get_ascend_config(
+        ).enable_shared_expert_dp
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
         self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
@@ -79,7 +81,9 @@ class MtpProposer(Proposer):
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            if self.torchair_graph_enabled:
+            if self.torchair_graph_enabled or (
+                    self.enable_shared_expert_dp
+                    and self.vllm_config.model_config.use_mla):
                 self.model = TorchairDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
             else:
@@ -113,7 +117,7 @@ class MtpProposer(Proposer):
              _) = self.runner._sync_metadata_across_dp(num_tokens,
                                                        with_prefill, False)
 
-        moe_comm_method = self.runner._select_moe_comm_method(
+        moe_comm_type = self.runner._select_moe_comm_method(
             num_tokens, with_prefill)
 
         is_running_torchair = self.torchair_graph_enabled and \
@@ -146,7 +150,7 @@ class MtpProposer(Proposer):
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
-                    moe_comm_method=moe_comm_method,
+                    moe_comm_type=moe_comm_type,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=0):
                 if is_running_torchair:
@@ -363,8 +367,14 @@ class MtpProposer(Proposer):
             not self.runner.with_prefill
 
         if is_running_torchair:
+            # Torchair graph mode, padding is same as the main model
             num_input_tokens = self.runner.graph_pad_size
+        elif (self.runner.use_aclgraph
+              and num_tokens <= self.runner.aclgraph_batch_sizes[-1]):
+            # Acl graph mode, add padding to the batch size
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
         else:
+            # Eager mode, no padding needed
             num_input_tokens = num_tokens
 
         seq_lens = target_positions[last_token_indices] + 1
@@ -379,7 +389,7 @@ class MtpProposer(Proposer):
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=self.runner.input_batch.block_table[0].
             get_device_tensor(),
-            slot_mapping_cpu=target_slot_mapping,
+            slot_mapping=target_slot_mapping,
             positions=target_positions,
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
@@ -390,7 +400,10 @@ class MtpProposer(Proposer):
             seq_lens=None)
 
         if not self.torchair_graph_enabled:
-            builder = self.runner.attn_groups[0][0].metadata_builder
+            if vllm_version_is("0.10.2"):
+                builder = self.runner.attn_groups[0][0].metadata_builder
+            else:
+                builder = self.runner.attn_groups[0][0].get_metadata_builder()
             attn_metadata_mtp = builder.build(0, common_attn_metadata,
                                               self.runner.get_model())
 
@@ -410,14 +423,18 @@ class MtpProposer(Proposer):
             # TODO: adapt enable_dbo later
             (num_input_tokens, num_tokens_across_dp, with_prefill,
              _) = self.runner._sync_metadata_across_dp(
-                 num_tokens, self.runner.with_prefill, False)
+                 num_input_tokens, self.runner.with_prefill, False)
         else:
             # torchair mode can reuse self.runner.num_tokens_across_dp
             num_tokens_across_dp = self.runner.num_tokens_across_dp
             with_prefill = self.runner.with_prefill
 
-        moe_comm_method = self.runner._select_moe_comm_method(
+        moe_comm_type = self.runner._select_moe_comm_method(
             num_input_tokens, with_prefill)
+        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
+                                           uniform_decode=False)
+        aclgraph_runtime_mode, batch_descriptor = \
+            self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
 
         for step in range(self.num_speculative_tokens):
             with set_ascend_forward_context(
@@ -427,7 +444,8 @@ class MtpProposer(Proposer):
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
-                    moe_comm_method=moe_comm_method,
+                    moe_comm_type=moe_comm_type,
+                    aclgraph_runtime_mode=aclgraph_runtime_mode,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
@@ -585,11 +603,10 @@ class MtpProposer(Proposer):
         torch.npu.set_compile_mode(jit_compile=False)
         if not self.runner.use_cached_npu_graph:
             npu_backend = torchair.get_npu_backend(compiler_config=config)
-            self.torchair_compiled_model = torch.compile(
-                self.model,
-                dynamic=True,
-                fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=npu_backend)
+            self.torchair_compiled_model = torch.compile(self.model,
+                                                         dynamic=True,
+                                                         fullgraph=True,
+                                                         backend=npu_backend)
             return self.torchair_compiled_model
         else:
             # Generate a new forward proxy code object to prevent the invalidation of
@@ -611,7 +628,7 @@ class MtpProposer(Proposer):
                 batch_size] = torchair.inference.cache_compile(
                     self.model.__dict__[forward_proxy_name],
                     dynamic=True,
-                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    fullgraph=True,
                     cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
                     ge_cache=False)

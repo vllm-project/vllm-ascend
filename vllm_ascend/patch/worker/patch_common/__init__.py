@@ -15,7 +15,13 @@
 # limitations under the License.
 #
 
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import vllm_ascend.patch.worker.patch_common.patch_triton
+
 import vllm_ascend.patch.worker.patch_common.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_logits  # noqa
-import vllm_ascend.patch.worker.patch_common.patch_minicpm  # noqa
-import vllm_ascend.patch.worker.patch_common.patch_shared_fused_moe  # noqa
+
+# TODO: revert me when triton import is fixed
+# import vllm_ascend.patch.worker.patch_common.patch_minicpm  # noqa

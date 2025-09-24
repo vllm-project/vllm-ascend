@@ -24,8 +24,9 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import (MultiModalKwargs, MultiModalKwargsItem,
-                                    PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalFeatureSpec,
+                                    MultiModalKwargsItem,
+                                    MultiModalKwargsItems, PlaceholderRange)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
@@ -38,6 +39,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
@@ -46,9 +48,6 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
-    mm_kwargs: list[MultiModalKwargsItem]
-    mm_positions: list[PlaceholderRange]
-    mm_hashes: list[str]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
@@ -59,6 +58,12 @@ class CachedRequestState:
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
+
+    mm_features: Optional[list[MultiModalFeatureSpec]] = None
+    # for back-compatibility, will be removed in next major release
+    mm_kwargs: Optional[list[MultiModalKwargsItem]] = None
+    mm_positions: Optional[list[PlaceholderRange]] = None
+    mm_hashes: Optional[list[PlaceholderRange]] = None
 
     lora_request: Optional[LoRARequest] = None
 
@@ -73,8 +78,18 @@ class CachedRequestState:
     @property
     @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
                 "removed in v0.13. Please use `mm_kwargs` instead.")
-    def mm_inputs(self) -> list[MultiModalKwargs]:
-        return [MultiModalKwargs([item]) for item in self.mm_kwargs]
+    def mm_inputs(self) -> list[MultiModalKwargsItems]:
+        if vllm_version_is("0.10.2"):
+            assert self.mm_kwargs is not None
+            return [
+                MultiModalKwargsItems.from_seq([item])
+                for item in self.mm_kwargs
+            ]
+        assert self.mm_features is not None
+        return [
+            MultiModalKwargsItems.from_seq([f.data]) for f in self.mm_features
+            if f.data is not None
+        ]
 
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:
