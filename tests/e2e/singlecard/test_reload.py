@@ -39,7 +39,7 @@ def initialize_kv_cache(runner: NPUModelRunner):
     runner.kv_cache_config = kv_cache_config
     runner.input_batch = InputBatch(
         max_num_reqs=runner.max_num_reqs,
-        max_model_len=runner.max_model_len,
+        max_model_len=runner.model_config.max_model_len,
         max_num_batched_tokens=runner.max_num_tokens,
         device=runner.device,
         pin_memory=runner.pin_memory,
@@ -91,7 +91,16 @@ def model_runner():
     return runner
 
 
-model_runner2 = model_runner
+model_runner_2 = model_runner
+
+
+def test_update_config(model_runner):
+    # Simple update
+    model_runner.update_config({"load_config": {"load_format": "dummy"}})
+    assert model_runner.load_config.load_format == "dummy"
+    # Raise error on non-existing config
+    with pytest.raises(AssertionError):
+        model_runner.update_config({"do_not_exist_config": "dummy"})
 
 
 def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
