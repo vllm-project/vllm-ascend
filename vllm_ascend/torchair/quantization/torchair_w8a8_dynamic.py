@@ -556,6 +556,9 @@ def torchair_fused_experts_with_allgather(hidden_states: torch.Tensor,
 
     hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
 
+    group_list_type = 1
+    row_idx_type = 0
+
     hidden_states, expanded_x_idx, expert_tokens, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
         hidden_states,
         topk_ids,
@@ -569,8 +572,7 @@ def torchair_fused_experts_with_allgather(hidden_states: torch.Tensor,
             ep_rank * local_num_experts, (ep_rank + 1) * local_num_experts
         ],
         quant_mode=-1,
-        row_idx_type=1)
-    group_list_type = 1
+        row_idx_type=row_idx_type)
 
     sorted_topk_weight = torch.index_select(topk_weights.view(-1), 0,
                                             expanded_x_idx)
@@ -602,17 +604,27 @@ def torchair_fused_experts_with_allgather(hidden_states: torch.Tensor,
         quant_mode=1,
     )
 
-    final_hidden_states = torch_npu.npu_grouped_matmul_finalize_routing(
-        hidden_states,
-        w2,
-        scale=w2_scale.to(torch.float32),
+    hidden_states = torch_npu.npu_grouped_matmul(
+        [hidden_states], 
+        [w2], 
+        scale=[w2_scale], 
+        per_token_scale=[pertoken_scale], 
         bias=None,
-        pertoken_scale=pertoken_scale.view(-1),
-        group_list=expert_tokens,
-        shared_input=share_input,
-        logit=sorted_topk_weight.to(torch.float32),
-        row_index=row_index,
-        output_bs=batch_size).to(torch.bfloat16)
+        group_list=expert_tokens, 
+        split_item=3, 
+        output_dtype=torch.bfloat16,
+        group_type=0, 
+        group_list_type=group_list_type)[0]
+                    
+    final_hidden_states = torch_npu.npu_moe_finalize_routing(
+        hidden_states.unsqueeze(1).to(torch.bfloat16),
+        None, 
+        None, 
+        None,
+        topk_weights.to(torch.bfloat16),
+        expanded_x_idx, 
+        topk_ids, 
+        drop_pad_mode=3)
 
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
