@@ -333,6 +333,15 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        shared_out, fused_out = AscendFusedMoE.forward(
+            self,
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+        )
+        return shared_out, fused_out
+
+    def forward_impl(self, hidden_states: torch.Tensor,
+                     router_logits: torch.Tensor):
         # Make sure the shared experts stream begins after hidden_states are ready.
         if self.multistream_overlap_shared_expert:
             self.shared_expert_stream.wait_stream(  # type: ignore
@@ -347,8 +356,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             moe_comm_type = forward_context.moe_comm_type
             if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
                 shared_out = tensor_model_parallel_all_reduce(shared_out)
-
-        _, fused_out = AscendFusedMoE.forward(
+        fused_output = AscendFusedMoE.forward_impl(
             self,
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -356,17 +364,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # Make sure the default stream waits for the shared experts stream to finish.
         if self.multistream_overlap_shared_expert:
             torch.npu.current_stream().wait_stream(self.shared_expert_stream)
-        return shared_out, fused_out
-
-    def forward_impl(self, hidden_states: torch.Tensor,
-                     router_logits: torch.Tensor):
-        shared_output = torch.empty(1)
-        fused_output = AscendFusedMoE.forward_impl(
-            self,
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
-        return shared_output, fused_output
+        return shared_out, fused_output
 
 
 UnquantizedFusedMoEMethod.__init__ = unquantized_fused_moe_init_func
