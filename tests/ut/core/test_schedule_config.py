@@ -27,7 +27,6 @@ class TestAscendSchedulerConfig(TestBase):
             max_model_len=8192,
             is_multimodal_model=False,
             send_delta_data=False,
-            scheduler_delay_factor=0,
         )
 
     def test_initialize_from_config_with_default(self):
@@ -51,6 +50,8 @@ class TestAscendSchedulerConfig(TestBase):
                 scheduler_cls="vllm_ascend.core.scheduler.AscendScheduler",
                 max_num_batched_tokens=2048,
                 max_model_len=2048,
+                max_long_partial_prefills=1,
+                long_prefill_token_threshold=512,
             ),
         )
         self.assertEqual(ascend_config.enable_chunked_prefill, False)
@@ -59,6 +60,8 @@ class TestAscendSchedulerConfig(TestBase):
                          "vllm_ascend.core.scheduler.AscendScheduler")
         self.assertEqual(ascend_config.max_num_batched_tokens, 2048)
         self.assertEqual(ascend_config.encoder_cache_size, 2048)
+        self.assertEqual(ascend_config.max_long_partial_prefills, 1)
+        self.assertEqual(ascend_config.long_prefill_token_threshold, 512)
 
     def test_not_implemented_policy(self):
         with self.assertRaises(NotImplementedError) as context:
@@ -87,21 +90,6 @@ class TestAscendSchedulerConfig(TestBase):
             )
         self.assertIn(
             "currently AscendScheduler doesn't support send_delta_data",
-            str(context.exception),
-        )
-
-    def test_not_implemented_delay_factor(self):
-        with self.assertRaises(NotImplementedError) as context:
-            AscendSchedulerConfig.initialize_from_config(
-                self.basic_scheduler_config,
-                AscendSchedulerConfig(
-                    delay_factor=1,
-                    max_num_batched_tokens=2048,
-                    max_model_len=2048,
-                ),
-            )
-        self.assertIn(
-            "currently AscendScheduler doesn't support scheduler_delay_factor",
             str(context.exception),
         )
 

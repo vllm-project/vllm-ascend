@@ -22,13 +22,12 @@ import functools
 import math
 import os
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
-import torch_npu  # noqa: F401  # noqa: F401
+import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
@@ -591,6 +590,14 @@ def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
 
 
+def enable_sp() -> bool:
+    from vllm.config import get_cached_compilation_config
+
+    return (
+        get_cached_compilation_config().pass_config.enable_sequence_parallelism
+        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM)
+
+
 def is_moe_model(vllm_config: VllmConfig):
     config = vllm_config.model_config.hf_config
     return any('experts' in key.lower() for key in config.to_dict())
@@ -635,34 +642,3 @@ def npu_stream_switch(target_stream: torch.npu.Stream,
         return nullcontext()
     assert target_stream is not None
     return torch.npu.stream(target_stream)
-
-
-@dataclass
-class GraphParams:
-    events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
-    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
-    attn_params: dict[int, list[tuple]]
-
-
-_graph_params: Optional[GraphParams] = None
-
-
-def set_graph_params(aclgraph_capture_sizes: set[int]):
-    global _graph_params
-    if _graph_params is not None:
-        raise ValueError("Graph parameters have already been set!")
-    _graph_params = GraphParams(
-        {size: []
-         for size in aclgraph_capture_sizes},
-        {size: None
-         for size in aclgraph_capture_sizes},
-        {size: []
-         for size in aclgraph_capture_sizes},
-        {size: []
-         for size in aclgraph_capture_sizes},
-    )
-
-
-def get_graph_params():
-    return _graph_params

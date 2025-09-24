@@ -70,7 +70,7 @@ run_tests_for_model() {
   # Start prefill instance
   PREFILL_PORT=8001
 
-  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=0 VLLM_LLMDD_RPC_PORT=5559 vllm serve $model_name \
+  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=0 VLLM_ASCEND_LLMDD_RPC_PORT=5559 vllm serve $model_name \
   --port $PREFILL_PORT \
   --seed 1024 \
   --enforce-eager \
@@ -90,7 +90,7 @@ run_tests_for_model() {
   DECODE_PORT=8002
 
   # Build the command with or without model-specific args
-  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=1 VLLM_LLMDD_RPC_PORT=6000 vllm serve $model_name \
+  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=1 VLLM_ASCEND_LLMDD_RPC_PORT=6000 vllm serve $model_name \
   --port $DECODE_PORT \
   --seed 1024 \
   --enforce-eager \

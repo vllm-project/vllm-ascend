@@ -142,7 +142,7 @@ class NPUPlatform(Platform):
                 "functionality is currently suboptimal.")
             if not model_config.is_multimodal_model and \
                 structured_outputs_config.backend == "auto" and \
-                not scheduler_config.delay_factor > 0 and \
+                not getattr(scheduler_config, "scheduler_delay_factor", 0) > 0 and \
                 not scheduler_config.send_delta_data and \
                 scheduler_config.policy == "fcfs":
                 ascend_scheduler_config.enabled = True
@@ -281,12 +281,6 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config,
                 ascend_config.ascend_scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
-
-        if compilation_config.pass_config.enable_sequence_parallelism:
-            if not parallel_config.enable_expert_parallel or vllm_config.model_config.hf_config.model_type != "qwen3_moe":
-                raise NotImplementedError(
-                    "For better performance in Qwen3 MoE, SP only works exclusively with MC2, AllToAll, and AllToAllV."
-                )
 
     @classmethod
     def get_attn_backend_cls(cls,
