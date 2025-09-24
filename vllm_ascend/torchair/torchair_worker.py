@@ -28,6 +28,20 @@ from vllm_ascend.worker.worker_v1 import NPUWorker
 class NPUTorchairWorker(NPUWorker):
     """Torchair worker bases on NPUWorker. Only torchair specified code should be added in this class."""
 
+    def __init__(self,
+                 vllm_config,
+                 local_rank,
+                 rank,
+                 distributed_init_method,
+                 is_driver_worker=False,
+                 **kwargs):
+        super().__init__(vllm_config, local_rank, rank,
+                         distributed_init_method, is_driver_worker, **kwargs)
+        from vllm.model_executor.layers.linear import \
+            WEIGHT_LOADER_V2_SUPPORTED
+        if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
+            WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
+
     def determine_available_memory(self) -> int:
         """Override determine_available_memory to use cached torchair kv_cache_bytes."""
 
