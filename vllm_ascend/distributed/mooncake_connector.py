@@ -11,7 +11,7 @@ from collections import defaultdict, deque
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, OrderedDict, Tuple
 
 import msgspec
 import numpy as np
@@ -68,12 +68,16 @@ class KVCacheTaskTracker:
         # intentionally delayed. Each entry is a tuple of (request_id,
         # timestamp). If a request remains in this queue for too long, it will
         # be force-freed.
-        self.delayed_free_requests: deque[Tuple[str, float]] = deque()
+        self.record_finished_requests: set[str] = set()
+        self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
 
     def update_done_task_count(self, request_id: str):
         with self.done_task_lock:
             self.finished_requests.add(request_id)
-            self._remove_delayed_requests(request_id)
+            if request_id in self.delayed_free_requests:
+                self._remove_delayed_requests(request_id)
+            else:
+                self.record_finished_requests.add(request_id)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -91,7 +95,10 @@ class KVCacheTaskTracker:
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         """Add a delayed free request."""
         with self.done_task_lock:
-            self.delayed_free_requests.append((request_id, delay_start_time))
+            if request_id not in self.record_finished_requests:
+                self.delayed_free_requests[request_id] = delay_start_time
+            else:
+                self.record_finished_requests.discard(request_id)
 
     def _retrieve_expired_requests(self):
         """Retrieve all expired delayed requests."""
@@ -99,10 +106,11 @@ class KVCacheTaskTracker:
         # Free delayed requests if they exceed the timeout
         current_time = time.time()
         while self.delayed_free_requests:
-            request_id, delay_start_time = self.delayed_free_requests[0]
+            request_id = next(iter(self.delayed_free_requests))
+            delay_start_time = self.delayed_free_requests[request_id]
             if (current_time - delay_start_time
                     > envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT):
-                self.delayed_free_requests.popleft()
+                self.delayed_free_requests.popitem(last=False)
                 expired_requests.add(request_id)
                 logger.info("Force freed request: %s", request_id)
             else:
@@ -111,8 +119,7 @@ class KVCacheTaskTracker:
 
     def _remove_delayed_requests(self, request_id: str):
         """Remove all delayed free requests matching the given request_id."""
-        self.delayed_free_requests = deque(
-            (r, t) for r, t in self.delayed_free_requests if r != request_id)
+        self.delayed_free_requests.pop(request_id)
 
 
 class KVCacheSendingThread(threading.Thread):
