@@ -31,8 +31,8 @@ def mock_adaptor():
 
 
 def test_generate_task_and_state_flow(mock_adaptor):
-    loader_obj = loader.D2DExpertWeightLoader(mock_adaptor)
-
+    loader_obj = loader.D2DExpertWeightLoader()
+    loader_obj.set_adator(mock_adaptor)
 
     with patch("torch.distributed.P2POp") as mock_p2p, \
          patch("torch.distributed.isend", return_value="isend_op"), \
@@ -58,12 +58,12 @@ def test_generate_task_and_state_flow(mock_adaptor):
 
 
 def test_asyn_transfer_and_update(mock_adaptor):
-    loader_obj = loader.D2DExpertWeightLoader(mock_adaptor)
+    loader_obj = loader.D2DExpertWeightLoader()
+    loader_obj.set_adator(mock_adaptor)
 
     loader_obj.comm_op_list = ["fake_op"]
     loader_obj.state = loader.ExpertWeightUpdateState.READY
 
-    # 给 reqs 添加类型注解，初始为空列表
     reqs: list[MagicMock] = []
 
     with patch("torch.distributed.batch_isend_irecv",
@@ -71,9 +71,8 @@ def test_asyn_transfer_and_update(mock_adaptor):
         loader_obj.asyn_expert_weight_transfer(reqs)
 
     assert loader_obj.state == loader.ExpertWeightUpdateState.TRANSFERRING
-    assert len(reqs) > 0  # 这里不直接判断 "req1"，因为现在用 MagicMock 代替字符串
+    assert len(reqs) > 0
 
-    # 创建单个 mock 请求
     mock_req = MagicMock()
     mock_req.wait.return_value = None
     reqs = [mock_req]
@@ -95,13 +94,15 @@ def test_asyn_transfer_and_update(mock_adaptor):
 
 
 def test_set_log2phy_map(mock_adaptor):
-    loader_obj = loader.D2DExpertWeightLoader(mock_adaptor)
+    loader_obj = loader.D2DExpertWeightLoader()
+    loader_obj.set_adator(mock_adaptor)
     loader_obj.set_log2phy_map({"a": 1})
     assert loader_obj.updated_log2phy_map == {"a": 1}
 
 
 def test_invalid_state_asyn_update(mock_adaptor):
-    loader_obj = loader.D2DExpertWeightLoader(mock_adaptor)
+    loader_obj = loader.D2DExpertWeightLoader()
+    loader_obj.set_adator(mock_adaptor)
 
     loader_obj.state = loader.ExpertWeightUpdateState.WAITING
     reqs: list[Any] = []
@@ -115,6 +116,7 @@ def test_invalid_state_asyn_update(mock_adaptor):
 
 
 def test_load_impl_not_implemented(mock_adaptor):
-    loader_obj = loader.D2DExpertWeightLoader(mock_adaptor)
+    loader_obj = loader.D2DExpertWeightLoader()
+    loader_obj.set_adator(mock_adaptor)
     with pytest.raises(NotImplementedError):
         loader_obj.load_impl({}, {})

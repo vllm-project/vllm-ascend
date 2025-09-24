@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Dict, Set
 
 import numpy as np
 import pytest
@@ -20,18 +20,15 @@ def policy(config):
 def test_safe_operations(policy):
     # safe_divide
     assert policy.safe_divide(10, 2) == 5
-    with pytest.raises(ZeroDivisionError):
-        policy.safe_divide(1, 0)
+    assert policy.safe_divide(1, 0) == 0
 
     # safe_exact_divide
     assert policy.safe_exact_divide(10, 3) == 3
-    with pytest.raises(ZeroDivisionError):
-        policy.safe_exact_divide(1, 0)
+    assert policy.safe_exact_divide(1, 0) == 0
 
     # safe_mod
     assert policy.safe_mod(10, 3) == 1
-    with pytest.raises(ZeroDivisionError):
-        policy.safe_mod(1, 0)
+    assert policy.safe_mod(1, 0) == 0
 
 
 def test_add_redundant():
@@ -81,7 +78,7 @@ def test_prepare_expert_list():
 def test_non_redundant_expert_information():
     origin_deployment = np.array([[0, 1]])
     updated_weights = [(0, 10), (1, 5)]
-    rendun_pos: dict[Any, Any] = {}
+    rendun_pos: Dict[int, Set[int]] = {0: set()}
     assignments, weights, loads, counts = DynamicEplbV2.non_redundant_expert_information(
         origin_deployment, updated_weights, rendun_pos)
     assert assignments[0] == [0, 1]
