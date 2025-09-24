@@ -50,7 +50,7 @@ class AttentionMaskBuilder:
         self._seq_len_cached = attn_mask.shape[0]
         self.attn_mask_cache = attn_mask
         self.device = device
-        if torch.version.cann.startswith("8.3"):
+        if torch.version.cann > "8.3.RC1.alpha002":
             assigned_mask_dim = 2048
             self.chunked_prefill_attn_mask = torch.triu(
                 torch.ones(assigned_mask_dim, assigned_mask_dim),
@@ -82,7 +82,7 @@ class AttentionMaskBuilder:
         dtype: torch.dtype = None,
         device: torch.device = None,
     ) -> torch.Tensor:
-        if torch.version.cann.startswith("8.3"):
+        if torch.version.cann > "8.3.RC1.alpha002":
             return self.chunked_prefill_attn_mask
         else:
             if dtype not in [torch.float16, torch.bfloat16]:
