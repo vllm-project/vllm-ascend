@@ -304,17 +304,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 (self.max_num_tokens, self.model_config.get_hidden_size()),
                 dtype=self.dtype,
                 device=self.device)
-
         # Set up Attention
-        self.attn_backend = get_attn_backend(
-            0,
-            self.dtype,
-            None,
-            self.block_size,
-            self.model_config.is_attention_free,
-            use_mla=self.model_config.use_mla,
-        )
-
+        if vllm_version_is("0.10.2"):
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                self.block_size,
+                self.model_config.is_attention_free,
+                use_mla=self.model_config.use_mla,
+            )
+        else:
+            self.attn_backend = get_attn_backend(
+                0,
+                self.dtype,
+                None,
+                self.block_size,
+                use_mla=self.model_config.use_mla,
+            )
         if torch.version.cann.startswith("8.3"):
             self.attn_mask_builder = AttentionMaskBuilder(
                 self.scheduler_config.max_num_batched_tokens, self.dtype,
