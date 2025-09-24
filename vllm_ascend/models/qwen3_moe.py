@@ -50,26 +50,30 @@ from vllm_ascend.ops.fused_moe import AscendFusedMoE
 
 class CustomQwen3MoeAttention(Qwen3MoeAttention):
     def forward(
-        self,
-        hidden_states: torch.Tensor,
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            kv_cache: Optional[torch.Tensor] = None,
+            attn_metadata: Optional[Any] = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         sizes = [self.q_size, self.kv_size, self.kv_size]
-        q, k, v = torch.split_with_sizes_copy(qkv, sizes, dim=-1)
 
-        # Add qk-norm
-        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
-                           self.head_dim)
+        q, k, v = torch.split_with_sizes(qkv, sizes, dim=-1)
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
-        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
-                           self.head_dim)
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
 
-        attn_output = self.attn(q, k, v)
+        q, k = self.rotary_emb(positions, q, k)
+
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+
         output, _ = self.o_proj(attn_output)
         return output
+
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
 
