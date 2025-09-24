@@ -1,18 +1,14 @@
-from abc import ABC, abstractmethod
-from typing import Optional
-
 import math
 import torch
 import torch_npu
-
+from abc import ABC, abstractmethod
+from typing import Optional
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
+
 from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
-
-from vllm_ascend.ascend_config import WeightPrefetchConfig
-
 
 PREFETCH_STREAM: Optional[torch_npu.npu.Stream] = None
 
@@ -57,8 +53,7 @@ class AttentionWeightPrefetchMethod(WeightPrefetchMethod):
         super().__init__(weight_prefetch_config)
 
     @classmethod
-    def create(cls, weight_prefetch_config: Optional[WeightPrefetchConfig]) -> "AttentionWeightPrefetchMethod":
-        weight_prefetch_config = weight_prefetch_config if weight_prefetch_config else WeightPrefetchConfig({})
+    def create(cls, weight_prefetch_config: WeightPrefetchConfig, vllm_config: VllmConfig) -> "AttentionWeightPrefetchMethod":
         return cls(weight_prefetch_config)
 
     def maybe_weight_prefetch_preprocess(self, weight: torch.Tensor, start_flag: torch.Tensor):
@@ -85,8 +80,9 @@ class AttentionWeightPrefetchMethod(WeightPrefetchMethod):
                                         dependency=start_flag,
                                         max_size=max_weight_size)
 
+
 class MoEWeightPrefetchMethod(WeightPrefetchMethod):
-    
+
     def __init__(self, weight_prefetch_config: WeightPrefetchConfig, vllm_config: VllmConfig):
         super().__init__(weight_prefetch_config)
         self.activated = False
@@ -132,9 +128,13 @@ class MoEWeightPrefetchMethod(WeightPrefetchMethod):
             return
         self.main_stream.wait_stream(self.prefetch_stream)
         self.prefetch_instruction_delivered = False
-    
+
+
 class PrefetchManager:
-    prefetch_map = {MoEWeightPrefetchMethod: None}
+    prefetch_map: Dict[Type, Optional[WeightPrefetchMethod]] = {
+        AttentionWeightPrefetchMethod: None, 
+        MoEWeightPrefetchMethod: None
+    }
 
     @classmethod
     def init_forward_prefetch(cls, vllm_config: VllmConfig):
@@ -145,6 +145,7 @@ class PrefetchManager:
     @classmethod
     def get_prefetch_obj(cls, prefetch_cls: type[WeightPrefetchMethod]) -> WeightPrefetchMethod:
         return PrefetchManager.prefetch_map.get(prefetch_cls)
+
 
 def npu_prefetch(inputs: torch.Tensor,
                  dependency: torch.Tensor,

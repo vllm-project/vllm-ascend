@@ -1,18 +1,16 @@
 import math
+import torch
 from contextlib import contextmanager
 from enum import Enum
 from typing import Any, Optional
-
-import torch
-import vllm_ascend.envs as envs_ascend
-
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size)
 from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
-from vllm_ascend.ops.weight_prefetch import PrefetchManager
 
+import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ops.weight_prefetch import PrefetchManager
 
 
 class FusedMoEState(Enum):
@@ -141,7 +139,7 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
-        
+
         # moe weight prefetch
         forward_context.num_tokens = num_tokens
         forward_context.model_instance = model_instance
