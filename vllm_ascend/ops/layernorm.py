@@ -27,6 +27,7 @@ def _addrmsnorm_forward_oot(
     x: torch.Tensor,
     residual: torch.Tensor,
     layer: Optional[torch.nn.Module] = None,
+    bias: Optional[torch.nn.Module] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     import torch_npu
 
@@ -39,6 +40,7 @@ def _addrmsnorm_forward_oot(
             self.weight,
             layer.aclnn_input_scale,
             layer.aclnn_input_offset,
+            beta=bias,
             epsilon=self.variance_epsilon)
     else:
         if is_310p():
@@ -50,6 +52,8 @@ def _addrmsnorm_forward_oot(
         else:
             x, _, residual = torch_npu.npu_add_rms_norm(
                 x, residual, self.weight, self.variance_epsilon)
+        if bias:
+            x.add_(bias)
     torch.ops.vllm.maybe_wait_prefetch_done(x)
     return x, residual
 
@@ -60,6 +64,7 @@ class AscendRMSNorm(RMSNorm):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
@@ -67,10 +72,12 @@ class AscendRMSNorm(RMSNorm):
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             assert x.size(0) == residual.size(0)
             x, residual = _addrmsnorm_forward_oot(
-                self, x, residual, self.next_need_quant_fusion_linear)
+                self, x, residual, self.next_need_quant_fusion_linear, bias)
             return x, residual
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
                                              self.variance_epsilon)
+        if bias:
+            x.add_(bias)
         return x
 
     @property
@@ -100,6 +107,12 @@ class AscendRMSNorm(RMSNorm):
             # does not need to be repeated
             if not forward_context.prefetch_mlp_enabled:
                 forward_context.layer_idx += 1
+        elif fusion_linear == "qkv_moe":
+            next_linear = model_instance.model.layers[layer_idx].self_attn.qkv_proj
+            forward_context.fusion_linear = "gate_moe"
+        elif fusion_linear == "gate_moe":
+            forward_context.fusion_linear = "qkv_moe"
+            forward_context.layer_idx += 1
         from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
         if next_linear is not None and \
             not isinstance(next_linear.quant_method.quant_method, AscendW8A8LinearMethod):
@@ -126,7 +139,5 @@ class AscendQuantRMSNorm(AscendRMSNorm):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if residual is not None:
-            x, residual = super().forward_oot(x, residual)
-            return x.add_(self.bias), residual
-        return cast(torch.Tensor, super().forward_oot(x)).add_(self.bias)
+        x, residual = super().forward_oot(x, residual, self.bias)
+        return x, residual
