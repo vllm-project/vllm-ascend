@@ -75,14 +75,8 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
-            self.tp_size,
-            self.num_k_heads,
-            self.num_v_heads,
-            self.head_k_dim,
-            self.head_v_dim,
-            self.conv_kernel_size,
-            self.num_spec,
-            use_v1=True)
+            self.tp_size, self.num_k_heads, self.num_v_heads, self.head_k_dim,
+            self.head_v_dim, self.conv_kernel_size, self.num_spec)
 
     def __init__(
         self,
