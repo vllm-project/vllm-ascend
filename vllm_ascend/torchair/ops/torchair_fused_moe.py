@@ -44,8 +44,8 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
                                               determine_default_log2phy_map)
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
-from vllm_ascend.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
+from vllm_ascend.torchair.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
