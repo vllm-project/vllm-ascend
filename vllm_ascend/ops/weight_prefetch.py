@@ -1,13 +1,14 @@
+from abc import ABC, abstractmethod
+from typing import Optional, Dict, Type
+
 import math
 import torch
 import torch_npu
-from abc import ABC, abstractmethod
-from typing import Optional
+
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
-
 from vllm_ascend.ascend_config import WeightPrefetchConfig, get_ascend_config
 
 PREFETCH_STREAM: Optional[torch_npu.npu.Stream] = None
@@ -100,7 +101,7 @@ class MoEWeightPrefetchMethod(WeightPrefetchMethod):
             self.activated = False
             return
         if vllm_config.model_config.hf_config.model_type == "qwen3_moe":
-            if (not forward_context.with_prefill and forward_context.num_tokens >= 96 and 
+            if (not forward_context.with_prefill and forward_context.num_tokens >= 96 and
                 parallel_config.world_size in (16, 32)):
                 self.activated = True
                 prefetch_ratio = self.weight_prefetch_config.moe_weight_prefetch_config.prefetch_ratio
@@ -132,7 +133,7 @@ class MoEWeightPrefetchMethod(WeightPrefetchMethod):
 
 class PrefetchManager:
     prefetch_map: Dict[Type, Optional[WeightPrefetchMethod]] = {
-        AttentionWeightPrefetchMethod: None, 
+        AttentionWeightPrefetchMethod: None,
         MoEWeightPrefetchMethod: None
     }
 
