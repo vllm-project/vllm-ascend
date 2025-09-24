@@ -21,8 +21,7 @@ from typing import Any, Callable, Optional
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group)
 from vllm.forward_context import get_forward_context
@@ -42,7 +41,6 @@ from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
-from vllm_ascend.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
                                get_all_reduce_merge_state,
                                get_rm_router_logits_state, is_310p,
@@ -360,8 +358,7 @@ class AscendFusedMoE(FusedMoE):
                 top_k: Optional[int] = None,
                 shared_experts: Optional[Any] = None,
                 gate=None,
-                replace_allreduce: bool = False,
-                _metadata_for_padding: Optional[MetadataForPadding] = None):
+                replace_allreduce: bool = False):
 
         assert self.quant_method is not None
 
@@ -379,13 +376,7 @@ class AscendFusedMoE(FusedMoE):
             # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
             shared_hidden_states = shared_experts(hidden_states)
 
-        enable_sp = _metadata_for_padding is not None and _metadata_for_padding.not_dummy_and_is_prefill
-        tp_size = get_tensor_model_parallel_world_size()
-        if enable_sp:
-            tp_rank = get_tensor_model_parallel_rank()
-            mc2_mask_sp = _metadata_for_padding.mc2_mask if _metadata_for_padding is not None else forward_context.mc2_mask
-            chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
-            mc2_mask = chunk_mc2_mask[tp_rank]
+        if forward_context.sp_enabled:
             replace_allreduce = True
 
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
