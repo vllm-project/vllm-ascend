@@ -28,7 +28,7 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
-    "Qwen/Qwen3-0.6B",
+    "deepseek-ai/DeepSeek-V2-Lite",
 ]
 
 
@@ -39,8 +39,10 @@ def test_models_with_multistream_overlap_shared_expert(
     max_tokens: int,
 ) -> None:
     prompts = [
-        "Hello, my name is", "The president of the United States is",
-        "The capital of France is", "The future of AI is"
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
     ]
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
@@ -48,6 +50,8 @@ def test_models_with_multistream_overlap_shared_expert(
             model,
             max_model_len=1024,
             enforce_eager=True,
+            data_parallel_size=2,
+            enable_expert_parallel=True,
             additional_config={
                 "multistream_overlap_shared_expert": True,
             },
@@ -59,6 +63,8 @@ def test_models_with_multistream_overlap_shared_expert(
             model,
             max_model_len=1024,
             enforce_eager=False,
+            data_parallel_size=2,
+            enable_expert_parallel=True,
             additional_config={
                 "multistream_overlap_shared_expert": True,
             },
@@ -70,6 +76,8 @@ def test_models_with_multistream_overlap_shared_expert(
             model,
             max_model_len=1024,
             enforce_eager=True,
+            data_parallel_size=2,
+            enable_expert_parallel=True,
     ) as runner:
         vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
 
