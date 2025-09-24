@@ -56,6 +56,18 @@
 #    Future Plan:
 #       Find a better way to support tensor alignment for 310p without this patch.
 #
+# ** File: platform/patch_common/patch_multimodal_merge.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.utils._merge_multimodal_embeddings`
+#    Why:
+#       '_merge_multimodal_embeddings' func of vllm is incompatible with Ascend.
+#    How：
+#       Replace with CPU operation that can be executed asynchronously.
+#    Related PR (if no, explain why):
+#       This is a bug by Ascend only. It can' be fixed in vLLM.
+#    Future Plan:
+#       Identify this pattern in torch-npu and remove this patch.
+#
 # * Worker Patch:
 # ===============
 # ** File: worker/patch_common/patch_minicpm.py **
