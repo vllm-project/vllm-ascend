@@ -42,8 +42,6 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
-KV_CACHE_DTYPE = torch.bfloat16
-
 
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     engine_id: str
@@ -173,7 +171,7 @@ class KVCacheSendingThread(threading.Thread):
         handshake_port = self.side_channel_port + self.tp_rank
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
         logger.info("Starting listening on path: %s", path)
-        with zmq_ctx(zmq.ROUTER, path) as sock:
+        with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
             self.ready_event.set()
             decoder = msgspec.msgpack.Decoder(type=tuple)
             while True:
@@ -201,10 +199,11 @@ class KVCacheSendingThread(threading.Thread):
                         while True:
                             try:
                                 # Send ACK to the sender.
-                                sock.send_multipart((identity, b"", b"ACK"),
-                                                    flags=zmq.NOBLOCK)
+                                sock.send_multipart(
+                                    (identity, b"", b"ACK"),
+                                    flags=zmq.NOBLOCK)  # type: ignore
                                 break
-                            except zmq.Again:
+                            except zmq.Again:  # type: ignore
                                 # If the socket is not ready, retry sending.
                                 logger.debug(
                                     "Socket not ready, retrying to send ACK for "
@@ -245,8 +244,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.use_mla = len(block_len) == 2
         self.use_sfa = len(block_len) == 3
 
-        self.request_queue = queue.Queue()
-        # TODO(jianzs): make this configurable
+        self.request_queue: queue.Queue[Any] = queue.Queue()
         max_workers = getattr(envs_ascend, 'MAX_TRANSFER_WORKERS', 32)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
 
@@ -255,8 +253,10 @@ class KVCacheRecvingThread(threading.Thread):
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
         self.remote_sockets_lock = threading.Lock()
-        self.remote_sockets: dict[str, deque[zmq.Socket]] = defaultdict(deque)
-        self.remote_poller = zmq.Poller()
+        self.remote_sockets: dict[  # type: ignore
+            str, deque[zmq.Socket]] = defaultdict(  # type: ignore
+                deque)
+        self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0  # seconds
 
         self.vllm_config = vllm_config
@@ -388,8 +388,8 @@ class KVCacheRecvingThread(threading.Thread):
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list,
                                                 length_list)
         if ret < 0:
-            logger.error(
-                "Mooncake transfer failed for request %s: ", req_meta["request_id"])
+            logger.error("Mooncake transfer failed for request %s",
+                         req_meta["request_id"])
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
         req_end_time = time.perf_counter()
@@ -398,15 +398,18 @@ class KVCacheRecvingThread(threading.Thread):
                     " %d blocks). local_ip %s local_device_id %s remote_session_id %s", request_id, req_transfer_elapsed,
                     num_transfer_groups, num_blocks, get_ip(), self.tp_rank, session_id)
         if self.num_need_pulls > 1 and offset == self.num_need_pulls -1:
-            self._cat_kv_cache(local_block_ids)
+            self._cat_kv_cache(remote_block_id)
 
     def _cat_kv_cache(self, block_ids: list[list[int]]):
-        # Get necessary parameters from the first key cache
+        # Get necessary parameters
         k_cache = list(self.kv_caches.values())[0][0]
         kv_shape = k_cache.shape
-        block_size, num_kv_head, head_dim = kv_shape[1:]
         dtype = k_cache.dtype
         device = k_cache.device
+        head_dim = self.model_config.hf_config.head_dim
+        block_size = self.vllm_config.cache_config.block_size
+        num_kv_head = max(self.model_config.hf_config.num_key_value_heads // self.tp_size,
+                          1)
         
         flat_block_ids = [item for sublist in block_ids for item in sublist]
         block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32)
@@ -429,7 +432,10 @@ class KVCacheRecvingThread(threading.Thread):
         slot_mapping = slot_mapping.flatten().to(device=device)
 
         # Process each layer in the KV cache
-        for layer, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
+        for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
+            if len(k_cache_layer.shape) == 3:   # kv shape in torchair model is [num_block, block_size, num_kv_head*head_dim]
+                k_cache_layer = k_cache_layer.view(kv_shape[0],kv_shape[1], num_kv_head, head_dim)
+                v_cache_layer = v_cache_layer.view(kv_shape[0],kv_shape[1], num_kv_head, head_dim)
             # Load cache data into buffers
             torch_npu.atb.npu_paged_cache_load(
                 k_cache_layer,
@@ -472,11 +478,12 @@ class KVCacheRecvingThread(threading.Thread):
         buffer = buffer.view(num_blocks, self.num_need_pulls, block_size, -1)
         buffer.transpose_(1, 2)
         return buffer.contiguous().view(block_len, num_kv_head, -1)
+        # return buffer.contiguous().view(block_len, -1)
 
     def _get_remote_metadata(self, remote_host: str,
                              remote_handshake_port: int) -> None:
         """Get the metadata from the remote host."""
-        sock: Optional[zmq.Socket] = None
+        sock: Optional[zmq.Socket] = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")))
@@ -494,51 +501,62 @@ class KVCacheRecvingThread(threading.Thread):
             if sock is not None:
                 self._return_remote_socket(sock, remote_host,
                                            remote_handshake_port)
-                logger.debug("Returned socket to pool for %s:%d",
-                             remote_host, remote_handshake_port)
+                logger.debug("Returned socket to pool for %s:%d", remote_host,
+                             remote_handshake_port)
 
     def _send_done_recv_signal(self, request_id: str, remote_host: str,
                                remote_handshake_port: int):
         logger.debug("Sending done recving signal for request %s to %s:%d",
-                     request_id, remote_host, remote_handshake_port)
-        sock: Optional[zmq.Socket] = None
+                request_id, remote_host, remote_handshake_port)
+        sock: Optional[zmq.Socket] = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             data_bytes = self.encoder.encode((DONE_RECVING_MSG, request_id))
             ensure_zmq_send(sock, data_bytes)
-            resp = ensure_zmq_recv(sock, self.remote_poller,
+            resp = ensure_zmq_recv(sock,
+                                   self.remote_poller,
                                    timeout=self.timeout)
-            logger.debug(f"Received response for request {request_id}: {resp}")
+            logger.debug(
+                f"Received response for request {request_id}: {resp.decode('utf-8')}"
+            )
             if resp != b"ACK":
                 logger.error("Failed to receive ACK for request %s from %s:%d",
-                            request_id, remote_host, remote_handshake_port)
-                raise RuntimeError(f"Failed to receive ACK, resp: {resp}")
+                             request_id, remote_host, remote_handshake_port)
+                raise RuntimeError(
+                    f"Failed to receive ACK, resp: {resp.decode('utf-8')}")
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host,
                                            remote_handshake_port)
-                logger.debug("Returned socket to pool for %s:%d",
-                             remote_host, remote_handshake_port)
+                logger.debug("Returned socket to pool for %s:%d", remote_host,
+                             remote_handshake_port)
 
-    def _get_remote_socket(self, remote_host: str,
-                    remote_handshake_port: int) -> zmq.Socket:
+    def _get_remote_socket(
+            self, remote_host: str,
+            remote_handshake_port: int) -> zmq.Socket:  # type: ignore
         """Get a socket to the remote host."""
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
         with self.remote_sockets_lock:
             if self.remote_sockets[remote_path]:
                 return self.remote_sockets[remote_path].popleft()
 
-            ctx = zmq.Context()
-            sock = make_zmq_socket(ctx=ctx,
-                                   path=remote_path,
-                                   socket_type=zmq.REQ,
-                                   bind=False)
-            sock.setsockopt(zmq.SNDTIMEO, int(self.timeout * 1000))
-            self.remote_poller.register(sock, zmq.POLLIN)
+            ctx = zmq.Context()  # type: ignore
+            sock = make_zmq_socket(
+                ctx=ctx,
+                path=remote_path,
+                socket_type=zmq.REQ,  # type: ignore
+                bind=False)
+            sock.setsockopt(
+                zmq.SNDTIMEO,  # type: ignore
+                int(self.timeout * 1000))
+            self.remote_poller.register(sock, zmq.POLLIN)  # type: ignore
             return sock
 
-    def _return_remote_socket(self, sock: zmq.Socket, remote_host: str,
-                              remote_handshake_port: int) -> None:
+    def _return_remote_socket(
+            self,
+            sock: zmq.Socket,  # type: ignore
+            remote_host: str,
+            remote_handshake_port: int) -> None:
         """Return the remote socket to the pool."""
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
         with self.remote_sockets_lock:
@@ -566,7 +584,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         )
 
 
-class MooncakeConnectorV1_barebone(KVConnectorBase_V1):
+class MooncakeConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
@@ -662,7 +680,7 @@ class MooncakeConnectorScheduler:
         self.local_ip = get_ip()
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
-        self.side_channel_host = get_local_ip_by_remote()
+        self.side_channel_host = get_ip()
         self.max_device_id = vllm_config.parallel_config.tensor_parallel_size * \
                              vllm_config.parallel_config.data_parallel_size
 
@@ -704,7 +722,7 @@ class MooncakeConnectorScheduler:
 
         if params is not None and params.get("do_remote_prefill"):
             assert num_computed_tokens == 0, "Currently only support " \
-                "prefill with num_computed_tokens == 0."
+                                             "prefill with num_computed_tokens == 0."
             # Assume that the request's KV cache is already fully prefilled and
             # can be fetched entirely from the prefill node.
             count = max(len(request.prompt_token_ids) - 1, 0)
@@ -817,15 +835,17 @@ class MooncakeConnectorScheduler:
                 "decode", {})
         assert "tp_size" in decode_parallel_config.keys()
         self._decode_tp_size = decode_parallel_config["tp_size"]
-
+        num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
         if self.vllm_config.model_config.use_mla or self.ascend_config.use_sfa:
             num_need_pulls = 1
         else:
-            num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
             num_p_block_heads = max(1, num_key_value_heads // self._prefill_tp_size)
             num_d_block_heads = max(1, num_key_value_heads // self._decode_tp_size)
             num_need_pulls = num_d_block_heads // num_p_block_heads
         kv_role = self.vllm_config.kv_transfer_config.kv_role
+        logger.debug("get_finished_count, kv_role=%s, num_need_pulls=%d, decode_tp_size=%d", 
+                     kv_role, num_need_pulls, self._decode_tp_size
+                )
         if kv_role == 'kv_producer':
             return num_need_pulls * self._decode_tp_size
         else:
@@ -856,9 +876,10 @@ class MooncakeConnectorWorker:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         self.dp_size = vllm_config.parallel_config.data_parallel_size_local
         self.kv_caches: dict[str, torch.Tensor] = {}
-        self.side_channel_host = get_local_ip_by_remote()
+        self.side_channel_host = get_ip()
         self.max_device_id = self.tp_size * self.dp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        self.num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
 
         # Handshake base port
         self.side_channel_port = (
@@ -868,8 +889,8 @@ class MooncakeConnectorWorker:
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
 
-        # get tp device id 
-        # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940 
+        # get tp device id
+        # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940
         # introducing some changes
         device_ids_str = envs_ascend.PHYSICAL_DEVICES
         if device_ids_str is None:
@@ -889,10 +910,12 @@ class MooncakeConnectorWorker:
         assert len(device_ids) > self.tp_rank  # type: ignore
         self.device_id = device_ids[self.tp_rank]  # type: ignore
 
-        self._initialize(
-            hostname=self.side_channel_host + ':' + "0" + ':' + 'npu_' \
-                + str(self.device_id),
-            device_name=None)
+        if vllm_config.kv_transfer_config.get_from_extra_config(
+                'use_ascend_direct', False):
+            hostname = self.side_channel_host
+        else:
+            hostname = f"{self.side_channel_host}:0:npu_{self.device_id}"
+        self._initialize(hostname=hostname, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
         # Background thread for sending or receiving KV caches.
@@ -905,7 +928,6 @@ class MooncakeConnectorWorker:
         if self.vllm_config.model_config.is_deepseek_mla:
             self.num_need_pulls = 1
         else:
-            self.num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
             num_d_block_heads = max(1, self.num_key_value_heads // self.tp_size)
             num_p_block_heads = max(1, self.num_key_value_heads // self._prefill_tp_size)
             self.num_need_pulls = num_d_block_heads // num_p_block_heads
@@ -938,8 +960,7 @@ class MooncakeConnectorWorker:
     ) -> None:
         """Initialize the mooncake instance."""
         device_name = device_name if device_name is not None else ""
-        ret_value = self.engine.initialize(hostname, "P2PHANDSHAKE",
-                                           "ascend",
+        ret_value = self.engine.initialize(hostname, "P2PHANDSHAKE", "ascend",
                                            device_name)
         if ret_value != 0:
             raise RuntimeError(
@@ -952,7 +973,6 @@ class MooncakeConnectorWorker:
         first_kv_cache = first_kv_cache_tuple[0]
 
         # TODO(tms): Find a more robust way to detect and handle MLA
-<<<<<<< HEAD
         self.use_mla = first_kv_cache_tuple[0].size(
             -1) != first_kv_cache_tuple[1].size(-1) and len(
                 first_kv_cache_tuple) == 2
@@ -998,24 +1018,6 @@ class MooncakeConnectorWorker:
         logger.info(
             "Registering KV_Caches. use_mla: %s, use_sfa: %s, shape %s",
             self.use_mla, self.use_sfa, first_kv_cache.shape)
-=======
-        self.num_blocks = first_kv_cache.shape[0]
-        block_rank = len(first_kv_cache_tuple[0]) - 1
-        kv_elem_size = first_kv_cache.element_size()
-        # MLA case.[num_block, block_size, 1, hidden_dims],
-        # block_shape_1 -> nope, block_shape_2 -> rope
-        # non-MLA case.[num_block, block_size, num_heads, head_dims]
-        # block_shape_1 -> k, block_shape_1 -> v
-        block_shape_1 = first_kv_cache_tuple[0].shape[-block_rank:]
-        block_shape_2 = first_kv_cache_tuple[1].shape[-block_rank:]
-        self.block_len = [
-            kv_elem_size * math.prod(block_shape_1),
-            kv_elem_size * math.prod(block_shape_2)
-        ]
-        logger.debug(
-            "num_blocks: %s, block_shape_1: %s, block_shape_2: %s",
-            self.num_blocks, block_shape_1, block_shape_1)
->>>>>>> ebea8ec (fit new kv shape)
 
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
@@ -1053,10 +1055,14 @@ class MooncakeConnectorWorker:
 
         ready_event = threading.Event()
         if self.kv_role == 'kv_producer':
-            self.kv_send_thread = KVCacheSendingThread(
-                self.tp_rank, self._decode_tp_size, self.engine_id,
-                self.side_channel_host, self.side_channel_port, metadata,
-                ready_event, self.kv_caches)
+            self.kv_send_thread = KVCacheSendingThread(self.tp_rank, 
+                                                       self._decode_tp_size, 
+                                                       self.engine_id,
+                                                       self.side_channel_host, 
+                                                       self.side_channel_port, 
+                                                       metadata,
+                                                       ready_event, 
+                                                       self.kv_caches)
             self.kv_send_thread.start()
         else:
             self.kv_recv_thread = KVCacheRecvingThread(
@@ -1067,7 +1073,7 @@ class MooncakeConnectorWorker:
         ready_event.wait()
 
     def _register(self, ptr, length):
-        logger.info(
+        logger.debug(
             "Registering KV cache: ptr=0x%x, length=%d, num_blocks=%d, "
             "block_lens=%s", ptr, length, self.num_blocks, self.block_len)
         ret_value = self.engine.register_memory(ptr, length)
@@ -1075,10 +1081,14 @@ class MooncakeConnectorWorker:
             raise RuntimeError("Mooncake memory registration failed.")
 
     def get_finished(self) -> tuple[set[str], set[str]]:
-        done_sending = (self.kv_send_thread.get_and_clear_finished_requests()
-                        if self.kv_role == 'kv_producer' else set())
-        done_recving = (self.kv_recv_thread.get_and_clear_finished_requests()
-                        if self.kv_role == 'kv_consumer' else set())
+        done_sending = (
+            self.kv_send_thread.
+            get_and_clear_finished_requests(  # type: ignore[union-attr]
+            ) if self.kv_role == 'kv_producer' else set())
+        done_recving = (
+            self.kv_recv_thread.
+            get_and_clear_finished_requests(  # type: ignore[union-attr]
+            ) if self.kv_role == 'kv_consumer' else set())
         if self.tp_rank == 0:
             logger.debug(
                 "Number of completed KV cache send requests: %d, receive "
@@ -1126,14 +1136,17 @@ class MooncakeConnectorWorker:
         rand = random.Random(seed)
         sampled_nums = []
         ori_data = np.arange(self._prefill_tp_size)
-
         # random split prefill tp list
-        if self._prefill_tp_size > self.num_key_value_heads:
-            # TODO: can be modified
-            num_groups = len(ori_data) // self.num_key_value_heads
+        if self._prefill_tp_size > self.num_key_value_heads or self.vllm_config.model_config.is_deepseek_mla:
+            # ues deepseek mla, num_key_value_heads == 128, but consider as 1
+            if self.vllm_config.model_config.is_deepseek_mla:
+                num_kv_head = 1
+            else:
+                num_kv_head = self.num_key_value_heads
+            num_groups = len(ori_data) // num_kv_head
             ori_data = ori_data.reshape(-1, num_groups)
             rand_group_index = rand.sample(range(num_groups), \
-                max(self.tp_size // self.num_key_value_heads, 1)) # random choose a group
+                max(self._decode_tp_size // num_kv_head, 1)) # random choose a group
 
             choosen_group = ori_data[:, [rand_group_index]]
             flattened = choosen_group.reshape(-1).tolist()
@@ -1141,60 +1154,31 @@ class MooncakeConnectorWorker:
 
         # non-random split
         else:
-            group_size = self._prefill_tp_size // self.tp_size
-            for i in range(self.tp_size):
+            group_size = self._prefill_tp_size // self._decode_tp_size
+            for i in range(self._decode_tp_size):
                 slice = ori_data[i*group_size : (i+1)*group_size]
                 sampled_nums.append(slice)
         return sampled_nums
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(socket_type: Any,
+            addr: str) -> Iterator[zmq.Socket]:  # type: ignore
     """Context manager for a ZMQ socket"""
 
-    if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
+    if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
-    ctx: Optional[zmq.Context] = None
+    ctx: Optional[zmq.Context] = None  # type: ignore
     try:
-        ctx = zmq.Context()
+        ctx = zmq.Context()  # type: ignore
         yield make_zmq_socket(ctx=ctx,
                               path=addr,
                               socket_type=socket_type,
-                              bind=socket_type == zmq.ROUTER)
+                              bind=socket_type == zmq.ROUTER)  # type: ignore
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
-
-
-def get_local_ip_by_remote() -> str:
-    # try ipv4
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
-        return s.getsockname()[0]
-    except Exception:
-        logger.error("get_local_ip_by_remote Error.")
-
-    try:
-        hostname = socket.gethostname()
-        ip = socket.gethostbyname(hostname)
-        if ip and ip != "127.0.0.1" and ip != "0.0.0.0":
-            return ip
-    except Exception:
-        logger.error("get_local_ip_by_remote Error 2.")
-
-    # try ipv6
-    try:
-        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
-        # Google's public DNS server, see
-        # https://developers.google.com/speed/public-dns/docs/using#addresses
-        s.connect(
-            ("2001:4860:4860::8888", 80
-             ))  # Doesn't need to be reachable  # Doesn't need to be reachable
-        return s.getsockname()[0]
-    except Exception:
-        raise ValueError("Can not get local ip")
 
 
 def group_concurrent_contiguous(
@@ -1228,26 +1212,33 @@ def string_to_int64_hash(input_str):
     return uint64_value
 
 
-def ensure_zmq_send(socket: zmq.Socket, data: bytes, max_retries: int = 3):
+def ensure_zmq_send(
+        socket: zmq.Socket,  # type: ignore
+        data: bytes,
+        max_retries: int = 3):
     retries_left = max_retries
     while True:
         try:
             socket.send(data)
             return
-        except zmq.ZMQError as e:
+        except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
-                logger.warning(f"Send failed: {e}, retrying... ({retries_left} "
-                               "attempts left)")
+                logger.warning(
+                    f"Send failed: {e}, retrying... ({retries_left} "
+                    "attempts left)")
                 time.sleep(0.1)
             else:
                 logger.error(f"Send failed after all retries: {e}")
                 raise RuntimeError(f"Failed to send data after {max_retries} "
                                    f"retries: {e}")
 
-           
-def ensure_zmq_recv(socket: zmq.Socket, poller: zmq.Poller,
-                    timeout: float = 1.0, max_retries: int = 3) -> bytes:
+
+def ensure_zmq_recv(
+        socket: zmq.Socket,  # type: ignore
+        poller: zmq.Poller,  # type: ignore
+        timeout: float = 1.0,
+        max_retries: int = 3) -> bytes:
     retries_left = max_retries
     while True:
         try:
@@ -1255,8 +1246,8 @@ def ensure_zmq_recv(socket: zmq.Socket, poller: zmq.Poller,
                 data = socket.recv()
                 return data
             else:
-                raise zmq.ZMQError("Receive timeout")
-        except zmq.ZMQError as e:
+                raise zmq.ZMQError("Receive timeout")  # type: ignore
+        except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
                 logger.warning(f"Receive failed: {e}, retrying... "
