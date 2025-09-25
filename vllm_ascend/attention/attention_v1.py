@@ -142,6 +142,8 @@ class AscendMetadata:
     # tokens + new tokens (is None if it is a decoding).
     # (batch_size,)
     seq_lens: torch.Tensor = None
+    seq_lens_list: List = None
+    actual_seq_lengths_q: List = None
 
     query_start_loc: torch.Tensor = None
     query_lens: torch.Tensor = None
@@ -230,7 +232,9 @@ class AscendAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
+            seq_lens_list=seq_lens.tolist(),
             max_query_len=common_attn_metadata.max_query_len,
+            actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
@@ -529,8 +533,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_table=attn_metadata.block_tables,
                 input_layout="TND",
                 block_size=block_size,
-                actual_seq_lengths=attn_metadata.query_start_loc[1:],
-                actual_seq_lengths_kv=attn_metadata.seq_lens,
+                actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                actual_seq_lengths_kv=attn_metadata.seq_lens_list,
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale=self.scale,

@@ -2258,6 +2258,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
                                                                  1],
                     seq_lens_cpu=self.seq_lens_cpu,
+                    seq_lens_list=self.seq_lens_cpu.tolist(),
                     seq_lens=self.seq_lens_cpu[:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
