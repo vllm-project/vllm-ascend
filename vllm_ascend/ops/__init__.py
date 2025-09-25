@@ -18,7 +18,6 @@
 import torch
 
 import vllm_ascend.ops.common_fused_moe  # noqa
-import vllm_ascend.ops.fused_moe  # noqa
 import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.register_custom_ops  # noqa
 import vllm_ascend.ops.vocab_parallel_embedding  # noqa
