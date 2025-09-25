@@ -468,7 +468,7 @@ async def _handle_completions(api: str, request: Request):
         # Select prefiller
         prefiller_idx = proxy_state.select_prefiller(prefiller_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
-        result_future = asyncio.Future()
+        result_future = asyncio.Future()  # type: ignore
         request_id_api = get_api_request_id(api, request_id)
         proxy_state.req_id_future[request_id_api] = result_future
         # Send request to prefiller

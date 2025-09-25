@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import asyncio
 import contextlib
 import hashlib
 import math
@@ -8,7 +7,7 @@ import random
 import struct
 import threading
 import time
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -31,7 +30,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
+from vllm_ascend.utils import get_ascend_soc_version
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -81,7 +80,7 @@ class KVCacheTaskTracker:
     def __init__(self,
                  target_count: int = 1,
                  on_done: Callable[[str], None] = lambda x: None,
-                 on_timeout: Callable[[str], None] = lambda x: None):
+                 on_timeout: Callable[[set[str]], Any] = lambda x: None):
         super().__init__()
         self.target_count = target_count
         self.done_task_lock = threading.Lock()
@@ -177,7 +176,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                                                     block_len, use_mla,
                                                     self.tp_rank)
         self.ready_decode = dict[str, DecodeMooncakeAgentMetadata]()
-        self.pending_decode = dict[str, list[tuple[str, list[int], int]]]()
+        self.pending_decode = dict[str, list[tuple[list[int], int]]]()
         self.total_layers = total_layers
         self.lock = threading.Lock()
         self.ready_event = ready_event
@@ -230,7 +229,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                     metadata = decoder.decode(payload[0])
                     request_id = metadata.req_id
                     logger.debug(
-                        f"Prefiller has received that requset {request_id} from the decoder."
+                        f"Prefiller has received that request {request_id} from the decoder."
                     )
                     sock.send_multipart((identity, b"", b"ACK"))
                     self.task_tracker.remove_delayed_request(request_id)
@@ -250,7 +249,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         path = make_zmq_path("tcp", decoder_meta.host, decoder_meta.port)
         msg_encoder = msgspec.msgpack.Encoder()
         encoded_data = msg_encoder.encode(request_id)
-        with zmq_ctx(zmq.REQ, path) as sock:
+        with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore
             ensure_zmq_send(sock, encoded_data)
             ack = sock.recv()
             if ack != b"ACK":
@@ -283,7 +282,7 @@ class SendingLayerThread(threading.Thread):
                  block_len: list[int], use_mla: bool, tp_rank: int):
         super().__init__(daemon=True, name="KVCacheRecvingPrefillerByeThread")
         self.send_queue = queue.Queue[tuple[DecodeMooncakeAgentMetadata, str,
-                                            str, list[int], int]]()
+                                            list[int], int]]()
         self.task_tracker = task_tracker
         self.total_layers = total_layers
         self.local_kv_base_addr = local_kv_base_addr
@@ -297,14 +296,14 @@ class SendingLayerThread(threading.Thread):
         #TODO layerwise step8
         # send kv cache for request in send_queue
         # while True:
-        #    get requeset form send_queue and send to decoder
+        #    get request form send_queue and send to decoder
         #    _handle_request(self, req_meta: dict[str, Any]):
         while True:
             request = self.send_queue.get()
             self._handle_request(request)
 
     def _handle_request(self, request: tuple[DecodeMooncakeAgentMetadata, str,
-                                             str, list[int], int]):
+                                             list[int], int]):
         #TODO layerwise step8
         # send kv layer to remote
         req_meta, request_id, local_block_ids, layer_index = request
@@ -331,7 +330,6 @@ class SendingLayerThread(threading.Thread):
 
         remote_host = req_meta.host
         remote_te_port = req_meta.te_rpc_port
-        remote_handshake_port = req_meta.port
         remote_kv_base_addrs = req_meta.kv_caches_base_addr
 
         remote_block_ids = req_meta.block_ids
@@ -832,7 +830,7 @@ class MooncakeLayerwiseConnectorWorker:
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        self.kv_caches_base_addr = []
+        self.kv_caches_base_addr: list[int] = []
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -978,7 +976,7 @@ class MooncakeLayerwiseConnectorWorker:
         if self.vllm_config.kv_transfer_config.is_kv_producer:
             for req_id, meta in metadata.requests.items():
                 logger.debug(
-                    f"Send requset: {req_id} to proxy metaserver: {meta.metaserver}"
+                    f"Send request: {req_id} to proxy metaserver: {meta.metaserver}"
                 )
                 if self.tp_rank == 0:
                     # All parameters here should appear in the returned dict of
@@ -1009,10 +1007,10 @@ class MooncakeLayerwiseConnectorWorker:
                 path = make_zmq_path("tcp", meta.remote_host,
                                      meta.remote_port + self.tp_rank)
                 logger.debug(
-                    f"Notify the prefiller: {path} that requset: {req_id} from decoder is ready."
+                    f"Notify the prefiller: {path} that request: {req_id} from decoder is ready."
                 )
                 msg_encoder = msgspec.msgpack.Encoder()
-                metadata = DecodeMooncakeAgentMetadata(
+                docode_metadata = DecodeMooncakeAgentMetadata(
                     req_id=req_id,
                     block_ids=meta.local_block_ids,
                     port=self.handshake_port,
@@ -1021,12 +1019,12 @@ class MooncakeLayerwiseConnectorWorker:
                     te_rpc_port=self.te_rpc_port,
                     kv_caches_base_addr=self.kv_caches_base_addr,
                     num_blocks=self.num_blocks)
-                encoded_data = msg_encoder.encode(metadata)
+                encoded_data = msg_encoder.encode(docode_metadata)
                 size_in_bytes = len(encoded_data)
                 logger.debug(
                     "Size of encoded Mooncake agent metadata: %d bytes",
                     size_in_bytes)
-                with zmq_ctx(zmq.REQ, path) as sock:
+                with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore
                     ensure_zmq_send(sock, encoded_data)
                     ack = sock.recv()
                     if ack != b"ACK":
@@ -1044,7 +1042,7 @@ class MooncakeLayerwiseConnectorWorker:
                       connector_metadata: MooncakeLayerwiseConnectorMetadata,
                       **kwargs) -> None:
         """MooncakeLayerwiseConnector does not save explicitly."""
-        if self.kv_role == 'kv_producer':
+        if self.kv_role == 'kv_producer' and self.kv_send_layer_thread is not None:
             for req_id, request in connector_metadata.requests.items():
                 logger.debug(f"Add request {req_id} to kv send layer thread.")
                 self.kv_send_layer_thread.add_request(
