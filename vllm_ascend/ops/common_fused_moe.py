@@ -20,13 +20,13 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 from vllm.config import CompilationLevel, get_current_vllm_config
-from vllm.utils import direct_register_custom_op
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
                               tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
+from vllm.utils import direct_register_custom_op
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -204,7 +204,8 @@ class AscendFusedMoE(FusedMoE):
         `finalize` function. In `allgathercommimpl`, we still need to all-reduce the
         outputs since each rank only has partial outputs.
         """
-        return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
+        return torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(
+            final_hidden_states)
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
@@ -364,14 +365,14 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
 
 def _maybe_all_reduce_tensor_model_parallel_impl(
-    final_hidden_states: torch.Tensor 
-) -> torch.Tensor:
+        final_hidden_states: torch.Tensor) -> torch.Tensor:
     forward_context = get_forward_context()
     moe_comm_type = forward_context.moe_comm_type
     if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
         return final_hidden_states
     else:
         return tensor_model_parallel_all_reduce(final_hidden_states)
+
 
 direct_register_custom_op(op_name="maybe_all_reduce_tensor_model_parallel",
                           op_func=_maybe_all_reduce_tensor_model_parallel_impl,
