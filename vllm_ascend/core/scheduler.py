@@ -211,10 +211,11 @@ class AscendScheduler(Scheduler):
                 # Schedule encoder inputs.
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
-                    new_encoder_budget) = self._try_schedule_encoder_inputs(
-                        request, num_computed_tokens, num_new_tokens,
-                        encoder_budget)
-                    if num_new_tokens == 0 or len(encoder_inputs_to_schedule) == 0:
+                     new_encoder_budget) = self._try_schedule_encoder_inputs(
+                         request, num_computed_tokens, num_new_tokens,
+                         encoder_budget)
+                    if num_new_tokens == 0 or len(
+                            encoder_inputs_to_schedule) == 0:
                         # The request cannot be scheduled.
                         break
 
