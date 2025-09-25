@@ -37,6 +37,7 @@ DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 
 
 @pytest.mark.parametrize("model", MODELS)
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "500"})
 def test_external_launcher(model):
     script = Path(
         __file__
@@ -159,7 +160,10 @@ def test_external_launcher_and_sleepmode():
     reason="This test is only for Ascend910B devices.",
 )
 @pytest.mark.parametrize("model", MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1"})
+@patch.dict(os.environ, {
+    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
+    "HCCL_BUFFSIZE": "500"
+})
 def test_mm_allreduce(model):
     script = Path(
         __file__
