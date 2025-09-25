@@ -70,7 +70,9 @@ def mock_dist_env(mocker: MockerFixture):
                return_value=mock_dp_and_tp_group(mocker)), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_config',
                return_value=MagicMock(
-                   torchair_graph_config=MagicMock(enabled=False, enable_multistream_moe=False),
+                   torchair_graph_config=MagicMock(enabled=False),
+                   enable_multistream_moe=False,
+                   enable_shared_expert_dp=False,
                    expert_map_path=None
                )), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.determine_expert_map',
@@ -151,6 +153,8 @@ def default_moe_config():
 def moe_method(mock_dist_env):
     moe = MagicMock()
     moe.moe_parallel_config.return_value = MagicMock(ep_size=4)
+    moe.moe_parallel_config.use_ep = False
+    moe.moe_parallel_config.dp_size = 1
     return TorchairAscendUnquantizedFusedMoEMethod(moe)
 
 
@@ -194,6 +198,9 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
 
     def apply(self, hidden_states: torch.Tensor,
               expert_weights: torch.Tensor) -> torch.Tensor:
+        pass
+
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
         pass
 
 

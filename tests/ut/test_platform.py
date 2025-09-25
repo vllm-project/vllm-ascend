@@ -36,6 +36,7 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config = MagicMock()
         mock_ascend_config.torchair_graph_config.enabled = False
         mock_ascend_config.ascend_scheduler_config.enabled = False
+        mock_ascend_config.enable_shared_expert_dp = False
         return mock_ascend_config
 
     def setUp(self):
@@ -479,6 +480,7 @@ class TestNPUPlatform(TestBase):
     def test_get_attn_backend_cls_use_v1_and_mla(self, mock_get_ascend_config):
         mock_config = MagicMock()
         mock_config.torchair_graph_config.enabled = False
+        mock_config.enable_shared_expert_dp = False
 
         mock_get_ascend_config.return_value = mock_config
 
