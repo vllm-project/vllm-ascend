@@ -27,7 +27,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
-import torch_npu  # noqa: F401  # noqa: F401
+import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
@@ -588,6 +588,14 @@ def matmul_allreduce_enable() -> bool:
 
 def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
+
+
+def enable_sp() -> bool:
+    from vllm.config import get_cached_compilation_config
+
+    return (
+        get_cached_compilation_config().pass_config.enable_sequence_parallelism
+        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM)
 
 
 def is_moe_model(vllm_config: VllmConfig):

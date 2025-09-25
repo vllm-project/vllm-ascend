@@ -28,7 +28,6 @@ from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.deepseek_mtp import (
@@ -36,7 +35,6 @@ from vllm.model_executor.models.deepseek_mtp import (
     SharedHead)
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2DecoderLayer
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 
@@ -168,7 +166,7 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        sampling_metadata=None,  # type: ignore
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
@@ -187,8 +185,6 @@ class CustomDeepSeekMTP(DeepSeekMTP):
         self.model = CustomDeepSeekMultiTokenPredictor(vllm_config=vllm_config,
                                                        prefix=maybe_prefix(
                                                            prefix, "model"))
-
-        self.sampler = get_sampler()
 
     def forward(
         self,

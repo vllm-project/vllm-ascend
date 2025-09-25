@@ -2,6 +2,10 @@ name: pre-commit
 
 on:
     workflow_call:
+      inputs:
+        vllm:
+          required: true
+          type: string
 
 permissions:
   contents: read
@@ -22,6 +26,7 @@ jobs:
       with:
         repository: vllm-project/vllm
         path: ./vllm-empty
+        ref: ${{ inputs.vllm }}
     - name: Install vllm
       working-directory: vllm-empty
       run: |

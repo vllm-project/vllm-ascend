@@ -41,6 +41,8 @@ concurrency:
 jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
+    with:
+      vllm: b1068903fdca26cf6b4a1a51a32c3365ce3ac636
 
   changes:
     runs-on: ubuntu-latest
@@ -81,7 +83,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [c60e6137f0bf2034853919b3a9d705d7e06b93cf, v0.10.2]
+        vllm_version: [b1068903fdca26cf6b4a1a51a32c3365ce3ac636, v0.10.2]
     steps:
       - name: Install packages
         run: |
@@ -136,14 +138,14 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [c60e6137f0bf2034853919b3a9d705d7e06b93cf, v0.10.2]
+        vllm_version: [b1068903fdca26cf6b4a1a51a32c3365ce3ac636, v0.10.2]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
     if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' && !contains(github.event.pull_request.labels.*.name, 'ready') }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
-      vllm: v0.10.2
+      vllm: ${{ matrix.vllm_version }}
       runner: linux-aarch64-a2
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
       type: light
