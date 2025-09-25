@@ -422,7 +422,7 @@ def get_column_parallel_op(
     elif enable_sp():
         if "gate_up_proj" in prefix or "in_proj" in prefix:
             custom_op = SequenceMergedColumnParallelOp(layer)
-        if "qkv_proj" in prefix:
+        if "qkv_proj" in prefix or "conv1d" in prefix:
             custom_op = SequenceQKVParallelOp(layer, prefix)
 
     if custom_op is not None:
