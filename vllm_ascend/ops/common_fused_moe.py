@@ -216,6 +216,9 @@ class AscendFusedMoE(FusedMoE):
             router_logits=router_logits,
             replace_allreduce=forward_context.sp_enabled)
 
+        # Load balancing for token distribution among experts in dummy_run
+        enable_force_load_balance = forward_context.in_profile_run
+
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
@@ -237,6 +240,7 @@ class AscendFusedMoE(FusedMoE):
             expert_load_view=self.expert_load_view,
             logical_to_physical_map=self.logical_to_physical_map,
             logical_replica_count=self.logical_replica_count,
+            enable_force_load_balance=enable_force_load_balance,
         )
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states

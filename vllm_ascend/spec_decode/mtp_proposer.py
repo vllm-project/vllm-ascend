@@ -26,6 +26,7 @@ from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
                                vllm_version_is)
+import vllm.envs as envs_vllm
 
 PADDING_SLOT_ID = -1
 
@@ -60,8 +61,7 @@ class MtpProposer(Proposer):
         self.torchair_compiled_models = {}  # type: ignore
         self.torchair_graph_enabled = get_ascend_config(
         ).torchair_graph_config.enabled
-        self.enable_shared_expert_dp = get_ascend_config(
-        ).enable_shared_expert_dp
+        self.enable_shared_expert_dp = get_ascend_config().enable_shared_expert_dp
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
         self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
@@ -81,9 +81,7 @@ class MtpProposer(Proposer):
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            if self.torchair_graph_enabled or (
-                    self.enable_shared_expert_dp
-                    and self.vllm_config.model_config.use_mla):
+            if self.torchair_graph_enabled or (self.enable_shared_expert_dp and self.vllm_config.model_config.use_mla):
                 self.model = TorchairDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
             else:
@@ -603,10 +601,11 @@ class MtpProposer(Proposer):
         torch.npu.set_compile_mode(jit_compile=False)
         if not self.runner.use_cached_npu_graph:
             npu_backend = torchair.get_npu_backend(compiler_config=config)
-            self.torchair_compiled_model = torch.compile(self.model,
-                                                         dynamic=True,
-                                                         fullgraph=True,
-                                                         backend=npu_backend)
+            self.torchair_compiled_model = torch.compile(
+                self.model,
+                dynamic=not get_ascend_config().use_sfa,
+                fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=npu_backend)
             return self.torchair_compiled_model
         else:
             # Generate a new forward proxy code object to prevent the invalidation of
@@ -627,8 +626,8 @@ class MtpProposer(Proposer):
             self.torchair_compiled_models[
                 batch_size] = torchair.inference.cache_compile(
                     self.model.__dict__[forward_proxy_name],
-                    dynamic=True,
-                    fullgraph=True,
+                    dynamic=not get_ascend_config().use_sfa,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                     cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
                     ge_cache=False)
