@@ -555,7 +555,7 @@ class MtpProposer(Proposer):
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
-            self.hidden_states[:batch_size] = hidden_states
+            self.hidden_states[:hidden_states.shape[0]] = hidden_states
             attn_metadata_i.slot_mapping[:batch_size] = slot_mapping
 
             if attn_metadata_i.prefill is not None:
