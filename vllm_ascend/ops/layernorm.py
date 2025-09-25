@@ -139,5 +139,7 @@ class AscendQuantRMSNorm(AscendRMSNorm):
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        x, residual = super().forward_oot(x, residual, self.bias)
-        return x, residual
+        if residual is not None:
+            x, residual = super().forward_oot(x, residual, self.bias)
+            return x, residual
+        return super().forward_oot(x, self.bias)
