@@ -78,7 +78,7 @@ class MtpTorchairProposer(MtpProposer):
                   skip_attn: bool = False,
                   num_reqs: int = 0,
                   num_tokens_across_dp=None) -> None:
-        moe_comm_method = self.runner._select_moe_comm_method(
+        moe_comm_type = self.runner._select_moe_comm_method(
             num_tokens, with_prefill)
 
         if not with_prefill:
@@ -108,7 +108,7 @@ class MtpTorchairProposer(MtpProposer):
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
-                    moe_comm_method=moe_comm_method,
+                    moe_comm_type=moe_comm_type,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=0):
                 if not with_prefill:
@@ -319,7 +319,7 @@ class MtpTorchairProposer(MtpProposer):
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=self.runner.input_batch.block_table[0].
             get_device_tensor(),
-            slot_mapping_cpu=target_slot_mapping,
+            slot_mapping=target_slot_mapping,
             positions=target_positions,
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
@@ -339,7 +339,7 @@ class MtpTorchairProposer(MtpProposer):
         num_tokens_across_dp = self.runner.num_tokens_across_dp
         with_prefill = self.runner.with_prefill
 
-        moe_comm_method = self.runner._select_moe_comm_method(
+        moe_comm_type = self.runner._select_moe_comm_method(
             num_input_tokens, with_prefill)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=False)
@@ -354,7 +354,7 @@ class MtpTorchairProposer(MtpProposer):
                     with_prefill=with_prefill,
                     num_tokens_across_dp=num_tokens_across_dp,
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
-                    moe_comm_method=moe_comm_method,
+                    moe_comm_type=moe_comm_type,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens):
