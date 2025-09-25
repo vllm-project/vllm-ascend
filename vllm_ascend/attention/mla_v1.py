@@ -198,10 +198,10 @@ class AscendMLAMetadataBuilder:
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
-            self.reorder_batch_threshold = self.decode_threshold
             assert self.decode_threshold <= 16, f"decode_threshold exceeded \
                 npu_fused_infer_attention_score TND layout's limit of 16, \
                 got {self.decode_threshold}"
+        self.reorder_batch_threshold = self.decode_threshold
 
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
