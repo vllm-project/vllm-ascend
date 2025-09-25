@@ -52,7 +52,7 @@ def _addrmsnorm_forward_oot(
         else:
             x, _, residual = torch_npu.npu_add_rms_norm(
                 x, residual, self.weight, self.variance_epsilon)
-        if bias:
+        if bias is not None:
             x.add_(bias)
     torch.ops.vllm.maybe_wait_prefetch_done(x)
     return x, residual
@@ -76,7 +76,7 @@ class AscendRMSNorm(RMSNorm):
             return x, residual
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
                                              self.variance_epsilon)
-        if bias:
+        if bias is not None:
             x.add_(bias)
         return x
 
