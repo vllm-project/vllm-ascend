@@ -148,6 +148,10 @@ class AscendFusedMoE(FusedMoE):
         self.dynamic_eplb = ascend_config.dynamic_eplb
         self.expert_map_path = ascend_config.expert_map_path
         self.global_redundant_expert_num = ascend_config.init_redundancy_expert
+        if self.custom_routing_function is None and self.e_score_correction_bias is not None:
+            vllm_config = get_current_vllm_config()
+            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
+                dtype=vllm_config.model_config.dtype)
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
