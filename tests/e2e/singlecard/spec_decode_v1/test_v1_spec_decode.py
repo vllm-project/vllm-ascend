@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
+import os
 import random
 from typing import Any
 
@@ -8,6 +9,8 @@ import pytest
 from vllm import LLM, SamplingParams
 
 from tests.e2e.conftest import VllmRunner
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 @pytest.fixture
@@ -99,7 +102,6 @@ def test_ngram_correctness(
     assert matches > int(0.7 * len(ref_outputs))
 
 
-@pytest.mark.skipif(True, reason="oom in CI, fix me")
 @pytest.mark.parametrize("use_eagle3", [False, True], ids=["eagle", "eagle3"])
 def test_eagle_correctness(
     test_prompts: list[list[dict[str, Any]]],
@@ -111,8 +113,6 @@ def test_eagle_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
     '''
-    if not use_eagle3:
-        pytest.skip("Not current support for the test.")
 
     ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=True)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
@@ -121,7 +121,6 @@ def test_eagle_correctness(
     spec_model_name = eagle3_model_name() if use_eagle3 else eagle_model_name()
     with VllmRunner(
             model_name,
-            trust_remote_code=True,
             enable_chunked_prefill=True,
             max_num_seqs=1,
             max_num_batched_tokens=2048,
