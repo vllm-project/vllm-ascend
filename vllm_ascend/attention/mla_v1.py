@@ -536,12 +536,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.qk_head_dim = kwargs['qk_head_dim']
         self.v_head_dim = kwargs['v_head_dim']
         self.rotary_emb = kwargs['rotary_emb']
-        self.q_proj = kwargs['q_proj']
+        self.fused_qkv_a_proj = kwargs.get('fused_qkv_a_proj', None)
+        self.q_proj = kwargs['q_proj'] if self.q_lora_rank is None else kwargs[
+            'q_b_proj']
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
-        self.q_a_proj = kwargs.get('q_a_proj', None)
         self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -1122,21 +1123,26 @@ class AscendMLAImpl(MLAAttentionImpl):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_actual_tokens = attn_metadata.num_actual_tokens
-        if self.q_a_proj is not None:
-            maybe_npu_prefetch(inputs=self.q_a_proj.weight,
+        if self.fused_qkv_a_proj is not None:
+            maybe_npu_prefetch(inputs=self.fused_qkv_a_proj.weight,
                                dependency=hidden_states,
                                enabled=self.enable_prefetch)
-            ckq = self.q_a_proj(hidden_states)[0]
-            q_c = self.q_a_layernorm(ckq)
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_no_split = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            q_c = self.q_a_layernorm(q_c)
         else:
             q_c = hidden_states
+            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
 
-        kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
         # Process for Flash Comm V1
         q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             q_c, need_gather_q_kv)
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             kv_no_split, need_gather_q_kv)
+
         decode_preprocess_res = None
         prefill_preprocess_res = None
         if has_prefill:
@@ -1264,14 +1270,18 @@ class AscendMLAImpl(MLAAttentionImpl):
                                max_size=MAX_O_PROJ_PREFETCH_SIZE,
                                enabled=self.enable_prefetch)
 
-            output[...] = self.o_proj(o_proj_input)[0]
+            output[...] = self.o_proj(o_proj_input,
+                                      is_prefill=prefill_preprocess_res
+                                      is not None)[0]
         else:
             with torch.npu.stream(current_ms_metadata.comm_stream):
                 maybe_npu_prefetch(inputs=self.o_proj.weight,
-                                   dependency=o_proj_input,
-                                   max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                                   enabled=self.enable_prefetch)
-                output[...] = self.o_proj(o_proj_input)[0]
+                                  dependency=o_proj_input,
+                                  max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                                  enabled=self.enable_prefetch)
+                output[...] = self.o_proj(o_proj_input,
+                                          is_prefill=prefill_preprocess_res
+                                          is not None)[0]
                 current_ms_metadata.after_comm_event.record()
         del o_proj_input
 
