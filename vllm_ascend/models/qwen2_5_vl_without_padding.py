@@ -29,7 +29,7 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 
 try:
     from transformers.models.qwen3_vl.configuration_qwen3_vl import (
-        Qwen3VLConfig, Qwen3VLVisionConfig)
+        Qwen3VLConfig)
     from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import \
         Qwen3VLMoeConfig
 except ImportError:
@@ -46,12 +46,24 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer, Qwen2_5_VLDummyInputsBuilder,
     Qwen2_5_VLForConditionalGeneration, Qwen2_5_VLMultiModalProcessor,
     Qwen2_5_VLProcessingInfo)
-from vllm.model_executor.models.qwen3_vl import (
-    Qwen3_VisionBlock, Qwen3_VisionPatchEmbed, Qwen3_VisionTransformer,
-    Qwen3VLDummyInputsBuilder, Qwen3VLForConditionalGeneration,
-    Qwen3VLMultiModalProcessor, Qwen3VLProcessingInfo)
-from vllm.model_executor.models.qwen3_vl_moe import (
-    Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeProcessingInfo)
+
+try:
+    from vllm.model_executor.models.qwen3_vl import (
+        Qwen3_VisionBlock, Qwen3_VisionPatchEmbed, Qwen3_VisionTransformer,
+        Qwen3VLDummyInputsBuilder, Qwen3VLForConditionalGeneration,
+        Qwen3VLMultiModalProcessor, Qwen3VLProcessingInfo)
+    from vllm.model_executor.models.qwen3_vl_moe import (
+        Qwen3VLMoeForConditionalGeneration, Qwen3VLMoeProcessingInfo)
+except ImportError:
+    Qwen3_VisionBlock = object
+    Qwen3_VisionPatchEmbed = object
+    Qwen3_VisionTransformer = object
+    Qwen3VLDummyInputsBuilder = object
+    Qwen3VLForConditionalGeneration = object
+    Qwen3VLMultiModalProcessor = object
+    Qwen3VLProcessingInfo = object
+    Qwen3VLMoeForConditionalGeneration = object
+    Qwen3VLMoeProcessingInfo = object
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
@@ -377,7 +389,7 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
 
     def __init__(
         self,
-        vision_config: Qwen3VLVisionConfig,
+        vision_config,
         norm_eps: float = 1e-6,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
