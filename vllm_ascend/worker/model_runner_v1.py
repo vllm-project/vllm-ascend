@@ -64,7 +64,7 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LazyLoader, cdiv, get_dtype_size,
@@ -144,7 +144,9 @@ else:
 
 if not vllm_version_is("0.10.2"):
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+    from vllm.v1.outputs import PoolerOutput
 else:
+    from vllm.sequence import PoolerOutput
     UniformTypeKVCacheSpecs = None
 
 
