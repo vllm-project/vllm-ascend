@@ -209,6 +209,11 @@ class NPUPlatform(Platform):
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
 
+        # TODO: Full graph is fully supported later, and the default value will be set to full graph.
+        if not vllm_version_is("v0.10.2"):
+            if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.level = CompilationLevel.NO_COMPILATION
         # TODO: Currently MLA does not support FULL_DECODE_ONLY, remove the second condition
