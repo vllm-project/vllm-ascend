@@ -44,6 +44,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertIsNone(ascend_config.expert_map_path)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
+        self.assertFalse(ascend_config.enable_kv_nz)
 
         torchair_graph_config = ascend_config.torchair_graph_config
         self.assertFalse(torchair_graph_config.enabled)
@@ -54,7 +55,6 @@ class TestAscendConfig(TestBase):
         self.assertFalse(torchair_graph_config.enable_multistream_mla)
         self.assertTrue(torchair_graph_config.enable_view_optimize)
         self.assertTrue(torchair_graph_config.enable_frozen_parameter)
-        self.assertFalse(torchair_graph_config.enable_kv_nz)
 
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
         self.assertFalse(ascend_scheduler_config.enabled)
@@ -71,7 +71,6 @@ class TestAscendConfig(TestBase):
                 "enable_multistream_mla": True,
                 "enable_view_optimize": True,
                 "enable_frozen_parameter": True,
-                "enable_kv_nz": True
             },
             "multistream_overlap_shared_expert": True,
             "ascend_scheduler_config": {
@@ -79,10 +78,12 @@ class TestAscendConfig(TestBase):
             },
             "expert_map_path": "test_expert_map_path",
             "refresh": True,
+            "enable_kv_nz": True
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
+        self.assertTrue(ascend_config.enable_kv_nz)
 
         torchair_graph_config = ascend_config.torchair_graph_config
         self.assertTrue(torchair_graph_config.enabled)
@@ -92,7 +93,6 @@ class TestAscendConfig(TestBase):
         self.assertTrue(torchair_graph_config.enable_multistream_mla)
         self.assertTrue(torchair_graph_config.enable_view_optimize)
         self.assertTrue(torchair_graph_config.enable_frozen_parameter)
-        self.assertTrue(torchair_graph_config.enable_kv_nz)
 
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
         self.assertTrue(ascend_scheduler_config.enabled)
@@ -312,17 +312,6 @@ class TestAscendConfig(TestBase):
                 "torchair_graph_config": {
                     "enabled": False,
                     "mode": 'max-autotune',
-                },
-                "refresh": True
-            }
-            init_ascend_config(test_vllm_config)
-
-        # enable_kv_nz should not be enabled without torchair graph mode
-        with self.assertRaises(RuntimeError):
-            test_vllm_config.additional_config = {
-                "torchair_graph_config": {
-                    "enabled": False,
-                    "enable_kv_nz": True,
                 },
                 "refresh": True
             }
