@@ -14,7 +14,6 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-import torch
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import AscendSocVersion
@@ -106,48 +105,3 @@ def test_select_moe_comm_method_unsupported_soc():
          pytest.raises(ValueError, match=f"Unsupported soc_version: {unsupported_soc}"):
 
         NPUModelRunner._select_moe_comm_method(mock_runner, 100, False)
-
-
-@patch('vllm_ascend.worker.model_runner_v1.torch_npu')
-@patch('vllm_ascend.worker.model_runner_v1.torch')
-def test_init_creates_transfer_event_and_pinned_memory(mock_torch,
-                                                       mock_torch_npu):
-    """Test that initialization creates transfer event and pinned CPU memory."""
-    # This is a simplified test focusing only on the new attributes
-    # We mock the entire __init__ process and only test the specific lines we added
-
-    # Mock torch.empty to return a mock tensor
-    mock_pinned_tensor = MagicMock()
-    mock_torch.empty.return_value = mock_pinned_tensor
-
-    # Mock torch_npu.npu.Event - 需要设置嵌套的 mock 结构
-    mock_event = MagicMock()
-    mock_torch_npu.npu.Event.return_value = mock_event
-
-    # Create a runner instance using __new__ to bypass __init__
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-
-    # Manually set the attributes we need for our test
-    runner.max_model_len = 2048
-
-    # Test the specific lines from the commit
-    runner.transfer_event = mock_torch_npu.npu.Event()
-    runner.sampled_token_ids_pinned_cpu = mock_torch.empty(
-        (runner.max_model_len, 1),
-        dtype=torch.int64,
-        device="cpu",
-        pin_memory=True)
-
-    # Verify max_model_len is set
-    assert runner.max_model_len == 2048
-
-    # Verify transfer_event is created
-    assert runner.transfer_event == mock_event
-    mock_torch_npu.npu.Event.assert_called_once()
-
-    # Verify pinned CPU memory is created with correct parameters
-    assert runner.sampled_token_ids_pinned_cpu == mock_pinned_tensor
-    mock_torch.empty.assert_called_with((2048, 1),
-                                        dtype=torch.int64,
-                                        device="cpu",
-                                        pin_memory=True)
