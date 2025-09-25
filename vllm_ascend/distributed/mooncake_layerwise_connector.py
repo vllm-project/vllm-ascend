@@ -20,6 +20,7 @@ import numpy.typing as npt
 import torch
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -30,7 +31,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import get_ascend_soc_version
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -137,7 +137,7 @@ class KVCacheTaskTracker:
             request_id, delay_start_time = next(
                 iter(self.delayed_free_requests.items()))
             if (current_time - delay_start_time
-                    > envs_ascend.VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT):
+                    > envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT):
                 self.delayed_free_requests.pop(request_id)
                 expired_requests.add(request_id)
                 logger.info("Force freed request: %s", request_id)
@@ -792,8 +792,6 @@ class MooncakeLayerwiseConnectorWorker:
             vllm_config.parallel_config.tensor_parallel_size)
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
-
-        self.soc_info = get_ascend_soc_version()
 
         # get tp device id
         # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940
