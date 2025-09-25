@@ -142,4 +142,4 @@ class AscendQuantRMSNorm(AscendRMSNorm):
         if residual is not None:
             x, residual = super().forward_oot(x, residual, self.bias)
             return x, residual
-        return super().forward_oot(x, self.bias)
+        return super().forward_oot(x, bias=self.bias)
