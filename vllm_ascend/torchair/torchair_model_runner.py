@@ -87,8 +87,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         """Override from NPUModelRunner to pad num_tokens"""
         if self.enable_shared_expert_dp:
-            return super()._sync_metadata_across_dp(num_tokens, with_prefill,
-                                                    enable_dbo)
+            # Padding is not required for shared_expert_dp cases in eager mode.
+            return num_tokens, None, with_prefill, enable_dbo
         if self.dp_size == 1:
             if not with_prefill:
                 maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
@@ -121,12 +121,14 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
 
-    def _build_attention_metadata(self, with_prefill, num_reqs, skip_attn):
+    def _build_attention_metadata(self, with_prefill, num_reqs, num_tokens,
+                                  max_query_len, force_attention):
         # NOTE: If torchair graph mode and not with_prefill,
         # we can't skip_attn, it will cause graph recompile.
         if with_prefill or self.enable_shared_expert_dp:
             attn_metadata = super()._build_attention_metadata(
-                with_prefill, num_reqs, skip_attn)
+                with_prefill, num_reqs, num_tokens, max_query_len,
+                force_attention)
         else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
