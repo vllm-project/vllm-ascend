@@ -90,25 +90,11 @@ def mock_distributed():
     mock_vllm_config.scheduler_config = Mock(max_num_seqs=256)
     mock_vllm_config.model_config = Mock(max_model_len=2048, quant_config=None)
 
-    with patch("vllm_ascend.models.deepseek_v2.get_tensor_model_parallel_rank", return_value=0), \
-            patch("vllm_ascend.models.deepseek_v2.get_tensor_model_parallel_world_size", return_value=1), \
-            patch("vllm_ascend.models.deepseek_v2.get_tp_group", return_value=tp_group), \
-            patch("vllm_ascend.models.deepseek_v2.get_pp_group", return_value=pp_group), \
-            patch("vllm_ascend.models.deepseek_v2.get_pp_group",
-                  return_value=Mock(is_first_rank=False, is_last_rank=False)), \
-            patch("vllm_ascend.ops.common_fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
+    with patch("vllm_ascend.ops.fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
             patch("vllm_ascend.ops.moe.token_dispatcher.torch.distributed.get_rank", return_value=0), \
             patch("vllm_ascend.ops.moe.token_dispatcher.get_ascend_soc_version", return_value=None), \
             patch.dict("vllm.distributed.parallel_state.__dict__", _TP=tp_group, _EP=ep_group, _DP=dp_group,
                        _PP=pp_group), \
             patch.dict("vllm_ascend.distributed.parallel_state.__dict__", _MC2=ep_group), \
             patch("torch.npu.current_device", return_value=0):
-        yield
-
-
-@pytest.fixture
-def mock_forward_context():
-    forward_context = Mock(in_profile_run=False, with_prefill=False)
-    with patch("vllm_ascend.models.deepseek_v2.get_forward_context",
-               return_value=forward_context):
         yield

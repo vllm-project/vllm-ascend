@@ -19,76 +19,87 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from dataclasses import dataclass
 from typing import Optional
 
 import torch
 from torch import nn
 from vllm.attention import Attention, AttentionMetadata
+from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.mla import MultiHeadLatentAttention
+from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils import direct_register_custom_op
 
+from vllm_ascend.ascend_config import get_ascend_config
 
-@dataclass
-class AscendMLAModules:
-    q_a_proj: Optional[torch.nn.Module]
-    q_a_layernorm: Optional[torch.nn.Module]
-    q_proj: Optional[torch.nn.Module]
-    kv_a_proj_with_mqa: torch.nn.Module
-    kv_a_layernorm: torch.nn.Module
-    kv_b_proj: torch.nn.Module
-    o_proj: torch.nn.Module
-    rotary_emb: torch.nn.Module
-    indexer: Optional[torch.nn.Module]
-    is_sparse: bool
-
-
-class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
+# TODO(whx): adapt v0.11.0 and DSA
+class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
 
     def __init__(
         self,
         hidden_size: int,
-        enable_shared_expert_dp: bool,
-        debug_layer_idx: int,
-        first_k_dense_replace: int,
-        tp_size: int,
-        mla_modules: AscendMLAModules,
-        num_local_heads: int,
-        scaling: float,
-        layers: int,
-        kv_lora_rank: int,
-        qk_rope_head_dim: int,
-        q_lora_rank: Optional[int],
+        num_heads: int,
+        scale: float,
         qk_nope_head_dim: int,
-        qk_head_dim: int,
+        qk_rope_head_dim: int,
         v_head_dim: int,
+        q_lora_rank: Optional[int],
+        kv_lora_rank: int,
+        mla_modules: MLAModules,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
-        self.enable_shared_expert_dp = enable_shared_expert_dp
-        self.debug_layer_idx = debug_layer_idx
-        self.first_k_dense_replace = first_k_dense_replace
-        self.tp_size = tp_size
-        self.num_local_heads = num_local_heads
-        self.layers = layers
         self.kv_lora_rank = kv_lora_rank
         self.qk_rope_head_dim = qk_rope_head_dim
         self.q_lora_rank = q_lora_rank
         self.qk_nope_head_dim = qk_nope_head_dim
-        self.qk_head_dim = qk_head_dim
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.prefix = prefix
+        hf_config = get_current_vllm_config().model_config.hf_config
+        self.enable_shared_expert_dp = get_ascend_config(
+        ).enable_shared_expert_dp
+        self.debug_layer_idx = int(self.prefix.split(".")[-2])
+        self.first_k_dense_replace = hf_config.first_k_dense_replace
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.layers = hf_config.num_hidden_layers
+
+        self.mla_attn = MLAAttention(
+            num_heads=self.num_heads,
+            scale=scale,
+            head_size=self.kv_lora_rank + self.qk_rope_head_dim,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            kv_b_proj=mla_modules.kv_b_proj,
+            use_sparse=mla_modules.is_sparse,
+            indexer=mla_modules.indexer,
+            # extra args
+            qk_head_dim=self.qk_head_dim,
+            rotary_emb=mla_modules.rotary_emb,
+            fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,
+            q_b_proj=mla_modules.q_b_proj,
+            q_a_layernorm=mla_modules.q_a_layernorm,
+            q_proj=mla_modules.q_proj,
+            kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
+            kv_a_layernorm=mla_modules.kv_a_layernorm,
+            o_proj=mla_modules.o_proj,
+        )
 
         self.mla_attn = Attention(
-            num_heads=self.num_local_heads,
+            num_heads=num_heads,
             head_size=self.kv_lora_rank + self.qk_rope_head_dim,
-            scale=scaling,
+            scale=scale,
             num_kv_heads=1,
             cache_config=cache_config,
             quant_config=quant_config,
@@ -99,10 +110,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
             kv_lora_rank=self.kv_lora_rank,
             qk_nope_head_dim=self.qk_nope_head_dim,
             qk_rope_head_dim=self.qk_rope_head_dim,
-            qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
+            qk_head_dim=self.qk_head_dim,
             rotary_emb=mla_modules.rotary_emb,
-            q_a_proj=mla_modules.q_a_proj,
+            fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,
+            q_b_proj=mla_modules.q_b_proj,
             q_a_layernorm=mla_modules.q_a_layernorm,
             q_proj=mla_modules.q_proj,
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,

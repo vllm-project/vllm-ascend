@@ -176,12 +176,14 @@ packed_modules_model_mapping = {
     "deepseek_v2": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
     "deepseek_v3": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
     "deepseek_v32": {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -274,6 +276,7 @@ class AscendLinearMethod(LinearMethodBase):
             # disable warning
             param.ignore_warning = True
             layer.register_parameter(pertensor_name, param)
+            param.weight_loader = extra_weight_attrs.get("weight_loader")
 
         perchannel_dict = self.quant_method.get_perchannel_param(
             output_size_per_partition, params_dtype)
