@@ -69,6 +69,7 @@ from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LazyLoader, cdiv, get_dtype_size,
                         is_pin_memory_available)
+from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, reorder_batch_to_split_decodes_and_prefills)
@@ -1815,18 +1816,30 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                               device=hidden_states.device)
         seq_lens_cpu = self.seq_lens_cpu[:self.input_batch.num_reqs]
 
-        # Pooling models D2H & synchronize occurs in pooler.py:build_output
-        raw_pooler_output = self.model.pooler(
-            hidden_states=hidden_states, pooling_metadata=pooling_metadata)
+        if vllm_version_is("0.12.0"):
+            # Pooling models D2H & synchronize occurs in pooler.py:build_output
+            raw_pooler_output = self.model.pooler(
+                hidden_states=hidden_states, pooling_metadata=pooling_metadata)
+        else:
+            model = cast(VllmModelForPooling, self.model)
+            raw_pooler_output: PoolerOutput = model.pooler(
+                hidden_states=hidden_states,
+                pooling_metadata=pooling_metadata,
+            )
+            raw_pooler_output = json_map_leaves(
+                lambda x: x.to("cpu", non_blocking=True),
+                raw_pooler_output,
+            )
+            torch.npu.synchronize()
 
         pooler_output: list[Optional[torch.Tensor]] = []
         for raw_output, seq_len, prompt_len in zip(
                 raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens):
-
-            if seq_len == prompt_len:
-                pooler_output.append(raw_output.data)
+            if vllm_version_is("0.12.0"):
+                output = raw_output.data if seq_len == prompt_len else None
             else:
-                pooler_output.append(None)
+                output = raw_output if seq_len == prompt_len else None
+            pooler_output.append(output)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -2591,7 +2604,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for task in self.get_supported_pooling_tasks():
             # Run a full batch with each task to ensure none of them OOMs
             output = self._dummy_pooler_run_task(hidden_states, task)
-            output_size[task] = output.get_data_nbytes()
+            if vllm_version_is("0.10.2"):
+                output_size[task] = output.get_data_nbytes()
+            else:
+                output_size[task] = sum(o.nbytes for o in output)
             del output  # Allow GC
 
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
