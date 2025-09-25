@@ -133,11 +133,15 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
         """
         self.replace_allreduce = replace_allreduce
         self.enable_shared_expert_dp = enable_shared_expert_dp
+        forward_context = get_forward_context()
+        mc2_mask = forward_context.mc2_mask
+        if self.tp_size > 1:
+            # Also slice mc2_mask
+            split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)
+            mc2_mask = split_mc2_mask[self.tp_rank]
 
         if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
-            forward_context = get_forward_context()
-            mc2_mask = forward_context.mc2_mask
             target_pad_length = forward_context.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
 
@@ -149,23 +153,16 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
                                                   (0, 0, 0, pad_size))
 
             # Slice across TP ranks
-            if self.tp_size > 1:
-                if not self.enable_shared_expert_dp:
-                    split_hidden_states = torch.tensor_split(hidden_states,
-                                                             self.tp_size,
-                                                             dim=0)
-                    split_router_logits = torch.tensor_split(router_logits,
-                                                             self.tp_size,
-                                                             dim=0)
-                    hidden_states = split_hidden_states[self.tp_rank]
-                    router_logits = split_router_logits[self.tp_rank]
-                    self.split_hidden_states = split_hidden_states  # Save for finalize
-
-                # Also slice mc2_mask
-                split_mc2_mask = torch.tensor_split(mc2_mask,
-                                                    self.tp_size,
-                                                    dim=0)
-                mc2_mask = split_mc2_mask[self.tp_rank]
+            if self.tp_size > 1 and not self.enable_shared_expert_dp:
+                split_hidden_states = torch.tensor_split(hidden_states,
+                                                         self.tp_size,
+                                                         dim=0)
+                split_router_logits = torch.tensor_split(router_logits,
+                                                         self.tp_size,
+                                                         dim=0)
+                hidden_states = split_hidden_states[self.tp_rank]
+                router_logits = split_router_logits[self.tp_rank]
+                self.split_hidden_states = split_hidden_states  # Save for finalize
 
         return hidden_states, router_logits, mc2_mask
 

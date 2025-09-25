@@ -936,7 +936,7 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
             self,
             hidden_states: torch.Tensor,
-            sampling_metadata,  # type: ignore
+            sampling_metadata=None,  # type: ignore
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)

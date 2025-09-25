@@ -36,6 +36,12 @@ The following table lists the additional configuration options available in vLLM
 | `lmhead_tensor_parallel_size` | int | `None` | The custom tensor parallel size of lmhead. |
 | `oproj_tensor_parallel_size` | int | `None` | The custom tensor parallel size of oproj. |
 | `multistream_overlap_shared_expert`| bool | `False` | Whether to enable multistream shared expert. This option only takes effects on moe models with shared experts. |
+| `dynamic_eplb`              | bool | `False` | Whether to enable dynamic eplb                                                                                                                |
+|`num_iterations_eplb_update`| int  | `400` | Forward iterations when eplb would begin                                                                                                      |
+|`gate_eplb`| bool | `False` | Whether to enale eplb only once.                                                                                                              |
+|`num_wait_worker_iterations`| int  | `30` | The  forward iterations when eplb worker will finish cpu task. In our test default value 30 would cover most cases.                           |
+|`expert_map_record_path`| str  | `None` |              When dynamic eplb is completed, save the current expert load heatmap to the specified path.                                                                                                                                 |
+|`init_redundancy_expert`| int  | `0`  |Specify redundant experts during initialization.|
 
 The details of each config option are as follows:
 
@@ -60,6 +66,8 @@ The details of each config option are as follows:
 | `enabled` | bool | `False` | Whether to enable ascend scheduler for V1 engine|
 | `enable_pd_transfer` | bool | `False` | Whether to enable pd transfer. When using it, decode is started only when prefill of all requests is done. This option only takes effects on offline inference. |
 | `decode_max_num_seqs` | int | `0` | Whether to change max_num_seqs of decode phase when enable pd transfer. This option only takes effects when enable_pd_transfer is True. |
+| `max_long_partial_prefills` | Union[int, float] | `float('inf')` | the maximum number of prompts longer than long_prefill_token_threshold that will be prefilled concurrently. |
+| `long_prefill_token_threshold` | Union[int, float] | `float('inf')` | a request is considered long if the prompt is longer than this number of tokens. |
 
 ascend_scheduler_config also support the options from [vllm scheduler config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig). For example, you can add `enable_chunked_prefill: True` to ascend_scheduler_config as well.
 
@@ -79,6 +87,8 @@ An example of additional configuration is as follows:
     "ascend_scheduler_config": {
         "enabled": True,
         "enable_chunked_prefill": True,
+        "max_long_partial_prefills": 1,
+        "long_prefill_token_threshold": 4096,
     },
     "multistream_overlap_shared_expert": True,
     "refresh": False,
