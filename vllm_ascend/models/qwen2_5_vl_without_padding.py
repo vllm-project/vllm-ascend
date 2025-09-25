@@ -28,8 +28,8 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 
 try:
-    from transformers.models.qwen3_vl.configuration_qwen3_vl import (
-        Qwen3VLConfig)
+    from transformers.models.qwen3_vl.configuration_qwen3_vl import \
+        Qwen3VLConfig
     from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import \
         Qwen3VLMoeConfig
 except ImportError:
