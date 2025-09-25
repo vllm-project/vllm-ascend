@@ -49,6 +49,10 @@ def test_generate_with_allgather():
                     tensor_parallel_size=2,
                     max_model_len=1024,
                     dtype="auto",
+                    model_loader_extra_config={
+                        "enable_multithread_load": True,
+                        "num_threads": 8
+                    },
                     enable_expert_parallel=True,
                     additional_config={
                         "ascend_scheduler_config": {
@@ -76,6 +80,10 @@ def test_generate_with_alltoall():
                     tensor_parallel_size=2,
                     max_model_len=1024,
                     dtype="auto",
+                    model_loader_extra_config={
+                        "enable_multithread_load": True,
+                        "num_threads": 8
+                    },
                     enable_expert_parallel=True,
                     additional_config={
                         "ascend_scheduler_config": {

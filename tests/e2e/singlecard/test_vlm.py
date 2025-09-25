@@ -45,6 +45,10 @@ def test_multimodal_vl(prompt_template):
     prompts = prompt_template(img_questions)
     with VllmRunner("Qwen/Qwen2.5-VL-3B-Instruct",
                     max_model_len=4096,
+                    model_loader_extra_config={
+                        "enable_multithread_load": True,
+                        "num_threads": 8
+                    },
                     mm_processor_kwargs={
                         "min_pixels": 28 * 28,
                         "max_pixels": 1280 * 28 * 28,

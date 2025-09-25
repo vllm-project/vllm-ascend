@@ -27,6 +27,10 @@ def test_e2e_ep_correctness(model_name):
     with VllmRunner(
             model_name,
             tensor_parallel_size=2,
+            model_loader_extra_config={
+                "enable_multithread_load": True,
+                "num_threads": 8
+            },
             enable_expert_parallel=True,
             additional_config={"ascend_scheduler_config": {
                 "enabled": True

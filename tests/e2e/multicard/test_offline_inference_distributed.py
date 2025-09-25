@@ -119,6 +119,10 @@ def test_models_distributed_DeepSeek_W4A8DYNAMIC():
             snapshot_download("vllm-ascend/DeepSeek-V3-W4A8-Pruing"),
             dtype="auto",
             tensor_parallel_size=2,
+            model_loader_extra_config={
+                "enable_multithread_load": True,
+                "num_threads": 8
+            },
             quantization="ascend",
             enforce_eager=True,
             enable_expert_parallel=True,
@@ -146,6 +150,10 @@ def test_sp_for_qwen3_moe() -> None:
     with VllmRunner(snapshot_download("Qwen/Qwen3-30B-A3B"),
                     dtype="auto",
                     tensor_parallel_size=2,
+                    model_loader_extra_config={
+                        "enable_multithread_load": True,
+                        "num_threads": 8
+                    },
                     distributed_executor_backend="mp",
                     compilation_config={
                         "pass_config": {
@@ -171,6 +179,10 @@ def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model, enforce_eager):
             snapshot_download(model),
             max_model_len=8192,
             enforce_eager=enforce_eager,
+            model_loader_extra_config={
+                "enable_multithread_load": True,
+                "num_threads": 8
+            },
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",

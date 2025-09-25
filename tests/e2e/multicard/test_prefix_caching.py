@@ -109,6 +109,10 @@ def test_prefix_cache_with_ascend_scheduler(model: str,
                             'enable_prefix_caching': True,
                         },
                     },
+                    model_loader_extra_config={
+                        "enable_multithread_load": True,
+                        "num_threads": 8
+                    },
                     enforce_eager=True,
                     max_model_len=2048,
                     tensor_parallel_size=2,

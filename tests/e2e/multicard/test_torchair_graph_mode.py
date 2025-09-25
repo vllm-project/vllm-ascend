@@ -54,6 +54,10 @@ def _deepseek_torchair_test_fixture(
     with VllmRunner(
             "vllm-ascend/DeepSeek-V3-Pruning",
             dtype="half",
+            model_loader_extra_config={
+                "enable_multithread_load": True,
+                "num_threads": 8
+            },
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
             additional_config=additional_config,
