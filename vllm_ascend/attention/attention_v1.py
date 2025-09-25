@@ -22,6 +22,7 @@ from typing import ClassVar, List, Optional, Tuple, Type
 import torch
 import torch.nn as nn
 import torch_npu
+from torch.nn.functional import scaled_dot_product_attention
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.config import VllmConfig
@@ -570,9 +571,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_actual_tokens = attn_metadata.num_actual_tokens
             assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
             attn_type = self.attn_type
-            if attn_type != AttentionType.DECODER:
-                raise NotImplementedError("Encoder self-attention and "
-                                          "encoder/decoder cross-attention "
+            if attn_type != AttentionType.DECODER and attn_type != AttentionType.ENCODER_ONLY:
+                raise NotImplementedError("Encoder/decoder cross-attention "
                                           "are not implemented for "
                                           "PallasAttentionBackendImpl")
             # View q k v to BSH.
@@ -592,9 +592,35 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_indices=slots)
+            if attn_type == AttentionType.ENCODER_ONLY:
+                # TODO: change to use torch_npu encoder attention op, instead
+                # of torch sdpa
+                query = query.movedim(0, query.dim() - 2)
+                key = key.movedim(0, key.dim() - 2)
+                value = value.movedim(0, value.dim() - 2)
 
+                causal_attn = (attn_type == AttentionType.DECODER)
+                if attn_metadata.seq_lens is not None:
+                    seq_lens_q = seq_lens_kv = attn_metadata.seq_lens
+                attn_masks = [None] * len(seq_lens_q)
+                start_q, start_kv = 0, 0
+                for seq_len_q, seq_len_kv, mask in zip(seq_lens_q, seq_lens_kv,
+                                                       attn_masks):
+                    end_q = start_q + seq_len_q
+                    end_kv = start_kv + seq_len_kv
+                    sub_out = scaled_dot_product_attention(
+                        query[None, :, start_q:end_q, :],
+                        key[None, :, start_kv:end_kv, :],
+                        value[None, :, start_kv:end_kv, :],
+                        attn_mask=mask,
+                        dropout_p=0.0,
+                        is_causal=causal_attn and mask is None,
+                        scale=self.scale).squeeze(0).movedim(
+                            query.dim() - 2, 0)
+                    output[start_q:end_q, :, :] = sub_out
+                    start_q, start_kv = end_q, end_kv
             # V0-Style scheduler situation.
-            if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 output = self._forward_prefill_no_cache(
                     query, key, value, attn_metadata, output, num_tokens)
             elif attn_metadata.attn_state == \
