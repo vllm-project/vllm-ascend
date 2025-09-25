@@ -24,7 +24,6 @@ import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
-from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import cdiv, direct_register_custom_op
@@ -55,10 +54,6 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_metadata_cls() -> Type["AscendMetadata"]:
         return AscendMetadata
-
-    @staticmethod
-    def get_state_cls() -> Type["CommonAttentionState"]:
-        return CommonAttentionState
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:

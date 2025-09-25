@@ -153,6 +153,8 @@ def default_moe_config():
 def moe_method(mock_dist_env):
     moe = MagicMock()
     moe.moe_parallel_config.return_value = MagicMock(ep_size=4)
+    moe.moe_parallel_config.use_ep = False
+    moe.moe_parallel_config.dp_size = 1
     return TorchairAscendUnquantizedFusedMoEMethod(moe)
 
 
