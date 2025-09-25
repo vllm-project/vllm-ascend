@@ -29,8 +29,6 @@ from unittest.mock import patch
 import pytest
 import torch_npu
 
-os.environ["HCCL_BUFFSIZE"] = "500"
-
 MODELS = ["Qwen/Qwen3-0.6B"]
 MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
 DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
