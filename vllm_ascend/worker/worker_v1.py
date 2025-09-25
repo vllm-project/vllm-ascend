@@ -116,6 +116,12 @@ class NPUWorker(WorkerBase):
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
+        # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
+        from vllm.model_executor.layers.linear import \
+            WEIGHT_LOADER_V2_SUPPORTED
+        if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
+            WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
+
     def sleep(self, level: int = 1) -> None:
         if not sleep_mode_enabled():
             raise ValueError(
