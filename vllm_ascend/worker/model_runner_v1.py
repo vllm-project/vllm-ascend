@@ -1822,7 +1822,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states=hidden_states, pooling_metadata=pooling_metadata)
         else:
             model = cast(VllmModelForPooling, self.model)
-            raw_pooler_output: PoolerOutput = model.pooler(
+            raw_pooler_output = model.pooler(
                 hidden_states=hidden_states,
                 pooling_metadata=pooling_metadata,
             )
