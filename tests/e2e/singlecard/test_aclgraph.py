@@ -73,3 +73,48 @@ def test_models_with_aclgraph(
         name_0="vllm_eager_outputs",
         name_1="vllm_aclgraph_outputs",
     )
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("max_tokens", [32])
+def test_models_with_aclgraph_full_decode_only(
+    model: str,
+    max_tokens: int,
+) -> None:
+    prompts = [
+        "Hello, my name is", "The president of the United States is",
+        "The capital of France is", "The future of AI is"
+    ]
+
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    with VllmRunner(
+            model,
+            max_model_len=1024,
+            enforce_eager=False,
+            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+    ) as runner:
+        vllm_aclgraph_outputs = runner.model.generate(prompts, sampling_params)
+
+    with VllmRunner(
+            model,
+            max_model_len=1024,
+            enforce_eager=True,
+    ) as runner:
+        vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
+
+    vllm_aclgraph_outputs_list = []
+    for output in vllm_aclgraph_outputs:
+        vllm_aclgraph_outputs_list.append(
+            (output.outputs[0].index, output.outputs[0].text))
+
+    vllm_eager_outputs_list = []
+    for output in vllm_eager_outputs:
+        vllm_eager_outputs_list.append(
+            (output.outputs[0].index, output.outputs[0].text))
+
+    check_outputs_equal(
+        outputs_0_lst=vllm_eager_outputs_list,
+        outputs_1_lst=vllm_aclgraph_outputs_list,
+        name_0="vllm_eager_outputs",
+        name_1="vllm_aclgraph_outputs",
+    )
