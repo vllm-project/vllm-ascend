@@ -43,17 +43,16 @@ class WeightPrefetchMethod:
             module_name="attn",
             enable=weight_prefetch_config.enabled,
             prefetch_ratio=weight_prefetch_config.prefetch_ratio.get(
-                "attn", {})
-        )
+                "attn", {}))
 
     def maybe_prefetch_attn_weight_preprocess(
-        self, prefix: str, weight: torch.Tensor,
-        start_flag: torch.Tensor) -> None:
+            self, prefix: str, weight: torch.Tensor,
+            start_flag: torch.Tensor) -> None:
         if not self.attn.enable:
             return
 
         weight_size = weight.data.element_size() * weight.data.numel(
-            ) * self.attn.prefetch_ratio.get(prefix, 0)
+        ) * self.attn.prefetch_ratio.get(prefix, 0)
 
         self.calculation_stream = torch_npu.npu.current_stream()
         self.weight_prefetch_impl(weight=weight,

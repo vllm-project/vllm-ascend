@@ -65,6 +65,7 @@ def select_experts(hidden_states: torch.Tensor,
         topk_weights: router weights of shape (num_tokens, top_k).
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
+
     topk_weights, topk_ids, row_idx = _select_experts_with_fusion_ops(
         hidden_states=hidden_states,
         router_logits=router_logits,

@@ -129,6 +129,7 @@ def set_ascend_forward_context(
             hasattr(model_instance.model, "start_layer"):
             forward_context.layer_idx = model_instance.model.start_layer
 
+        # TODO(rjg-lyh): refactor mlp weight prefetch method
         # set for mlp weight prefetch
         prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE and \
             envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
@@ -140,13 +141,6 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
-
-        # TODO(rjg-lyh): refactor mlp weight prefetch method
-        # moe weight prefetch
-        forward_context.num_tokens = num_tokens
-        forward_context.model_instance = model_instance
-        forward_context.with_prefill = with_prefill
-        forward_context.ep_size = ep_size
         # TODO(yuzhup): integrate moe weight prefetch method
         forward_context.weight_prefetch_method = weight_prefetch_method
 
