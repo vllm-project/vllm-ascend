@@ -18,6 +18,7 @@
 from typing import Optional, Tuple, Union, cast
 
 import torch
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 
@@ -27,7 +28,7 @@ def _addrmsnorm_forward_oot(
     x: torch.Tensor,
     residual: torch.Tensor,
     layer: Optional[torch.nn.Module] = None,
-    bias: Optional[torch.nn.Module] = None,
+    bias: Optional[torch.nn.Parameter] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     import torch_npu
 
@@ -60,11 +61,26 @@ def _addrmsnorm_forward_oot(
 
 class AscendRMSNorm(RMSNorm):
 
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        var_hidden_size: Optional[int] = None,
+        has_weight: bool = True,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+        vllm_config = get_current_vllm_config()
+        self.bias = None
+        # m4
+        if vllm_config is not None and vllm_config.quant_config is not None and \
+                any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
+            self.bias = torch.nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
+
     def forward_oot(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
@@ -72,12 +88,12 @@ class AscendRMSNorm(RMSNorm):
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             assert x.size(0) == residual.size(0)
             x, residual = _addrmsnorm_forward_oot(
-                self, x, residual, self.next_need_quant_fusion_linear, bias)
+                self, x, residual, self.next_need_quant_fusion_linear, self.bias)
             return x, residual
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
                                              self.variance_epsilon)
-        if bias is not None:
-            x.add_(bias)
+        if self.bias is not None:
+            x.add_(self.bias)
         return x
 
     @property
@@ -118,28 +134,3 @@ class AscendRMSNorm(RMSNorm):
             not isinstance(next_linear.quant_method.quant_method, AscendW8A8LinearMethod):
             next_linear = None
         return next_linear
-
-
-class AscendQuantRMSNorm(AscendRMSNorm):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        eps: float = 1e-6,
-        var_hidden_size: Optional[int] = None,
-        has_weight: bool = True,
-        dtype: Optional[torch.dtype] = None,
-    ) -> None:
-        super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
-        self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
-                                       requires_grad=False)
-
-    def forward_oot(
-        self,
-        x: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        if residual is not None:
-            x, residual = super().forward_oot(x, residual, self.bias)
-            return x, residual
-        return super().forward_oot(x, bias=self.bias)
