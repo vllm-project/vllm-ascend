@@ -401,24 +401,41 @@ class AscendMLAMetadataBuilder:
             block_table = block_table[:num_decodes, ...]
             seq_lens_list = seq_lens.tolist()
 
+            # TODO: After the fullgraph supports MTP, the if branch needs to deleted
             assert self.cos_cache is not None
             assert self.sin_cache is not None
+            if cos is None and sin is None:
+                cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
+                    1).unsqueeze(2)
+                sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
+                    1).unsqueeze(2)
 
-            cos[:num_decodes, ...] = self.cos_cache[input_positions].unsqueeze(
-                1).unsqueeze(2)
-            sin[:num_decodes, ...] = self.sin_cache[input_positions].unsqueeze(
-                1).unsqueeze(2)
+                decode_metadata = AscendMLADecodeMetadata(
+                    input_positions=input_positions,
+                    block_table=block_table,
+                    seq_lens=seq_lens,
+                    seq_lens_list=seq_lens_list,
+                    max_seq_lens=max_seq_lens,
+                    attn_mask=common_attn_metadata.spec_attn_mask,
+                    actual_seq_lengths_q=actual_seq_lengths_q,
+                    sin=sin,
+                    cos=cos)
+            else:
+                cos[:num_decodes, ...] = self.cos_cache[input_positions].unsqueeze(
+                    1).unsqueeze(2)
+                sin[:num_decodes, ...] = self.sin_cache[input_positions].unsqueeze(
+                    1).unsqueeze(2)
 
-            decode_metadata = AscendMLADecodeMetadata(
-                input_positions=input_positions,
-                block_table=block_table,
-                seq_lens=seq_lens,
-                seq_lens_list=seq_lens_list,
-                max_seq_lens=max_seq_lens,
-                attn_mask=common_attn_metadata.spec_attn_mask,
-                actual_seq_lengths_q=actual_seq_lengths_q,
-                sin=sin[:num_decodes, ...],
-                cos=cos[:num_decodes, ...])
+                decode_metadata = AscendMLADecodeMetadata(
+                    input_positions=input_positions,
+                    block_table=block_table,
+                    seq_lens=seq_lens,
+                    seq_lens_list=seq_lens_list,
+                    max_seq_lens=max_seq_lens,
+                    attn_mask=common_attn_metadata.spec_attn_mask,
+                    actual_seq_lengths_q=actual_seq_lengths_q,
+                    sin=sin[:num_decodes, ...],
+                    cos=cos[:num_decodes, ...])
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
