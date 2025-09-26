@@ -15,10 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Optional, Tuple, Union, cast
+from typing import Optional, Tuple, Union
 
 import torch
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 
@@ -75,7 +75,8 @@ class AscendRMSNorm(RMSNorm):
         # m4
         if vllm_config is not None and vllm_config.quant_config is not None and \
                 any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
-            self.bias = torch.nn.Parameter(torch.zeros(hidden_size), requires_grad=False)
+            self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
+                                           requires_grad=False)
 
     def forward_oot(
         self,
@@ -88,7 +89,8 @@ class AscendRMSNorm(RMSNorm):
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             assert x.size(0) == residual.size(0)
             x, residual = _addrmsnorm_forward_oot(
-                self, x, residual, self.next_need_quant_fusion_linear, self.bias)
+                self, x, residual, self.next_need_quant_fusion_linear,
+                self.bias)
             return x, residual
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
                                              self.variance_epsilon)
@@ -124,7 +126,8 @@ class AscendRMSNorm(RMSNorm):
             if not forward_context.prefetch_mlp_enabled:
                 forward_context.layer_idx += 1
         elif fusion_linear == "qkv_moe":
-            next_linear = model_instance.model.layers[layer_idx].self_attn.qkv_proj
+            next_linear = model_instance.model.layers[
+                layer_idx].self_attn.qkv_proj
             forward_context.fusion_linear = "gate_moe"
         elif fusion_linear == "gate_moe":
             forward_context.fusion_linear = "qkv_moe"
