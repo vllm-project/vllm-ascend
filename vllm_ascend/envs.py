@@ -159,6 +159,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # caused by the initialization of the Mooncake connector.
     "PHYSICAL_DEVICES":
     lambda: os.getenv("PHYSICAL_DEVICES", None),
+    # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
+    "MSMONITOR_USE_DAEMON":
+    lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
 }
 
 # end-env-vars-definition

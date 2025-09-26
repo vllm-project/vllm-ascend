@@ -183,6 +183,11 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
                                 self.moe_config.tp_group.device_group)
                 hidden_states = torch.cat(self.split_hidden_states, dim=0)
 
+                # TODO: It is a quick bugfix for the memory explosion issue in eager mode.
+                # If the cache is not cleared after `self.split_hidden_states` is created,
+                # it can lead to the memory explosion in eager mode.
+                del self.split_hidden_states
+
             # Unpad if necessary
             if self.num_tokens < hidden_states.shape[0]:
                 hidden_states = hidden_states[:self.num_tokens]
@@ -266,6 +271,11 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
                 dist.all_gather(list(self.split_hidden_states), hidden_states,
                                 self.moe_config.tp_group.device_group)
                 hidden_states = torch.cat(self.split_hidden_states, dim=0)
+
+                # TODO: It is a quick bugfix for the memory explosion issue in eager mode.
+                # If the cache is not cleared after `self.split_hidden_states` is created,
+                # it can lead to the memory explosion in eager mode.
+                del self.split_hidden_states
 
             if self.num_tokens < hidden_states.shape[0]:
                 hidden_states = hidden_states[:self.num_tokens]
