@@ -23,6 +23,7 @@ on:
       - 'main'
       - '*-dev'
     paths:
+      - '!examples/**'
       - '*.txt'
       - '**/*.py'
       - '.github/workflows/vllm_ascend_test.yaml'
