@@ -98,7 +98,7 @@ class TestTokenDispatcherWithMC2(TestBase):
                                                     self.row_idx, expert_map)
             mock_dispatch.assert_called_once()
             self.assertEqual(output["group_list_type"],
-                             1)  # group_list_type == 1
+                             0)  # group_list_type == 0
 
     def test_token_dispatch_with_shared_experts_and_quant(self):
         self.shared_experts = MagicMock()
