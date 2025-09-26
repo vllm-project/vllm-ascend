@@ -202,6 +202,8 @@ class AscendMLAMetadataBuilder:
                 npu_fused_infer_attention_score TND layout's limit of 16, \
                 got {self.decode_threshold}"
 
+        self.reorder_batch_threshold = self.decode_threshold
+
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
                 # Max sure there is enough for 8 full length request or at least
