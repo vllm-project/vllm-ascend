@@ -196,3 +196,18 @@ export ATB_LLM_LCOC_ENABLE=0
 ### 19. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？
 The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met `pip install qwen-omni-utils`,
 this package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring audio processing functionality works correctly.
+
+### 20. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
+
+```
+error example in detail: 
+ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph sizes capture fail: RuntimeError:
+ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph has insufficient available streams to capture the configured number of sizes.Please verify both the availability of adequate streams and the appropriateness of the configured size count.
+```
+
+Recommended mitigation strategies:
+1. Manually configure the compilation_config parameter with a reduced size set: '{"cudagraph_capture_sizes":[size1, size2, size3, ...]}'.
+2. Employ ACLgraph's full graph mode as an alternative to the piece-wise approach.
+
+Root cause analysis:
+The current stream requirement calculation for size captures only accounts for measurable factors including: data parallel size, tensor parallel size, expert parallel configuration, piece graph count, multistream overlap shared expert settings, and HCCL communication mode (AIV/AICPU). However, numerous unquantifiable elements - such as operator characteristics and specific hardware features - consume additional streams outside of this calculation framework, resulting in stream resource exhaustion during size capture operations.
