@@ -302,10 +302,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.is_pooling_model = self.model_config.pooler_config is not None
         self.enable_prompt_embeds = self.model_config.enable_prompt_embeds
         if self.is_multimodal_model or self.enable_prompt_embeds:
-            self.inputs_embeds = self._make_buffer(self.max_num_tokens,
-                                               self.model_config.get_hidden_size(),
-                                               dtype=self.dtype,
-                                               numpy=False)
+            self.inputs_embeds = self._make_buffer(
+                self.max_num_tokens,
+                self.model_config.get_hidden_size(),
+                dtype=self.dtype,
+                numpy=False)
         self.is_token_ids = self._make_buffer(self.max_num_tokens,
                                               dtype=torch.bool)
 
@@ -2203,7 +2204,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 self.input_batch.token_ids_cpu[req_idx,
                                                start_idx:end_idx] = sampled_ids
-                self.input_batch.is_token_ids[req_idx, start_idx:end_idx] = True
+                self.input_batch.is_token_ids[req_idx,
+                                              start_idx:end_idx] = True
                 self.input_batch.num_tokens_no_spec[req_idx] = end_idx
                 self.input_batch.num_tokens[req_idx] = end_idx
                 req_id = self.input_batch.req_ids[req_idx]
