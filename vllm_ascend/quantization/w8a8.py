@@ -21,10 +21,10 @@ import torch
 import torch_npu
 from vllm.attention.backends.abstract import AttentionType
 from vllm.distributed.parallel_state import get_ep_group
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.ops.weight_prefetch import AttentionWeightPrefetchMethod, PrefetchManager
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
 
 
@@ -97,8 +97,20 @@ class AscendW8A8LinearMethod:
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-        if layer.__class__.__name__ in ["AscendQLVParallelLinear", "AscendRowParallelLinear"]:
-            PrefetchManager.get_prefetch_obj(AttentionWeightPrefetchMethod).maybe_weight_prefetch_preprocess(layer.weight, x)
+        # TODO(zhoux77899): integrate prefetch qkvo_proj.weight with unquantized layers
+        attn_weight_map = {
+            "AscendQKVParallelLinear": "qkv",
+            "AscendRowParallelLinear": "o",
+        }
+        weight_prefetch_method = get_forward_context().weight_prefetch_method
+        assert weight_prefetch_method is not None
+
+        # prefetch qkvo_proj.weight preprocess
+        weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
+            prefix=attn_weight_map.get(layer.__class__.__name__, ""),
+            weight=layer.weight,
+            start_flag=x,
+        )
 
         if x.dtype != torch.int8:
             x = quant_per_tensor(
@@ -107,8 +119,9 @@ class AscendW8A8LinearMethod:
                 layer.aclnn_input_offset,
             )
 
-        if layer.__class__.__name__ in ["AscendQLVParallelLinear", "AscendRowParallelLinear"]:
-            PrefetchManager.get_prefetch_obj(AttentionWeightPrefetchMethod).maybe_weight_prefetch_postprocess()
+        # prefetch qkvo_proj.weight preprocess
+        if layer.__class__.__name__ in attn_weight_map.keys():
+            weight_prefetch_method.maybe_prefetch_attn_weight_postprocess()
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
         if is_310p():

@@ -10,7 +10,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ops.weight_prefetch import PrefetchManager
+from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
 from vllm_ascend.utils import enable_sp
 
 
@@ -65,7 +65,8 @@ def set_ascend_forward_context(
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
         prefetch_stream: torch.npu.Stream = None,
-        model_instance: torch.nn.Module = None):
+        model_instance: torch.nn.Module = None,
+        weight_prefetch_method: Optional[WeightPrefetchMethod] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -139,12 +140,15 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
 
+        # TODO(rjg-lyh): refactor mlp weight prefetch method
         # moe weight prefetch
         forward_context.num_tokens = num_tokens
         forward_context.model_instance = model_instance
         forward_context.with_prefill = with_prefill
         forward_context.ep_size = ep_size
-        PrefetchManager.init_forward_prefetch(vllm_config)
+        # TODO(yuzhup): integrate moe weight prefetch method
+        forward_context.weight_prefetch_method = weight_prefetch_method
+
         # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
         # It will be improved later by implementing operator fusion through the FX graph.
         #

@@ -44,7 +44,12 @@ class AscendConfig:
             "ascend_scheduler_config", {})
         self.ascend_scheduler_config = AscendSchedulerConfig(
             ascend_scheduler_config)
-        self.weight_prefetch_config = WeightPrefetchConfig(additional_config.get("weight_prefetch_config", {}))
+
+        weight_prefetch_config = additional_config.get(
+            "weight_prefetch_config", {})
+        self.weight_prefetch_config = WeightPrefetchConfig(
+            weight_prefetch_config)
+
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.expert_map_record_path = additional_config.get(
@@ -174,33 +179,22 @@ class AscendSchedulerConfig:
                 setattr(self, k, v)
 
 
-@dataclass
-class AttentionWeightPrefetchConfig:
-    enabled: bool = False
-
-
-@dataclass
-class MoEWeightPrefetchConfig:
-    enabled: bool = False
-    prefetch_ratio: float = 0
-
-
 class WeightPrefetchConfig:
     """
     Configuration Object for weight_prefetch_config from additional_config
     """
 
-    def __init__(self, weight_prefetch_config: dict):
-        attn_weight_prefetch_config = weight_prefetch_config.get("attn", {})
-        self.attn_weight_prefetch_config = AttentionWeightPrefetchConfig(
-            enabled=attn_weight_prefetch_config.get("enabled", False)
-        )
+    prefetch_ratio: dict = {
+        "attn": {
+            "qkv": 1.0,
+            "o": 1.0,
+        },
+    }
 
-        moe_weight_prefetch_config = weight_prefetch_config.get("moe", {})
-        self.moe_weight_prefetch_config = MoEWeightPrefetchConfig(
-            enabled=moe_weight_prefetch_config.get("enabled", False),
-            prefetch_ratio=moe_weight_prefetch_config.get("prefetch_ratio", 0)
-        )
+    def __init__(self, weight_prefetch_config: dict):
+        self.enabled = weight_prefetch_config.get("enabled", True)
+        self.prefetch_ratio = weight_prefetch_config.get(
+            "prefetch_ratio", self.prefetch_ratio)
 
 
 _ASCEND_CONFIG: Optional[AscendConfig] = None
