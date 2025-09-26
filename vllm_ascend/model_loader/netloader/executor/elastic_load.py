@@ -80,13 +80,10 @@ class P2PLoad:
 
             trans_stream = torch_npu.npu.Stream()
             with torch_npu.npu.stream(trans_stream):
-                handlers = []
                 for name, param in model.named_parameters():
                     if len(param.shape) == 0:
                         continue
-                    handlers.append(receiver_pg.recv([param], 1, 0))
-                for h in handlers:
-                    h.wait()
+                    receiver_pg.recv([param], 1, 0).wait()
                 torch.distributed.barrier(group=receiver_pg,
                                           device_ids=[model_device.index])
 
@@ -154,17 +151,14 @@ class P2PSend:
 
             trans_stream = torch_npu.npu.Stream()
             with torch_npu.npu.stream(trans_stream):
-                handlers = []
                 for name, param in model.named_parameters():
+                    if "aclnn_input_scale" in name:
+                        continue
                     if name in int8_params:
-                        handlers.append(
-                            sender_pg.send(
-                                [int8_params[name].to(model_device)], 0, 0))
+                        sender_pg.send([int8_params[name].to(model_device)], 0,
+                                       0).wait()
                     else:
-                        handlers.append(
-                            sender_pg.send([param.contiguous()], 0, 0))
-                for h in handlers:
-                    h.wait()
+                        sender_pg.send([param.contiguous()], 0, 0).wait()
                 torch.distributed.barrier(group=sender_pg,
                                           device_ids=[model_device.index])
             torch_npu.npu.synchronize(trans_stream)
