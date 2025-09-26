@@ -1,0 +1,27 @@
+diff --git a/vllm/config.py b/vllm/config.py
+index 9f3b91d79..c4191d592 100644
+--- a/vllm/config.py
++++ b/vllm/config.py
+@@ -2438,8 +2438,7 @@ class SpeculativeConfig:
+                 self.posterior_threshold = 0.0
+                 self.posterior_alpha = 0.0
+                 self.disable_logprobs = False
+-                self.disable_log_stats = False
+-                self.num_speculative_tokens = 1   #zxp TODO: get from config            
++                self.disable_log_stats = False           
+             else:
+                 raise ValueError("num_speculative_tokens was provided without "
+                                  "speculative model.")
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index bff9f53f9..88c3b5d0a 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -1003,7 +1003,7 @@ class Scheduler(SchedulerInterface):
+ 
+         # with spec
+         if self.vllm_config.speculative_config is not None:
+-            request.spec_token_ids.append(0)
++            request.spec_token_ids.extend([0] * self.vllm_config.speculative_config.num_speculative_tokens)
+ 
+         # very dangerous changes! 
+         # self.kv_cache_manager.single_type_manager.cache_blocks(

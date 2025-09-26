@@ -1,0 +1,20 @@
+{
+    "model_parallel_config":{
+        "dense_mlp_tp_size": 4,
+        "o_proj_tp_size": 1,
+        "dp_size":18
+    },
+    "operator_optimizition_config":{
+        "enable_kv_rmsnorm_rope_cache":false,
+        "prefill_moe_all_to_all":false,
+        "moe_multi_stream_tune":true,
+        "best_ep":true,
+        "merge_qkv":true,
+        "two_stage_comm":true,
+        "gmm_nz": true,
+        "decode_moe_dispatch_combine": true,
+        "use_omni_placement": true,
+        "omni_placement_config_path":".",
+        "control_accept_rate": -1
+    }
+}

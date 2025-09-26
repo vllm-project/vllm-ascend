@@ -1,0 +1,67 @@
+# Copyright 2025 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ============================================================================
+
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o IdentitiesOnly=yes'
+    ansible_ssh_private_key_file: /path/to/key.pem  # Private key path on the executor
+    global_port_base: 8000
+    base_api_port: 9000
+    proxy_port: 7000
+    etcd_port: 6000
+    mooncake_master_port: 6001
+    mooncake_metrics_port: 6002
+    port_offset:
+      P: 0      # Actual port range for group P: 8000-8099
+      D: 100    # Actual port range for group D: 8100-8199
+
+  children:
+    P:
+      hosts:
+        p0:
+          ansible_host: "127.0.0.1"
+          node_rank: 0
+          kv_rank: 0
+          node_port: "{{ global_port_base + port_offset.P + kv_rank }}"
+          api_port: "{{ base_api_port + port_offset.P + kv_rank }}"
+          host_ip: "127.0.0.1"
+          ascend_rt_visible_devices: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+
+    D:
+      hosts:
+        d0:
+          ansible_host: "127.0.0.3"
+          node_rank: 0
+          node_port: "{{ global_port_base + port_offset.D }}"
+          api_port: "{{ base_api_port + port_offset.D + node_rank }}"
+          host_ip: "127.0.0.3"
+          ascend_rt_visible_devices: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+
+        d1:
+          ansible_host: "127.0.0.4"
+          node_rank: 1
+          node_port: "{{ global_port_base + port_offset.D }}"
+          api_port: "{{ base_api_port + port_offset.D + node_rank }}"
+          host_ip: "127.0.0.3"
+          ascend_rt_visible_devices: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+
+    C:
+      hosts:
+        c0:
+          ansible_host: "127.0.0.1"
+          node_rank: 0
+          node_port: "{{ proxy_port + node_rank }}"
+          role: "C"

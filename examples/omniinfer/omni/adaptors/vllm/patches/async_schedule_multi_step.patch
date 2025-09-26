@@ -1,0 +1,319 @@
+diff --git a/vllm/v1/core/sched/utils.py b/vllm/v1/core/sched/utils.py
+index 3a0028a59..814c87762 100644
+--- a/vllm/v1/core/sched/utils.py
++++ b/vllm/v1/core/sched/utils.py
+@@ -20,3 +20,35 @@ def check_stop(request: Request, max_model_len: int) -> bool:
+         request.stop_reason = last_token_id
+         return True
+     return False
++
++def add_token_and_check_stop(token_ids: list[int], request: Request, max_model_len: int):
++    remain_len = min(max_model_len - request.num_tokens, request.max_tokens - request.num_output_tokens)
++    if remain_len <= 0:
++        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
++        return True, 0
++
++    possible_len = min(len(token_ids), remain_len)
++
++    true_idx = 0
++    sampling_params = request.sampling_params
++
++    for true_idx, last_token_id in enumerate(token_ids[:possible_len], 1):
++        if (not sampling_params.ignore_eos
++                and last_token_id == request.eos_token_id):
++            request.append_output_token_ids(token_ids[:true_idx])
++            request.status = RequestStatus.FINISHED_STOPPED
++            return True, true_idx
++
++        if last_token_id in (sampling_params.stop_token_ids or ()):
++            request.append_output_token_ids(token_ids[:true_idx])
++            request.status = RequestStatus.FINISHED_STOPPED
++            request.stop_reason = last_token_id
++            return True, true_idx
++
++    request.append_output_token_ids(token_ids[:true_idx])
++
++    if remain_len - true_idx <= 0:
++        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
++        return True, true_idx
++
++    return False, true_idx
+diff --git a/vllm/v1/core/sched/output.py b/vllm/v1/core/sched/output.py
+index 257234430..3ed7dc664 100644
+--- a/vllm/v1/core/sched/output.py
++++ b/vllm/v1/core/sched/output.py
+@@ -151,3 +151,5 @@ class SchedulerOutput:
+ 
+     # KV Cache Connector metadata.
+     kv_connector_metadata: Optional[KVConnectorMetadata] = None
++    # Number of steps to schedule
++    num_step: Optional[int] = 1
+\ No newline at end of file
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 4c6b3eea0..5d297ff1a 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -21,7 +21,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+ from vllm.v1.core.sched.interface import SchedulerInterface
+ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
+                                        SchedulerOutput)
+-from vllm.v1.core.sched.utils import check_stop
++from vllm.v1.core.sched.utils import check_stop, add_token_and_check_stop
+ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
+                             EngineCoreOutputs)
+ from vllm.v1.kv_cache_interface import KVCacheConfig
+@@ -53,6 +53,11 @@ class Scheduler(SchedulerInterface):
+         self.kv_events_config = vllm_config.kv_events_config
+         self.log_stats = log_stats
+         self.structured_output_manager = structured_output_manager
++        additional_config = vllm_config.additional_config
++        self.async_schedule = False
++        if additional_config:
++            self.async_schedule = additional_config.get(
++                    "async_schedule", False)
+ 
+         # include_finished_set controls whether a separate set of finished
+         # request ids should be included in the EngineCoreOutputs returned
+@@ -192,6 +197,11 @@ class Scheduler(SchedulerInterface):
+ 
+             num_new_tokens = (request.num_tokens_with_spec -
+                               request.num_computed_tokens)
++
++            # In async schedule, the num_tokens_with_spec is updated behind schedule(). Here clear the incorrect value
++            if self.async_schedule and num_new_tokens < 0:
++                num_new_tokens = 0
++
+             if (0 < self.scheduler_config.long_prefill_token_threshold <
+                     num_new_tokens):
+                 num_new_tokens = (
+@@ -213,6 +223,10 @@ class Scheduler(SchedulerInterface):
+                      request, request.num_computed_tokens, num_new_tokens,
+                      encoder_budget)
+ 
++            if self.async_schedule:
++                if num_new_tokens == 0:
++                    num_new_tokens = 1 + self.num_spec_tokens
++
+             if num_new_tokens == 0:
+                 # The request cannot be scheduled because one of the following
+                 # reasons:
+@@ -693,6 +707,7 @@ class Scheduler(SchedulerInterface):
+         self,
+         scheduler_output: SchedulerOutput,
+         model_runner_output: ModelRunnerOutput,
++        num_steps: int = 1,
+     ) -> EngineCoreOutputs:
+         sampled_token_ids = model_runner_output.sampled_token_ids
+         spec_token_ids = model_runner_output.spec_token_ids
+@@ -727,13 +742,13 @@ class Scheduler(SchedulerInterface):
+                 # num_computed_tokens is decreased by the number of rejected
+                 # tokens, where is given by:
+                 # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
+-                num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
+-                                       len(generated_token_ids))
++                num_tokens_rejected = (len(scheduled_spec_token_ids) * num_steps + num_steps -
++                                    len(generated_token_ids))
+                 request.num_computed_tokens -= num_tokens_rejected
+                 spec_decoding_stats = self.make_spec_decoding_stats(
+                     spec_decoding_stats,
+-                    num_draft_tokens=len(scheduled_spec_token_ids),
+-                    num_accepted_tokens=len(generated_token_ids) - 1)
++                    num_draft_tokens=len(scheduled_spec_token_ids) * num_steps,
++                    num_accepted_tokens=len(generated_token_ids) - num_steps)
+ 
+             cached_encoder_input_ids = (
+                 self.encoder_cache_manager.get_cached_input_ids(request))
+@@ -757,16 +772,11 @@ class Scheduler(SchedulerInterface):
+             # Append generated tokens and check for stop. Note that if
+             # a request is still being prefilled, we expect the model runner
+             # to return empty token ids for the request.
+-            for num_new, output_token_id in enumerate(new_token_ids, 1):
+-                request.append_output_token_ids(output_token_id)
+-
+-                # Check for stop and update request state.
+-                # This must be called before we make the EngineCoreOutput.
+-                stopped = check_stop(request, self.max_model_len)
+-                if stopped:
+-                    kv_transfer_params = self._free_request(request)
+-                    del new_token_ids[num_new:]  # Trim new tokens if needed.
+-                    break
++
++            stopped, num_new = add_token_and_check_stop(new_token_ids, request, self.max_model_len)
++            if stopped:
++                kv_transfer_params = self._free_request(request)
++                del new_token_ids[num_new:]  # Trim new tokens if needed.
+ 
+             # Extract sample logprobs if needed.
+             if request.sampling_params.logprobs is not None and logprobs:
+@@ -929,7 +939,7 @@ class Scheduler(SchedulerInterface):
+         if not self.log_stats:
+             return None
+         if spec_decoding_stats is None:
+-            spec_decoding_stats = SpecDecodingStats.new(self.num_spec_tokens)
++            spec_decoding_stats = SpecDecodingStats.new(num_draft_tokens)
+         spec_decoding_stats.observe_draft(
+             num_draft_tokens=num_draft_tokens,
+             num_accepted_tokens=num_accepted_tokens)
+
+diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
+index 740ba60fe..75b284f03 100644
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -38,6 +38,7 @@ from vllm.v1.request import Request, RequestStatus
+ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+ from vllm.v1.structured_output import StructuredOutputManager
+ from vllm.version import __version__ as VLLM_VERSION
++from concurrent.futures import ThreadPoolExecutor
+ 
+ logger = init_logger(__name__)
+ 
+@@ -98,6 +99,15 @@ class EngineCore:
+                 "This scheduler interface is not public and "
+                 "compatibility may not be maintained.",
+                 vllm_config.scheduler_config.scheduler_cls)
++        additional_config = vllm_config.additional_config
++        self.async_schedule = False
++        self.step_num = 1
++        if additional_config:
++            self.async_schedule = additional_config.get(
++                    "async_schedule", False)
++
++            if additional_config.get("multi_step", False):
++                self.step_num = 4
+ 
+         self.scheduler: SchedulerInterface = Scheduler(
+             vllm_config=vllm_config,
+@@ -108,6 +118,7 @@ class EngineCore:
+             log_stats=self.log_stats,
+         )
+ 
++        self.scheduler.num_lookahead_tokens = (self.step_num - 1) * (1 + self.scheduler.num_spec_tokens)
+         # Setup MM Input Mapper.
+         self.mm_input_cache_server = MirroredProcessingCache(
+             vllm_config.model_config)
+@@ -119,12 +130,36 @@ class EngineCore:
+         self.batch_queue_size = self.model_executor.max_concurrent_batches
+         self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
+                                                      SchedulerOutput]]] = None
++
++        if self.async_schedule:
++            self._slow_executor = ThreadPoolExecutor(max_workers=1)
++            self._rank = os.environ.get('VLLM_DP_RANK_LOCAL')
++            if self._rank is None:
++                self._rank = os.environ.get('ASCEND_RT_VISIBLE_DEVICES')
++                if self._rank is None:
++                    self._rank = 0
++                else:
++                    self._rank = self._rank.split(",")
++                    self._rank = int(self._rank[0])
++            else:
++                self._rank = int(self._rank)
++            self._rank = self._rank % 16
++            self._slow_future = self._slow_executor.submit(self.set_thread_rank, self._rank)
++            self._slow_future.result()
++            self._slow_future = None
++            self.cur_batch = None
++            self.last_batch = None
++
+         if self.batch_queue_size > 1:
+             logger.info("Batch queue is enabled with size %d",
+                         self.batch_queue_size)
+             self.batch_queue = queue.Queue(self.batch_queue_size)
+         self.vllm_config = vllm_config
+ 
++    def set_thread_rank(self, rank):
++        import torch
++        torch.npu.set_device("npu:" + str(rank))
++
+     def _initialize_kv_caches(
+             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
+         start = time.time()
+@@ -223,10 +258,73 @@ class EngineCore:
+                 scheduler_stats=self.scheduler.make_stats(),
+             )
+         scheduler_output = self.scheduler.schedule()
++        scheduler_output.num_step = self.step_num
++        for req_id, num_scheduled_token in scheduler_output.num_scheduled_tokens.items():
++            self.scheduler.requests[req_id].num_computed_tokens += num_scheduled_token * (self.step_num - 1)
+         model_output = self.execute_model(scheduler_output)
+         engine_core_outputs = self.scheduler.update_from_output(
+-            scheduler_output, model_output)  # type: ignore
++            scheduler_output, model_output, num_steps=self.step_num)  # type: ignore
++
++        return engine_core_outputs
++
++    def step_async(self) -> EngineCoreOutputs:
++        """Schedule, execute, and make output."""
++
++        if not self.scheduler.has_requests():
++            self.cur_batch = None
++            self.last_batch = None
++            if self._slow_future is not None:
++                self._slow_future.cancel()
++            self._slow_future = None
++            return EngineCoreOutputs(
++                outputs=[],
++                scheduler_stats=self.scheduler.make_stats(),
++            )
+ 
++        engine_core_outputs = EngineCoreOutputs(
++                outputs=[],
++                scheduler_stats=self.scheduler.make_stats(),
++            )
++        if self.async_pull_kv:
++            with self.pull_kv_lock:
++                self.cur_batch = self.scheduler.schedule()
++        else:
++            self.cur_batch = self.scheduler.schedule()
++        self.cur_batch.num_step = self.step_num
++        for req_id, num_scheduled_token in self.cur_batch.num_scheduled_tokens.items():
++            self.scheduler.requests[req_id].num_computed_tokens += num_scheduled_token * (self.step_num - 1)
++
++        output = None
++        if self._slow_future is not None:
++            output = self._slow_future.result()
++            for each_cached_req in self.cur_batch.scheduled_cached_reqs:
++                if each_cached_req.req_id in output.req_ids:
++                    req_idx = output.req_id_to_index[each_cached_req.req_id]
++                    new_tokens = output.sampled_token_ids[-1][req_idx]
++                    spec_tokens = None
++                    len_spec_tokens = 0
++                    if output.spec_token_ids is not None and output.spec_token_ids[-1] is not None:
++                        spec_tokens = output.spec_token_ids[-1][req_idx]
++                        len_spec_tokens = len(spec_tokens)
++                    if len(each_cached_req.new_token_ids) != self.cur_batch.num_scheduled_tokens[each_cached_req.req_id]:
++                        self.cur_batch.total_num_scheduled_tokens = self.cur_batch.total_num_scheduled_tokens - self.cur_batch.num_scheduled_tokens[each_cached_req.req_id] + len(new_tokens[-1:]) + len_spec_tokens
++                        self.cur_batch.num_scheduled_tokens[each_cached_req.req_id] = len(new_tokens[-1:]) + len_spec_tokens
++                        each_cached_req.new_token_ids = new_tokens[-1:]
++                        actual_computed_tokens = len(output.sampled_token_ids[0][req_idx])
++                        each_cached_req.num_computed_tokens =  \
++                            each_cached_req.num_computed_tokens + actual_computed_tokens \
++                            - self.last_batch.num_scheduled_tokens[each_cached_req.req_id] * self.step_num
++                        if spec_tokens is not None:
++                            self.cur_batch.scheduled_spec_decode_tokens[each_cached_req.req_id] = spec_tokens[:]
++
++        self._slow_future = self._slow_executor.submit(self.model_executor.execute_model, self.cur_batch)
++        time.sleep(0.005) # 5ms
++
++        if output is not None:
++            engine_core_outputs = self.scheduler.update_from_output(self.last_batch, output, num_steps=self.cur_batch.num_step)
++
++        self.last_batch = self.cur_batch
++        # By wcd, return None or not?
+         return engine_core_outputs
+ 
+     def step_with_batch_queue(self) -> Optional[EngineCoreOutputs]:
+@@ -392,6 +490,13 @@ class EngineCoreProc(EngineCore):
+ 
+             self.step_fn = (self.step if self.batch_queue is None else
+                             self.step_with_batch_queue)
++            if self.batch_queue is None:
++                if self.async_schedule is True:
++                    self.step_fn = self.step_async
++                else:
++                    self.step_fn = self.step
++            else:
++                self.step_with_batch_queue
+             self.engines_running = False
+ 
+             # Send ready message.

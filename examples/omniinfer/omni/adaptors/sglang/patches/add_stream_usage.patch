@@ -1,0 +1,112 @@
+diff --git a/python/sglang/srt/entrypoints/openai/protocol.py b/python/sglang/srt/entrypoints/openai/protocol.py
+index fb12eee1c..5e5334250 100644
+--- a/python/sglang/srt/entrypoints/openai/protocol.py
++++ b/python/sglang/srt/entrypoints/openai/protocol.py
+@@ -98,6 +98,7 @@ class UsageInfo(BaseModel):
+ 
+ class StreamOptions(BaseModel):
+     include_usage: Optional[bool] = False
++    continuous_usage_stats: Optional[bool] = False
+ 
+ 
+ class JsonSchemaResponseFormat(BaseModel):
+diff --git a/python/sglang/srt/entrypoints/openai/serving_chat.py b/python/sglang/srt/entrypoints/openai/serving_chat.py
+index 51a4bd327..9aa401f71 100644
+--- a/python/sglang/srt/entrypoints/openai/serving_chat.py
++++ b/python/sglang/srt/entrypoints/openai/serving_chat.py
+@@ -459,6 +459,13 @@ class OpenAIServingChat(OpenAIServingBase):
+         cached_tokens = {}
+         hidden_states = {}
+ 
++        stream_options = request.stream_options
++        if stream_options:
++            include_usage = stream_options.include_usage
++            include_continuous_usage = include_usage and stream_options.continuous_usage_stats
++        else:
++            include_usage = False
++            include_continuous_usage = False
+         # Harmony tracking
+         if self.use_harmony:
+             harmony_parsers = [
+@@ -509,6 +516,15 @@ class OpenAIServingChat(OpenAIServingBase):
+                         choices=[choice_data],
+                         model=request.model,
+                     )
++                    if include_continuous_usage:
++                        chunk.usage = UsageProcessor.calculate_streaming_usage(
++                            prompt_tokens,
++                            completion_tokens,
++                            cached_tokens,
++                            n_choices=request.n,
++                            enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
++                        )
++                        chunk.usage.completion -= 1
+                     yield f"data: {chunk.model_dump_json()}\n\n"
+ 
+                 # Process content delta
+@@ -638,6 +654,14 @@ class OpenAIServingChat(OpenAIServingBase):
+                             choices=[choice_data],
+                             model=request.model,
+                         )
++                        if include_continuous_usage:
++                            chunk.usage = UsageProcessor.calculate_streaming_usage(
++                                prompt_tokens,
++                                completion_tokens,
++                                cached_tokens,
++                                n_choices=request.n,
++                                enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
++                            )
+                         yield f"data: {chunk.model_dump_json()}\n\n"
+ 
+             # Send finish_reason chunks for each index that completed
+@@ -697,7 +721,7 @@ class OpenAIServingChat(OpenAIServingBase):
+                         yield f"data: {hidden_states_chunk.model_dump_json()}\n\n"
+ 
+             # Additional usage chunk
+-            if request.stream_options and request.stream_options.include_usage:
++            if include_usage:
+                 usage = UsageProcessor.calculate_streaming_usage(
+                     prompt_tokens,
+                     completion_tokens,
+diff --git a/python/sglang/srt/entrypoints/openai/serving_completions.py b/python/sglang/srt/entrypoints/openai/serving_completions.py
+index 992787132..91eb87916 100644
+--- a/python/sglang/srt/entrypoints/openai/serving_completions.py
++++ b/python/sglang/srt/entrypoints/openai/serving_completions.py
+@@ -151,6 +151,13 @@ class OpenAIServingCompletion(OpenAIServingBase):
+         cached_tokens = {}
+         hidden_states = {}
+ 
++        stream_options = request.stream_options
++        if stream_options:
++            include_usage = stream_options.include_usage
++            include_continuous_usage = include_usage and stream_options.continuous_usage_stats
++        else:
++            include_usage = False
++            include_continuous_usage = False
+         try:
+             async for content in self.tokenizer_manager.generate_request(
+                 adapted_request, raw_request
+@@ -221,6 +228,14 @@ class OpenAIServingCompletion(OpenAIServingBase):
+                     choices=[choice_data],
+                     model=request.model,
+                 )
++                if include_continuous_usage:
++                    chunk.usage = UsageProcessor.calculate_streaming_usage(
++                        prompt_tokens,
++                        completion_tokens,
++                        cached_tokens,
++                        n_choices=request.n,
++                        enable_cache_report=self.tokenizer_manager.server_args.enable_cache_report,
++                    )
+ 
+                 yield f"data: {chunk.model_dump_json()}\n\n"
+ 
+@@ -249,7 +264,7 @@ class OpenAIServingCompletion(OpenAIServingBase):
+                         yield f"data: {hidden_states_chunk.model_dump_json()}\n\n"
+ 
+             # Handle final usage chunk
+-            if request.stream_options and request.stream_options.include_usage:
++            if include_usage:
+                 usage = UsageProcessor.calculate_streaming_usage(
+                     prompt_tokens,
+                     completion_tokens,

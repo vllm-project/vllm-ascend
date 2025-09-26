@@ -1,0 +1,24 @@
+From b91b1c45a188f232b72e0fbde943c5128ec1ebf7 Mon Sep 17 00:00:00 2001
+From: zhangwei <mathzhangwei@gmailcom>
+Date: Fri, 18 Jul 2025 14:40:36 +0800
+Subject: [PATCH 1/3] Patch request.py to support TFAS
+
+---
+ vllm/v1/request.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/vllm/v1/request.py b/vllm/v1/request.py
+index d2843b65a..8ad5496c9 100644
+--- a/vllm/v1/request.py
++++ b/vllm/v1/request.py
+@@ -31,6 +31,7 @@ class Request:
+         structured_output_request: Optional["StructuredOutputRequest"] = None,
+         cache_salt: Optional[str] = None,
+     ) -> None:
++        self.arrival_time = arrival_time
+         self.request_id = request_id
+         self.sampling_params = sampling_params
+         # Because of LoRA, the eos token id can be different for each request.
+-- 
+2.43.0
+

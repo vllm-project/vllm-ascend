@@ -1,0 +1,30 @@
+type: "marker"
+targets:
+  - module: "vllm.entrypoints.openai.serving_engine:OpenAIServing"
+    function_name: __init__
+    entry_operation: |
+      import os, time, pathlib
+      trace_file = pathlib.Path("/tmp/process/proc_trace.txt")
+      trace_file.parent.mkdir(parents=True, exist_ok=True)
+      with trace_file.open("a") as f:
+          f.write(f"time={time.time()} tag=API_Server pid={os.getpid()}\n")
+
+  - module: "vllm.v1.core.sched.scheduler:Scheduler"
+    function_name: __init__
+    entry_operation: |
+      import os, time, pathlib
+      trace_file = pathlib.Path("/tmp/process/proc_trace.txt")
+      trace_file.parent.mkdir(parents=True, exist_ok=True)
+      with trace_file.open("a") as f:
+          f.write(f"time={time.time()} tag=EngineCore pid={os.getpid()}\n")
+
+  - module: "omni.adaptors.vllm.worker.npu_worker:NPUWorker"
+    function_name: __init__
+    exit_operation: |
+      import os, time, pathlib
+      trace_file = pathlib.Path("/tmp/process/proc_trace.txt")
+      trace_file.parent.mkdir(parents=True, exist_ok=True)
+      local_rank = getattr(self, 'local_rank', -1)  
+      with trace_file.open("a") as f:
+          f.write(f"time={time.time()} tag=Worker pid={os.getpid()} local_rank={local_rank}\n")
+

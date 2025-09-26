@@ -1,0 +1,94 @@
+From 2c1762189bb91f200835d97a871e4b4103bd4875 Mon Sep 17 00:00:00 2001
+From: lantian7 <liuchun22@huawei.com>
+Date: Mon, 18 Aug 2025 19:57:16 +0800
+Subject: [PATCH] 2
+
+---
+ vllm/engine/arg_utils.py    | 8 ++++++++
+ vllm/v1/engine/async_llm.py | 9 +++++----
+ vllm/v1/engine/core.py      | 9 +++++++++
+ 3 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index 442e4100f..b25aa9ab2 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -287,6 +287,8 @@ class EngineArgs:
+     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
+     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+     data_parallel_size: int = ParallelConfig.data_parallel_size
++    data_parallel_rank: int = ParallelConfig.data_parallel_rank
++    data_parallel_rank_local: int = ParallelConfig.data_parallel_rank_local
+     data_parallel_size_local: Optional[int] = None
+     data_parallel_address: Optional[str] = None
+     data_parallel_rpc_port: Optional[int] = None
+@@ -603,6 +605,10 @@ class EngineArgs:
+                                     **parallel_kwargs["tensor_parallel_size"])
+         parallel_group.add_argument("--data-parallel-size", "-dp",
+                                     **parallel_kwargs["data_parallel_size"])
++        parallel_group.add_argument("--data-parallel-rank", "-dp-rank",
++                                    **parallel_kwargs["data_parallel_rank"])
++        parallel_group.add_argument("--data-parallel-rank-local", "-dp-rank-local",
++                                    **parallel_kwargs["data_parallel_rank_local"])
+         parallel_group.add_argument('--data-parallel-size-local',
+                                     '-dpl',
+                                     type=int,
+@@ -1064,6 +1070,8 @@ class EngineArgs:
+             pipeline_parallel_size=self.pipeline_parallel_size,
+             tensor_parallel_size=self.tensor_parallel_size,
+             data_parallel_size=self.data_parallel_size,
++            data_parallel_rank=self.data_parallel_rank,
++            data_parallel_rank_local=self.data_parallel_rank_local,
+             data_parallel_size_local=data_parallel_size_local,
+             data_parallel_master_ip=data_parallel_address,
+             data_parallel_rpc_port=data_parallel_rpc_port,
+diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
+index 74c2251c7..16165b52e 100644
+--- a/vllm/v1/engine/async_llm.py
++++ b/vllm/v1/engine/async_llm.py
+@@ -115,10 +115,11 @@ class AsyncLLM(EngineClient):
+         self.output_processor = OutputProcessor(self.tokenizer,
+                                                 log_stats=self.log_stats)
+ 
+-        # EngineCore (starts the engine in background process).
+-        core_client_class = AsyncMPClient if (
+-            vllm_config.parallel_config.data_parallel_size
+-            == 1) else DPAsyncMPClient
++        # # EngineCore (starts the engine in background process).
++        # core_client_class = AsyncMPClient if (
++        #     vllm_config.parallel_config.data_parallel_size
++        #     == 1) else DPAsyncMPClient
++        core_client_class = AsyncMPClient # use AsyncMPClient only. a workaround for manual api-server scaleout
+ 
+         self.engine_core = core_client_class(
+             vllm_config=vllm_config,
+diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
+index 740ba60fe..2d85881c6 100644
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -690,6 +690,11 @@ class DPEngineCoreProc(EngineCoreProc):
+         super().__init__(vllm_config, on_head_node, input_address,
+                          executor_class, log_stats, dp_rank)
+ 
++        self.enable_sleep_mode = bool(int(os.getenv("VLLM_ENABLE_SLEEP_MODE", '0')))
++        if not self.enable_sleep_mode:
++            # initialized with True, a workaround for manual api-server scaleout
++            self.engines_running = True
++
+     def _init_data_parallel(self, vllm_config: VllmConfig):
+ 
+         # Configure GPUs and stateless process group for data parallel.
+@@ -776,6 +781,10 @@ class DPEngineCoreProc(EngineCoreProc):
+                 # dummy forward pass.
+                 self.execute_dummy_batch()
+ 
++            if not self.enable_sleep_mode:
++                # disable all-reduce operation, a workaround for manual api-server scale-out
++                continue
++
+             # 3) All-reduce operation to determine global unfinished reqs.
+             self.engines_running = self._has_global_unfinished_reqs(
+                 local_unfinished_reqs)
+-- 
+2.50.1.windows.1
+

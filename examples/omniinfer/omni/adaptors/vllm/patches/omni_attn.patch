@@ -1,0 +1,26 @@
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index f227e6f5d..a595ca295 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -997,8 +997,8 @@ class Scheduler(SchedulerInterface):
+         """
+         if self.connector is None:
+             return False, None
+-        assert len(self.kv_cache_config.kv_cache_groups
+-                   ) == 1, "KV connector only supports one KV cache group now"
++        # assert len(self.kv_cache_config.kv_cache_groups
++        #            ) == 1, "KV connector only supports one KV cache group now"
+         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
+         return self.connector.request_finished(request, block_ids)
+ 
+@@ -1016,8 +1016,8 @@ class Scheduler(SchedulerInterface):
+         """
+         if request.request_id not in self.finished_recving_kv_req_ids:
+             return False
+-        assert len(self.kv_cache_config.kv_cache_groups
+-                   ) == 1, "KV connector only supports one KV cache group now"
++        # assert len(self.kv_cache_config.kv_cache_groups
++        #            ) == 1, "KV connector only supports one KV cache group now"
+         # Now that the blocks are ready, actually cache them.
+         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)[0]
+         num_computed_tokens = len(block_ids) * self.block_size

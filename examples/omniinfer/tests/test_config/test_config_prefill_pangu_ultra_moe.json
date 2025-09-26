@@ -1,0 +1,18 @@
+{
+    "model_parallel_config": {
+        "dense_mlp_tp_size": 4,
+        "o_proj_tp_size": 1,
+        "dp_size": 1
+    },
+    "operator_optimizition_config": {
+        "enable_kv_rmsnorm_rope_cache": true,
+        "prefill_moe_all_to_all": true,
+        "best_ep": false,
+        "merge_qkv": false,
+        "gmm_nz": true,
+        "use_omni_placement": false,
+        "omni_placement_config_path": "../../tests/test_config/config_p.yaml",
+        "control_accept_rate": -1,
+        "enable_prefill_micro_batch": false
+    }
+}

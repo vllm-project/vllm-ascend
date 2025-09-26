@@ -1,0 +1,16 @@
+diff --git a/vllm/triton_utils/__init__.py b/vllm/triton_utils/__init__.py
+index 3bde394ab..e64185f37 100644
+--- a/vllm/triton_utils/__init__.py
++++ b/vllm/triton_utils/__init__.py
+@@ -3,7 +3,10 @@
+ from vllm.triton_utils.importing import (HAS_TRITON, TritonLanguagePlaceholder,
+                                          TritonPlaceholder)
+ 
+-if HAS_TRITON:
++import torch
++has_cuda = torch.version.cuda is not None
++
++if HAS_TRITON and has_cuda:
+     from vllm.triton_utils import triton
+     from vllm.triton_utils import tl
+ else:

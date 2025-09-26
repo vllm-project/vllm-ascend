@@ -1,0 +1,29 @@
+type: "torchnpu" # should be one of (torchnpu, viztracer, timer)
+base_params:  # Default profiling parameters
+  save_path: "profiling_output/"
+  profiler_level: "Level1"
+  export_type: "Text"
+  msprof_tx: False
+  aic_metrics: "PipeUtilization"
+  l2_cache: False
+  op_attr: False
+  data_simplification: False
+  record_op_args: False
+  gc_detect_threshold: null
+  activities:
+    - "NPU"
+    - "CPU"
+  with_stack: False
+  record_shapes: False
+  profile_memory: False
+  with_flops: False
+  with_modules: False
+  schedule:
+    wait: 0
+    warmup: 0
+    active: 1
+    repeat: 1
+    skip_first: 1
+targets:
+  - module: "vllm.v1.worker.gpu_model_runner:GPUModelRunner"
+    function_name: execute_model

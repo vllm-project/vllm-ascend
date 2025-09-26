@@ -1,0 +1,164 @@
+diff --git a/vllm/config.py b/vllm/config.py
+index 8c3346956..85ee0ab56 100644
+--- a/vllm/config.py
++++ b/vllm/config.py
+@@ -2092,7 +2092,7 @@ class SpeculativeConfig:
+                 self.model = self.target_model_config.model
+             elif self.method in ("ngram", "[ngram]"):
+                 self.model = "ngram"
+-            elif self.method == "mtp":
++            elif self.method == "deepseek_mtp":
+                 self.draft_model_config = self.target_model_config
+                 self.draft_parallel_config = None
+                 self.speculative_disable_mqa_scorer = None
+@@ -2181,7 +2181,7 @@ class SpeculativeConfig:
+ 
+                 # Automatically detect the method
+                 # Automatically detect the method
+-                if self.method in ('eagle', 'eagle3', "mtp"):
++                if self.method in ('eagle', 'eagle3', "deepseek_mtp"):
+                     pass
+                 elif "eagle-" in self.draft_model_config.model.lower():
+                     self.method = "eagle"
+@@ -2358,7 +2358,7 @@ class SpeculativeConfig:
+             raise ValueError("Expected num_speculative_tokens to be greater "
+                              f"than zero ({self.num_speculative_tokens}).")
+ 
+-        if self.method == "mtp":
++        if self.method == "deepseek_mtp":
+             return
+ 
+         if self.draft_model_config:
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index f18e5c8ff..5c966bec2 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -1532,7 +1532,7 @@ class EngineArgs:
+                     is_ngram_enabled = True
+                 elif speculative_method in ("eagle", "eagle3"):
+                     is_eagle_enabled = True
+-                elif speculative_method in ("mtp"):
++                elif speculative_method in ("deepseek_mtp"):
+                     is_fusion_spec_enabled = True
+             else:
+                 speculative_model = self.speculative_config.get("model")
+diff --git a/vllm/envs.py b/vllm/envs.py
+index 6067f5bdd..50e0128d1 100644
+--- a/vllm/envs.py
++++ b/vllm/envs.py
+@@ -68,6 +68,7 @@ if TYPE_CHECKING:
+     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
+     VLLM_RPC_TIMEOUT: int = 10000  # ms
+     VLLM_PLUGINS: Optional[list[str]] = None
++    VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
+     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+     VLLM_USE_TRITON_AWQ: bool = False
+     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+@@ -491,6 +492,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
+     lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
+         "VLLM_PLUGINS"].split(","),
+ 
++    # a local directory to look in for unrecognized LoRA adapters.
++    # only works if plugins are enabled and
++    # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
++    "VLLM_LORA_RESOLVER_CACHE_DIR":
++    lambda: os.getenv("VLLM_LORA_RESOLVER_CACHE_DIR", None),
++
+     # Enables torch profiler if set. Path to the directory where torch profiler
+     # traces are saved. Note that it must be an absolute path.
+     "VLLM_TORCH_PROFILER_DIR":
+diff --git a/vllm/v1/core/sched/output.py b/vllm/v1/core/sched/output.py
+index ae428dc95..b9f7d435b 100644
+--- a/vllm/v1/core/sched/output.py
++++ b/vllm/v1/core/sched/output.py
+@@ -124,3 +124,6 @@ class SchedulerOutput:
+ 
+     # KV Cache Connector metadata.
+     kv_connector_metadata: Optional[KVConnectorMetadata] = None
++
++    # Number of steps to schedule
++    num_step: Optional[int] = 1
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 67e7a250c..a60b32513 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -694,6 +694,12 @@ class Scheduler(SchedulerInterface):
+         outputs: list[EngineCoreOutput] = []
+         spec_decoding_stats: Optional[SpecDecodingStats] = None
+ 
++        if sampled_token_ids:
++            sampled_token_ids = sampled_token_ids[0]
++            spec_token_ids = spec_token_ids[0]
++            logprobs = logprobs[0]
++            prompt_logprobs_dict = prompt_logprobs_dict[0]
++
+         # NOTE(woosuk): As len(self.running) can be up to 1K or more, the below
+         # loop can be a performance bottleneck. We should do our best to avoid
+         # expensive operations inside the loop.
+diff --git a/vllm/v1/worker/block_table.py b/vllm/v1/worker/block_table.py
+index 66fd318b1..a42f8f716 100644
+--- a/vllm/v1/worker/block_table.py
++++ b/vllm/v1/worker/block_table.py
+@@ -107,15 +107,10 @@ class MultiGroupBlockTable:
+ 
+     def __init__(self, max_num_reqs: int, max_model_len: int,
+                  max_num_batched_tokens: int, pin_memory: bool,
+-                 device: torch.device, kv_cache_config: KVCacheConfig) -> None:
+-        max_num_blocks_per_req = [
+-            cdiv(max_model_len, g.kv_cache_spec.block_size)
+-            for g in kv_cache_config.kv_cache_groups
+-        ]
++                 device: torch.device, block_size: int) -> None:
+         self.block_tables = [
+-            BlockTable(max_num_reqs, max_num_blocks_per_req[i],
++            BlockTable(max_num_reqs, cdiv(max_model_len, block_size),
+                        max_num_batched_tokens, pin_memory, device)
+-            for i in range(len(kv_cache_config.kv_cache_groups))
+         ]
+ 
+     def append_row(self, block_ids: list[list[int]], row_idx: int) -> None:
+diff --git a/vllm/v1/worker/gpu_input_batch.py b/vllm/v1/worker/gpu_input_batch.py
+index 8ea2a13cf..b3e65917d 100644
+--- a/vllm/v1/worker/gpu_input_batch.py
++++ b/vllm/v1/worker/gpu_input_batch.py
+@@ -14,8 +14,7 @@ from vllm.utils import swap_dict_values
+ from vllm.v1.outputs import LogprobsTensors
+ from vllm.v1.sample.metadata import SamplingMetadata
+ from vllm.v1.utils import copy_slice
+-from vllm.v1.worker.block_table import BlockTable, MultiGroupBlockTable
+-from vllm.v1.kv_cache_interface import KVCacheConfig
++from vllm.v1.worker.block_table import MultiGroupBlockTable
+ 
+ _SAMPLING_EPS = 1e-5
+ 
+@@ -63,7 +62,7 @@ class InputBatch:
+         device: torch.device,
+         pin_memory: bool,
+         vocab_size: int,
+-        kv_cache_config: KVCacheConfig,
++        block_size: int,
+     ):
+         self.max_num_reqs = max_num_reqs
+         self.max_model_len = max_model_len
+@@ -105,7 +104,7 @@ class InputBatch:
+             max_num_batched_tokens=max_num_batched_tokens,
+             pin_memory=pin_memory,
+             device=device,
+-            kv_cache_config=kv_cache_config,
++            block_size=block_size,
+         )
+ 
+         # Sampling-related.
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index fed7d8daa..8335718bf 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -149,7 +149,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+         if self.speculative_config:
+             self.use_spec_decode = True
+             if get_pp_group().is_last_rank:
+-                if self.speculative_config.method == "mtp":
++                if self.speculative_config.method == "deepseek_mtp":
+                     self.drafter = None
+                 elif self.speculative_config.method == "ngram":
+                     self.drafter = NgramProposer(self.vllm_config)

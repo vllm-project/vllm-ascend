@@ -1,0 +1,774 @@
+# Copyright 2025 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ============================================================================
+
+- name: run omniai
+  hosts: all
+  any_errors_fatal: true
+  max_fail_percentage: 0
+  gather_facts: yes
+
+  environment:
+    # Global Configuration 
+    LOG_PATH: "/data/omniinfer/log"
+    MODEL_PATH: "/data/models/DeepSeek-R1-w8a8-fusion"
+    MODEL_LEN_MAX_PREFILL: "30000"
+    MODEL_LEN_MAX_DECODE: "16384"
+
+    # Configuration for containers 
+    DOCKER_IMAGE_ID: "registry-cbu.huawei.com/omni_infer_v1/omni_infer_v1_a3:20250615"
+    DOCKER_NAME_P: "omni_infer_prefill"
+    DOCKER_NAME_D: "omni_infer_decode"
+    DOCKER_NAME_C: "omni_infer_proxy"
+    SCRIPTS_PATH: "/tmp/scripts"
+
+    # Script path in container 
+    OMNI_INFER_SCRIPTS: "/workspace/omniinfer/tools/scripts"
+
+    # Tensor Parallel Size
+    DECODE_TENSOR_PARALLEL_SIZE: "1"
+
+  vars:
+    # Configure the storage path of the ranktable file. 
+    ranktable_save_path: "/tmp/ranktable_save_dir"
+    docker_run_cmd: |
+      docker run -it --shm-size=500g \
+        -e OMNI_INFER_SCRIPTS=$OMNI_INFER_SCRIPTS \
+        -e RANKTABLE_SAVE_PATH={{ ranktable_save_path }} \
+        -e MODEL_PATH=$MODEL_PATH \
+        -e LOG_PATH=$LOG_PATH \
+        --net=host \
+        --privileged=true \
+        -u root \
+        -w /data \
+        --device=/dev/davinci_manager \
+        --device=/dev/hisi_hdc \
+        --device=/dev/devmm_svm \
+        --entrypoint=bash \
+        -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /usr/local/sbin:/usr/local/sbin \
+        -v /etc/hccn.conf:/etc/hccn.conf \
+        -v /usr/bin/hccn_tool:/usr/bin/hccn_tool \
+        -v /tmp:/tmp \
+        -v /data:/data \
+        -v $MODEL_PATH:$MODEL_PATH \
+        -v $LOG_PATH:$LOG_PATH \
+        -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
+
+    docker_exec_cmd: |
+      docker exec \
+
+    generate_prefill_ranktable_cmd: |
+      #!/bin/bash
+
+      . ~/.bashrc
+
+      rm -rf ${PREFILL_RANKTABLE_SAVE_PATH}
+      mkdir -p ${PREFILL_RANKTABLE_SAVE_PATH}
+      python ${OMNI_INFER_SCRIPTS}/pd_ranktable_tools.py --mode gen --prefill-server-list "${PREFILL_SERVER_LIST}" --api-server --save-dir ${PREFILL_RANKTABLE_SAVE_PATH}
+
+    generate_decode_ranktable_cmd: |
+      #!/bin/bash
+
+      . ~/.bashrc
+
+      rm -rf ${DECODE_RANKTABLE_SAVE_PATH}
+      mkdir -p ${DECODE_RANKTABLE_SAVE_PATH}
+      python ${OMNI_INFER_SCRIPTS}/pd_ranktable_tools.py --mode gen --decode-server-list ${DECODE_SERVER_LIST} --save-dir ${DECODE_RANKTABLE_SAVE_PATH}
+      
+    generate_global_ranktable_cmd: |
+      #!/bin/bash
+
+      . ~/.bashrc
+      cd ${RANKTABLE_SAVE_PATH}/global
+      prefill_ranktable_list="{{ PREFILL_RANKTABLE_LIST }}"
+      prefill_ranktable_list=$(echo "$prefill_ranktable_list" | awk '$1=$1' | tr ',' ' ')
+
+      decode_ranktable_list="{{ DECODE_RANKTABLE_LIST }}"
+      decode_ranktable_list=$(echo "$decode_ranktable_list" | awk '$1=$1' | tr ',' ' ')
+
+      api_server_files=$(ls collect_files_p/api/*.json | head -1)
+
+      if [ $DECODE_POD_NUM -gt 1 ]; then
+        python ${OMNI_INFER_SCRIPTS}/pd_ranktable_tools.py \
+        --mode merge-local \
+        --local-ranktable-list ${decode_ranktable_list} \
+        --save-dir ${RANKTABLE_SAVE_PATH}/global
+      
+        decode_local_ranktable_merge=$(ls ./*.json | tr '\n' ' ')
+      else
+        decode_local_ranktable_merge="${decode_ranktable_list}"
+      fi
+
+      python ${OMNI_INFER_SCRIPTS}/pd_ranktable_tools.py \
+      --mode merge-all \
+      --api-server-list ${api_server_files} \
+      --prefill-server-list ${prefill_ranktable_list} \
+      --decode-server-list ${decode_local_ranktable_merge} \
+      --save-dir ${RANKTABLE_SAVE_PATH}/global
+
+    run_vllm_server_prefill_cmd: |
+      #!/bin/bash
+      . ~/.bashrc
+      export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+      tp=$(echo -n "$DECODE_DATA_PARALLEL_SIZE" | tr -cd ',' | wc -c)
+      ((tp++))
+      prefill_server_list=$(echo "$PREFILL_SERVER_LIST" | awk '$1=$1' | tr -d ',')
+      LOCAL_RANKTABLE_FLIE=($(ls ${RANKTABLE_SAVE_PATH}/prefill_config/local_*$prefill_server_list.json | tr '\n' ' '))
+      KV_PARALLEL_SIZE=$((PREFILL_POD_NUM + 1))
+      MODEL_EXTRA_CFG_PATH="/workspace/omniinfer/tests/test_config/test_config_prefill.json"
+      EXTRA_ARGS='--max-num-batched-tokens 30000 --enforce-eager --enable-expert-parallel --disable-log-requests --max-num-seqs 16 --no-enable-prefix-caching'
+      GPU_UTIL=0.92
+      VLLM_ENABLE_MC2=1
+
+      cd ${OMNI_INFER_SCRIPTS}
+      bash ${OMNI_INFER_SCRIPTS}/pd_run.sh \
+        --global-rank-table-path "${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json" \
+        --rank-table-path ${LOCAL_RANKTABLE_FLIE} \
+        --local-decode-server-ip-list "$SERVER_IP_LIST" \
+        --global-decode-server-ip-list "$SERVER_IP_LIST" \
+        --prefill-pod-num ${PREFILL_POD_NUM} \
+        --gloo-socket-ifname ${SOCKET_IFNAME} \
+        --tp-socket-ifname ${SOCKET_IFNAME} \
+        --model-path ${MODEL_PATH} \
+        --master-ip ${HOST_IP} \
+        --role "prefill" \
+        --kv-role "kv_producer" \
+        --max-model-len ${MODEL_LEN_MAX_PREFILL} \
+        --master-port ${MASTER_PORT} \
+        --base-api-port ${API_PORT} \
+        --tp ${PREFILL_TENSOR_PARALLEL_SIZE} \
+        --ascend-rt-visible-devices "${PREFILL_SERVER_LIST}" \
+        --kv-rank ${KV_RANK} \
+        --kv-engine-id ${KV_RANK} \
+        --kv-parallel-size ${KV_PARALLEL_SIZE} \
+        --model-extra-cfg-path ${MODEL_EXTRA_CFG_PATH} \
+        --gpu-util ${GPU_UTIL} \
+        --vllm-enable-mc2 ${VLLM_ENABLE_MC2} \
+        --extra-args "${EXTRA_ARGS}" \
+        --hccl-buffsize  "${HCCL_BUFFSIZE}" \
+        --log-dir "${LOG_PATH}" > ${LOG_PATH}/run_prefill.log 2>&1 &
+
+    run_vllm_server_decode_cmd: |
+      #!/bin/bash
+
+      . ~/.bashrc
+      HCCL_BUFFSIZE=1000
+      dp=$(echo -n "$DECODE_DATA_PARALLEL_SIZE" | tr -cd ',' | wc -c)
+      ((dp++))
+      KV_PARALLEL_SIZE=$((PREFILL_POD_NUM + 1))
+
+      if [ $DECODE_POD_NUM -gt 1 ]; then
+        LOCAL_RANKTABLE_FLIE=($(ls ${RANKTABLE_SAVE_PATH}/global/local_*.json | tr '\n' ' '))
+      else
+        LOCAL_RANKTABLE_FLIE=($(ls ${RANKTABLE_SAVE_PATH}/decode_config/local_*.json | tr '\n' ' '))
+      fi
+
+      decode_server_list=${DECODE_SERVER_LIST}
+
+      declare -A config_dict=(
+          {% for key, value in server_offset_dict.items() %}
+          [{{ key }}]={{ value }}{% if not loop.last %} {% endif %}
+          {% endfor %}
+      )
+      MODEL_EXTRA_CFG_PATH="/workspace/omniinfer/tests/test_config/test_config_decode.json"
+      EXTRA_ARGS='--enforce-eager --enable-expert-parallel --disable-log-requests --max-num-seqs 32 --no-enable-prefix-caching'
+      GPU_UTIL=0.95
+      ADDITIONAL_CONFIG='{"graph_model_compile_config": {"level":1}}'
+      VLLM_ENABLE_MC2=1
+      HCCL_OP_EXPANSION_MODE="AIV"
+
+      cd ${OMNI_INFER_SCRIPTS}
+      bash ${OMNI_INFER_SCRIPTS}/pd_run.sh \
+        --global-rank-table-path "${RANKTABLE_SAVE_PATH}/global/global_ranktable_merge.json" \
+        --rank-table-path ${LOCAL_RANKTABLE_FLIE} \
+        --local-decode-server-ip-list "$SERVER_IP_LIST" \
+        --global-decode-server-ip-list "$SERVER_IP_LIST" \
+        --prefill-pod-num ${PREFILL_POD_NUM} \
+        --gloo-socket-ifname ${SOCKET_IFNAME} \
+        --tp-socket-ifname ${SOCKET_IFNAME} \
+        --num-servers ${NUM_SERVERS} \
+        --num-dp ${dp} \
+        --server-offset ${config_dict[$HOST]:-0} \
+        --model-path ${MODEL_PATH} \
+        --master-ip ${HOST_IP} \
+        --role "decode" \
+        --kv-role "kv_consumer" \
+        --max-model-len ${MODEL_LEN_MAX_DECODE} \
+        --master-port ${MASTER_PORT} \
+        --base-api-port ${API_PORT} \
+        --tp ${DECODE_TENSOR_PARALLEL_SIZE} \
+        --kv-rank ${PREFILL_POD_NUM} \
+        --kv-engine-id ${PREFILL_POD_NUM} \
+        --kv-parallel-size ${KV_PARALLEL_SIZE} \
+        --model-extra-cfg-path ${MODEL_EXTRA_CFG_PATH} \
+        --gpu-util ${GPU_UTIL} \
+        --additional-config "$ADDITIONAL_CONFIG" \
+        --vllm-enable-mc2 ${VLLM_ENABLE_MC2} \
+        --extra-args "${EXTRA_ARGS}" \
+        --hccl-buffsize "${HCCL_BUFFSIZE}" \
+        --hccl-op-expansion-mode "${HCCL_OP_EXPANSION_MODE}" \
+        --log-dir "${LOG_PATH}" > ${LOG_PATH}/run_decode.log 2>&1 &
+
+    run_proxy_cmd: |
+      #!/bin/bash
+
+      prefill_result="{{ PREFILL_API_SERVER_LIST }}"
+      prefill_result=`echo "$prefill_result" | awk '$1=$1'`
+
+      decode_result=""
+      decode_api_servers="{{ DECODE_API_SERVER_LIST }}"
+      decode_api_servers=`echo "$decode_api_servers" | awk '$1=$1'`
+      decode_array=(${decode_api_servers//,/ })
+      for var in ${decode_array[@]}; do 
+        address=${var%@*}
+        ip=${address%:*}
+        port=${address#*:}
+        num=${var#*@}
+        for ((i=0; i<=$num;i++)); do
+          if [[ -z ${decode_result} ]]; then
+            decode_result="$ip:$port"
+          else
+            decode_result="${decode_result},$ip:$port"
+          fi
+          ((port++))
+        done
+      done
+      cd ${OMNI_INFER_SCRIPTS}
+      bash global_proxy.sh --listen-port "$PROXY_NODE_PORT" --prefill-servers-list "$prefill_result" --decode-servers-list "$decode_result" &
+
+    start_docker_cmd_p: >
+      {{ docker_run_cmd }}
+      -d --name $DOCKER_NAME_P $DOCKER_IMAGE_ID
+
+    start_docker_cmd_d: >
+      {{ docker_run_cmd }} 
+      -d --name $DOCKER_NAME_D $DOCKER_IMAGE_ID
+
+    start_docker_cmd_c: >
+      {{ docker_run_cmd }} 
+      -e PROXY_NODE_PORT=$NODE_PORT
+      -d --name $DOCKER_NAME_C $DOCKER_IMAGE_ID
+
+    docker_generate_prefill_ranktable_cmd: >
+      {{ docker_exec_cmd }} 
+      -e PREFILL_SERVER_LIST=$PREFILL_SERVER_LIST
+      -e PREFILL_RANKTABLE_SAVE_PATH={{ ranktable_save_path }}/prefill_config
+      $DOCKER_NAME_P 
+      /bin/bash -c $SCRIPTS_PATH/generate_prefill_ranktable.sh
+
+    docker_generate_decode_ranktable_cmd: >
+      {{ docker_exec_cmd }} 
+      -e DECODE_SERVER_LIST=$DECODE_SERVER_LIST
+      -e DECODE_RANKTABLE_SAVE_PATH={{ ranktable_save_path }}/decode_config
+      $DOCKER_NAME_D 
+      /bin/bash -c $SCRIPTS_PATH/generate_decode_ranktable.sh
+
+    docker_generate_global_cmd: >
+      {{ docker_exec_cmd }} 
+      -e DECODE_POD_NUM=$DECODE_POD_NUM
+      $DOCKER_NAME_P 
+      /bin/bash -c $SCRIPTS_PATH/generate_global_ranktable.sh
+
+    docker_start_vllm_cmd_p: >
+      {{ docker_exec_cmd }} 
+      -e MODEL_LEN_MAX_PREFILL=$MODEL_LEN_MAX_PREFILL
+      -e PREFILL_SERVER_LIST=$PREFILL_SERVER_LIST
+      -e PREFILL_TENSOR_PARALLEL_SIZE=$PREFILL_TENSOR_PARALLEL_SIZE
+      -e HOST_IP=$HOST_IP 
+      -e MASTER_PORT=$NODE_PORT
+      -e API_PORT=$API_PORT
+      -e SERVER_IP_LIST=$SERVER_IP_LIST
+      -e PREFILL_POD_NUM=$PREFILL_POD_NUM
+      -e SOCKET_IFNAME=$SOCKET_IFNAME
+      -e KV_RANK=$KV_RANK
+      -d $DOCKER_NAME_P 
+      /bin/bash -c $SCRIPTS_PATH/vllm_run_for_p.sh
+
+    docker_start_vllm_cmd_d: >
+      {{ docker_exec_cmd }} 
+      -e MODEL_LEN_MAX_DECODE=$MODEL_LEN_MAX_DECODE
+      -e DECODE_SERVER_LIST=$DECODE_SERVER_LIST
+      -e DECODE_TENSOR_PARALLEL_SIZE=$DECODE_TENSOR_PARALLEL_SIZE
+      -e DECODE_DATA_PARALLEL_SIZE=$DECODE_DATA_PARALLEL_SIZE
+      -e HOST_IP=$HOST_IP
+      -e MASTER_PORT=$NODE_PORT
+      -e API_PORT=$API_PORT
+      -e SERVER_IP_LIST=$SERVER_IP_LIST
+      -e PREFILL_POD_NUM=$PREFILL_POD_NUM
+      -e DECODE_POD_NUM=$DECODE_POD_NUM
+      -e SOCKET_IFNAME=$SOCKET_IFNAME
+      -e NUM_SERVERS=$NUM_SERVERS
+      -e HOST=$HOST
+      -d $DOCKER_NAME_D 
+      /bin/bash -c $SCRIPTS_PATH/vllm_run_for_d.sh
+
+    docker_start_proxy_cmd_c: "{{ docker_exec_cmd }} $DOCKER_NAME_C /bin/bash -c $SCRIPTS_PATH/run_proxy_server.sh"
+
+  tasks:
+    - name: generate container name.  
+      set_fact:
+        ACTUAL_DOCKER_NAME_P: "{{ ansible_env.DOCKER_NAME_P }}_{{ inventory_hostname }}"
+        ACTUAL_DOCKER_NAME_D: "{{ ansible_env.DOCKER_NAME_D }}_{{ inventory_hostname }}"
+        ACTUAL_DOCKER_NAME_C: "{{ ansible_env.DOCKER_NAME_C }}_{{ inventory_hostname }}"
+      when: "'P' in group_names or 'D' in group_names or 'C' in group_names"
+      tags: 
+        - start
+        - server
+        - onlyserver
+        - proxy
+      
+    - name: Check and delete Prefill/Decode group Docker containers.
+      block:
+        - name: Check whether the container exists.  
+          shell: |
+            docker inspect --format='{{"{{.Name}}"}}' \
+            $DOCKER_NAME_P $DOCKER_NAME_D \
+            2>/dev/null | grep -v '^$'
+          register: existing_containers
+          environment:
+            DOCKER_NAME_P: "{{ ACTUAL_DOCKER_NAME_P }}"
+            DOCKER_NAME_D: "{{ ACTUAL_DOCKER_NAME_D }}"
+          failed_when: false
+          changed_when: false
+
+        - name: Show generated container name. 
+          debug:
+            msg: "Generated container name: {{ existing_containers.stdout_lines }}"
+
+        - name: Stop containers.  
+          command: |
+            /bin/bash -c "docker stop {{ existing_containers.stdout_lines | join(' ') }}"
+          when: existing_containers.stdout != ""
+
+        - name: Delete containers.  
+          command: |
+            /bin/bash -c "docker rm -f {{ existing_containers.stdout_lines | join(' ') }}"
+          when: existing_containers.stdout != ""
+      when: "'P' in group_names or 'D' in group_names"
+      tags: start
+
+    - name: Check and delete containers used for global proxy server. 
+      block:
+        - name: Check whether the container exists.  
+          shell: |
+            docker inspect --format='{{"{{.Name}}"}}' \
+            $DOCKER_NAME_C \
+            2>/dev/null | grep -v '^$'
+          register: existing_containers
+          environment:
+            DOCKER_NAME_C: "{{ ACTUAL_DOCKER_NAME_C }}"
+          failed_when: false
+          changed_when: false
+
+        - name: Show generated container name. 
+          debug:
+            msg: "Generated container name: {{ existing_containers.stdout_lines }}"
+
+        - name: Stop containers.  
+          command: |
+            /bin/bash -c "docker stop {{ existing_containers.stdout_lines | join(' ') }}"
+          when: existing_containers.stdout != ""
+
+        - name: Delete containers.  
+          command: |
+            /bin/bash -c "docker rm -f {{ existing_containers.stdout_lines | join(' ') }}"
+          when: existing_containers.stdout != ""
+      when: "'C' in group_names"
+      tags: start
+
+    - name: Register all values. 
+      set_fact:  
+        PREFILL_API_SERVER_LIST: >-
+          {% set result=[] %}
+          {% for host in groups['P']|default([]) %}
+            {% set h=hostvars.get(host,{}) %}
+            {% set ip=h.ansible_host|default('') %}
+            {% set port=h.api_port|default('9000') %}
+            {% if ip %}{% set entry=ip~':'~port %}
+              {% if entry not in result %}
+              {% set _=result.append(entry) %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ result|join(',') }}
+        DECODE_API_SERVER_LIST: >-
+          {% set result=[] %}
+          {% for host in groups['D']|default([]) %}
+            {% set h=hostvars.get(host,{}) %}
+            {% set ip=h.ansible_host|default('') %}
+            {% set port=h.api_port|default('9100') %}
+            {% set num=h.npu_server_list.count(',')|default('0') %}
+            {% if ip %}
+              {% set entry=ip~':'~port~'@'~num %}
+              {% if entry not in result %}
+                {% set _=result.append(entry) %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ result | join(',') }}
+        PREFILL_POD_NUM: "{{ groups['P'] | length }}"
+        DECODE_POD_NUM: "{{ groups['D'] | length }}"
+        DECODE_SERVER_IP_LIST: >-
+          {% set host_list = [] %}
+          {% for host in groups['D'] %}
+            {% if hostvars[host].role == 'M' %}
+              {% set _ = host_list.insert(0, hostvars[host].ansible_host) %}
+            {% else %}
+              {% set _ = host_list.append(hostvars[host].ansible_host) %}
+            {% endif %}
+          {% endfor %}         
+          {{ host_list | join(',') }}
+        DECODE_SERVER_ALL: "{{ groups['D'] | map('extract', hostvars) | map(attribute='npu_server_list') | select('defined') | join(',') }}"
+        PREFILL_RANKTABLE_LIST: >-
+          {% set result=[] %}
+          {% for host in groups['P']|default([]) %}
+            {% set h=hostvars.get(host,{}) %}
+            {% set ip=h.ansible_host|default('') %}
+            {% set list=h.npu_server_list|default('')|replace(',', '')|replace(' ', '') %}
+            {% if ip %}
+              {% set entry="collect_files_p/local_ranktable_"~ip~'_'~list~'.json' %}
+              {% if entry not in result %}
+                {% set _=result.append(entry) %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ result | join(',') }}
+        DECODE_RANKTABLE_LIST: >-
+          {% set result=[] %}
+          {% for host in groups['D']|default([]) %}
+            {% set h=hostvars.get(host,{}) %}
+            {% set ip=h.ansible_host|default('') %}
+            {% set list=h.npu_server_list|default('')|replace(',', '')|replace(' ', '') %}
+            {% if ip %}
+              {% set entry="collect_files_d/local_ranktable_"~ip~'_'~list~'.json' %}
+              {% if entry not in result %}
+                {% set _=result.append(entry) %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ result | join(',') }}
+        DECODE_SERVER_OFFSET: "{% set offsets = {} %}{% set ns = namespace(cnt=0) %}{% for host in groups['D']|default([]) %}{% set _ = offsets.update({host: ns.cnt}) %}{% set num=hostvars[host].npu_server_list.count(',')|default('0')|int %}{% set ns.cnt = ns.cnt + num + 1 %}{% endfor %}{{ offsets }}"
+      run_once: yes
+      delegate_to: localhost
+      tags: 
+        - server
+        - onlyserver
+        - proxy
+
+    - name: Display all values. 
+      debug:
+        msg: |
+         PREFILL_API_SERVER_LIST: {{ PREFILL_API_SERVER_LIST }}
+         DECODE_API_SERVER_LIST: {{ DECODE_API_SERVER_LIST }}
+         DECODE_SERVER_IP_LIST: {{ DECODE_SERVER_IP_LIST }}
+         PREFILL_POD_NUM: {{ PREFILL_POD_NUM }}
+         DECODE_NUM_DP: {{ DECODE_SERVER_ALL.count(',') + 1 }} 
+         PREFILL_RANKTABLE_LIST: {{ PREFILL_RANKTABLE_LIST }}   
+         DECODE_RANKTABLE_LIST: {{ DECODE_RANKTABLE_LIST }}
+         DECODE_SERVER_OFFSET: {{ DECODE_SERVER_OFFSET }}
+      run_once: yes
+      delegate_to: localhost
+
+    - name: Create a directory on the local node. 
+      command: bash -c "rm -rf {{ ranktable_save_path }}; mkdir -p {{ ranktable_save_path }}/global {{ ranktable_save_path }}/collect_files_d {{ ranktable_save_path }}/collect_files_p/api;"
+      delegate_to: localhost
+      tags: start
+
+    - name: Create the path used to store the log.
+      command: /bin/bash -c "mkdir -p ${LOG_PATH}"
+      when: "'P' in group_names or 'D' in group_names or 'C' in group_names"
+      tags: run_docker
+
+    - name: Delete the path used to store the script.
+      command: /bin/bash -c "rm -rf ${SCRIPTS_PATH}"
+      register: cmd_result
+      when: "'P' in group_names or 'D' in group_names or 'C' in group_names"
+      tags: start
+
+    - name: Create the path used to store the script.
+      command: /bin/bash -c "mkdir -p ${SCRIPTS_PATH}"
+      when: "'P' in group_names or 'D' in group_names or 'C' in group_names"
+      tags: start
+
+    - name: Generate a script to generate the ranktable file for the prefill instances. 
+      copy:
+        content: "{{ generate_prefill_ranktable_cmd }}"
+        dest: "$SCRIPTS_PATH/generate_prefill_ranktable.sh"
+        mode: '0750'
+      when: "'P' in group_names"
+      tags: server
+
+    - name: Generate a script to generate the ranktable file for the decode instances. 
+      copy:
+        content: "{{ generate_decode_ranktable_cmd }}"
+        dest: "$SCRIPTS_PATH/generate_decode_ranktable.sh"
+        mode: '0750'
+      when: "'D' in group_names"
+      tags: server
+
+    - name: Generate a script to generate the global ranktable file.
+      copy:
+        content: "{{ generate_global_ranktable_cmd }}"
+        dest: "$SCRIPTS_PATH/generate_global_ranktable.sh"
+        mode: '0750'
+      when: "'P' in group_names and inventory_hostname == groups['P'][0]"
+      tags: server
+
+    - name: Generate a script to run the vllm server for the prefill instances.
+      copy:
+        content: "{{ run_vllm_server_prefill_cmd }}"
+        dest: "$SCRIPTS_PATH/vllm_run_for_p.sh"
+        mode: '0750'
+      when: "'P' in group_names"
+      tags: 
+        - server
+        - onlyserver
+
+    - name: Generate a script to run the vllm server for the decode instances.
+      copy:
+        content: "{{ run_vllm_server_decode_cmd }}"
+        dest: "$SCRIPTS_PATH/vllm_run_for_d.sh"
+        mode: '0750'
+      vars:
+        server_offset_dict: "{{ DECODE_SERVER_OFFSET }}"
+      when: "'D' in group_names"
+      tags: 
+        - server
+        - onlyserver
+
+    - name: Get socket name for communication between prefill instances and decode instances.
+      shell: |
+        ip -4 route list 0/0 | awk '{print $5}' | head -1
+      register: default_interface_result
+      changed_when: false
+      tags: 
+        - server
+        - onlyserver
+
+    - name: Use a variable to store the socket name. 
+      set_fact:
+        default_interface: "{{ default_interface_result.stdout }}"
+      when: default_interface_result.stdout != ""
+      tags: 
+        - server
+        - onlyserver
+
+    - name: Run container for prefill instances.
+      command: bash -c "{{ start_docker_cmd_p }}"
+      environment:
+        ROLE: "P"
+        DOCKER_NAME_P: "{{ ACTUAL_DOCKER_NAME_P }}"
+      when: "'P' in group_names"
+      tags: start
+    
+    - name: Run container for decode instances.
+      command: bash -c "{{ start_docker_cmd_d }}"
+      environment:
+        ROLE: "D"
+        DOCKER_NAME_D: "{{ ACTUAL_DOCKER_NAME_D }}"
+      when: "'D' in group_names"
+      tags: start
+
+    - name: Run container for global proxy server.
+      command: bash -c "{{ start_docker_cmd_c }}"
+      environment:
+        ROLE: "C"
+        NODE_PORT: "{{ node_port }}"
+        DOCKER_NAME_C: "{{ ACTUAL_DOCKER_NAME_C }}"
+      when: "'C' in group_names"
+      tags: start
+
+    - name: Delete the path used to store the ranktable files.
+      command: /bin/bash -c "rm -rf {{ ranktable_save_path }}"
+      register: cmd_result
+      when: "'P' in group_names or 'D' in group_names"
+      tags: server
+
+    - name: Create the path used to store the global ranktable file.
+      command: /bin/bash -c "mkdir -p {{ ranktable_save_path }}/global"
+      when: "'P' in group_names or 'D' in group_names"
+      tags: server
+
+    - name: Generate the ranktable file in the prefill instances. 
+      command: bash -c "{{ docker_generate_prefill_ranktable_cmd }}"
+      environment:
+        PREFILL_SERVER_LIST: "{{ npu_server_list }}"
+        DOCKER_NAME_P: "{{ ACTUAL_DOCKER_NAME_P }}"
+      when: "'P' in group_names"
+      tags: server
+
+    - name: Generate the ranktable file in the decode instances. 
+      command: bash -c "{{ docker_generate_decode_ranktable_cmd }}"
+      environment:
+        DECODE_SERVER_LIST: "{{ npu_server_list }}"
+        DOCKER_NAME_D: "{{ ACTUAL_DOCKER_NAME_D }}"
+      when: "'D' in group_names"
+      tags: server
+
+    - name: Get a list of JSON files in prefill instances that match the format.
+      ansible.builtin.find:
+        paths: '{{ ranktable_save_path }}/prefill_config'
+        patterns: "local_ranktable_{{ ansible_host }}_[0-9]+.json"
+        use_regex: yes
+      register: p_dynamic_files
+      when: "'P' in group_names"
+      changed_when: false
+      tags: server
+
+    - name: Forward the JSON file of the prefill instances to the executor. 
+      ansible.builtin.fetch:
+        src: "{{ item }}"
+        dest: "{{ (item == fixed_file_src) | ternary(ranktable_save_path + '/collect_files_p/api/', ranktable_save_path + '/collect_files_p/') }}"
+        flat: yes
+      loop: "{{ p_dynamic_files.files | map(attribute='path') | list + [fixed_file_src] }}"
+      vars:
+        fixed_file_src: '{{ ranktable_save_path }}/prefill_config/local_ranktable_{{ ansible_host }}_host.json'
+      when: 
+        - "'P' in group_names"
+        - p_dynamic_files.matched > 0 or lookup('file', fixed_file_src, errors='ignore').exists
+      tags: server
+
+    - name: Get a list of JSON files in decode instances that match the format.
+      ansible.builtin.find:
+        paths: '{{ ranktable_save_path }}/decode_config'
+        patterns: "local_ranktable_{{ ansible_host }}_[0-9]+.json"
+        use_regex: yes
+      register: d_dynamic_files
+      when: "'D' in group_names"
+      changed_when: false
+      tags: server
+
+    - name: Forward the JSON file of the decode instances to the executor. 
+      ansible.builtin.fetch:
+        src: "{{ item }}"
+        dest: '{{ ranktable_save_path }}/collect_files_d/'
+        flat: yes
+      loop: "{{ d_dynamic_files.files | map(attribute='path') | list }}"
+      when:
+        - "'D' in group_names"
+        - d_dynamic_files.matched > 0
+      register: fetch_result
+      tags: server
+
+    - name: The executor synchronizes the files to the first prefill instances. 
+      copy:
+        src: "{{ item }}"
+        dest: "{{ ranktable_save_path }}/global"
+      loop:
+        - "{{ ranktable_save_path }}/collect_files_p"
+        - "{{ ranktable_save_path }}/collect_files_d"
+      when: "'P' in group_names and inventory_hostname == groups['P'][0]"
+      tags: server
+
+    - name: Generate the global ranktable file on the first prefill instances. 
+      command: bash -c "{{ docker_generate_global_cmd }}"
+      environment:
+        DOCKER_NAME_P: "{{ ACTUAL_DOCKER_NAME_P }}"
+        DECODE_POD_NUM: "{{ DECODE_POD_NUM }}"
+      when: "'P' in group_names and inventory_hostname == groups['P'][0]"
+      tags: server
+
+    - name: Get the global ranktable file of the first prefill instances. 
+      ansible.builtin.find:
+        paths: "{{ ranktable_save_path }}/global"
+        patterns: '[\s\S]+.json'
+        use_regex: yes
+      register: merge_json_files
+      when: "'P' in group_names and inventory_hostname == groups['P'][0]"
+      changed_when: false
+      tags: server
+
+    - name: Forward the global ranktable file of the first prefill instances to the executor. 
+      ansible.builtin.fetch:
+        src: "{{ item }}"
+        dest: "{{ ranktable_save_path }}/global/"
+        flat: yes
+      loop: "{{ merge_json_files.files | map(attribute='path') | list }}"
+      when: "'P' in group_names and inventory_hostname == groups['P'][0]"
+      tags: server
+
+    - name: The executor synchronizes the global ranktable file to all instances. 
+      copy:
+        src: "{{ ranktable_save_path }}/global"
+        dest: "{{ ranktable_save_path }}"
+      when: "inventory_hostname != groups['P'][0]"
+      tags: server
+
+    - name: Run the Omniai service for decode instances. 
+      command: bash -c "{{ docker_start_vllm_cmd_d }}"
+      environment:
+        ROLE: "D"
+        DOCKER_NAME_D: "{{ ACTUAL_DOCKER_NAME_D }}"
+        NODE_PORT: "{{ node_port }}"
+        API_PORT: "{{ api_port }}"
+        DECODE_SERVER_LIST: "{{ npu_server_list }}"
+        SERVER_IP_LIST: "{{ DECODE_SERVER_IP_LIST | replace(' ', '') | trim }}"
+        PREFILL_POD_NUM: "{{ PREFILL_POD_NUM }}"
+        DECODE_POD_NUM: "{{ DECODE_POD_NUM }}"
+        SOCKET_IFNAME: "{{ default_interface }}"
+        NUM_SERVERS: "{{ npu_server_list.split(',') | length }}"
+        HOST_IP: "{{ groups['D'] | map('extract', hostvars) | selectattr('role', 'equalto', 'M') | map(attribute='ansible_host') | first }}"
+        DECODE_DATA_PARALLEL_SIZE: "{{ DECODE_SERVER_ALL }}"
+        HOST: "{{ inventory_hostname }}"
+      when: "'D' in group_names"
+      tags: 
+        - server
+        - onlyserver
+
+    - name: Wait 80 seconds.
+      pause:
+        seconds: 80 # 支持小数（如0.5秒）
+      tags: 
+        - server
+        - onlyserver
+
+    - name: Run the Omniai service for prefill instances. 
+      command: bash -c "{{ docker_start_vllm_cmd_p }}"
+      environment:
+        ROLE: "P"
+        DOCKER_NAME_P: "{{ ACTUAL_DOCKER_NAME_P }}"
+        NODE_PORT: "{{ node_port }}"
+        PREFILL_SERVER_LIST: "{{ npu_server_list }}"
+        API_PORT: "{{ api_port }}"
+        SERVER_IP_LIST: "{{ DECODE_SERVER_IP_LIST | replace(' ', '') | trim }}"
+        PREFILL_POD_NUM: "{{ PREFILL_POD_NUM }}"
+        SOCKET_IFNAME: "{{ default_interface }}"
+        HOST_IP: "{{ ansible_host }}"
+        KV_RANK: "{{ node_rank }}"
+        PREFILL_TENSOR_PARALLEL_SIZE: "{{ npu_server_list.split(',') | length }}"
+      when: "'P' in group_names"
+      tags: 
+        - server
+        - onlyserver
+
+    - name: Generate a script to run the global proxy server.
+      copy:
+        content: "{{ run_proxy_cmd }}"
+        dest: "$SCRIPTS_PATH/run_proxy_server.sh"
+        mode: '0750'
+      when: "'C' in group_names"
+      tags: 
+        - proxy
+
+    - name: Run the global proxy server.
+      command: bash -c "{{ docker_start_proxy_cmd_c }}"
+      environment:
+        DOCKER_NAME_C: "{{ ACTUAL_DOCKER_NAME_C }}"
+      when: "'C' in group_names"
+      tags: 
+        - proxy

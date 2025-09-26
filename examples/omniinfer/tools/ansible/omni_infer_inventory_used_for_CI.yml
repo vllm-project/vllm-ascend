@@ -1,0 +1,74 @@
+# Copyright 2025 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ============================================================================
+
+all:
+  vars:
+    ansible_user: root
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o IdentitiesOnly=yes'
+
+    global_port_base: 8000
+    base_api_port: 9000
+    proxy_port: 7000
+    port_offset:
+      P: 0      # Actual port range for group P: 8000-8099
+      D: 100    # Actual port range for group D: 8100-8199
+
+  children:
+    P:
+      hosts:
+        p_1:
+          ansible_host: "7.242.108.64"
+          ansible_ssh_private_key_file: /workspace/CI/pem/keypair-dwe-g00615224.pem  # Private key path on the executor
+          node_rank: 0
+          node_port: "{{ global_port_base + port_offset.P + node_rank }}"
+          api_port: "{{ base_api_port + port_offset.P + node_rank }}"
+          npu_server_list: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+
+        p_2:
+          ansible_host: "7.242.108.196"
+          ansible_ssh_private_key_file: /workspace/CI/pem/keypair-dwe-g00615224.pem
+          node_rank: 1
+          node_port: "{{ global_port_base + port_offset.P + node_rank }}"
+          api_port: "{{ base_api_port + port_offset.P + node_rank }}"
+          npu_server_list: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+
+    D:
+      hosts:
+        d_1:
+          ansible_host: "7.242.104.37"
+          ansible_ssh_private_key_file: /workspace/CI/pem/keypair-dwe-g00615224.pem
+          node_rank: 0
+          node_port: "{{ global_port_base + port_offset.D }}"
+          api_port: "{{ base_api_port + port_offset.D + node_rank }}"
+          role: "M"
+          npu_server_list: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+
+        d_2:
+          ansible_host: "7.242.109.162"
+          ansible_ssh_private_key_file: /workspace/CI/pem/keypair-dwe-g00615224.pem
+          node_rank: 1
+          node_port: "{{ global_port_base + port_offset.D }}"
+          api_port: "{{ base_api_port + port_offset.D + node_rank }}"
+          role: "S"
+          npu_server_list: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+        
+    C:
+      hosts:
+        c_1:
+          ansible_host: "7.242.108.64"
+          ansible_ssh_private_key_file: /workspace/CI/pem/keypair-dwe-g00615224.pem
+          node_rank: 0
+          node_port: "{{ proxy_port + node_rank }}"
+          role: "C"   

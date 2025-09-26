@@ -1,0 +1,35 @@
+diff --git a/vllm/entrypoints/openai/protocol.py b/vllm/entrypoints/openai/protocol.py
+index 8ac653487..43a4a98be 100644
+--- a/vllm/entrypoints/openai/protocol.py
++++ b/vllm/entrypoints/openai/protocol.py
+@@ -1438,6 +1438,8 @@ class DeltaMessage(OpenAIBaseModel):
+ 
+ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
+     index: int
++    prompt_num_token: Optional[int] = None
++    output_num_token: Optional[int] = None
+     delta: DeltaMessage
+     logprobs: Optional[ChatCompletionLogProbs] = None
+     finish_reason: Optional[str] = None
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index ee18e0b0a..f96233545 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -763,6 +763,8 @@ class OpenAIServingChat(OpenAIServing):
+                         # Send token-by-token response for each request.n
+                         choice_data = ChatCompletionResponseStreamChoice(
+                             index=i,
++                            prompt_num_token = num_prompt_tokens,
++                            output_num_token = len(output.token_ids),
+                             delta=delta_message,
+                             logprobs=logprobs,
+                             finish_reason=None)
+@@ -822,6 +824,8 @@ class OpenAIServingChat(OpenAIServing):
+                         # Send the finish response for each request.n only once
+                         choice_data = ChatCompletionResponseStreamChoice(
+                             index=i,
++                            prompt_num_token = num_prompt_tokens,
++                            output_num_token = len(output.token_ids),
+                             delta=delta_message,
+                             logprobs=logprobs,
+                             finish_reason=output.finish_reason

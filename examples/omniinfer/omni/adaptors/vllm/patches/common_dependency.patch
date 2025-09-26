@@ -1,0 +1,19 @@
+diff --git a/requirements/common.txt b/requirements/common.txt
+index 625efc3366..d7d10e55e0 100644
+--- a/requirements/common.txt
++++ b/requirements/common.txt
+@@ -2,12 +2,12 @@ regex # Replace re for higher-performance regex matching
+ cachetools
+ psutil
+ sentencepiece  # Required for LLaMA tokenizer.
+-numpy
++numpy == 1.26
+ requests >= 2.26.0
+ tqdm
+ blake3
+ py-cpuinfo
+-transformers >= 4.51.1
++transformers >= 4.51.1, <= 4.53.2
+ huggingface-hub[hf_xet] >= 0.32.0  # Required for Xet downloads.
+ tokenizers >= 0.21.1  # Required for fast incremental detokenization.
+ protobuf # Required by LlamaTokenizer.

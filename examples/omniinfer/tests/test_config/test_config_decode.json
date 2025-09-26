@@ -1,0 +1,26 @@
+{
+    "model_parallel_config": {
+        "dense_mlp_tp_size": 4,
+        "o_proj_tp_size": 1,
+        "dp_size": 64
+    },
+    "operator_optimizition_config": {
+        "enable_kv_rmsnorm_rope_cache": true,
+        "prefill_moe_all_to_all": true,
+        "moe_multi_stream_tune": true,
+        "best_ep": false,
+        "merge_qkv": false,
+        "gmm_nz": true,
+        "decode_moe_dispatch_combine": true,
+        "use_omni_placement": true,
+        "omni_placement_config_path": "../../tests/test_config/config_d.yaml",
+        "use_super_kernel": false,
+        "use_mlaprolog": false,
+        "opt_w2_scale_cast": true,
+        "control_accept_rate": -1,
+        "use_prefetch": true,
+        "expert_gate_up_prefetch": 50,
+        "expert_down_prefetch": 0,
+        "attn_prefetch": 96
+    }
+}

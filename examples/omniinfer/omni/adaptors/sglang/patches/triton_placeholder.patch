@@ -1,0 +1,198 @@
+diff --git a/python/sglang/srt/layers/dp_attention.py b/python/sglang/srt/layers/dp_attention.py
+index 79397cce5..74bcaaf56 100644
+--- a/python/sglang/srt/layers/dp_attention.py
++++ b/python/sglang/srt/layers/dp_attention.py
+@@ -7,8 +7,8 @@ from enum import IntEnum, auto
+ from typing import TYPE_CHECKING, List, Tuple
+ 
+ import torch
+-import triton
+-import triton.language as tl
++from sglang.triton_utils import triton
++from sglang.triton_utils import tl
+ 
+ from sglang.srt.distributed import (
+     GroupCoordinator,
+diff --git a/python/sglang/srt/layers/quantization/fp8_kernel.py b/python/sglang/srt/layers/quantization/fp8_kernel.py
+index ae7074a9b..7b9730fb4 100644
+--- a/python/sglang/srt/layers/quantization/fp8_kernel.py
++++ b/python/sglang/srt/layers/quantization/fp8_kernel.py
+@@ -20,8 +20,8 @@ from functools import lru_cache
+ from typing import Any, Dict, List, Optional, Tuple
+ 
+ import torch
+-import triton
+-import triton.language as tl
++from sglang.triton_utils import triton
++from sglang.triton_utils import tl
+ 
+ from sglang.srt.layers.quantization import deep_gemm_wrapper
+ from sglang.srt.utils import (
+diff --git a/python/sglang/srt/managers/schedule_batch.py b/python/sglang/srt/managers/schedule_batch.py
+index 761defe00..9ae909f25 100644
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ -41,8 +41,8 @@ from typing import TYPE_CHECKING, Any, List, Optional, Set, Tuple, Union
+ 
+ import numpy as np
+ import torch
+-import triton
+-import triton.language as tl
++from sglang.triton_utils import triton
++from sglang.triton_utils import tl
+ 
+ from sglang.global_config import global_config
+ from sglang.srt.constrained.base_grammar_backend import BaseGrammarObject
+diff --git a/python/sglang/srt/mem_cache/allocator.py b/python/sglang/srt/mem_cache/allocator.py
+index 58afbf312..adc87a5e4 100644
+--- a/python/sglang/srt/mem_cache/allocator.py
++++ b/python/sglang/srt/mem_cache/allocator.py
+@@ -24,8 +24,8 @@ import weakref
+ from typing import TYPE_CHECKING
+ 
+ import torch
+-import triton
+-import triton.language as tl
++from sglang.triton_utils import triton
++from sglang.triton_utils import tl
+ 
+ from sglang.srt.mem_cache.memory_pool import SWAKVPool
+ from sglang.srt.utils import get_bool_env_var, next_power_of_2
+diff --git a/python/sglang/srt/mem_cache/memory_pool.py b/python/sglang/srt/mem_cache/memory_pool.py
+index 167bb22ed..c75328ee9 100644
+--- a/python/sglang/srt/mem_cache/memory_pool.py
++++ b/python/sglang/srt/mem_cache/memory_pool.py
+@@ -31,8 +31,8 @@ from typing import Dict, List, Optional, Tuple, Union
+ 
+ import numpy as np
+ import torch
+-import triton
+-import triton.language as tl
++from sglang.triton_utils import triton
++from sglang.triton_utils import tl
+ 
+ from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
+ from sglang.srt.layers.radix_attention import RadixAttention
+diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
+index 314635fcd..aabfa80ab 100644
+--- a/python/sglang/srt/model_executor/forward_batch_info.py
++++ b/python/sglang/srt/model_executor/forward_batch_info.py
+@@ -35,8 +35,8 @@ from functools import total_ordering
+ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
+ 
+ import torch
+-import triton
+-import triton.language as tl
++from sglang.triton_utils import triton
++from sglang.triton_utils import tl
+ 
+ from sglang.srt.distributed.parallel_state import get_moe_expert_parallel_world_size
+ from sglang.srt.layers.dp_attention import (
+diff --git a/python/sglang/srt/utils.py b/python/sglang/srt/utils.py
+index 1f4134e33..5401ac1a9 100644
+--- a/python/sglang/srt/utils.py
++++ b/python/sglang/srt/utils.py
+@@ -74,7 +74,7 @@ import requests
+ import torch
+ import torch.distributed
+ import torch.distributed as dist
+-import triton
++from sglang.triton_utils import triton
+ import zmq
+ from fastapi.responses import ORJSONResponse
+ from packaging import version as pkg_version
+@@ -85,7 +85,7 @@ from torch.func import functional_call
+ from torch.library import Library
+ from torch.profiler import ProfilerActivity, profile, record_function
+ from torch.utils._contextlib import _DecoratorContextManager
+-from triton.runtime.cache import FileCacheManager
++from sglang.triton_utils import FileCacheManager
+ from typing_extensions import Literal
+ 
+ from sglang.srt.metrics.func_timer import enable_func_timer
+diff --git a/python/sglang/triton_utils/__init__.py b/python/sglang/triton_utils/__init__.py
+new file mode 100644
+index 000000000..2a41f9eb1
+--- /dev/null
++++ b/python/sglang/triton_utils/__init__.py
+@@ -0,0 +1,15 @@
++# SPDX-License-Identifier: Apache-2.0
++
++from sglang.triton_utils.importing import (HAS_TRITON, TritonLanguagePlaceholder,
++                                         TritonPlaceholder, TritonFileCacheManagerPlaceholder)
++
++if HAS_TRITON:
++    import triton
++    import triton.language as tl
++    from triton.runtime.cache import FileCacheManager as FileCacheManager
++else:
++    triton = TritonPlaceholder()
++    tl = TritonLanguagePlaceholder()
++    FileCacheManager = TritonFileCacheManagerPlaceholder()
++
++__all__ = ["HAS_TRITON", "triton", "tl", "FileCacheManager"]
+diff --git a/python/sglang/triton_utils/importing.py b/python/sglang/triton_utils/importing.py
+new file mode 100644
+index 000000000..cb550b14b
+--- /dev/null
++++ b/python/sglang/triton_utils/importing.py
+@@ -0,0 +1,58 @@
++# SPDX-License-Identifier: Apache-2.0
++
++import types
++from importlib.util import find_spec
++
++import logging
++logger = logging.getLogger(__file__)
++
++HAS_TRITON = (
++    find_spec("triton") is not None
++    or find_spec("pytorch-triton-xpu") is not None  # Not compatible
++)
++
++if not HAS_TRITON:
++    logger.info("Triton not installed or not compatible; certain GPU-related"
++                " functions will not be available.")
++
++
++class TritonPlaceholder(types.ModuleType):
++
++    def __init__(self):
++        super().__init__("triton")
++        self.jit = self._dummy_decorator("jit")
++        self.autotune = self._dummy_decorator("autotune")
++        self.heuristics = self._dummy_decorator("heuristics")
++        self.Config = self._dummy_decorator("Config")
++        self.language = TritonLanguagePlaceholder()
++        logger.warning(
++            "Triton is not installed. Using dummy decorators. "
++            "Install it via `pip install triton` to enable kernel"
++            " compilation.")
++
++    def _dummy_decorator(self, name):
++
++        def decorator(*args, **kwargs):
++            if args and callable(args[0]):
++                return args[0]
++            return lambda f: f
++
++        return decorator
++
++
++class TritonLanguagePlaceholder(types.ModuleType):
++
++    def __init__(self):
++        super().__init__("triton.language")
++        self.constexpr = None
++        self.dtype = None
++        self.int64 = None
++
++
++class TritonFileCacheManagerPlaceholder(types.ModuleType):
++
++    def __init__(self):
++        super().__init__("triton.runtime.cache")
++        self.constexpr = None
++        self.dtype = None
++        self.int64 = None
+\ No newline at end of file

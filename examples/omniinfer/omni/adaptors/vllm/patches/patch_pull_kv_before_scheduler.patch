@@ -1,0 +1,106 @@
+diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
+index 4d5f4d3d1..4bef53343 100644
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -38,6 +38,7 @@ from vllm.v1.request import Request, RequestStatus
+ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+ from vllm.v1.structured_output import StructuredOutputManager
+ from vllm.version import __version__ as VLLM_VERSION
++from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+ 
+ logger = init_logger(__name__)
+ 
+@@ -62,6 +63,7 @@ class EngineCore:
+                     VLLM_VERSION, vllm_config)
+ 
+         self.log_stats = log_stats
++        self.pull_kv_lock = threading.Lock()
+ 
+         # Setup Model.
+         self.model_executor = executor_class(vllm_config)
+@@ -182,10 +184,12 @@ class EngineCore:
+             # Start grammar compilation asynchronously
+             self.structured_output_manager.grammar_init(req)
+ 
+-        if req.kv_transfer_params is not None and (
+-                not self.scheduler.get_kv_connector()):
+-            logger.warning("Got kv_transfer_params, but no KVConnector found. "
+-                           "Disabling KVTransfer for this request.")
++        if req.kv_transfer_params is not None:
++            if not self.scheduler.get_kv_connector():
++                logger.warning("Got kv_transfer_params, but no KVConnector found. "
++                            "Disabling KVTransfer for this request.")
++            if req.kv_transfer_params["fast_path"]:
++                req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+ 
+         self.scheduler.add_request(req)
+ 
+@@ -218,7 +222,8 @@ class EngineCore:
+                 outputs=[],
+                 scheduler_stats=self.scheduler.make_stats(),
+             )
+-        scheduler_output = self.scheduler.schedule()
++        with self.pull_kv_lock:
++            scheduler_output = self.scheduler.schedule()
+         model_output = self.execute_model(scheduler_output)
+         engine_core_outputs = self.scheduler.update_from_output(
+             scheduler_output, model_output)  # type: ignore
+@@ -392,6 +397,8 @@ class EngineCoreProc(EngineCore):
+                     "num_gpu_blocks": num_gpu_blocks,
+                 }))
+ 
++            self.pull_kv_lock = threading.Lock()
++
+             # Background Threads and Queues for IO. These enable us to
+             # overlap ZMQ socket IO with GPU since they release the GIL,
+             # and to overlap some serialization/deserialization with the
+@@ -606,9 +613,49 @@ class EngineCoreProc(EngineCore):
+                 request_type == EngineCoreRequestType.ADD) else generic_decoder
+             request = decoder.decode(data_frames)
+ 
++            if request_type == EngineCoreRequestType.ADD:
++                with self.pull_kv_lock:
++                    self.try_pull_kv_fast_path(request)
++
+             # Push to input queue for core busy loop.
+             self.input_queue.put_nowait((request_type, request))
+ 
++    def try_pull_kv_fast_path(self, request: EngineCoreRequest):
++        req = Request.from_engine_core_request(request)
++        
++        if req.kv_transfer_params is not None:
++            req.kv_transfer_params["fast_path"] = False
++
++            connector = self.scheduler.connector
++            num_external_computed_tokens, load_kv_async = (
++                    (0, False) if connector is None else
++                    connector.get_num_new_matched_tokens(
++                        req, 0))
++
++            new_computed_blocks = KVCacheBlocks.create_empty()
++
++            new_blocks = self.scheduler.kv_cache_manager.allocate_slots(
++                    req,
++                    num_external_computed_tokens,
++                    0,
++                    new_computed_blocks,
++                    num_lookahead_tokens=0,
++                    delay_cache_blocks=load_kv_async,
++                )
++            if new_blocks is None:
++                # Let's delay to slow path.
++                return
++
++            req.kv_transfer_params["fast_path"] = True
++            connector.update_state_after_alloc(
++                        req,
++                        new_blocks,
++                        num_external_computed_tokens,
++                    )
++           
++            # Kick off pulling kv directly to worker thread
++            connector.build_connector_meta(None)
++
+     def process_output_socket(self, output_path: str, engine_index: int):
+         """Output socket IO thread."""
+ 

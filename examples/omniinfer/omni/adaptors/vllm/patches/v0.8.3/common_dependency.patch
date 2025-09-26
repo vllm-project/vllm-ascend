@@ -1,0 +1,13 @@
+diff --git a/requirements/common.txt b/requirements/common.txt
+index 80f90e600..98b613072 100644
+--- a/requirements/common.txt
++++ b/requirements/common.txt
+@@ -1,7 +1,7 @@
+ cachetools
+ psutil
+ sentencepiece  # Required for LLaMA tokenizer.
+-numpy
++numpy == 1.26
+ requests >= 2.26.0
+ tqdm
+ blake3

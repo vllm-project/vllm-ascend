@@ -1,0 +1,310 @@
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index bc11686d7..81a167592 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -45,6 +45,9 @@ from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
+ 
+ logger = init_logger(__name__)
+ 
++import os
++reuse_prefilled_tokens = os.getenv("OMNI_REUSE_PREFILLED_TOKENS", "0") == "1"
++skip_decode_tokenize = os.getenv("OMNI_SKIP_DECODE_TOKENIZE", "0") == "1"
+ 
+ class OpenAIServingChat(OpenAIServing):
+ 
+@@ -211,6 +214,12 @@ class OpenAIServingChat(OpenAIServing):
+         try:
+             for i, engine_prompt in enumerate(engine_prompts):
+                 sampling_params: Union[SamplingParams, BeamSearchParams]
++                if reuse_prefilled_tokens:
++                    if request.kv_transfer_params and "prefilled_token" in request.kv_transfer_params:
++                        engine_prompt["prefilled_token_ids"] = request.kv_transfer_params["prefilled_token"]
++                        new_tokens = tokenizer.convert_ids_to_tokens(engine_prompt["prefilled_token_ids"][0])
++                        delta_text = tokenizer.convert_tokens_to_string([new_tokens])
++                        engine_prompt["prefilled_texts"] = delta_text
+                 default_max_tokens = self.max_model_len - len(
+                     engine_prompt["prompt_token_ids"])
+                 if request.use_beam_search:
+@@ -912,6 +921,20 @@ class OpenAIServingChat(OpenAIServing):
+ 
+         assert final_res is not None
+ 
++        if reuse_prefilled_tokens:
++            if request.kv_transfer_params and "prefilled_token" in request.kv_transfer_params:
++                prompt_token_ids = request.kv_transfer_params["prefilled_token"]
++                new_tokens = tokenizer.convert_ids_to_tokens(prompt_token_ids[0])
++                prompt_text = tokenizer.convert_tokens_to_string([new_tokens])
++                final_res.outputs[0].text = prompt_text + final_res.outputs[0].text
++        ## In Prefill node, the response will carry prompt_token_ids with kv_transfer_params
++        if skip_decode_tokenize:
++            if final_res.kv_transfer_params:
++                final_res.kv_transfer_params["prompt_token_ids"] = final_res.prompt_token_ids
++        if reuse_prefilled_tokens:
++            if final_res.kv_transfer_params:
++                final_res.kv_transfer_params["prefilled_token"] = [final_res.outputs[0].token_ids[0]]
++
+         choices: list[ChatCompletionResponseChoice] = []
+ 
+         role = self.get_chat_request_role(request)
+@@ -1069,6 +1092,9 @@ class OpenAIServingChat(OpenAIServing):
+             num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
+         num_generated_tokens = sum(
+             len(output.token_ids) for output in final_res.outputs)
++        if reuse_prefilled_tokens:
++            if request.kv_transfer_params and "prefilled_token" in request.kv_transfer_params:
++                num_generated_tokens += 1
+         usage = UsageInfo(prompt_tokens=num_prompt_tokens,
+                           completion_tokens=num_generated_tokens,
+                           total_tokens=num_prompt_tokens +
+diff --git a/vllm/entrypoints/openai/serving_completion.py b/vllm/entrypoints/openai/serving_completion.py
+index a162a01ee..3cd064d6d 100644
+--- a/vllm/entrypoints/openai/serving_completion.py
++++ b/vllm/entrypoints/openai/serving_completion.py
+@@ -40,6 +40,10 @@ from vllm.utils import merge_async_iterators
+ 
+ logger = init_logger(__name__)
+ 
++import os
++reuse_prefilled_tokens = os.getenv("OMNI_REUSE_PREFILLED_TOKENS", "0") == "1"
++skip_decode_tokenize = os.getenv("OMNI_SKIP_DECODE_TOKENIZE", "0") == "1"
++
+ 
+ class OpenAIServingCompletion(OpenAIServing):
+ 
+@@ -161,6 +165,12 @@ class OpenAIServingCompletion(OpenAIServing):
+                     input_length = len(engine_prompt["prompt_token_ids"])
+                 else:
+                     assert_never(engine_prompt)
++                if reuse_prefilled_tokens:
++                    if request.kv_transfer_params and "prefilled_token" in request.kv_transfer_params:
++                        engine_prompt["prefilled_token_ids"] = request.kv_transfer_params["prefilled_token"]
++                        new_tokens = tokenizer.convert_ids_to_tokens(engine_prompt["prefilled_token_ids"][0])
++                        delta_text = tokenizer.convert_tokens_to_string([new_tokens])
++                        engine_prompt["prefilled_texts"] = delta_text
+                 default_max_tokens = self.max_model_len - input_length
+ 
+                 if request.use_beam_search:
+@@ -259,7 +269,7 @@ class OpenAIServingCompletion(OpenAIServing):
+             prompt_token_ids = []
+             for req_output in final_res_batch_checked:
+                 prompt_token_ids.append(req_output.prompt_token_ids) 
+-            if final_res_batch_checked[0].kv_transfer_params:
++            if final_res_batch_checked[0].kv_transfer_params and skip_decode_tokenize:
+                 ## In Prefill node, the response will carry prompt_token_ids with kv_transfer_params
+                 final_res_batch_checked[0].kv_transfer_params["prompt_token_ids"] = prompt_token_ids
+ 
+@@ -458,6 +468,20 @@ class OpenAIServingCompletion(OpenAIServing):
+             prompt_logprobs = clamp_prompt_logprobs(final_res.prompt_logprobs)
+             prompt_text = final_res.prompt
+ 
++            if reuse_prefilled_tokens:
++                if request.kv_transfer_params and "prefilled_token" in request.kv_transfer_params:
++                    prompt_token_ids = request.kv_transfer_params["prefilled_token"]
++                    new_tokens = tokenizer.convert_ids_to_tokens(prompt_token_ids[0])
++                    prompt_text = tokenizer.convert_tokens_to_string([new_tokens])
++                    final_res.outputs[0].text = prompt_text + final_res.outputs[0].text
++            ## In Prefill node, the response will carry prompt_token_ids with kv_transfer_params
++            if skip_decode_tokenize:
++                if final_res.kv_transfer_params:
++                    final_res.kv_transfer_params["prompt_token_ids"] = final_res.prompt_token_ids
++            if reuse_prefilled_tokens:
++                if final_res.kv_transfer_params:
++                    final_res.kv_transfer_params["prefilled_token"] = [final_res.outputs[0].token_ids[0]]
++
+             token_ids: GenericSequence[int]
+             out_logprobs: Optional[GenericSequence[Optional[dict[int,
+                                                                  Logprob]]]]
+@@ -515,6 +539,9 @@ class OpenAIServingCompletion(OpenAIServing):
+ 
+             num_prompt_tokens += len(prompt_token_ids)
+ 
++        if reuse_prefilled_tokens:
++            if request.kv_transfer_params and "prefilled_token" in request.kv_transfer_params:
++                num_generated_tokens += 1
+         usage = UsageInfo(
+             prompt_tokens=num_prompt_tokens,
+             completion_tokens=num_generated_tokens,
+diff --git a/vllm/entrypoints/openai/serving_engine.py b/vllm/entrypoints/openai/serving_engine.py
+index 2f35619ca..42d6d2659 100644
+--- a/vllm/entrypoints/openai/serving_engine.py
++++ b/vllm/entrypoints/openai/serving_engine.py
+@@ -81,6 +81,8 @@ from multiprocessing import Manager
+ 
+ logger = init_logger(__name__)
+ 
++skip_decode_tokenize = os.getenv("OMNI_SKIP_DECODE_TOKENIZE", "0") == "1"
++
+ CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
+                               EmbeddingCompletionRequest, RerankRequest,
+                               ClassificationRequest, ScoreRequest,
+@@ -1114,33 +1116,37 @@ class OpenAIServing:
+             request = tool_parser(tokenizer).adjust_request(  # type: ignore
+                 request=request)
+ 
+-        if isinstance(request_prompt, str):
+-            if self.enable_tokenizer_proc_pool and len(request_prompt) >= self.process_pool_threshold:
+-                prompt_inputs = await self._tokenize_prompt_input_or_inputs_async_proc_pool(
+-                    request,
+-                    request_prompt,
+-                    truncate_prompt_tokens=truncate_prompt_tokens,
+-                    add_special_tokens=add_special_tokens,
+-                )
+-                prompt_inputs = prompt_inputs[0]
+-            else:
+-                prompt_inputs = await self._tokenize_prompt_input_async(
+-                    request,
+-                    tokenizer,
+-                    request_prompt,
+-                    truncate_prompt_tokens=truncate_prompt_tokens,
+-                    add_special_tokens=add_special_tokens,
+-                )
++        if request.kv_transfer_params and "prompt_token_ids" in request.kv_transfer_params:
++            engine_prompt = TextTokensPrompt(
++                prompt_token_ids=request.kv_transfer_params["prompt_token_ids"])
+         else:
+-            # For MistralTokenizer
+-            assert is_list_of(request_prompt, int), (
+-                "Prompt has to be either a string or a list of token ids")
+-            prompt_inputs = TextTokensPrompt(
+-                prompt=tokenizer.decode(request_prompt),
+-                prompt_token_ids=request_prompt)
+-
+-        engine_prompt = EngineTokensPrompt(
+-            prompt_token_ids=prompt_inputs["prompt_token_ids"])
++            if isinstance(request_prompt, str):
++                if self.enable_tokenizer_proc_pool and len(request_prompt) >= self.process_pool_threshold:
++                    prompt_inputs = await self._tokenize_prompt_input_or_inputs_async_proc_pool(
++                        request,
++                        request_prompt,
++                        truncate_prompt_tokens=truncate_prompt_tokens,
++                        add_special_tokens=add_special_tokens,
++                    )
++                    prompt_inputs = prompt_inputs[0]
++                else:
++                    prompt_inputs = await self._tokenize_prompt_input_async(
++                        request,
++                        tokenizer,
++                        request_prompt,
++                        truncate_prompt_tokens=truncate_prompt_tokens,
++                        add_special_tokens=add_special_tokens,
++                    )
++            else:
++                # For MistralTokenizer
++                assert is_list_of(request_prompt, int), (
++                    "Prompt has to be either a string or a list of token ids")
++                prompt_inputs = TextTokensPrompt(
++                    prompt=tokenizer.decode(request_prompt),
++                    prompt_token_ids=request_prompt)
++
++            engine_prompt = EngineTokensPrompt(
++                prompt_token_ids=prompt_inputs["prompt_token_ids"])
+         if mm_data is not None:
+             engine_prompt["multi_modal_data"] = mm_data
+         if request.mm_processor_kwargs is not None:
+diff --git a/vllm/inputs/data.py b/vllm/inputs/data.py
+index 843c45bd6..f1e55df86 100644
+--- a/vllm/inputs/data.py
++++ b/vllm/inputs/data.py
+@@ -7,7 +7,8 @@ from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
+ 
+ if TYPE_CHECKING:
+     from vllm.multimodal.inputs import MultiModalDataDict, MultiModalInputs
+-
++import os
++reuse_prefilled_tokens = os.getenv("OMNI_REUSE_PREFILLED_TOKENS", "0") == "1"
+ 
+ class TextPrompt(TypedDict):
+     """Schema for a text prompt."""
+@@ -62,7 +63,12 @@ class TokensPrompt(TypedDict):
+     """
+     Optional cache salt to be used for prefix caching.
+     """
+-
++    if reuse_prefilled_tokens:
++        """
++        This is used when the model supports reusing prefilled tokens.
++        """
++        prefilled_token_ids: Optional[list[int]] = []
++        prefilled_texts: Optional[str] = ""
+ 
+ class EmbedsPrompt(TypedDict):
+     """Schema for a prompt provided via token embeddings."""
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 994350062..1d18e3721 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -33,6 +33,9 @@ from vllm.v1.structured_output import StructuredOutputManager
+ 
+ logger = init_logger(__name__)
+ 
++import os
++reuse_prefilled_tokens = os.getenv("OMNI_REUSE_PREFILLED_TOKENS", "0") == "1"
++
+ 
+ class Scheduler(SchedulerInterface):
+ 
+@@ -1021,6 +1024,11 @@ class Scheduler(SchedulerInterface):
+         num_computed_tokens = len(block_ids) * self.block_size
+         if num_computed_tokens == request.num_tokens:
+             num_computed_tokens -= 1
++   
++        if reuse_prefilled_tokens:
++            if request.sampling_params.extra_args['kv_transfer_params'] and "prefilled_token" in request.sampling_params.extra_args['kv_transfer_params']:
++                request.prompt_token_ids.extend(request.sampling_params.extra_args['kv_transfer_params']['prefilled_token'])
++                request.append_output_token_ids(request.sampling_params.extra_args['kv_transfer_params']['prefilled_token'])
+         # due to no speculative trans from prefill node, push one manually
+         if self.vllm_config.speculative_config is not None:
+             request.spec_token_ids.extend([0] * self.vllm_config.speculative_config.num_speculative_tokens)
+diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
+index 16165b52e..39a43006b 100644
+--- a/vllm/v1/engine/async_llm.py
++++ b/vllm/v1/engine/async_llm.py
+@@ -16,7 +16,7 @@ from vllm.inputs.preprocess import InputPreprocessor
+ from vllm.logger import init_logger
+ from vllm.lora.request import LoRARequest
+ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+-from vllm.outputs import RequestOutput
++from vllm.outputs import RequestOutput, CompletionOutput
+ from vllm.pooling_params import PoolingParams
+ from vllm.prompt_adapter.request import PromptAdapterRequest
+ from vllm.sampling_params import SamplingParams
+@@ -37,6 +37,8 @@ from vllm.v1.executor.abstract import Executor
+ from vllm.v1.metrics.loggers import (StatLoggerBase, StatLoggerFactory,
+                                      setup_default_loggers)
+ from vllm.v1.metrics.stats import IterationStats, SchedulerStats
++import os
++reuse_prefilled_tokens = os.getenv("OMNI_REUSE_PREFILLED_TOKENS", "0") == "1"
+ 
+ logger = init_logger(__name__)
+ 
+@@ -292,6 +294,30 @@ class AsyncLLM(EngineClient):
+         """
+ 
+         try:
++            if reuse_prefilled_tokens:
++                if "prefilled_token_ids" in prompt and prompt["prefilled_token_ids"] != []:
++                    if sampling_params.n == 1:
++                        output = RequestOutput(request_id=request_id,
++                                prompt=None, finished=False, prompt_logprobs=None,
++                                prompt_token_ids=prompt["prompt_token_ids"],
++                                outputs=[CompletionOutput(index=0,
++                                    cumulative_logprob=None, logprobs=None,
++                                    text= prompt["prefilled_texts"],
++                                    token_ids=prompt["prefilled_token_ids"])])
++                    else:
++                        # Fan out child requests (for n>1).
++                        parent_request = ParentRequest(request_id, sampling_params)
++                        for idx in range(sampling_params.n):
++                            request_id_child, params = parent_request.get_child_info(idx)
++                            output = RequestOutput(request_id=request_id_child,
++                                    prompt=None, finished=False, prompt_logprobs=None,
++                                    prompt_token_ids=prompt["prompt_token_ids"],
++                                    outputs=[CompletionOutput(index=idx,
++                                        cumulative_logprob=None, logprobs=None,
++                                        text= prompt["prefilled_texts"],
++                                        token_ids=prompt["prefilled_token_ids"])])
++                    prompt["prefilled_token_ids"] = []
++                    yield output
+             # We start the output_handler on the first call to generate() so
+             # we can call __init__ before the event loop, which enables us
+             # to handle startup failure gracefully in the OpenAI server.
