@@ -2332,12 +2332,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
-        aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
         uniform_decode: bool = False,
     ) -> torch.Tensor:
         # only support eager mode and piecewise graph now
-        assert aclgraph_runtime_mode in {
+        assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
 
@@ -2370,8 +2370,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         max_num_reqs = self.scheduler_config.max_num_seqs
         if uniform_decode:
             num_reqs = cdiv(num_tokens, max_query_len)
-            assert num_reqs <= max_num_reqs, \
-                "Do not capture num_reqs > max_num_reqs for uniform batch"
             num_scheduled_tokens_list = [max_query_len] * num_reqs
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
@@ -2432,18 +2430,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     k: v[:num_tokens]
                     for k, v in self.intermediate_tensors.items()
                 })
-            if aclgraph_runtime_mode == CUDAGraphMode.NONE:
-                batch_descriptor = None
-            else:
-                # filter out the valid batch descriptor
-                _cg_mode, batch_descriptor = \
-                    self.aclgraph_dispatcher.dispatch(
-                        BatchDescriptor(num_tokens=num_tokens,
-                                        uniform_decode=uniform_decode))
-                # sanity check
-                assert aclgraph_runtime_mode == _cg_mode, (
+
+            # filter out the valid batch descriptor
+            _cg_mode, batch_descriptor = \
+                self.aclgraph_dispatcher.dispatch(
+                    BatchDescriptor(num_tokens=num_tokens,
+                                    uniform_decode=uniform_decode))
+            if aclgraph_runtime_mode is not None:
+                # we allow forcing NONE when the dispatcher disagrees to support
+                # warm ups for aclgraph capture
+                assert aclgraph_runtime_mode == CUDAGraphMode.NONE or \
+                    aclgraph_runtime_mode == _cg_mode, (
                     f"Aclgraph runtime mode mismatch at dummy_run. "
                     f"Expected {_cg_mode}, but got {aclgraph_runtime_mode}.")
+            else:
+                aclgraph_runtime_mode = _cg_mode
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
