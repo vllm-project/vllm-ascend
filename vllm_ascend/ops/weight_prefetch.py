@@ -4,7 +4,8 @@ import torch
 import torch_npu
 
 from vllm_ascend.ascend_config import WeightPrefetchConfig
-from vllm_ascend.utils import current_stream, prefetch_stream, npu_stream_switch
+from vllm_ascend.utils import (current_stream, npu_stream_switch,
+                               prefetch_stream)
 
 SUPPORTED_MODULES = ["attn", "mlp", "moe"]
 
@@ -18,8 +19,7 @@ class ModuleWeightPrefetchConfig:
     def __post_init__(self) -> None:
         self.prefetch_ratio = {
             prefix: ratio
-            for prefix, ratio in self.prefetch_ratio.items()
-            if 0 <= ratio <= 1
+            for prefix, ratio in self.prefetch_ratio.items() if 0 <= ratio <= 1
         }
 
         assert self.module_name in SUPPORTED_MODULES, (
@@ -42,17 +42,18 @@ class WeightPrefetchMethod:
         self.attn = ModuleWeightPrefetchConfig(
             module_name="attn",
             enable=weight_prefetch_config.enabled,
-            prefetch_ratio=weight_prefetch_config.prefetch_ratio.get("attn", {})
+            prefetch_ratio=weight_prefetch_config.prefetch_ratio.get(
+                "attn", {})
         )
 
-    def maybe_prefetch_attn_weight_preprocess(self,
-                                              prefix: str,
-                                              weight: torch.Tensor,
-                                              start_flag: torch.Tensor) -> None:
+    def maybe_prefetch_attn_weight_preprocess(
+        self, prefix: str, weight: torch.Tensor,
+        start_flag: torch.Tensor) -> None:
         if not self.attn.enable:
             return
 
-        weight_size = weight.data.element_size() * weight.data.numel() * self.attn.prefetch_ratio.get(prefix, 0)
+        weight_size = weight.data.element_size() * weight.data.numel(
+            ) * self.attn.prefetch_ratio.get(prefix, 0)
 
         self.calculation_stream = torch_npu.npu.current_stream()
         self.weight_prefetch_impl(weight=weight,
@@ -63,8 +64,7 @@ class WeightPrefetchMethod:
         if self.attn.enable and self.prefetch_stream is not None:
             self.calculation_stream.wait_stream(self.prefetch_stream)
 
-    def weight_prefetch_impl(self,
-                             weight: torch.Tensor,
+    def weight_prefetch_impl(self, weight: torch.Tensor,
                              start_flag: torch.Tensor,
                              max_weight_size: int) -> None:
         self.prefetch_stream.wait_stream(self.calculation_stream)

@@ -1,8 +1,9 @@
 import math
-import torch
 from contextlib import contextmanager
 from enum import Enum
 from typing import Any, Optional
+
+import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size)

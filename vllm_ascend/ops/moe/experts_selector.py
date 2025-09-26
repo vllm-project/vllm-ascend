@@ -19,7 +19,6 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 
-from vllm_ascend.ops.weight_prefetch import PrefetchManager, MoEWeightPrefetchMethod
 
 def return_row_idx(hidden_states, top_k):
     num_tokens = hidden_states.shape[0]
@@ -66,7 +65,6 @@ def select_experts(hidden_states: torch.Tensor,
         topk_weights: router weights of shape (num_tokens, top_k).
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
-    PrefetchManager.get_prefetch_obj(MoEWeightPrefetchMethod).maybe_weight_prefetch_preprocess(None, None)
     topk_weights, topk_ids, row_idx = _select_experts_with_fusion_ops(
         hidden_states=hidden_states,
         router_logits=router_logits,

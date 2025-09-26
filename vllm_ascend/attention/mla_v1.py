@@ -24,7 +24,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
-from vllm_ascend.ops.weight_prefetch import _maybe_npu_prefetch_impl
+from vllm_ascend.ops.register_custom_ops import _maybe_npu_prefetch_impl
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
