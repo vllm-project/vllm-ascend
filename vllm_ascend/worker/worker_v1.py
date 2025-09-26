@@ -25,6 +25,7 @@ import torch.nn as nn
 import torch_npu
 import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
+from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -41,6 +42,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.worker.worker_base import WorkerBase
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
@@ -113,6 +115,12 @@ class NPUWorker(WorkerBase):
         if sleep_mode_enabled():
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+
+        # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
+        from vllm.model_executor.layers.linear import \
+            WEIGHT_LOADER_V2_SUPPORTED
+        if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
+            WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
     def sleep(self, level: int = 1) -> None:
         if not sleep_mode_enabled():
@@ -221,6 +229,10 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+        # enable msMonitor to monitor the performance of vllm-ascend
+        if envs_ascend.MSMONITOR_USE_DAEMON:
+            dp.step()
+
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
@@ -350,6 +362,10 @@ class NPUWorker(WorkerBase):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs_vllm.VLLM_TORCH_PROFILER_DIR:
+            if envs_ascend.MSMONITOR_USE_DAEMON:
+                raise RuntimeError(
+                    "MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time."
+                )
             torch_profiler_trace_dir = envs_vllm.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)

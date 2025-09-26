@@ -64,11 +64,12 @@ from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LazyLoader, cdiv, get_dtype_size,
                         is_pin_memory_available)
+from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, reorder_batch_to_split_decodes_and_prefills)
@@ -145,7 +146,9 @@ else:
 
 if not vllm_version_is("0.10.2"):
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+    from vllm.v1.outputs import PoolerOutput
 else:
+    from vllm.sequence import PoolerOutput
     UniformTypeKVCacheSpecs = None
 
 
@@ -249,7 +252,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.block_size = vllm_config.cache_config.block_size
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
                                            self.block_size)
-        self.max_model_len = self.model_config.max_model_len
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         decode_max_num_seqs = getattr(self.scheduler_config,
                                       'decode_max_num_seqs', 0)
@@ -438,12 +440,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Cached outputs.
         self._draft_token_ids: Optional[Union[list[list[int]],
                                               torch.Tensor]] = None
-        self.transfer_event = torch_npu.npu.Event()
-        self.sampled_token_ids_pinned_cpu = torch.empty(
-            (self.max_model_len, 1),
-            dtype=torch.int64,
-            device="cpu",
-            pin_memory=True)
 
         # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
         self.in_profile_run = False
@@ -1816,18 +1812,30 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                               device=hidden_states.device)
         seq_lens_cpu = self.seq_lens_cpu[:self.input_batch.num_reqs]
 
-        # Pooling models D2H & synchronize occurs in pooler.py:build_output
-        raw_pooler_output = self.model.pooler(
-            hidden_states=hidden_states, pooling_metadata=pooling_metadata)
+        if vllm_version_is("0.10.2"):
+            # Pooling models D2H & synchronize occurs in pooler.py:build_output
+            raw_pooler_output = self.model.pooler(
+                hidden_states=hidden_states, pooling_metadata=pooling_metadata)
+        else:
+            model = cast(VllmModelForPooling, self.model)
+            raw_pooler_output = model.pooler(
+                hidden_states=hidden_states,
+                pooling_metadata=pooling_metadata,
+            )
+            raw_pooler_output = json_map_leaves(
+                lambda x: x.to("cpu", non_blocking=True),
+                raw_pooler_output,
+            )
+            torch.npu.synchronize()
 
         pooler_output: list[Optional[torch.Tensor]] = []
         for raw_output, seq_len, prompt_len in zip(
                 raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens):
-
-            if seq_len == prompt_len:
-                pooler_output.append(raw_output.data)
+            if vllm_version_is("0.10.2"):
+                output = raw_output.data if seq_len == prompt_len else None
             else:
-                pooler_output.append(None)
+                output = raw_output if seq_len == prompt_len else None
+            pooler_output.append(output)
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -2099,7 +2107,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_gen_len = sampled_token_ids.shape[-1]
                 if max_gen_len == 1:
                     # No spec decode tokens.
-                    valid_sampled_token_ids = self._to_list(sampled_token_ids)
+                    valid_sampled_token_ids = sampled_token_ids.tolist()
                 else:
                     # Includes spec decode tokens.
                     valid_sampled_token_ids = self.rejection_sampler.parse_output(
@@ -2504,6 +2512,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with self.set_in_profile_run():
             hidden_states = self._dummy_run(self.max_num_tokens,
                                             with_prefill=True)
+            # MC2 will consume additional NPU memory.
+            # Therefore, we need to run the MC2 path once here to complete its initialization,
+            # allowing vLLM to correctly estimate the maximum memory required.
+            if self._select_moe_comm_method(
+                    self.mc2_tokens_capacity,
+                    with_prefill=True) == MoECommType.MC2:
+                self._dummy_run(self.mc2_tokens_capacity)
+
         output = None
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
@@ -2594,7 +2610,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for task in self.get_supported_pooling_tasks():
             # Run a full batch with each task to ensure none of them OOMs
             output = self._dummy_pooler_run_task(hidden_states, task)
-            output_size[task] = output.get_data_nbytes()
+            if vllm_version_is("0.10.2"):
+                output_size[task] = output.get_data_nbytes()
+            else:
+                output_size[task] = sum(o.nbytes for o in output)
             del output  # Allow GC
 
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
@@ -3552,18 +3571,3 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _build_drafter_prepare_inputs_torchair_param(self):
         return False
-
-    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
-        # This is a short term mitigation for issue mentioned in
-        # https://github.com/vllm-project/vllm/issues/22754.
-        # `tolist` would trigger a npu wise stream sync, which
-        # would block other copy ops from other npu streams.
-        # A npu event sync would avoid such a situation. Since
-        # this is in the critical path of every single model
-        # forward loop, this has caused perf issue for a disagg
-        # setup.
-        pinned = self.sampled_token_ids_pinned_cpu[:sampled_token_ids.shape[0]]
-        pinned.copy_(sampled_token_ids, non_blocking=True)
-        self.transfer_event.record()
-        self.transfer_event.synchronize()
-        return pinned.tolist()

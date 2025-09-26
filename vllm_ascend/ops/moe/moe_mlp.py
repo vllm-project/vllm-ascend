@@ -79,8 +79,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
 
     is_mc2 = get_forward_context().moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and is_mc2:
-        if w1_scale.dtype != torch.float32:
-            w1_scale = w1_scale.to(torch.float32)
         if fusion:
             # gmm1: gate_up_proj & act_fn: swiglu
             hidden_states, swiglu_out_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
@@ -90,6 +88,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale)
         else:
+            if w1_scale.dtype != torch.float32:
+                w1_scale = w1_scale.to(torch.float32)
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[hidden_states],

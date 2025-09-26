@@ -135,7 +135,8 @@ class NPUPlatform(Platform):
         else:
             structured_outputs_config = vllm_config.structured_outputs_config
 
-        if model_config is not None and not model_config.use_mla:
+        if (model_config is not None and not model_config.use_mla
+                and not scheduler_config.async_scheduling):
             logger.info(
                 "Non-MLA LLMs forcibly disable the chunked prefill feature,"
                 "as the performance of operators supporting this feature "
@@ -208,6 +209,11 @@ class NPUPlatform(Platform):
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
+
+        # TODO: Full graph is fully supported later, and the default value will be set to full graph.
+        if not vllm_version_is("v0.10.2"):
+            if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.level = CompilationLevel.NO_COMPILATION
