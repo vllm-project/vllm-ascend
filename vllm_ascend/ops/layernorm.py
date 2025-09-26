@@ -72,7 +72,7 @@ class AscendRMSNorm(RMSNorm):
         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
         vllm_config = get_current_vllm_config()
         self.bias = None
-        # m4
+        # quantization with anti_method m4 will generate none-zero norm bias
         if vllm_config is not None and vllm_config.quant_config is not None and \
                 any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
             self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
