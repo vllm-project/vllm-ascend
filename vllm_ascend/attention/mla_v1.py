@@ -318,8 +318,6 @@ class AscendMLAMetadataBuilder:
                 self.model_config.dtype)  # type: ignore
             self.sin_cache = self.sin_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
-        cos = common_attn_metadata.cos
-        sin = common_attn_metadata.sin
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         query_lens = query_seq_lens_cpu[:num_reqs]
@@ -393,6 +391,8 @@ class AscendMLAMetadataBuilder:
 
         decode_metadata = None
         if num_decodes > 0:
+            cos = common_attn_metadata.cos
+            sin = common_attn_metadata.sin
             # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
             actual_seq_lengths_q = query_start_loc[1:num_decodes + 1].tolist()
             max_seq_lens = seq_lens[:num_decodes].max().item()
@@ -405,10 +405,12 @@ class AscendMLAMetadataBuilder:
             assert self.cos_cache is not None
             assert self.sin_cache is not None
             if cos is None and sin is None:
-                cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
-                    1).unsqueeze(2)
-                sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
-                    1).unsqueeze(2)
+                cos = self.cos_cache[
+                    input_positions].unsqueeze(  # type: ignore
+                        1).unsqueeze(2)
+                sin = self.sin_cache[
+                    input_positions].unsqueeze(  # type: ignore
+                        1).unsqueeze(2)
 
                 decode_metadata = AscendMLADecodeMetadata(
                     input_positions=input_positions,
@@ -421,10 +423,12 @@ class AscendMLAMetadataBuilder:
                     sin=sin,
                     cos=cos)
             else:
-                cos[:num_decodes, ...] = self.cos_cache[input_positions].unsqueeze(
-                    1).unsqueeze(2)
-                sin[:num_decodes, ...] = self.sin_cache[input_positions].unsqueeze(
-                    1).unsqueeze(2)
+                cos[:num_decodes,
+                    ...] = self.cos_cache[input_positions].unsqueeze(
+                        1).unsqueeze(2)
+                sin[:num_decodes,
+                    ...] = self.sin_cache[input_positions].unsqueeze(
+                        1).unsqueeze(2)
 
                 decode_metadata = AscendMLADecodeMetadata(
                     input_positions=input_positions,
