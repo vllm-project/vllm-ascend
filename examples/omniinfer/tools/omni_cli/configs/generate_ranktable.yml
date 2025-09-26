@@ -1,0 +1,333 @@
+# Copyright 2025 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ============================================================================
+
+- name: run omniai
+  hosts: all
+  any_errors_fatal: true
+  max_fail_percentage: 0
+  gather_facts: yes
+
+  environment:
+
+    DOCKER_NAME_P: "omni_infer_prefill"
+    DOCKER_NAME_D: "omni_infer_decode"
+    SCRIPTS_PATH: "/tmp/scripts_path"
+
+  vars:
+    # Configure the storage path of the ranktable file.
+    ranktable_save_path: "/tmp/ranktable_save_path"
+
+    docker_exec_cmd: |
+      docker exec \
+
+    generate_prefill_ranktable_cmd: |
+      #!/bin/bash
+
+      . ~/.bashrc
+
+      rm -rf ${PREFILL_RANKTABLE_SAVE_PATH}
+      mkdir -p ${PREFILL_RANKTABLE_SAVE_PATH}
+      python /workspace/omniinfer/tools/scripts/pd_ranktable_tools.py --mode gen --prefill-server-list "${PREFILL_SERVER_LIST}" --api-server --save-dir ${PREFILL_RANKTABLE_SAVE_PATH}
+
+    generate_decode_ranktable_cmd: |
+      #!/bin/bash
+
+      . ~/.bashrc
+
+      rm -rf ${DECODE_RANKTABLE_SAVE_PATH}
+      mkdir -p ${DECODE_RANKTABLE_SAVE_PATH}
+      python /workspace/omniinfer/tools/scripts/pd_ranktable_tools.py --mode gen --decode-server-list ${DECODE_SERVER_LIST} --save-dir ${DECODE_RANKTABLE_SAVE_PATH}
+
+    generate_global_ranktable_cmd: |
+      #!/bin/bash
+
+      . ~/.bashrc
+      cd ${RANKTABLE_SAVE_PATH}/global
+      decode_ranktable_list="{{ DECODE_RANKTABLE_LIST }}"
+      decode_ranktable_list=$(echo "$decode_ranktable_list" | awk '$1=$1' | tr ',' ' ')
+      prefill_merge_ranktable_list="{{ PREFILL_MERGE_RANKTABLE_LIST }}"
+      prefill_merge_ranktable_list=$(echo "$prefill_merge_ranktable_list" | awk '$1=$1' | tr ',' ' ')
+      prefill_local_ranktable_merge=""
+      IFS=';' read -ra parts <<< ${prefill_merge_ranktable_list}
+
+      for i in "${!parts[@]}"; do
+        part="${parts[$i]}"
+        comma_count=$(grep -o " " <<< "$part" | wc -l)
+        ip_address=""
+
+        if [ "$comma_count" -ge 1 ]; then
+          IFS=',' read -ra subparts <<< "$part"
+          file_name="${subparts[0]}"
+        else
+          file_name="$part"
+        fi
+
+        if [[ "$file_name" =~ local_ranktable_([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})_ ]]; then
+          ip_address="${BASH_REMATCH[1]}"
+        else
+          ip_addresses=($(grep -oE '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' <<< "$file_name"))
+          ip_address="${ip_addresses[0]}"
+        fi
+
+        mkdir -p "${RANKTABLE_SAVE_PATH}/global/collect_files_p/${ip_address}"
+
+        if [ "$comma_count" -ge 1 ]; then
+          python /workspace/omniinfer/tools/scripts/pd_ranktable_tools.py \
+          --mode merge-local \
+          --local-ranktable-list ${part} \
+          --save-dir ${RANKTABLE_SAVE_PATH}/global/collect_files_p/${ip_address}
+
+          if [ -z "$prefill_local_ranktable_merge" ]; then
+            prefill_local_ranktable_merge=$(ls collect_files_p/${ip_address}/local*merge.json | tr '\n' ' ')
+          else
+            prefill_local_ranktable_merge="${prefill_local_ranktable_merge} $(ls collect_files_p/${ip_address}/local*merge.json | tr '\n' ' ')"
+          fi
+
+        else
+          if [ -z "$prefill_local_ranktable_merge" ]; then
+            prefill_local_ranktable_merge="${part}"
+          else
+            prefill_local_ranktable_merge="${prefill_local_ranktable_merge} ${part}"
+          fi
+        fi
+      done
+
+      api_server_files=$(ls collect_files_p/api/*.json | head -1)
+
+      if [ $DECODE_POD_NUM -gt 1 ]; then
+        python /workspace/omniinfer/tools/scripts/pd_ranktable_tools.py \
+        --mode merge-local \
+        --local-ranktable-list ${decode_ranktable_list} \
+        --save-dir ${RANKTABLE_SAVE_PATH}/global/collect_files_d
+
+        decode_local_ranktable_merge=$(ls collect_files_d/local*merge.json | tr '\n' ' ')
+      else
+        decode_local_ranktable_merge="${decode_ranktable_list}"
+      fi
+
+      python /workspace/omniinfer/tools/scripts/pd_ranktable_tools.py \
+        --mode merge-all \
+        --api-server-list ${api_server_files} \
+        --prefill-server-list ${prefill_local_ranktable_merge} \
+        --decode-server-list ${decode_local_ranktable_merge} \
+        --save-dir ${RANKTABLE_SAVE_PATH}/global
+
+    docker_generate_prefill_ranktable_cmd: >
+      {{ docker_exec_cmd }}
+      -e PREFILL_SERVER_LIST=$PREFILL_SERVER_LIST
+      -e PREFILL_RANKTABLE_SAVE_PATH={{ ranktable_save_path }}/prefill_config
+      $DOCKER_NAME_P
+      /bin/bash -c $SCRIPTS_PATH/generate_prefill_ranktable.sh
+
+    docker_generate_decode_ranktable_cmd: >
+      {{ docker_exec_cmd }}
+      -e DECODE_SERVER_LIST=$DECODE_SERVER_LIST
+      -e DECODE_RANKTABLE_SAVE_PATH={{ ranktable_save_path }}/decode_config
+      $DOCKER_NAME_D
+      /bin/bash -c $SCRIPTS_PATH/generate_decode_ranktable.sh
+
+    docker_generate_global_cmd: >
+      {{ docker_exec_cmd }}
+      -e DECODE_POD_NUM=$DECODE_POD_NUM
+      -e RANKTABLE_SAVE_PATH={{ ranktable_save_path }} 
+      $DOCKER_NAME_P
+      /bin/bash -c $SCRIPTS_PATH/generate_global_ranktable.sh
+
+  tasks:
+    - name: generate container name.
+      set_fact:
+        ACTUAL_DOCKER_NAME_P: "{{ container_name }}"
+        ACTUAL_DOCKER_NAME_D: "{{ container_name }}"
+      when: "'P' in group_names or 'D' in group_names"
+      tags: always
+      
+    - name: Create a directory on the executor to store ranktable file.
+      command: bash -c "rm -rf {{ ranktable_save_path }}/*; mkdir -p {{ ranktable_save_path }}/global {{ ranktable_save_path }}/collect_files_d {{ ranktable_save_path }}/collect_files_p/api;"
+      delegate_to: localhost
+      tags:
+        - ranktable
+
+    - name: Delete the the ranktable files.
+      command: /bin/bash -c "rm -rf {{ ranktable_save_path }}/*"
+      register: cmd_result
+      when: "'P' in group_names or 'D' in group_names"
+      tags: ranktable
+
+    - name: Register all values.
+      set_fact:
+        DECODE_POD_NUM: "{{ groups['D'] | length }}"
+        PREFILL_MERGE_RANKTABLE_LIST: >-
+          {% set result=[] %}
+          {% set element = namespace(entry="") %}
+          {% set hi = namespace(hostip="") %}
+          {% for host in groups['P']|default([]) %}
+            {% set h=hostvars.get(host,{}) %}
+            {% if h.host_ip is defined and (h.host_ip == h.ansible_host or h.host_ip == hi.hostip) %}
+              {% set hi.hostip = h.host_ip | default('') %}
+              {% set ip=h.ansible_host|default('') %}
+              {% set list=h.ascend_rt_visible_devices|default('')|replace(',', '')|replace(' ', '') %}
+              {% if ip %}
+                {% if h.host_ip == h.ansible_host and element.entry == "" %}
+                  {% set element.entry = element.entry + "collect_files_p/local_ranktable_"~ip~'_'~list~'.json' %}
+                {% elif h.host_ip != h.ansible_host and h.host_ip == hi.hostip %}
+                  {% set element.entry = element.entry + "," + "collect_files_p/local_ranktable_"~ip~'_'~list~'.json' %}
+                {% else %}
+                  {% set _=result.append(element.entry) %}
+                  {% set element.entry="collect_files_p/local_ranktable_"~ip~'_'~list~'.json' %}
+                {% endif %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {% set _=result.append(element.entry) %}
+          {{ result | join(';') }}
+        DECODE_RANKTABLE_LIST: >-
+          {% set result=[] %}
+          {% for host in groups['D']|default([]) %}
+            {% set h=hostvars.get(host,{}) %}
+            {% set ip=h.ansible_host|default('') %}
+            {% set list=h.ascend_rt_visible_devices|default('')|replace(',', '')|replace(' ', '') %}
+            {% if ip %}
+              {% set entry="collect_files_d/local_ranktable_"~ip~'_'~list~'.json' %}
+              {% if entry not in result %}
+                {% set _=result.append(entry) %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ result | join(',') }}
+      run_once: yes
+      delegate_to: localhost
+      tags: always
+
+    - name: Generate a script to generate the ranktable file for the prefill instances.
+      copy:
+        content: "{{ generate_prefill_ranktable_cmd }}"
+        dest: "$SCRIPTS_PATH/generate_prefill_ranktable.sh"
+        mode: '0750'
+      when: "'P' in group_names"
+      tags: ranktable
+
+    - name: Generate a script to generate the ranktable file for the decode instances.
+      copy:
+        content: "{{ generate_decode_ranktable_cmd }}"
+        dest: "$SCRIPTS_PATH/generate_decode_ranktable.sh"
+        mode: '0750'
+      when: "'D' in group_names"
+      tags: ranktable
+
+    - name: Generate a script to generate the global ranktable file.
+      copy:
+        content: "{{ generate_global_ranktable_cmd }}"
+        dest: "$SCRIPTS_PATH/generate_global_ranktable.sh"
+        mode: '0750'
+      when: "'P' in group_names and inventory_hostname == groups['P'][0]"
+      tags: ranktable
+
+    - name: Create the path used to store the global ranktable file.
+      command: /bin/bash -c "mkdir -p {{ ranktable_save_path }}/global"
+      when: "'P' in group_names or 'D' in group_names"
+      tags: ranktable
+
+    - name: Generate the ranktable file in the prefill instances.
+      command: bash -c "{{ docker_generate_prefill_ranktable_cmd }}"
+      environment:
+        PREFILL_SERVER_LIST: "{{ ascend_rt_visible_devices }}"
+        DOCKER_NAME_P: "{{ ACTUAL_DOCKER_NAME_P }}"
+      when: "'P' in group_names"
+      tags: ranktable
+
+    - name: Generate the ranktable file in the decode instances.
+      command: bash -c "{{ docker_generate_decode_ranktable_cmd }}"
+      environment:
+        DECODE_SERVER_LIST: "{{ ascend_rt_visible_devices }}"
+        DOCKER_NAME_D: "{{ ACTUAL_DOCKER_NAME_D }}"
+      when: "'D' in group_names"
+      tags: ranktable
+
+    - name: Get a list of JSON files in prefill instances that match the format.
+      ansible.builtin.find:
+        paths: '{{ ranktable_save_path }}/prefill_config'
+        patterns: "local_ranktable_{{ ansible_host }}_[0-9]+.json"
+        use_regex: yes
+      register: p_dynamic_files
+      when: "'P' in group_names"
+      changed_when: false
+      tags: ranktable
+
+    - name: Forward the JSON file of the prefill instances to the executor.
+      ansible.builtin.fetch:
+        src: "{{ item }}"
+        dest: "{{ (item == fixed_file_src) | ternary(ranktable_save_path + '/collect_files_p/api/', ranktable_save_path + '/collect_files_p/') }}"
+        flat: yes
+      loop: "{{ p_dynamic_files.files | map(attribute='path') | list + [fixed_file_src] }}"
+      vars:
+        fixed_file_src: '{{ ranktable_save_path }}/prefill_config/local_ranktable_{{ ansible_host }}_host.json'
+      when:
+        - "'P' in group_names"
+        - p_dynamic_files.matched > 0 or lookup('file', fixed_file_src, errors='ignore').exists
+      tags: ranktable
+
+    - name: Get a list of JSON files in decode instances that match the format.
+      ansible.builtin.find:
+        paths: '{{ ranktable_save_path }}/decode_config'
+        patterns: "local_ranktable_{{ ansible_host }}_[0-9]+.json"
+        use_regex: yes
+      register: d_dynamic_files
+      when: "'D' in group_names"
+      changed_when: false
+      tags: ranktable
+
+    - name: Forward the JSON file of the decode instances to the executor.
+      ansible.builtin.fetch:
+        src: "{{ item }}"
+        dest: '{{ ranktable_save_path }}/collect_files_d/'
+        flat: yes
+      loop: "{{ d_dynamic_files.files | map(attribute='path') | list }}"
+      when:
+        - "'D' in group_names"
+        - d_dynamic_files.matched > 0
+      tags: ranktable
+
+    - name: The executor synchronizes the files to the first prefill instances.
+      synchronize:
+        src: "{{ item }}"
+        dest: "{{ ranktable_save_path }}/global"
+      loop:
+        - "{{ ranktable_save_path }}/collect_files_p"
+        - "{{ ranktable_save_path }}/collect_files_d"
+      when: "'P' in group_names and inventory_hostname == groups['P'][0]"
+      tags: ranktable
+
+    - name: Generate the global ranktable file on the first prefill instances.
+      command: bash -c "{{ docker_generate_global_cmd }}"
+      environment:
+        DOCKER_NAME_P: "{{ ACTUAL_DOCKER_NAME_P }}"
+        DECODE_POD_NUM: "{{ DECODE_POD_NUM }}"
+      when: "'P' in group_names and inventory_hostname == groups['P'][0]"
+      tags: ranktable
+
+    - name: Forward the global ranktable file of the first prefill instances to the executor.
+      ansible.builtin.synchronize:
+        mode: pull
+        src: "{{ ranktable_save_path }}/global/"
+        dest: "{{ ranktable_save_path }}/global/"
+      when: "'P' in group_names and inventory_hostname == groups['P'][0]"
+      tags: ranktable
+
+    - name: The executor synchronizes the global ranktable file to all instances.
+      synchronize:
+        src: "{{ ranktable_save_path }}/global/"
+        dest: "{{ ranktable_save_path }}/global/"
+      when: "inventory_hostname != groups['P'][0]"
+      tags: ranktable

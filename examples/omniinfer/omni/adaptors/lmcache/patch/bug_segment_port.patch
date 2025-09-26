@@ -1,0 +1,55 @@
+diff --git a/mooncake-integration/store/store_py.cpp b/mooncake-integration/store/store_py.cpp
+index 8993fee..d8088be 100644
+--- a/mooncake-integration/store/store_py.cpp
++++ b/mooncake-integration/store/store_py.cpp
+@@ -149,9 +149,33 @@ void ResourceTracker::signalHandler(int signal) {
+ 
+ void ResourceTracker::exitHandler() { getInstance().cleanupAllResources(); }
+ 
++/*
++ * When vllm integrates with lmcache and mooncake,
++ * it may spawn multiple processes to start the mooncake store,
++ * which can occasionally lead to port conflicts.
++ * To mitigate this issue, file locks are used.
++ */
+ static bool isPortAvailable(int port) {
++    char lockFile[64];
++    snprintf(lockFile, sizeof(lockFile), "/tmp/mooncake_port_%d.lock", port);
++
++    int lockFd = open(lockFile, O_CREAT | O_RDWR, 0666);
++    if (lockFd < 0) {
++        VLOG(2) << "open lock file";
++        return false;
++    }
++
++    if (flock(lockFd, LOCK_EX | LOCK_NB) != 0) {
++        close(lockFd);
++        return false;
++    }
++
+     int sock = socket(AF_INET, SOCK_STREAM, 0);
+-    if (sock < 0) return false;
++    if (sock < 0) {
++        flock(lockFd, LOCK_UN);
++        close(lockFd);
++        return false;
++    }
+ 
+     int opt = 1;
+     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+@@ -164,7 +188,14 @@ static bool isPortAvailable(int port) {
+ 
+     bool available = (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) == 0);
+     close(sock);
+-    return available;
++
++    if (!available) {
++        flock(lockFd, LOCK_UN);
++        close(lockFd);
++        return false;
++    }
++
++    return true;
+ }
+ 
+ // Get a random available port between min_port and max_port

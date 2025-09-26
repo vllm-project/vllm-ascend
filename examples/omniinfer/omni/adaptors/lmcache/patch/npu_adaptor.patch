@@ -1,0 +1,290 @@
+diff --git a/lmcache/integration/vllm/vllm_v1_adapter.py b/lmcache/integration/vllm/vllm_v1_adapter.py
+index 694f85d..572140a 100644
+--- a/lmcache/integration/vllm/vllm_v1_adapter.py
++++ b/lmcache/integration/vllm/vllm_v1_adapter.py
+@@ -15,6 +15,7 @@
+ # Standard
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, Any, Optional
++import time
+ 
+ # Third Party
+ from vllm.config import VllmConfig
+@@ -312,13 +313,9 @@ class LMCacheConnectorV1Impl:
+                 role, is_tp, vllm_config
+             )
+             self._requests_in_step: dict[str, Request] = {}
++            self.use_spec = (vllm_config.speculative_config is not None)
+         else:
+-            self.lmcache_engine = init_lmcache_engine(
+-                vllm_config.model_config,
+-                vllm_config.parallel_config,
+-                vllm_config.cache_config,
+-                vllm_config.scheduler_config,
+-            )
++            self.lmcache_engine = init_lmcache_engine(vllm_config)
+ 
+             self.use_layerwise = config.use_layerwise
+             self.enable_blending = config.enable_blending
+@@ -424,7 +421,7 @@ class LMCacheConnectorV1Impl:
+ 
+             tokens = request.token_ids
+             # TODO: have a pre-allocated buffer to hold the slot_mappings
+-            slot_mapping = request.slot_mapping.cuda()
++            slot_mapping = request.slot_mapping
+             assert len(tokens) == len(slot_mapping)
+ 
+             token_mask = torch.ones_like(tokens, dtype=torch.bool)
+@@ -636,8 +633,6 @@ class LMCacheConnectorV1Impl:
+             assert isinstance(slot_mapping, torch.Tensor)
+             assert len(slot_mapping) == len(token_ids)
+ 
+-            # TODO: have a pre-allocated buffer to hold the slot_mappings
+-            slot_mapping = slot_mapping.cuda()
+             # NOTE: In PD setting, lmcache_engine.lookup() will always return
+             # 0 if there is no local storage configured. In this case, we
+             # should rely on the slip_leading_tokens in save_spec to avoid
+@@ -726,6 +721,21 @@ class LMCacheConnectorV1Impl:
+         else:
+             num_external_hit_tokens = self.lookup_client.lookup(token_ids)
+ 
++        if num_external_hit_tokens < request.num_tokens and self.kv_role == "kv_consumer":
++            max_tried = 500
++            retried = 0
++            while num_external_hit_tokens < request.num_tokens and retried < max_tried:
++                time.sleep(0.1)
++                if self.skip_last_n_tokens > 0:
++                    num_external_hit_tokens = self.lookup_client.lookup(
++                        token_ids[: -self.skip_last_n_tokens]
++                    )
++                else:
++                    num_external_hit_tokens = self.lookup_client.lookup(token_ids)
++                retried += 1
++            num_external_hit_tokens = request.num_tokens
++
++
+         # When prompt length is divisible by the block size and all
+         # blocks are cached, we need to recompute the last token.
+         # This will be removed in the future if vLLM's scheduler provides
+@@ -751,6 +761,11 @@ class LMCacheConnectorV1Impl:
+             lmcache_cached_tokens=num_external_hit_tokens,
+             can_load=False,
+         )
++        # due to no speculative trans from prefill node, push one manually
++        if self.kv_role == "kv_consumer":
++            if self.use_spec:
++                request.spec_token_ids.append(16426)
++            request.num_computed_tokens = need_to_allocate
+ 
+         # TODO: Align to vLLM block size. Should test whether it can be removed
+         # need_to_allocate = need_to_allocate // self._block_size * \
+diff --git a/lmcache/usage_context.py b/lmcache/usage_context.py
+index 72bbe19..ed83e21 100644
+--- a/lmcache/usage_context.py
++++ b/lmcache/usage_context.py
+@@ -232,11 +232,11 @@ class UsageContext:
+         return num_cpu, cpu_type, cpu_family_model_stepping
+ 
+     def _get_gpu_info(self):
+-        device_property = torch.cuda.get_device_properties(0)
+-        gpu_count = torch.cuda.device_count()
+-        gpu_type = device_property.name
+-        gpu_memory_per_device = device_property.total_memory
+-        return gpu_count, gpu_type, gpu_memory_per_device
++        device_property = torch.npu.get_device_properties(0)
++        npu_count = torch.npu.device_count()
++        npu_type = device_property.name
++        npu_memory_per_device = device_property.total_memory
++        return npu_count, npu_type, npu_memory_per_device
+ 
+     def _get_source(self):
+         path = "/proc/1/cgroup"
+diff --git a/lmcache/v1/cache_engine.py b/lmcache/v1/cache_engine.py
+index 6eca4ea..e5f700c 100644
+--- a/lmcache/v1/cache_engine.py
++++ b/lmcache/v1/cache_engine.py
+@@ -177,6 +177,14 @@ class LMCacheEngine:
+             num_to_store_tokens = len(tokens)
+         monitor_req_id = self.stats_monitor.on_store_request(num_to_store_tokens)
+ 
++        block_size = self.gpu_connector.get_block_size()
++        if self.metadata.use_mla:
++            if "slot_mapping" not in kwargs:
++                raise ValueError("'slot_mapping' should be provided in kwargs.")
++            slot_mapping: torch.Tensor = kwargs["slot_mapping"]
++            if block_size == 0:
++                raise ValueError("'block_size' should not be 0.")
++
+         starts = []
+         ends = []
+         keys = []
+@@ -194,7 +202,11 @@ class LMCacheEngine:
+                 continue
+             # Allocate the memory object
+             num_tokens = end - start
+-            kv_shape = self.gpu_connector.get_shape(num_tokens)
++            if self.metadata.use_mla:
++                block_num = (slot_mapping[start:end] // block_size).unique().numel()
++                kv_shape = self.gpu_connector.get_shape(block_num)
++            else:
++                kv_shape = self.gpu_connector.get_shape(num_tokens)
+             kv_dtype = self.metadata.kv_dtype
+             memory_obj = self.storage_manager.allocate(kv_shape, kv_dtype)
+             if memory_obj is None:
+@@ -456,6 +468,8 @@ class LMCacheEngine:
+ 
+         # TODO(Jiayi): Remove the following for loop with batched operations
+         for key, memory_obj in zip(reordered_keys, reordered_memory_objs, strict=False):
++            if memory_obj is None:
++                continue
+             memory_obj.ref_count_down()
+ 
+             # NOTE (ApostaC): This is only for the current implementation:
+diff --git a/lmcache/v1/lookup_client/mooncake_lookup_client.py b/lmcache/v1/lookup_client/mooncake_lookup_client.py
+index 8607dd7..4393f9d 100644
+--- a/lmcache/v1/lookup_client/mooncake_lookup_client.py
++++ b/lmcache/v1/lookup_client/mooncake_lookup_client.py
+@@ -67,6 +67,10 @@ class MooncakeLookupClient(LookupClientInterface):
+         # First Party
+         from lmcache.v1.token_database import ChunkedTokenDatabase, SegmentTokenDatabase
+ 
++        if metadata.use_mla:
++            metadata.world_size = 1
++            metadata.worker_id = 0
++
+         if config.enable_blending:
+             self.token_database = SegmentTokenDatabase(config, metadata)
+         else:
+diff --git a/lmcache/v1/storage_backend/__init__.py b/lmcache/v1/storage_backend/__init__.py
+index 3ce5959..40335d7 100644
+--- a/lmcache/v1/storage_backend/__init__.py
++++ b/lmcache/v1/storage_backend/__init__.py
+@@ -45,13 +45,13 @@ def CreateStorageBackends(
+     metadata: LMCacheEngineMetadata,
+     loop: asyncio.AbstractEventLoop,
+     memory_allocator: MemoryAllocatorInterface,
+-    dst_device: str = "cuda",
++    dst_device: str = "npu",
+     lmcache_worker: Optional["LMCacheWorker"] = None,
+     lookup_server: Optional[LookupServerInterface] = None,
+ ) -> OrderedDict[str, StorageBackendInterface]:
+-    # Replace 'cuda' with 'cuda:<device id>'
+-    if dst_device == "cuda":
+-        dst_device = f"cuda:{torch.cuda.current_device()}"
++    # Replace 'npu' with 'npu:<device id>'
++    if dst_device == "npu":
++        dst_device = f"npu:{torch.npu.current_device()}"
+ 
+     storage_backends: OrderedDict[str, StorageBackendInterface] = OrderedDict()
+ 
+diff --git a/lmcache/v1/storage_backend/local_cpu_backend.py b/lmcache/v1/storage_backend/local_cpu_backend.py
+index cecccec..1c95e3e 100644
+--- a/lmcache/v1/storage_backend/local_cpu_backend.py
++++ b/lmcache/v1/storage_backend/local_cpu_backend.py
+@@ -68,7 +68,7 @@ class LocalCPUBackend(StorageBackendInterface):
+         self.instance_id = config.lmcache_instance_id
+         self.cpu_lock = threading.Lock()
+ 
+-        self.stream = torch.cuda.Stream()
++        self.stream = torch.npu.Stream()
+ 
+         self.stats_monitor = LMCStatsMonitor.GetOrCreate()
+         self.usage = 0
+@@ -348,7 +348,7 @@ class LocalCPUBackend(StorageBackendInterface):
+         if memory_obj is None or not self.use_hot:
+             return
+ 
+-        if memory_obj.tensor is not None and memory_obj.tensor.is_cuda:
++        if memory_obj.tensor is not None and memory_obj.tensor.is_npu:
+             self.cpu_lock.acquire()
+             if key in self.hot_cache:
+                 self.cpu_lock.release()
+@@ -368,8 +368,8 @@ class LocalCPUBackend(StorageBackendInterface):
+ 
+             # Copy the tensor to the cpu memory object
+             assert cpu_memory_obj.tensor is not None
+-            self.stream.wait_stream(torch.cuda.default_stream())
+-            with torch.cuda.stream(self.stream):
++            self.stream.wait_stream(torch.npu.default_stream())
++            with torch.npu.stream(self.stream):
+                 cpu_memory_obj.tensor.copy_(memory_obj.tensor, non_blocking=True)
+             memory_obj.tensor.record_stream(self.stream)
+ 
+diff --git a/lmcache/v1/storage_backend/storage_manager.py b/lmcache/v1/storage_backend/storage_manager.py
+index eb79bcc..dbce5ad 100644
+--- a/lmcache/v1/storage_backend/storage_manager.py
++++ b/lmcache/v1/storage_backend/storage_manager.py
+@@ -69,7 +69,7 @@ class StorageManager:
+         self.thread = threading.Thread(target=self.loop.run_forever)
+         self.thread.start()
+ 
+-        dst_device = "cuda"
++        dst_device = "npu"
+         # FIXME (Jiayi): The allocator is a dummy allocator in nixl for now.
+         # The real allocator is initialized inside the NixlBackend.
+         self.storage_backends: OrderedDict[str, StorageBackendInterface] = (
+@@ -99,7 +99,7 @@ class StorageManager:
+         self.instance_id = config.lmcache_instance_id
+         self.worker_id = metadata.worker_id
+ 
+-        self.stream = torch.cuda.Stream()
++        self.stream = torch.npu.Stream()
+ 
+     @_lmcache_nvtx_annotate
+     def allocate(
+@@ -298,8 +298,8 @@ class StorageManager:
+ 
+         # TODO(Jiayi): this part should be done in another process if
+         # the cpu->pinned cpu copy is blocking.
+-        prefetch_stream = torch.cuda.Stream()
+-        with torch.cuda.stream(prefetch_stream):
++        prefetch_stream = torch.npu.Stream()
++        with torch.npu.stream(prefetch_stream):
+             memory_obj.tensor.copy_(kv_chunk, non_blocking=True)
+         prefetch_stream.synchronize()
+ 
+diff --git a/pyproject.toml b/pyproject.toml
+index ef7a1b7..057861d 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -5,7 +5,7 @@ requires = [
+     "packaging>=24.2",
+     "setuptools>=77.0.3,<81.0.0",
+     "setuptools_scm>=8",
+-    "torch==2.7.0",
++    "torch==2.5.1",
+     "wheel",
+     "xxhash==3.5.0",
+ ]
+diff --git a/requirements/build.txt b/requirements/build.txt
+index 880130b..bbb8acd 100644
+--- a/requirements/build.txt
++++ b/requirements/build.txt
+@@ -4,6 +4,6 @@ ninja
+ packaging>=24.2
+ setuptools>=77.0.3,<81.0.0
+ setuptools_scm>=8
+-torch==2.7.0 # Corresponds to the version used by vLLM main branch
++torch==2.5.1 # Corresponds to the version used by vLLM main branch
+ wheel
+ xxhash==3.5.0
+diff --git a/requirements/common.txt b/requirements/common.txt
+index 34e30c2..db2e1c0 100644
+--- a/requirements/common.txt
++++ b/requirements/common.txt
+@@ -2,7 +2,6 @@ aiofile
+ aiofiles
+ aiohttp
+ cufile-python
+-infinistore
+ msgspec
+ numpy
+ nvtx
+@@ -15,6 +14,6 @@ safetensors
+ setuptools>=77.0.3,<81.0.0
+ setuptools_scm>=8
+ sortedcontainers
+-torch==2.7.0  # Should correspond to the version used by vLLM main branch
++torch==2.5.1  # Should correspond to the version used by vLLM main branch
+ transformers >= 4.51.1
+ xxhash==3.5.0

@@ -1,0 +1,4 @@
+include omni_placement/*.py
+include omni_placement/*.so
+include omni_placement/optim/*.py
+exclude omni_placement/cpp/*.cpp

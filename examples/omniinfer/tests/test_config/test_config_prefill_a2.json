@@ -1,0 +1,25 @@
+{
+    "model_parallel_config": {
+        "dense_mlp_tp_size": 8,
+        "o_proj_tp_size": 1,
+        "dp_size": 1
+    },
+    "operator_optimizition_config": {
+        "enable_kv_rmsnorm_rope_cache": false,
+        "prefill_moe_all_to_all": false,
+        "moe_multi_stream_tune": false,
+        "best_ep": false,
+        "merge_qkv": false,
+        "two_stage_comm": false,
+        "gmm_nz": true,
+        "use_omni_placement": false,
+        "omni_placement_config_path": ".",
+        "opt_w2_scale_cast": false,
+        "enable_round_pipeline_comm": false,
+        "enable_pipeline_comm": true,
+        "pd_seperate_prefill": true,
+        "prefill_enable_long_seq": false,
+        "use_prefetch": false,
+        "prefill_enable_mla_alltoall_local": true
+    }
+}

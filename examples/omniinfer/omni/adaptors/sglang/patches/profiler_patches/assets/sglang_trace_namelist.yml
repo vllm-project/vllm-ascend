@@ -1,0 +1,255 @@
+type: "marker"
+base_params: { }
+targets:
+  # conn.py
+  # Finish pull kv
+  - module: "sglang.srt.disaggregation.datadist.conn:DataDistKVManager"
+    function_name: "update_status"
+    scope: "sglang.srt.disaggregation.datadist.conn:DataDistKVManager"
+    scope_function: "transfer_worker"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      
+      if os.getenv('ROLE') == "prefill" and len(args) >= 1:
+          raw_request_id = args[0]
+          safe_print(trace_output_directory, f"<<<Action: Finish pull kv; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # self.started = False
+  - module: "sglang.srt.disaggregation.datadist.conn:DataDistKVSender"
+    function_name: "__init__"
+    exit_operation: |
+      self.started = False
+
+  # Start pull kv
+  - module: "sglang.srt.disaggregation.datadist.conn:DataDistKVSender"
+    function_name: "send"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+
+      if not self.started:
+          self.started = True
+          raw_request_id = self.bootstrap_room
+          safe_print(trace_output_directory, f"<<<Action: Start pull kv; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # decode.py
+  # Start append running sequece for decode
+  - module: "sglang.srt.managers.schedule_batch:Req"
+    function_name: "init_next_round_input"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      
+      # The D-side KV cache transmission is complete.
+      if os.getenv('ROLE') != "prefill" and self.bootstrap_room:
+          raw_request_id = self.bootstrap_room
+          safe_print(trace_output_directory, f"<<<Action: Start append running sequece for decode; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # Add need pullling sequence
+  - module: "sglang.srt.disaggregation.decode:DecodePreallocQueue"
+    function_name: "pop_preallocated"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+
+      if result:
+          for i, decode_req in enumerate(result):
+              # The decode side allocates kv memory and successfully synchronizes with the p side. 
+              raw_request_id = decode_req.req.bootstrap_room
+              safe_print(trace_output_directory, f"<<<Action: Add need pullling sequence|waiting_pull_len={len(self.queue) + i + 1} ; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # Prefill free kv blocks
+  - module: "sglang.srt.disaggregation.prefill:SchedulerDisaggregationPrefillMixin"
+    function_name: "process_disagg_prefill_inflight_queue"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      from sglang.srt.managers.schedule_batch import Req
+      
+      if result and isinstance(result, (list, tuple, set, dict)):
+          for req in result:
+              if (isinstance(req, Req)):
+                  raw_request_id = req.bootstrap_room
+                  safe_print(trace_output_directory, f"<<<Action: Prefill free kv blocks; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # serving_chat.py
+  # Finish decode pickle and start response
+  - module: "sglang.srt.entrypoints.openai.serving_chat:OpenAIServingChat"
+    function_name: "_generate_chat_stream"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      
+      if os.getenv('ROLE') != "prefill" and len(args) >= 2:
+          raw_request_id = args[1].bootstrap_room
+          safe_print(trace_output_directory, f"<<<Action: Finish decode pickle and start response; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # First decode output token
+  # Second  decode output token
+  # Finish decode pickle and start response
+  - module: "sglang.srt.entrypoints.openai.serving_chat:OpenAIServingChat"
+    function_name: "_build_chat_response"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      
+      if os.getenv('ROLE') != "prefill" and len(args) >= 1:
+          raw_request_id = args[0].bootstrap_room
+          safe_print(trace_output_directory, f"<<<Action: First decode output token; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          safe_print(trace_output_directory, f"<<<Action: Second decode output token; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          safe_print(trace_output_directory, f"<<<Action: Finish decode pickle and start response; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # serving_completions.py
+  # Finish decode pickle and start response
+  - module: "sglang.srt.entrypoints.openai.serving_completions:OpenAIServingCompletion"
+    function_name: "_generate_completion_stream"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory     
+      
+      if len(args) > 1 and os.getenv('ROLE') != "prefill":
+          raw_request_id = args[1].bootstrap_room
+          safe_print(trace_output_directory, f"<<<Action: Finish decode pickle and start response; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # First decode output token
+  # Scend decode output token
+  # Finish decode pickle and start response
+  - module: "sglang.srt.entrypoints.openai.serving_completions:OpenAIServingCompletion"
+    function_name: "_build_completion_response"
+    exit_operation: |
+      import os, time 
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory     
+
+      if os.getenv('ROLE') != "prefill" and len(args) >= 1:
+          raw_request_id = args[0].bootstrap_room
+          safe_print(trace_output_directory, f"<<<Action: First decode output token; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          safe_print(trace_output_directory, f"<<<Action: Second decode output token; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          safe_print(trace_output_directory, f"<<<Action: Finish decode pickle and start response; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          
+  # scheduler.py
+  # try to schedule in waiting queue
+  - module: "sglang.srt.managers.schedule_policy:PrefillAdder"
+    function_name: "add_one_req"
+    entry_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      
+      # try to schedule in waiting queue
+      if len(args) >= 1:
+          raw_request_id = args[0].bootstrap_room
+          safe_print(trace_output_directory, f"<<<Action: try to schedule in waiting queue; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+  
+  # Prefill get new_blocks
+  # success add to seq groups
+  - module: "sglang.srt.managers.schedule_batch:ScheduleBatch"
+    function_name: "init_new"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+
+      if cls and os.getenv('ROLE') == "prefill":
+          for req in cls:
+              raw_request_id = req.bootstrap_room
+              safe_print(trace_output_directory, f"<<<Action: Prefill get new_blocks; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+              safe_print(trace_output_directory, f"<<<Action: success add to seq groups; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # tokenizer_manager.py
+  # Finish process request in prefill engine
+  - module: "sglang.srt.managers.tokenizer_manager:TokenizerManager"
+    function_name: "_tokenize_one_request"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+
+      if os.getenv('ROLE') == "prefill" and len(args) >= 1:
+          raw_request_id = args[0].bootstrap_room
+          safe_print(trace_output_directory, f"<<<Action: Finish process request in prefill engine; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # engine step
+  - module: "sglang.srt.managers.scheduler:Scheduler"
+    function_name: "_profile_batch_predicate"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+
+      self.engine_step_start_time = time.time()
+      self.start_free_block_num = self.req_to_token_pool.available_size()
+      self.execute_model_start_time = self.engine_step_start_time
+      if os.getenv('ROLE') != "prefill" and len(args) >= 1:
+          batch = args[0]
+          batch.engine_core_str = f'{os.getpid()}|{self.execute_model_start_time}'
+
+      if len(args) >= 1:
+          batch = args[0]
+          for req in batch.reqs:
+              raw_request_id = req.bootstrap_room
+              if os.getenv('ROLE') == "prefill":
+                  safe_print(trace_output_directory, f"<<<Action: Start engine step; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+                  safe_print(trace_output_directory, f"<<<Action: Prefill start execute_model; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+              else:
+                  if not req.first_decode_flag:
+                      req.first_decode_flag = True
+                      # Node D initiates the first model execution. 
+                      safe_print(trace_output_directory, f"<<<Action: Start to send output; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  - module: "sglang.srt.managers.scheduler:Scheduler"
+    function_name: "run_batch"
+    exit_operation: |
+      import os, time
+      from sglang.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+
+      engine_step_finish_time = time.time()
+      execute_model_end_time = engine_step_finish_time
+      engine_step_execute_cost = (engine_step_finish_time - self.engine_step_start_time) * 1000
+      execute_model_cost_time = (execute_model_end_time - self.execute_model_start_time) * 1000
+      waiting_reqs_num_after_step = len(self.waiting_queue)
+      running_reqs_num_after_step = self.running_batch.batch_size()
+      if os.getenv('ROLE') == "prefill":
+          if len(args) >= 1:
+              batch = args[0]
+              running_reqs_num_after_step += batch.batch_size()
+      total_tokens = 0
+      reqs_ids = []
+      bs_tokens = []
+      if len(args) >= 1:
+          batch = args[0]
+          for req in batch.reqs:
+              reqs_ids.append(req.bootstrap_room)
+              total_tokens += len(req.origin_input_ids)
+              bs_tokens.append(len(req.origin_input_ids))
+          if os.getenv('ROLE') != "prefill":
+              for req in batch.reqs:
+                  total_tokens += len(req.output_ids)   
+          kv_blocks_num = self.req_to_token_pool.size
+          end_free_block_num = self.req_to_token_pool.available_size()
+          cost_blocks_num = len(batch.reqs)   
+          kv_cache_usage = 1.0 - (end_free_block_num / kv_blocks_num)  
+
+          if total_tokens != 0:
+              safe_print(trace_output_directory, f"profile: {os.getenv('ROLE')}_{ip_str}|{self.engine_step_start_time}|"
+                  f"{engine_step_finish_time}|{engine_step_execute_cost}|{running_reqs_num_after_step}|{total_tokens}|"
+                  f"{waiting_reqs_num_after_step}|{reqs_ids}|{bs_tokens}|{self.execute_model_start_time}|"
+                  f"{execute_model_end_time}|{execute_model_cost_time}|{kv_cache_usage}|{kv_blocks_num}|"
+                  f"{self.start_free_block_num}|{end_free_block_num}|{cost_blocks_num}|{batch.engine_core_str}")
+          
+          for req in batch.reqs:
+              if os.getenv('ROLE') == "prefill":
+                  raw_request_id = req.bootstrap_room
+                  safe_print(trace_output_directory, f"<<<Action: Prefill done execute_model; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+                  safe_print(trace_output_directory, f"<<<Action: Finish engine step; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  - module: "sglang.srt.managers.schedule_batch:Req"
+    function_name: "__init__"
+    exit_operation: |
+      self.first_decode_flag = False
+
+  - module: "sglang.srt.managers.schedule_batch:ModelWorkerBatch"
+    function_name: "__init__"
+    exit_operation: |
+      self.engine_core_str: str = None
+
+  - module: "sglang.srt.managers.schedule_batch:ScheduleBatch"
+    function_name: "__init__"
+    exit_operation: |
+      self.engine_core_str: str = None

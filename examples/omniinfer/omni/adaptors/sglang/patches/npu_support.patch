@@ -1,0 +1,581 @@
+From 9152fc3617c02abf62581346b90ce75dd4e779db Mon Sep 17 00:00:00 2001
+From: gxf_xbd <gaoxiaofan1@huawei.com>
+Date: Sat, 23 Aug 2025 13:39:41 +0800
+Subject: [PATCH] NPU adatation for SGL
+
+---
+ python/sglang/launch_server.py                |  1 +
+ .../sglang/srt/distributed/parallel_state.py  |  2 +-
+ python/sglang/srt/layers/linear.py            |  5 ++
+ python/sglang/srt/layers/moe/topk.py          |  4 +-
+ .../srt/layers/quantization/__init__.py       |  2 +-
+ .../srt/layers/quantization/fp8_kernel.py     |  4 +-
+ .../srt/layers/quantization/moe_wna16.py      |  3 +-
+ .../srt/managers/data_parallel_controller.py  |  1 +
+ python/sglang/srt/managers/schedule_batch.py  | 11 ++---
+ python/sglang/srt/managers/scheduler.py       |  2 +
+ .../srt/managers/scheduler_profiler_mixin.py  | 31 +++++++++++-
+ .../srt/managers/tp_worker_overlap_thread.py  |  4 +-
+ python/sglang/srt/mem_cache/memory_pool.py    | 49 ++++++++++++++-----
+ .../srt/model_executor/forward_batch_info.py  |  1 -
+ .../sglang/srt/model_executor/model_runner.py |  7 +++
+ .../sglang/srt/model_loader/weight_utils.py   |  5 +-
+ python/sglang/srt/models/registry.py          |  5 +-
+ python/sglang/srt/server_args.py              |  5 +-
+ python/sglang/srt/utils.py                    |  7 ++-
+ 19 files changed, 113 insertions(+), 36 deletions(-)
+
+diff --git a/python/sglang/launch_server.py b/python/sglang/launch_server.py
+index caae7b0f6..6455d4e35 100644
+--- a/python/sglang/launch_server.py
++++ b/python/sglang/launch_server.py
+@@ -3,6 +3,7 @@
+ import os
+ import sys
+ 
++import omni.adaptors.sglang.patches.model_patch
+ from sglang.srt.entrypoints.http_server import launch_server
+ from sglang.srt.server_args import prepare_server_args
+ from sglang.srt.utils import kill_process_tree
+diff --git a/python/sglang/srt/distributed/parallel_state.py b/python/sglang/srt/distributed/parallel_state.py
+index ad336c808..71fe73686 100644
+--- a/python/sglang/srt/distributed/parallel_state.py
++++ b/python/sglang/srt/distributed/parallel_state.py
+@@ -591,7 +591,7 @@ class GroupCoordinator:
+             )
+ 
+     def all_gather_into_tensor(self, output: torch.Tensor, input: torch.Tensor):
+-        if not supports_custom_op():
++        if not supports_custom_op() or is_npu():
+             self._all_gather_into_tensor(output, input)
+         else:
+             torch.ops.sglang.reg_all_gather_into_tensor(
+diff --git a/python/sglang/srt/layers/linear.py b/python/sglang/srt/layers/linear.py
+index 2a9dfda59..15e11c165 100644
+--- a/python/sglang/srt/layers/linear.py
++++ b/python/sglang/srt/layers/linear.py
+@@ -216,6 +216,7 @@ class ReplicatedLinear(LinearBase):
+ 
+         # The per-tensor quant-scale must be 1 dimension
+         if _is_npu:
++            torch.npu.set_device(param.device)
+             if param.size() != loaded_weight.size() and param.size(0) == 1:
+                 if torch.allclose(loaded_weight, loaded_weight[0]):
+                     loaded_weight = loaded_weight[:1]
+@@ -378,6 +379,8 @@ class ColumnParallelLinear(LinearBase):
+             loaded_weight = loaded_weight.reshape(1)
+ 
+         assert param_data.shape == loaded_weight.shape
++        if _is_npu:
++            torch.npu.set_device(param.device)
+         param_data.copy_(loaded_weight)
+ 
+     def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
+@@ -1254,6 +1257,8 @@ class RowParallelLinear(LinearBase):
+             loaded_weight = loaded_weight.reshape(1)
+ 
+         assert param_data.shape == loaded_weight.shape
++        if _is_npu:
++            torch.npu.set_device(param.device)
+         param_data.copy_(loaded_weight)
+ 
+     def weight_loader_v2(self, param: BasevLLMParameter, loaded_weight: torch.Tensor):
+diff --git a/python/sglang/srt/layers/moe/topk.py b/python/sglang/srt/layers/moe/topk.py
+index 78bd6f08d..1cfbff498 100644
+--- a/python/sglang/srt/layers/moe/topk.py
++++ b/python/sglang/srt/layers/moe/topk.py
+@@ -248,13 +248,13 @@ class TopK(CustomOp):
+             return torch_npu.npu_moe_gating_top_k(
+                 router_logits,
+                 k=self.top_k,
+-                bias=self.correction_bias,
++                bias=self.correction_bias.to(router_logits.dtype),
+                 k_group=self.topk_group,
+                 group_count=self.num_expert_group,
+                 group_select_mode=1,
+                 renorm=0,
+                 norm_type=1,
+-                routed_scaling_factor=1,
++                routed_scaling_factor=self.routed_scaling_factor,
+                 eps=float(1e-20),
+             )
+         else:
+diff --git a/python/sglang/srt/layers/quantization/__init__.py b/python/sglang/srt/layers/quantization/__init__.py
+index 19977012a..b4018fb31 100644
+--- a/python/sglang/srt/layers/quantization/__init__.py
++++ b/python/sglang/srt/layers/quantization/__init__.py
+@@ -72,7 +72,7 @@ from sglang.srt.layers.quantization.qoq import QoQConfig
+ from sglang.srt.layers.quantization.utils import get_linear_quant_method
+ from sglang.srt.layers.quantization.w4afp8 import W4AFp8Config
+ from sglang.srt.layers.quantization.w8a8_fp8 import W8A8Fp8Config
+-from sglang.srt.layers.quantization.w8a8_int8 import W8A8Int8Config
++from omni.adaptors.sglang.layers.quantization.w8a8_int8 import W8A8Int8Config
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.layers.moe.topk import TopKOutput
+diff --git a/python/sglang/srt/layers/quantization/fp8_kernel.py b/python/sglang/srt/layers/quantization/fp8_kernel.py
+index 16d1a4d7f..ae7074a9b 100644
+--- a/python/sglang/srt/layers/quantization/fp8_kernel.py
++++ b/python/sglang/srt/layers/quantization/fp8_kernel.py
+@@ -33,6 +33,7 @@ from sglang.srt.utils import (
+     is_cpu,
+     is_cuda,
+     is_hip,
++    is_npu,
+     log_info_on_rank0,
+     supports_custom_op,
+ )
+@@ -40,6 +41,7 @@ from sglang.srt.utils import (
+ _is_hip = is_hip()
+ _is_cuda = is_cuda()
+ _is_cpu = is_cpu()
++_is_npu = is_npu()
+ _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+ 
+ if _is_cuda:
+@@ -1320,7 +1322,7 @@ def _per_token_group_quant_fp8_hopper_moe_mn_major(
+         tl.store(sfa_ptrs, inp_amax / 448.0, mask=coord_m < m)
+ 
+ 
+-if not _is_cpu:
++if not (_is_cpu or _is_npu):
+     _per_token_group_quant_fp8_hopper_moe_mn_major = fp8_autotune(
+         _per_token_group_quant_fp8_hopper_moe_mn_major
+     )
+diff --git a/python/sglang/srt/layers/quantization/moe_wna16.py b/python/sglang/srt/layers/quantization/moe_wna16.py
+index fbbf11066..fc06cd8f7 100644
+--- a/python/sglang/srt/layers/quantization/moe_wna16.py
++++ b/python/sglang/srt/layers/quantization/moe_wna16.py
+@@ -166,7 +166,8 @@ class MoeWNA16Config(QuantizationConfig):
+         capability_tuple = get_device_capability()
+         device_capability = (
+             -1
+-            if all(capability is None for capability in capability_tuple)
++            if capability_tuple is None
++            or all(capability is None for capability in capability_tuple)
+             else capability_tuple[0] * 10 + capability_tuple[1]
+         )
+         # Avoid circular import
+diff --git a/python/sglang/srt/managers/data_parallel_controller.py b/python/sglang/srt/managers/data_parallel_controller.py
+index 76b9e1a01..2bafd6f27 100644
+--- a/python/sglang/srt/managers/data_parallel_controller.py
++++ b/python/sglang/srt/managers/data_parallel_controller.py
+@@ -343,6 +343,7 @@ def run_data_parallel_controller_process(
+     port_args: PortArgs,
+     pipe_writer,
+ ):
++    import omni.adaptors.sglang.patches.model_patch
+     setproctitle.setproctitle("sglang::data_parallel_controller")
+     configure_logger(server_args)
+     parent_process = psutil.Process().parent()
+diff --git a/python/sglang/srt/managers/schedule_batch.py b/python/sglang/srt/managers/schedule_batch.py
+index dca2cbfb7..761defe00 100644
+--- a/python/sglang/srt/managers/schedule_batch.py
++++ b/python/sglang/srt/managers/schedule_batch.py
+@@ -64,7 +64,7 @@ from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, Forw
+ from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
+ from sglang.srt.sampling.sampling_params import SamplingParams
+ from sglang.srt.server_args import ServerArgs
+-from sglang.srt.utils import flatten_nested_list, support_triton
++from sglang.srt.utils import flatten_nested_list, is_npu, support_triton
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.configs.model_config import ModelConfig
+@@ -1713,15 +1713,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
+             attention_backend_str = global_server_args_dict["prefill_attention_backend"]
+         # Create seq_lens_cpu when needed
+         if (
+-            attention_backend_str == "fa3"
++            attention_backend_str
++            in ["fa3", "flashmla", "cutlass_mla", "trtllm_mha", "npumla", "ascend"]
+             or (
+                 global_server_args_dict["use_mla_backend"]
+                 and attention_backend_str == "flashinfer"
+             )
+-            or attention_backend_str == "flashmla"
+-            or attention_backend_str == "cutlass_mla"
+-            or attention_backend_str == "ascend"
+-            or attention_backend_str == "trtllm_mha"
+             or global_server_args_dict["enable_two_batch_overlap"]
+         ):
+             seq_lens_cpu = (
+@@ -1977,7 +1974,7 @@ def get_last_loc(
+     prefix_lens_tensor: torch.Tensor,
+ ) -> torch.Tensor:
+     if (
+-        global_server_args_dict["attention_backend"] != "ascend"
++        global_server_args_dict["attention_backend"] not in ["ascend", "npumla"]
+         and global_server_args_dict["attention_backend"] != "torch_native"
+     ):
+         impl = get_last_loc_triton
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index 5d2204c3f..e84d35013 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -13,6 +13,7 @@
+ # ==============================================================================
+ """A scheduler that manages a tensor parallel GPU worker."""
+ 
++import omni.adaptors.sglang.patches.model_patch
+ import faulthandler
+ import logging
+ import os
+@@ -2514,6 +2515,7 @@ def run_scheduler_process(
+     pipe_writer,
+     balance_meta: Optional[DPBalanceMeta] = None,
+ ):
++    import omni.adaptors.sglang.patches.model_patch
+     # Generate the prefix
+     prefix = ""
+     if dp_rank is not None:
+diff --git a/python/sglang/srt/managers/scheduler_profiler_mixin.py b/python/sglang/srt/managers/scheduler_profiler_mixin.py
+index 3d061a8fe..4e78ec855 100644
+--- a/python/sglang/srt/managers/scheduler_profiler_mixin.py
++++ b/python/sglang/srt/managers/scheduler_profiler_mixin.py
+@@ -8,6 +8,11 @@ import torch
+ 
+ from sglang.srt.managers.io_struct import ProfileReq, ProfileReqOutput, ProfileReqType
+ from sglang.srt.model_executor.forward_batch_info import ForwardMode
++from sglang.srt.utils import is_npu
++
++_is_npu = is_npu()
++if _is_npu:
++    import torch_npu
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -52,7 +57,7 @@ class SchedulerProfilerMixin:
+         if output_dir is None:
+             output_dir = os.getenv("SGLANG_TORCH_PROFILER_DIR", "/tmp")
+         if activities is None:
+-            activities = ["CPU", "GPU"]
++            activities = ["CPU", "GPU" if not _is_npu else "NPU"]
+ 
+         self.torch_profiler_output_dir = output_dir
+         self.torch_profiler_with_stack = with_stack
+@@ -98,6 +103,11 @@ class SchedulerProfilerMixin:
+             "CPU": torch.profiler.ProfilerActivity.CPU,
+             "GPU": torch.profiler.ProfilerActivity.CUDA,
+         }
++        if _is_npu:
++            activity_map = {
++                "CPU": torch_npu.profiler.ProfilerActivity.CPU,
++                "NPU": torch_npu.profiler.ProfilerActivity.NPU,
++            }
+         torchprof_activities = [
+             activity_map[a] for a in activities if a in activity_map
+         ]
+@@ -139,6 +149,25 @@ class SchedulerProfilerMixin:
+             )
+             self.torch_profiler.start()
+             self.profile_in_progress = True
++        elif _is_npu:
++            experimental_config = torch_npu.profiler._ExperimentalConfig(
++                profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
++                aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
++                record_op_args=False,
++            )
++
++            self.torch_profiler = torch_npu.profiler.profile(
++                activities=torchprof_activities,
++                with_stack=with_stack if with_stack is not None else True,
++                record_shapes=record_shapes if record_shapes is not None else False,
++                profile_memory=True,
++                experimental_config=experimental_config,
++                on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
++                    self.torch_profiler_output_dir
++                ),
++            )
++            self.torch_profiler.start()
++            self.profile_in_progress = True
+ 
+         if "MEM" in activities:
+             torch.cuda.memory._record_memory_history(max_entries=100000)
+diff --git a/python/sglang/srt/managers/tp_worker_overlap_thread.py b/python/sglang/srt/managers/tp_worker_overlap_thread.py
+index 674a94195..5b3df8449 100644
+--- a/python/sglang/srt/managers/tp_worker_overlap_thread.py
++++ b/python/sglang/srt/managers/tp_worker_overlap_thread.py
+@@ -35,7 +35,7 @@ from sglang.srt.managers.io_struct import (
+ from sglang.srt.managers.schedule_batch import ModelWorkerBatch
+ from sglang.srt.managers.tp_worker import TpModelWorker
+ from sglang.srt.server_args import ServerArgs
+-from sglang.srt.utils import DynamicGradMode, get_compiler_backend
++from sglang.srt.utils import DynamicGradMode, get_compiler_backend, is_npu
+ from sglang.utils import get_exception_traceback
+ 
+ logger = logging.getLogger(__name__)
+@@ -137,6 +137,8 @@ class TpModelWorkerClient:
+ 
+     def forward_thread_func(self):
+         try:
++            if is_npu():
++                torch.npu.set_device(self.device)
+             with torch.get_device_module(self.device).stream(self.forward_stream):
+                 self.forward_thread_func_()
+         except Exception:
+diff --git a/python/sglang/srt/mem_cache/memory_pool.py b/python/sglang/srt/mem_cache/memory_pool.py
+index cc3faea0a..167bb22ed 100644
+--- a/python/sglang/srt/mem_cache/memory_pool.py
++++ b/python/sglang/srt/mem_cache/memory_pool.py
+@@ -36,13 +36,15 @@ import triton.language as tl
+ 
+ from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
+ from sglang.srt.layers.radix_attention import RadixAttention
+-from sglang.srt.utils import get_bool_env_var, is_cuda, next_power_of_2
++from sglang.srt.utils import get_bool_env_var, is_cuda, is_npu, next_power_of_2
+ 
+ logger = logging.getLogger(__name__)
+ 
+ GB = 1024 * 1024 * 1024
+ _is_cuda = is_cuda()
+-
++_is_npu = is_npu()
++if _is_npu:
++    import torch_npu
+ 
+ class ReqToTokenPool:
+     """A memory pool that maps a request to its token locations."""
+@@ -239,7 +241,7 @@ class MHATokenToKVPool(KVCache):
+                 ]
+ 
+         self.k_data_ptrs = torch.tensor(
+-            [x.data_ptr() for x in self.k_buffer],
++            [x.data_ptr() for x in self.k_buffer + self.v_buffer],
+             dtype=torch.uint64,
+             device=self.device,
+         )
+@@ -248,7 +250,7 @@ class MHATokenToKVPool(KVCache):
+             dtype=torch.uint64,
+             device=self.device,
+         )
+-        self.data_ptrs = torch.cat([self.k_data_ptrs, self.v_data_ptrs], dim=0)
++        self.data_ptrs = torch.cat([self.k_data_ptrs.to(torch.float16), self.v_data_ptrs.to(torch.float16)], dim=0)
+         self.data_strides = torch.tensor(
+             [
+                 np.prod(x.shape[1:]) * x.dtype.itemsize
+@@ -624,8 +626,6 @@ class AscendTokenToKVPool(MHATokenToKVPool):
+             cache_k = cache_k.view(self.store_dtype)
+             cache_v = cache_v.view(self.store_dtype)
+ 
+-        import torch_npu
+-
+         torch_npu._npu_reshape_and_cache(
+             key=cache_k,
+             value=cache_v,
+@@ -704,6 +704,14 @@ def set_mla_kv_buffer_triton(
+         BLOCK=BLOCK,
+     )
+ 
++def set_mla_kv_buffer_npu(
++    kv_buffer: torch.Tensor,
++    loc_tensor: torch.Tensor,
++    cache_k_nope: torch.Tensor,
++    cache_k_rope: torch.Tensor,
++):
++    key_states = torch.cat([cache_k_nope, cache_k_rope], dim=-1)
++    torch_npu.npu_scatter_nd_update_(kv_buffer, loc_tensor.view(-1, 1), key_states)
+ 
+ class MLATokenToKVPool(KVCache):
+     def __init__(
+@@ -753,9 +761,14 @@ class MLATokenToKVPool(KVCache):
+                 else nullcontext()
+             ):
+                 # The padded slot 0 is used for writing dummy outputs from padded tokens.
++                if _is_npu:
++                    # NPU only support 128 align
++                    size_align = (size + page_size) // 128 * 128
++                else:
++                    size_align = size + page_size
+                 self.kv_buffer = [
+                     torch.zeros(
+-                        (size + page_size, 1, kv_lora_rank + qk_rope_head_dim),
++                        (size_align, 1, kv_lora_rank + qk_rope_head_dim),
+                         dtype=self.store_dtype,
+                         device=device,
+                     )
+@@ -831,7 +844,14 @@ class MLATokenToKVPool(KVCache):
+                 self.store_dtype
+             )
+         else:
+-            self.kv_buffer[layer_id - self.start_layer][loc] = cache_k
++            if _is_npu and loc.ndim == 1:
++                torch_npu.npu_scatter_nd_update_(
++                    self.kv_buffer[layer_id - self.start_layer],
++                    loc.view(-1, 1),
++                    cache_k,
++                )
++            else:
++                self.kv_buffer[layer_id - self.start_layer][loc] = cache_k
+ 
+     def set_mla_kv_buffer(
+         self,
+@@ -848,9 +868,14 @@ class MLATokenToKVPool(KVCache):
+             cache_k_nope = cache_k_nope.view(self.store_dtype)
+             cache_k_rope = cache_k_rope.view(self.store_dtype)
+ 
+-        set_mla_kv_buffer_triton(
+-            self.kv_buffer[layer_id], loc, cache_k_nope, cache_k_rope
+-        )
++        if _is_npu:
++            set_mla_kv_buffer_npu(
++                self.kv_buffer[layer_id], loc, cache_k_nope, cache_k_rope
++            )
++        else:
++            set_mla_kv_buffer_triton(
++                self.kv_buffer[layer_id], loc, cache_k_nope, cache_k_rope
++            )
+ 
+     def get_cpu_copy(self, indices):
+         torch.cuda.synchronize()
+@@ -953,8 +978,6 @@ class AscendMLAPagedTokenToKVPool(MLATokenToKVPool):
+         if self.store_dtype != self.dtype:
+             cache_k = cache_k.view(store_dtype)
+ 
+-        import torch_npu
+-
+         torch_npu._npu_reshape_and_cache_siso(
+             key=cache_k.view(-1, 1, self.kv_lora_rank + self.qk_rope_head_dim),
+             key_cache=self.kv_buffer[layer_id - self.start_layer].view(
+diff --git a/python/sglang/srt/model_executor/forward_batch_info.py b/python/sglang/srt/model_executor/forward_batch_info.py
+index e5793a269..314635fcd 100644
+--- a/python/sglang/srt/model_executor/forward_batch_info.py
++++ b/python/sglang/srt/model_executor/forward_batch_info.py
+@@ -611,7 +611,6 @@ class ForwardBatch:
+             )
+ 
+     def prepare_mlp_sync_batch(self, model_runner: ModelRunner):
+-
+         from sglang.srt.speculative.eagle_utils import EagleDraftInput
+ 
+         assert self.global_num_tokens_cpu is not None
+diff --git a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
+index 923482d72..79e3de599 100644
+--- a/python/sglang/srt/model_executor/model_runner.py
++++ b/python/sglang/srt/model_executor/model_runner.py
+@@ -440,6 +440,7 @@ class ModelRunner:
+                     "fa3",
+                     "triton",
+                     "flashmla",
++                    "npumla",
+                     "cutlass_mla",
+                     "trtllm_mla",
+                     "ascend",
+@@ -639,6 +640,8 @@ class ModelRunner:
+         monkey_patch_vllm_parallel_state()
+         monkey_patch_isinstance_for_vllm_base_layer()
+ 
++        if is_npu():
++            torch.npu.set_device(self.device)
+         with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_WEIGHTS):
+             self.model = get_model(
+                 model_config=self.model_config,
+@@ -1400,6 +1403,10 @@ class ModelRunner:
+             from sglang.srt.layers.attention.ascend_backend import AscendAttnBackend
+ 
+             return AscendAttnBackend(self)
++        elif self.server_args.attention_backend == "npumla":
++            from omni.adaptors.sglang.layers.attention.npumla_backend import NpuMLABackend
++
++            return NpuMLABackend(self)
+         elif backend_str == "triton":
+             assert not self.model_config.is_encoder_decoder, (
+                 "Cross attention is not supported in the triton attention backend. "
+diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
+index a326e3f10..6f7d2b348 100644
+--- a/python/sglang/srt/model_loader/weight_utils.py
++++ b/python/sglang/srt/model_loader/weight_utils.py
+@@ -37,7 +37,7 @@ from sglang.srt.configs.model_config import ModelConfig
+ from sglang.srt.distributed import get_tensor_model_parallel_rank
+ from sglang.srt.layers.quantization import QuantizationConfig, get_quantization_config
+ from sglang.srt.layers.quantization.modelopt_quant import ModelOptFp4Config
+-from sglang.srt.utils import print_warning_once
++from sglang.srt.utils import print_warning_once, is_npu
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -650,7 +650,8 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
+                 f"Attempted to load weight ({loaded_weight.size()}) "
+                 f"into parameter ({param.size()})"
+             )
+-
++            if is_npu():
++                torch.npu.set_device(param.device)
+             param.data.copy_(loaded_weight)
+     except Exception:
+         # NOTE: This exception is added for the purpose of setting breakpoint to
+diff --git a/python/sglang/srt/models/registry.py b/python/sglang/srt/models/registry.py
+index f81d3c76e..e5c50528c 100644
+--- a/python/sglang/srt/models/registry.py
++++ b/python/sglang/srt/models/registry.py
+@@ -104,4 +104,7 @@ def import_model_classes():
+     return model_arch_name_to_cls
+ 
+ 
+-ModelRegistry = _ModelRegistry(import_model_classes())
++tmp_ = _ModelRegistry(import_model_classes())
++module = importlib.import_module("omni.adaptors.sglang.models.deepseek_v2")
++tmp_.models["DeepseekV3ForCausalLM"] = module.EntryClass
++ModelRegistry = tmp_
+diff --git a/python/sglang/srt/server_args.py b/python/sglang/srt/server_args.py
+index 7bfd443bf..aa9fd9943 100644
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -409,7 +409,7 @@ class ServerArgs:
+             )
+             self.disable_cuda_graph = True
+ 
+-        if self.attention_backend == "ascend":
++        if self.attention_backend in ["ascend", "npumla"]:
+             logger.warning(
+                 "At this moment Ascend attention backend only supports a page_size of 128, change page_size to 128."
+             )
+@@ -1353,6 +1353,7 @@ class ServerArgs:
+                 "fa3",
+                 "flashinfer",
+                 "flashmla",
++                "npumla",
+                 "intel_amx",
+                 "torch_native",
+                 "ascend",
+@@ -1910,7 +1911,7 @@ class ServerArgs:
+             "--disaggregation-transfer-backend",
+             type=str,
+             default=ServerArgs.disaggregation_transfer_backend,
+-            choices=["mooncake", "nixl", "ascend"],
++            choices=["mooncake", "nixl", "ascend", "llm-datadist"],
+             help="The backend for disaggregation transfer. Default is mooncake.",
+         )
+         parser.add_argument(
+diff --git a/python/sglang/srt/utils.py b/python/sglang/srt/utils.py
+index edf441945..1f4134e33 100644
+--- a/python/sglang/srt/utils.py
++++ b/python/sglang/srt/utils.py
+@@ -203,7 +203,7 @@ def get_int_env_var(name: str, default: int = 0) -> int:
+ 
+ 
+ def support_triton(backend: str) -> bool:
+-    return backend not in ["torch_native", "intel_amx", "ascend"]
++    return backend not in ["torch_native", "intel_amx", "ascend", "npumla"]
+ 
+ 
+ try:
+@@ -1677,12 +1677,15 @@ def get_compiler_backend() -> str:
+         try:
+             import torchair
+             import torchair.ge_concrete_graph.ge_converter.experimental.patch_for_hcom_allreduce
++            from torchair import patch_for_hcom
+             from torchair.configs.compiler_config import CompilerConfig
++
++            patch_for_hcom()
+         except ImportError as e:
+             raise ImportError(
+                 "NPU detected, but torchair package is not installed. "
+                 "Please install torchair for torch.compile support on NPU."
+-            )
++            ) from e
+         compiler_config = CompilerConfig()
+         predefined_config = get_npu_compiler_config()
+         for k, v in predefined_config.items():
+-- 
+2.28.0.windows.1
+

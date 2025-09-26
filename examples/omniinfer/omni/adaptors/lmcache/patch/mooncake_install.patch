@@ -1,0 +1,19 @@
+diff --git a/mooncake-store/tests/e2e/chaosctl.cpp b/mooncake-store/tests/e2e/chaosctl.cpp
+index 4c47c62..f61c5fb 100644
+--- a/mooncake-store/tests/e2e/chaosctl.cpp
++++ b/mooncake-store/tests/e2e/chaosctl.cpp
+@@ -4,6 +4,7 @@
+ #include <fstream>
+ #include <map>
+ #include <memory>
++#include <unistd.h>
+ 
+ #include "e2e_utils.h"
+ #include "process_handler.h"
+@@ -256,4 +257,4 @@ int main(int argc, char* argv[]) {
+     generate_testing_report(master_num, client_num, FLAGS_out_dir);
+ 
+     return 0;
+-}
+\ No newline at end of file
++}

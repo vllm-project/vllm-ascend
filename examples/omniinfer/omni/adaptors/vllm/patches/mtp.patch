@@ -1,0 +1,80 @@
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 3b1d3f94a..844f6d511 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -389,7 +389,7 @@ class Scheduler(SchedulerInterface):
+                     # We use `request.num_tokens` instead of
+                     # `request.num_prompt_tokens` to consider the resumed
+                     # requests, which have output tokens.
+-                    num_new_tokens = request.num_tokens - num_computed_tokens
++                    num_new_tokens = request.num_tokens_with_spec - num_computed_tokens
+                     if (0 < self.scheduler_config.long_prefill_token_threshold
+                             < num_new_tokens):
+                         num_new_tokens = (
+@@ -443,6 +443,15 @@ class Scheduler(SchedulerInterface):
+                     structured_output_request_ids[
+                         request.request_id] = req_index
+                 req_index += 1
++                if request.spec_token_ids:
++                    num_scheduled_spec_tokens = (num_new_tokens +
++                                                    request.num_computed_tokens -
++                                                    request.num_tokens)
++                    if num_scheduled_spec_tokens > 0:
++                        # Trim spec_token_ids list to num_scheduled_spec_tokens.
++                        del request.spec_token_ids[num_scheduled_spec_tokens:]
++                        scheduled_spec_decode_tokens[request.request_id] = (
++                            request.spec_token_ids)
+                 self.running.append(request)
+                 if self.log_stats:
+                     request.record_event(EngineCoreEventType.SCHEDULED,
+@@ -983,7 +992,9 @@ class Scheduler(SchedulerInterface):
+         num_computed_tokens = len(block_ids) * self.block_size
+         if num_computed_tokens == request.num_tokens:
+             num_computed_tokens -= 1
+-
++        # due to no speculative trans from prefill node, push one manually
++        if self.vllm_config.speculative_config is not None:
++            request.spec_token_ids.extend([0] * self.vllm_config.speculative_config.num_speculative_tokens)
+         # Update the request state for scheduling.
+         request.num_computed_tokens = request.num_tokens - 1
+ 
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index 910c0e80b..9b848fac5 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -159,8 +159,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+                 if self.speculative_config.method == "ngram":
+                     self.drafter = NgramProposer(self.vllm_config)
+                 elif self.speculative_config.use_eagle():
+-                    self.drafter = EagleProposer(self.vllm_config, self.device,
+-                                                 self)  # type: ignore
++                    self.drafter = None
++
+                     if self.speculative_config.method == "eagle3":
+                         self.use_aux_hidden_state_outputs = True
+                 elif self.speculative_config.method == "medusa":
+@@ -170,7 +170,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
+                 else:
+                     raise ValueError("Unknown speculative decoding method: "
+                                      f"{self.speculative_config.method}")
+-                self.rejection_sampler = RejectionSampler()
++                self.rejection_sampler = None
+ 
+         # Request states.
+         self.requests: dict[str, CachedRequestState] = {}
+diff --git a/vllm/config.py b/vllm/config.py
+index db35c848b..5b255e210 100644
+--- a/vllm/config.py
++++ b/vllm/config.py
+@@ -2737,9 +2737,9 @@ class SpeculativeConfig:
+                              f"{self.disable_by_batch_size=}")
+ 
+         if self.method == "eagle3" and self.target_model_config and \
+-            "llama" not in self.target_model_config.hf_text_config.model_type:
++            not any(item in self.target_model_config.hf_text_config.model_type for item in ('qwen2',)):
+             raise ValueError(
+-                "Eagle3 is only supported for Llama models. "
++                "Eagle3 is only supported for Qwen2 models. "
+                 f"Got {self.target_model_config.hf_text_config.model_type=}")
+ 
+     @property
