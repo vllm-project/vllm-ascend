@@ -56,7 +56,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader import get_model, get_model_loader
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -2644,23 +2644,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         logger.info("Starting to load model %s...", self.model_config.model)
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
-            model_loader = get_model_loader(self.load_config)
-            logger.info("Loading model from scratch...")
-            self.model = model_loader.load_model(
-                vllm_config=self.vllm_config, model_config=self.model_config)
+            self.model = get_model(vllm_config=self.vllm_config)
             if self.dynamic_eplb:
                 model_register(self.model, self.model_config)
-            if self.lora_config:
-                if vllm_version_is("0.10.2"):
-                    self.model = self.load_lora_model(self.model,
-                                                      self.model_config,
-                                                      self.scheduler_config,
-                                                      self.lora_config,
-                                                      self.device)
-                else:
-                    self.model = self.load_lora_model(self.model,
-                                                      self.vllm_config,
-                                                      self.device)
             if is_310p():
                 from vllm.model_executor.layers.linear import (
                     MergedColumnParallelLinear, QKVParallelLinear,
@@ -2678,6 +2664,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.model.set_aux_hidden_state_layers(
                         self.model.get_eagle3_aux_hidden_state_layers())
 
+            if self.lora_config:
+                if vllm_version_is("0.10.2"):
+                    self.model = self.load_lora_model(self.model,
+                                                      self.model_config,
+                                                      self.scheduler_config,
+                                                      self.lora_config,
+                                                      self.device)
+                else:
+                    self.model = self.load_lora_model(self.model,
+                                                      self.vllm_config,
+                                                      self.device)
         logger.info("Loading model weights took %.4f GB",
                     m.consumed_memory / float(2**30))
 
