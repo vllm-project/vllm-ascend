@@ -1,0 +1,9 @@
+model_name: "Qwen/Qwen2-7B"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.78
+  - name: "exact_match,flexible-extract"
+    value: 0.70
+num_fewshot: 5
