@@ -2320,6 +2320,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                    positions=positions,
                                    intermediate_tensors=intermediate_tensors,
                                    inputs_embeds=inputs_embeds)
+        forward_context = get_forward_context()
+        assert forward_context is not None
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            update_attn_params(self.update_stream, forward_context,
+                               positions.shape[0])
+
         if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
             hidden_states, _ = hidden_states
         else:

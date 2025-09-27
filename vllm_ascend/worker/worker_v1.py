@@ -345,7 +345,9 @@ class NPUWorker(WorkerBase):
         return self.model_runner.pin_lora(lora_id)
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1, uniform_decode=True)
+        self.model_runner._dummy_run(1,
+                                     uniform_decode=True,
+                                     force_attention=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
