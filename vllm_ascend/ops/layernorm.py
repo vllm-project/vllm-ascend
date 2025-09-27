@@ -56,6 +56,16 @@ def _addrmsnorm_forward_oot(
 
 class AscendRMSNorm(RMSNorm):
 
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        var_hidden_size: Optional[int] = None,
+        has_weight: bool = True,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+
     def forward_oot(
         self,
         x: torch.Tensor,
