@@ -147,6 +147,29 @@ def _maybe_wait_prefetch_done_impl_fake(x: torch.Tensor) -> None:
     return
 
 
+def _maybe_npu_prefetch_impl(inputs: torch.Tensor,
+                             dependency: torch.Tensor,
+                             max_size: int = 0,
+                             offset: int = 0,
+                             *,
+                             enabled: bool = True) -> None:
+    if not enabled:
+        return
+    input_size = inputs.element_size() * inputs.numel()
+    if max_size < 0 or max_size > input_size:
+        max_size = input_size
+    torch_npu.npu_prefetch(inputs, dependency, max_size, offset)
+
+
+def _maybe_npu_prefetch_impl_fake(inputs: torch.Tensor,
+                                  dependency: torch.Tensor,
+                                  max_size: int = 0,
+                                  offset: int = 0,
+                                  *,
+                                  enabled: bool = True) -> None:
+    return
+
+
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
                           fake_impl=lambda x, residual: residual,
@@ -180,5 +203,11 @@ direct_register_custom_op(op_name="maybe_prefetch_mlp_down_proj",
 direct_register_custom_op(op_name="maybe_wait_prefetch_done",
                           op_func=_maybe_wait_prefetch_done_impl,
                           fake_impl=_maybe_wait_prefetch_done_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="maybe_npu_prefetch",
+                          op_func=_maybe_npu_prefetch_impl,
+                          fake_impl=_maybe_npu_prefetch_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
