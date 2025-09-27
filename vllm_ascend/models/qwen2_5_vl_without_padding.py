@@ -68,6 +68,7 @@ from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm_ascend.models.qwen2_5_vl import AscendQwen2_5_VisionRotaryEmbedding
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendQwen2_5_VisionAttention_Without_Padding(Qwen2_5_VisionAttention):
@@ -483,12 +484,20 @@ class AscendQwen2_5_VLForConditionalGeneration_Without_Padding(
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        self.visual = AscendQwen2_5_VisionTransformer_Without_Padding(
-            vision_config=config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-        )
+        if vllm_version_is("0.10.2"):
+            self.visual = AscendQwen2_5_VisionTransformer_Without_Padding(
+                vision_config=config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=self._maybe_ignore_quant_config(quant_config),
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+        else:
+            self.visual = AscendQwen2_5_VisionTransformer_Without_Padding(
+                vision_config=config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
 
     def _process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
 
@@ -554,12 +563,20 @@ class AscendQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config: Qwen3VLConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        self.visual = AscendQwen3_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-            use_data_parallel=self.use_data_parallel)
+        if vllm_version_is("0.10.2"):
+            self.visual = AscendQwen3_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=self._maybe_ignore_quant_config(quant_config),
+                prefix=maybe_prefix(prefix, "visual"),
+                use_data_parallel=self.use_data_parallel)
+        else:
+            self.visual = AscendQwen3_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+                use_data_parallel=self.use_data_parallel)
 
 
 @MULTIMODAL_REGISTRY.register_processor(Qwen3VLMultiModalProcessor,
@@ -596,11 +613,19 @@ class AscendQwen3VLMoeForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-
-        self.visual = AscendQwen3_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-            use_data_parallel=self.use_data_parallel,
-        )
+        if vllm_version_is("0.10.2"):
+            self.visual = AscendQwen3_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=self._maybe_ignore_quant_config(quant_config),
+                prefix=maybe_prefix(prefix, "visual"),
+                use_data_parallel=self.use_data_parallel,
+            )
+        else:
+            self.visual = AscendQwen3_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+                use_data_parallel=self.use_data_parallel,
+            )
