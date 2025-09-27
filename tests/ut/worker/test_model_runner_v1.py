@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.utils import AscendSocVersion
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -25,21 +24,25 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
     "soc_version, enable_expert_parallel, world_size, num_tokens, mc2_tokens_capacity, quant_type, expected_method",
     [
         # Case 1: Expert parallel is disabled, should always be 'allgather'
-        (AscendSocVersion.A2, False, 8, 100, 256, None, MoECommType.ALLGATHER),
-        (AscendSocVersion.A3, False, 16, 500, 256, None, MoECommType.ALLGATHER),
+        ("A2", False, 8, 100, 256, None, "allgather"),
+        ("A3", False, 16, 500, 256, None, "allgather"),
 
         # Case 2: A2 SOC with w4a8_dynamic -> use alltoall when not mc2
-        (AscendSocVersion.A2, True, 8, 100, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
-        (AscendSocVersion.A2, True, 16, 257, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
-        (AscendSocVersion.A2, True, 16, 100, 256, "w4a8_dynamic", MoECommType.MC2),  # meets mc2 condition
+        ("A2", True, 8, 100, 256, "w4a8_dynamic", "alltoall"),
+        ("A2", True, 16, 257, 256, "w4a8_dynamic", "alltoall"),
+        ("A2", True, 16, 100, 256, "w4a8_dynamic", "mc2"),  # meets mc2 condition
 
         # Case 3: A2 SOC without w4a8_dynamic -> fallback to allgather
-        (AscendSocVersion.A2, True, 8, 100, 256, None, MoECommType.ALLGATHER),
-        (AscendSocVersion.A2, True, 16, 257, 256, None, MoECommType.ALLGATHER),
+        ("A2", True, 8, 100, 256, None, "allgather"),
+        ("A2", True, 16, 257, 256, None, "allgather"),
 
         # Case 4: A3 SOC
-        (AscendSocVersion.A3, True, 8, 100, 256, None, MoECommType.MC2),
-        (AscendSocVersion.A3, True, 8, 257, 256, None, MoECommType.ALLTOALL),
+        ("A3", True, 8, 100, 256, None, "mc2"),
+        ("A3", True, 8, 257, 256, None, "alltoall"),
+
+        # Case 5: P3 SOC
+        ("310P", True, 8, 100, 256, None, "allgather"),
+        ("310P", True, 8, 257, 256, None, "allgather"),
     ])
 # yapf: enable
 def test_select_moe_comm_method(soc_version, enable_expert_parallel,
@@ -65,8 +68,8 @@ def test_select_moe_comm_method(soc_version, enable_expert_parallel,
     mock_runner.vllm_config = mock_vllm_config
 
     # Patch the helper functions
-    with patch('vllm_ascend.worker.model_runner_v1.get_ascend_soc_version',
-               return_value=soc_version), \
+    with patch('vllm_ascend._build_info.__ascend_soc_version__',
+               new=soc_version), \
          patch('vllm_ascend.worker.model_runner_v1.is_global_first_rank',
                return_value=True):
 
@@ -98,8 +101,8 @@ def test_select_moe_comm_method_unsupported_soc():
 
     unsupported_soc = "UnsupportedSOC"
 
-    with patch('vllm_ascend.worker.model_runner_v1.get_ascend_soc_version',
-               return_value=unsupported_soc), \
+    with patch('vllm_ascend._build_info.__ascend_soc_version__',
+               new=unsupported_soc), \
          patch('vllm_ascend.worker.model_runner_v1.is_global_first_rank',
                return_value=True), \
          pytest.raises(ValueError, match=f"Unsupported soc_version: {unsupported_soc}"):

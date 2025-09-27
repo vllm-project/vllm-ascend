@@ -28,8 +28,7 @@ from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.torchair.ops.torchair_fused_moe import torchair_select_experts
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
-                               dispose_tensor, get_ascend_soc_version)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, dispose_tensor
 
 
 def torchair_apply_mlp_decode(hidden_states: torch.Tensor,
@@ -230,12 +229,14 @@ def torchair_fused_experts_with_mc2(
     ep_rank_id = ep_group.rank_in_group
     ep_world_size = ep_group.world_size
 
+    from vllm_ascend import _build_info  # type: ignore
+
     # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
-    need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
+    need_extra_args = (_build_info.__ascend_soc_version__ == "A3"
                        or is_torchair)
 
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
-    a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
+    a3_need_extra_args = _build_info.__ascend_soc_version__ == "A3"
 
     enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
 

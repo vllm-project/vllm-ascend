@@ -40,8 +40,7 @@ from vllm_ascend.torchair.utils import (
     register_torchair_model, torchair_ops_patch,
     torchair_quant_method_register, write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_310p, get_ascend_soc_version,
-                               AscendSocVersion)
+                               is_310p)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -459,8 +458,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
         # NOTE: when enable_expert_parallel on A3, we need to check if `graph_batch_size` is divisible by `tp_size`
         # Because we use x_active_mask for dispatch/combine op on A3, which requires that input shape should be same
         # on all EP ranks
-        if get_ascend_soc_version(
-        ) == AscendSocVersion.A3 and self.parallel_config.enable_expert_parallel:
+        from vllm_ascend import _build_info  # type: ignore
+        if _build_info.__ascend_soc_version__ == "A3" and self.parallel_config.enable_expert_parallel:
             self._align_graph_size_divisible_by_tp_size()
 
     def _align_graph_size_divisible_by_tp_size(self):
