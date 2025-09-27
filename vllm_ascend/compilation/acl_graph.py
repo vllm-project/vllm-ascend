@@ -215,15 +215,17 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
 
         with torch.npu.stream(update_stream):
             torch.npu.graph_task_update_begin(update_stream, handle)
-            torch_npu._npu_paged_attention(query=query,
-                                           key_cache=key_cache,
-                                           value_cache=value_cache,
-                                           num_kv_heads=num_kv_heads,
-                                           num_heads=num_heads,
-                                           scale_value=scale,
-                                           block_table=block_table,
-                                           context_lens=seq_lens,
-                                           out=output)
+            func = graph_params.func_handles.get(runtime_shape)
+            func(query=query,
+                 key_cache=key_cache,
+                 value_cache=value_cache,
+                 num_kv_heads=num_kv_heads,
+                 num_heads=num_heads,
+                 scale_value=scale,
+                 block_table=block_table,
+                 context_lens=seq_lens,
+                 out=output,
+                 workspace=graph_params.workspaces.get(runtime_shape))
             torch.npu.graph_task_update_end(update_stream)
 
             event.record(update_stream)
@@ -235,6 +237,7 @@ class GraphParams:
     workspaces: dict[int, torch.Tensor]
     handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
     attn_params: dict[int, list[tuple]]
+    func_handles: dict[int, Any]
 
 
 _graph_params: Optional[GraphParams] = None
@@ -253,7 +256,21 @@ def set_graph_params(aclgraph_capture_sizes: set[int]):
          for size in aclgraph_capture_sizes},
         {size: []
          for size in aclgraph_capture_sizes},
+        {size: None
+         for size in aclgraph_capture_sizes},
     )
+
+
+def update_graph_params_workspaces(num_tokens: int, workspace: int):
+    global _graph_params
+    if _graph_params is not None:
+        _graph_params.workspaces[num_tokens] = workspace
+
+
+def update_graph_params_func(num_tokens: int, func: Any):
+    global _graph_params
+    if _graph_params is not None:
+        _graph_params.func_handles[num_tokens] = func
 
 
 def get_graph_params():
