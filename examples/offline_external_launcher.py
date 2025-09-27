@@ -125,6 +125,12 @@ def parse_args():
                         type=float,
                         default=None,
                         help="Model weight memory usage in GiB (e.g., 1.0 for 0.5B model).")
+    # e2e test will use it to avoid oom in aclgraph.
+    parser.add_argument("--gpu-memory-utilization",
+                        type=float,
+                        default=0.9,
+                        help="The ratio (between 0 and 1) of GPU memory to reserve for the model weights, "
+                             "activations, and KV cache.")
 
     args = parser.parse_args()
     if args.enable_sleep_mode:
@@ -152,6 +158,7 @@ def main(
     trust_remote_code: bool = True,
     enable_sleep_mode: bool = False,
     temperature: float = 0.8,
+    gpu_memory_utilization: float = 0.9,
 ):
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = str(master_port)
@@ -184,6 +191,7 @@ def main(
         distributed_executor_backend="external_launcher",
         seed=0,
         enable_sleep_mode=enable_sleep_mode,
+        gpu_memory_utilization=gpu_memory_utilization,
     )
     tp_ranks = get_tp_group().ranks
     print(f'TP RANKS: {tp_ranks}')
@@ -268,6 +276,7 @@ if __name__ == "__main__":
                            args.trust_remote_code,
                            args.enable_sleep_mode,
                            args.temperature,
+                           args.gpu_memory_utilization,
                        ))
 
         proc.start()
