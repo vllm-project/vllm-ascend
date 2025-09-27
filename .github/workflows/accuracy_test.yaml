@@ -19,7 +19,7 @@
 # 1. PR labeled with: '*accuracy-test' (ONLY 1 label valid) & 'ready-for-test'
 # 2. workflow_dispatch with models input
 # See detail rule in strategy.matrix note
-name: Benchmarks / accuracy
+name: ascend test / accuracy
 
 on:
   schedule:
@@ -112,7 +112,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
-          ref: v0.10.1.1
+          ref: v0.10.2
           path: ./vllm-empty
 
       - name: Install vllm-project/vllm from source
@@ -303,7 +303,7 @@ jobs:
           git push -f origin "${{ env.BRANCH_NAME }}"
 
       - name: Create PR in upstream via API
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           github-token: ${{ secrets.PAT_TOKEN }}
           script: |

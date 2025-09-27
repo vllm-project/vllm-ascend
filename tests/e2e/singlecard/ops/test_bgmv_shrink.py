@@ -1,3 +1,5 @@
+import gc
+
 import torch
 
 from vllm_ascend.utils import enable_custom_op
@@ -18,7 +20,7 @@ def bgmv_shrink_cpu_impl(x: torch.Tensor, w: torch.Tensor,
 
 
 @torch.inference_mode()
-def test_bgmv_shrink() -> None:
+def test_bgmv_shrink():
     B = 1
     x = torch.randn([B, 128], dtype=torch.float16)
     w = torch.randn([64, 16, 128], dtype=torch.float16)
@@ -31,10 +33,13 @@ def test_bgmv_shrink() -> None:
     y_npu = y.npu()
 
     y = bgmv_shrink_cpu_impl(x, w, indices, y, 0.5)
-    torch.ops._C.bgmv_shrink(x_npu, w_npu, indices_npu, y_npu, 0.5)
+    torch.ops._C_ascend.bgmv_shrink(x_npu, w_npu, indices_npu, y_npu, 0.5)
 
     # Compare the results.
     torch.testing.assert_close(y_npu.cpu(),
                                y,
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

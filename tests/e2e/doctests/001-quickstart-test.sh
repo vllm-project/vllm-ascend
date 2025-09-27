@@ -57,8 +57,8 @@ function quickstart_online_test() {
 }
 
 _info "====> Start simple_test"
-simple_test
+time simple_test
 _info "====> Start quickstart_offline_test"
-quickstart_offline_test
+time quickstart_offline_test
 _info "====> Start quickstart_online_test"
-quickstart_online_test
+time quickstart_online_test

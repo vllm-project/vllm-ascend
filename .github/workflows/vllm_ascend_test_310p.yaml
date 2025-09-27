@@ -53,7 +53,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-310p-1, linux-aarch64-310p-4]
-        vllm_version: [v0.10.1.1, main]
+        vllm_version: [v0.10.2]
     name: 310p e2e test
     runs-on: ${{ matrix.os }}
     container:
@@ -111,7 +111,7 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         run: |
           if [[ "${{ matrix.os }}" == "linux-aarch64-310p-1" ]]; then
-            pytest -sv tests/e2e/singlecard/test_offline_inference_310p.py
+            pytest -sv tests/e2e/310p/test_offline_inference_310p.py
           else
-            pytest -sv tests/e2e/multicard/test_offline_inference_310p.py
+            pytest -sv tests/e2e/310p/test_offline_inference_parallel_310p.py
           fi

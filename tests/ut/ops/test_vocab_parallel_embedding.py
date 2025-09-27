@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.ops.vocab_parallel_embedding import (
     AscendLogitsProcessor, AscendParallelLMHead, AscendVocabParallelEmbedding)
 
@@ -31,6 +32,9 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.embedding_dim = 10
         self.org_num_embeddings = 40
         self.padding_size = 8
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.additional_config = {}
+        init_ascend_config(mock_vllm_config)
 
     def _create_layer(self):
         # Patch methods and dependencies for VocabParallelEmbedding
@@ -206,7 +210,15 @@ class TestAscendLogitsProcessor(unittest.TestCase):
                   return_value=True),
             patch(
                 "vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group.all_to_all",
-                return_value=torch.randn(1, self.vocab_size))
+                return_value=torch.randn(1, self.vocab_size)),
+            patch(
+                "vllm_ascend.ops.vocab_parallel_embedding.get_lmhead_tp_group.all_gather",
+                return_value=torch.randn(1, self.vocab_size)),
+            patch(
+                "vllm_ascend.core.schedule_config.AscendSchedulerConfig.initialize_from_config",
+                return_value=MagicMock(max_num_batched_tokens=1000,
+                                       max_model_len=512,
+                                       enable_chunked_prefill=False))
         ]
 
         for p in self.patches:

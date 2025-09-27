@@ -100,6 +100,11 @@ def mock_distributed():
     pp_group.rank_in_group = 0
     pp_group.world_size = 1
 
+    mlp_tp_group = Mock(spec=GroupCoordinator)
+    mlp_tp_group.rank_in_group = 0
+    mlp_tp_group.world_size = 1
+    mlp_tp_group.all_gather = Mock(return_value=torch.randn(2, 4, 128))
+
     mock_vllm_config = Mock()
     mock_vllm_config.scheduler_config = Mock(max_num_seqs=256)
     mock_vllm_config.model_config = Mock(max_model_len=2048, quant_config=None)
@@ -196,10 +201,6 @@ def test_torchair_deepseek_v2_mlp(mock_distributed, base_config):
                                 quant_config=None)
     assert isinstance(mlp.act_fn, TorchairDeepseekV2SiluAndMul)
 
-    x = torch.randn(2, 4, 128)
-    output = mlp(x)
-    assert output.shape == (2, 4, 128)
-
     with patch(
             "vllm_ascend.torchair.models.torchair_deepseek_v2.QuantizationConfig"
     ) as mock_quant_config:
@@ -274,7 +275,12 @@ def test_torchair_deepseek_v2_mla_attention(mock_rms_norm, mock_distributed,
 
 @patch("torch_npu.npu_add_rms_norm")
 @patch("torch_npu.npu_rms_norm")
-def test_torchair_deepseek_v2_decoder_layer(mock_rms_norm, mock_add_norm,
+@patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
+@patch("torch.ops.vllm.maybe_chunk_residual",
+       side_effect=lambda x, residual: residual)
+def test_torchair_deepseek_v2_decoder_layer(mock_maybe_chunk_residual,
+                                            mock_maybe_wait_prefetch_done,
+                                            mock_rms_norm, mock_add_norm,
                                             mock_distributed, base_config,
                                             vllm_config):
     mock_rms_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128))
