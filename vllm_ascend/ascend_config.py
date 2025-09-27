@@ -92,6 +92,8 @@ class AscendConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
+        self.enable_mla_prefill_dp_rebalancing = additional_config.get(
+            "enable_mla_prefill_dp_rebalancing", False)
 
 
 class TorchairGraphConfig:
