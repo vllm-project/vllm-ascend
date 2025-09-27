@@ -1,0 +1,12 @@
+model_name: "Qwen/Qwen3-8B"
+runner: "linux-aarch64-a2-1"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.765
+  - name: "exact_match,flexible-extract"
+    value: 0.81
+num_fewshot: 5
+enable_thinking: False

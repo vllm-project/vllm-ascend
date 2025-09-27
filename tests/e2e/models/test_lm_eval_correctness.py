@@ -48,7 +48,7 @@ def build_model_args(eval_config, tp_size):
     }
     for s in [
             "max_images", "gpu_memory_utilization", "enable_expert_parallel",
-            "tensor_parallel_size", "enforce_eager"
+            "tensor_parallel_size", "enforce_eager", "enable_thinking"
     ]:
         val = eval_config.get(s, None)
         if val is not None:
