@@ -307,8 +307,8 @@ class P2pHcclEngine:
             elif data["cmd"] == "PUT":
                 tensor_id = data["tensor_id"]
                 shape: torch.Tensor = torch.tensor(data["shape"])
-                recv_tensor_size = shape.prod().item() * torch.empty([1],
-                    getattr(torch, data["dtype"])).element_size()
+                recv_tensor_size = shape.prod().item() * torch.empty((1),
+                    dtype=getattr(torch, data["dtype"])).element_size()
                 while (self.buffer_size + recv_tensor_size > self.buffer_size_threshold):
                     if recv_tensor_size > self.buffer_size_threshold:
                         raise RuntimeError(
