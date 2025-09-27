@@ -87,6 +87,7 @@ jobs:
           # the test separately.
 
           pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          pytest -sv tests/e2e/singlecard/test_reload.py
           pytest -sv tests/e2e/singlecard/test_ascend_scheduler.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_chunked.py
