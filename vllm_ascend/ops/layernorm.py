@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, cast
 
 import torch
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -44,6 +44,8 @@ class AddRMSNormW8A8Quant(RMSNorm):
         import torch_npu
 
         if residual is not None:
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            assert x.size(0) == residual.size(0)
             x, _, residual = torch_npu.npu_add_rms_norm_quant(
                 x,
                 residual,
@@ -51,6 +53,7 @@ class AddRMSNormW8A8Quant(RMSNorm):
                 self.layer.aclnn_input_scale,
                 self.layer.aclnn_input_offset,
                 epsilon=self.variance_epsilon)
+            torch.ops.vllm.maybe_wait_prefetch_done(x)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
@@ -69,6 +72,8 @@ class AscendRMSNorm(RMSNorm):
 
         from vllm_ascend.utils import is_310p
         if residual is not None:
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            assert x.size(0) == residual.size(0)
             if is_310p():
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
@@ -78,8 +83,34 @@ class AscendRMSNorm(RMSNorm):
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(
                     x, residual, self.weight, self.variance_epsilon)
+            torch.ops.vllm.maybe_wait_prefetch_done(x)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight,
                                              self.variance_epsilon)
         return x
+
+
+class AscendQuantRMSNorm(AscendRMSNorm):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        var_hidden_size: Optional[int] = None,
+        has_weight: bool = True,
+        dtype: Optional[torch.dtype] = None,
+    ) -> None:
+        super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+        self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
+                                       requires_grad=False)
+
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if residual is not None:
+            x, residual = super().forward_oot(x, residual)
+            return x.add_(self.bias), residual
+        return cast(torch.Tensor, super().forward_oot(x)).add_(self.bias)

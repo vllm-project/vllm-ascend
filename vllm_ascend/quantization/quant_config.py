@@ -35,13 +35,16 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
+from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
+                                                    get_otp_group)
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, mlp_tp_enable,
+                               oproj_tp_enable)
 
-from .quantizer import AscendQuantizer
+from .utils import get_quant_method
 
 
-@register_quantization_config(ASCEND_QUATIZATION_METHOD)
+@register_quantization_config(ASCEND_QUANTIZATION_METHOD)
 class AscendQuantConfig(QuantizationConfig):
     """Config class for Ascend
 
@@ -50,6 +53,7 @@ class AscendQuantConfig(QuantizationConfig):
     """
 
     def __init__(self, quant_config: Dict[str, Any]):
+        super().__init__()
         self.quant_description = quant_config
 
     def __repr__(self) -> str:
@@ -57,7 +61,7 @@ class AscendQuantConfig(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> str:
-        return ASCEND_QUATIZATION_METHOD
+        return ASCEND_QUANTIZATION_METHOD
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
@@ -80,12 +84,14 @@ class AscendQuantConfig(QuantizationConfig):
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
         if torch.npu.is_available():
-            return ASCEND_QUATIZATION_METHOD
+            return ASCEND_QUANTIZATION_METHOD
         return None
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention
+        if prefix.startswith("language_model"):
+            prefix = prefix.split('.', 1)[-1]
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
@@ -102,7 +108,7 @@ class AscendQuantConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
-                return AscendUnquantizedFusedMoEMethod(layer.moe)
+                return AscendUnquantizedFusedMoEMethod(layer.moe_config)
             return AscendFusedMoEMethod(self, prefix,
                                         self.packed_modules_mapping)
         elif isinstance(layer, VocabParallelEmbedding):
@@ -150,18 +156,15 @@ class AscendQuantConfig(QuantizationConfig):
 class AscendLinearMethod(LinearMethodBase):
     """Linear method for Ascend quantization.
 
-    This class calls AscendQuantizer to search a specific quantization
-    implementations supported on ascend hardware for linear methods.
-
     Args:
         quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]) -> None:
-        self.quantizer = AscendQuantizer.get_quantizer(
-            quant_config.quant_description, prefix, packed_modules_mapping)
-        self.quant_method = self.quantizer.build_linear_method()
+        self.quant_method = get_quant_method(quant_config.quant_description,
+                                             prefix, "linear",
+                                             packed_modules_mapping)
 
     def create_weights(
         self,
@@ -223,25 +226,27 @@ class AscendLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if isinstance(layer, RowParallelLinear):
-            tp_rank = get_tensor_model_parallel_rank()
-            return self.quant_method.apply(layer, x, bias, tp_rank)
-        return self.quant_method.apply(layer, x, bias)
+            if layer.prefix.find("o_proj") != -1 and oproj_tp_enable():
+                tp_rank = get_otp_group().rank_in_group
+            elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
+                tp_rank = get_mlp_tp_group().rank_in_group
+            else:
+                tp_rank = get_tensor_model_parallel_rank()
+        else:
+            tp_rank = 0
+        return self.quant_method.apply(layer, x, bias, tp_rank)
 
 
 class AscendKVCacheMethod(BaseKVCacheMethod):
     """KVCache method for Ascend quantization.
-
-    This class calls AscendQuantizer to search a specific quantization
-    implementations supported on ascend hardware for kvcache methods.
 
     Args:
         quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str) -> None:
-        self.quantizer = AscendQuantizer.get_quantizer(
-            quant_config.quant_description, prefix)
-        self.quant_method = self.quantizer.build_attention_method()
+        self.quant_method = get_quant_method(quant_config.quant_description,
+                                             prefix, "attention")
 
     def create_weights(self, layer: torch.nn.Module) -> None:
         # Different from linear method, there are no weight processing/slicing
@@ -263,18 +268,15 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
 class AscendFusedMoEMethod(FusedMoEMethodBase):
     """FusedMoE method for Ascend quantization.
 
-    This class calls AscendQuantizer to search a specific quantization
-    implementations supported on ascend hardware for kvcache methods.
-
     Args:
         quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]):
-        self.quantizer = AscendQuantizer.get_quantizer(
-            quant_config.quant_description, prefix, packed_modules_mapping)
-        self.quant_method = self.quantizer.build_moe_method()
+        self.quant_method = get_quant_method(quant_config.quant_description,
+                                             prefix, "moe",
+                                             packed_modules_mapping)
 
     def create_weights(
         self,
@@ -344,14 +346,13 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
 class AscendEmbeddingMethod(AscendLinearMethod):
     """Embedding method for Ascend quantization.
-      This class calls AscendQuantizer to search a specific quantization
-      implementations supported on ascend hardware for Embedding methods.
+    
       Args:
           quant_config: The Ascend quantization config.
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]) -> None:
-        self.quantizer = AscendQuantizer.get_quantizer(
-            quant_config.quant_description, prefix, packed_modules_mapping)
-        self.quant_method = self.quantizer.build_linear_method()
+        self.quant_method = get_quant_method(quant_config.quant_description,
+                                             prefix, "linear",
+                                             packed_modules_mapping)

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
+from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
@@ -16,7 +17,7 @@ def test_concurrent_partial_prefill():
                         },
                     },
                     max_num_seqs=3,
-                    max_num_batched_tokens=200,
+                    max_num_batched_tokens=2048,
                     enforce_eager=True,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
@@ -35,7 +36,7 @@ def test_prefix_cache_stats_is_recorded():
                         },
                     },
                     max_num_seqs=3,
-                    max_num_batched_tokens=200,
+                    max_num_batched_tokens=2048,
                     enforce_eager=True,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
@@ -50,8 +51,10 @@ def test_prefix_cache_stats_is_recorded():
                          [4])  # cannot align results when max_tokens > 4
 @pytest.mark.parametrize("chunked_prefill_token_size", [16])
 def test_chunked_prefill_with_ascend_scheduler(
-        example_prompts, max_tokens: int,
-        chunked_prefill_token_size: int) -> None:
+        max_tokens: int, chunked_prefill_token_size: int) -> None:
+    example_prompts = [
+        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs."
+    ]
     max_num_seqs = chunked_prefill_token_size
     max_num_batched_tokens = chunked_prefill_token_size
     with VllmRunner(MODEL,
@@ -63,7 +66,6 @@ def test_chunked_prefill_with_ascend_scheduler(
                     },
                     max_num_seqs=max_num_seqs,
                     max_num_batched_tokens=max_num_batched_tokens,
-                    enforce_eager=True,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
         chunked_prefill_output = vllm_model.generate_greedy(
@@ -75,7 +77,6 @@ def test_chunked_prefill_with_ascend_scheduler(
                             'enabled': True,
                         },
                     },
-                    enforce_eager=True,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_output = vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -86,3 +87,25 @@ def test_chunked_prefill_with_ascend_scheduler(
         name_0="vllm_output",
         name_1="chunked_prefill_output",
     )
+
+
+def test_async_scheduling() -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ] * 10
+    sampling_params = SamplingParams(temperature=0.2,
+                                     max_tokens=10,
+                                     stop_token_ids=None)
+
+    with VllmRunner(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            max_model_len=4096,
+            max_num_seqs=50,
+            dtype="bfloat16",
+            gpu_memory_utilization=0.9,
+            async_scheduling=True,
+    ) as vllm_model:
+        vllm_model.generate(prompts, sampling_params=sampling_params)

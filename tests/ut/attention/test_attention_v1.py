@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
+from vllm.distributed.parallel_state import GroupCoordinator
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendAttentionBackendImpl,
                                                 AscendAttentionMetadataBuilder,
@@ -173,6 +174,10 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
 class TestAscendAttentionBackendImpl(TestBase):
 
+    @patch('vllm.distributed.parallel_state._CP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_context_model_parallel_world_size",
+           return_value=1)
     def setUp(self):
         self.layer = MagicMock()
         self.layer.layer_name = "test_layer"
@@ -226,6 +231,18 @@ class TestAscendAttentionBackendImpl(TestBase):
             kv_cache_dtype="float16",
             logits_soft_cap=None,
             attn_type=None,
+            kv_sharing_target_layer_name=None)
+
+        self.impl_swa = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=64,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=1024,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
             kv_sharing_target_layer_name=None)
 
     @patch('torch.ops.vllm.unified_ascend_attention_with_output')
@@ -385,6 +402,35 @@ class TestAscendAttentionBackendImpl(TestBase):
                                    trace_flag=False)
 
         mock_paged_attention.assert_called_once()
+        assert output.shape == (10, 8 * 64)
+
+    @patch('torch_npu._npu_reshape_and_cache')
+    @patch('torch_npu.npu_fused_infer_attention_score')
+    def test_forward_decode_only_swa(self, mock_fused_infer_attention_score,
+                                     mock_npu_reshape_and_cache):
+        """Test forward pass in DecodeOnly state"""
+        query = torch.randn(10, 8 * 64)
+        key = torch.randn(10, 8 * 64)
+        value = torch.randn(10, 8 * 64)
+        kv_cache = torch.empty(2, 5, 128, 8, 64)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.DecodeOnly
+        metadata.seq_lens = torch.tensor([10] * 10)
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+        metadata.num_actual_tokens = 100
+        metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
+        layer = self.layer_no_quant
+        mock_fused_infer_attention_score.return_value = (torch.ones(10, 8,
+                                                                    64), 1)
+        output = self.impl_swa.forward(layer,
+                                       query,
+                                       key,
+                                       value,
+                                       kv_cache,
+                                       metadata,
+                                       trace_flag=False)
+        print(output.shape)
+        mock_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8 * 64)
 
     @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)

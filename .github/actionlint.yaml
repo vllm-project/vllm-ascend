@@ -11,3 +11,10 @@ self-hosted-runner:
     - linux-aarch64-310p-2
     - linux-aarch64-310p-4
     - ubuntu-24.04-arm
+    - linux-aarch64-a3-1
+    - linux-aarch64-a3-2
+    - linux-aarch64-a3-4
+    - linux-aarch64-a3-8
+    - linux-amd64-cpu-0
+    - linux-amd64-cpu-8
+    - linux-amd64-cpu-16

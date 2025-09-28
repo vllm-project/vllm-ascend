@@ -35,3 +35,4 @@ jobs:
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       with:
         extra_args: --all-files --hook-stage manual
+

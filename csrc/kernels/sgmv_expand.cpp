@@ -53,8 +53,8 @@ public:
 public:
     __aicore__ inline SGMVExpand(AscendC::TPipe* pipe) : pipe_(pipe) {}
 
-    __aicore__ inline void Init(__gm__ void* x, __gm__ void* weight, __gm__ void* loraIndices,
-                                __gm__ void* seqLen, __gm__ void* yIn, __gm__ void* yOut,
+    __aicore__ inline void Init(__gm__ void* x, __gm__ void* weight, __gm__ void* loraIndices, uint32_t loraIndicesSize,
+                                __gm__ void* seqLen, uint32_t seqLenSize, __gm__ void* yIn, __gm__ void* yOut,
                                 uint32_t batchSize, uint32_t numTokensPerCore, uint32_t maxLoRARank,
                                 uint32_t outputHiddenDim, uint32_t sliceOffset, uint32_t outputFullDim)
     {
@@ -70,8 +70,8 @@ public:
         wGm_.SetGlobalBuffer((__gm__ W_T *)weight);
         yInGm_.SetGlobalBuffer((__gm__ Y_T *)yIn);
         yOutGm_.SetGlobalBuffer((__gm__ Y_T *)yOut);
-        loraIndicesGm_.SetGlobalBuffer((__gm__ int64_t *)loraIndices);
-        seqLenGm_.SetGlobalBuffer((__gm__ int64_t *)seqLen);
+        loraIndicesGm_.SetGlobalBuffer((__gm__ int64_t *)loraIndices, loraIndicesSize);
+        seqLenGm_.SetGlobalBuffer((__gm__ int64_t *)seqLen, seqLenSize);
 
         pipe_->InitBuffer(inQueueX_, 1, NUM_ELEMENTS_PER_REPEAT * sizeof(X_T));
         pipe_->InitBuffer(inQueueW_, BUFFER_NUM, W_IN_TILE_NUM_ELEMENTS * sizeof(W_T));
@@ -340,7 +340,8 @@ private:
 
 #define SGMV_EXPAND_TYPE_DECLARE(TYPE)                                                                                 \
     extern "C" __global__ __aicore__ void sgmv_expand_##TYPE(__gm__ void* x, __gm__ void* weight,                      \
-                                                             __gm__ void* loraIndices, __gm__ void* seqLen,            \
+                                                             __gm__ void* loraIndices, uint32_t loraIndicesSize,       \
+                                                             __gm__ void* seqLen, uint32_t seqLenSize,                 \
                                                              __gm__ void* yIn,  __gm__ void* yOut,                     \
                                                              uint32_t batchSize, uint32_t numTokensPerCore,            \
                                                              uint32_t maxLoRARank, uint32_t outputHiddenDim,           \
@@ -348,7 +349,8 @@ private:
     {                                                                                                                  \
         AscendC::TPipe pipe;                                                                                           \
         SGMVExpand<TYPE> op(&pipe);                                                                                    \
-        op.Init(x, weight, loraIndices, seqLen, yIn, yOut, batchSize, numTokensPerCore, maxLoRARank,                   \
+        op.Init(x, weight, loraIndices, loraIndicesSize, seqLen, seqLenSize,                                           \
+                yIn, yOut, batchSize, numTokensPerCore, maxLoRARank,                                                   \
                 outputHiddenDim, sliceOffset, outputFullDim);                                                          \
         op.Process();                                                                                                  \
     }
@@ -360,18 +362,22 @@ SGMV_EXPAND_TYPE_DECLARE(half)
 #endif
 
 namespace vllm_ascend {
-extern void sgmv_expand_impl(AscendType type, void* stream, void* x, void* weight, void* loraIndices, void* seqLen,
+extern void sgmv_expand_impl(AscendType type, void* stream, void* x, void* weight, 
+                             void* loraIndices, uint32_t loraIndicesSize,
+                             void* seqLen, uint32_t seqLenSize,
                              void* yIn, void* yOut, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t maxLoRARank,
                              uint32_t outputHiddenDim, uint32_t sliceOffset, uint32_t outputFullDim)
 {
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
     if (type == AscendType::FP16) {
-        sgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, seqLen, yIn, yOut, batchSize,
+        sgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, seqLen, seqLenSize, 
+                                                        yIn, yOut, batchSize,
                                                         numTokensPerCore, maxLoRARank, outputHiddenDim, sliceOffset, 
                                                         outputFullDim);
     } else if (type == AscendType::BF16) {
         #if (__CCE_AICORE__ >= 220)
-            sgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, seqLen, yIn, yOut, batchSize,
+            sgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, 
+                                                                  seqLen, seqLenSize, yIn, yOut, batchSize,
                                                                   numTokensPerCore, maxLoRARank, outputHiddenDim,
                                                                   sliceOffset, outputFullDim);
         #endif

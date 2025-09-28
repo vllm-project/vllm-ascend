@@ -24,6 +24,7 @@ from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
+from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
 class TestUtils(TestBase):
@@ -116,79 +117,6 @@ class TestUtils(TestBase):
         input_tensor = torch.randn(17, 64)
         output_tensor = utils.aligned_16(input_tensor)
         self.assertEqual(output_tensor.shape[0], 32)
-
-    @mock.patch('torch_npu.get_npu_format')
-    @mock.patch('torch_npu.npu_format_cast')
-    @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
-                new=mock.MagicMock)
-    @mock.patch('vllm_ascend.utils.is_310p')
-    @mock.patch('vllm_ascend.utils.get_ascend_config')
-    def test_maybe_converting_weight_acl_format(self, mock_get_config,
-                                                mock_310p, mock_npu_cast,
-                                                mock_get_format):
-        ACL_FORMAT_FRACTAL_NZ = 29
-        mock_310p.return_value = True
-
-        mock_config = mock.MagicMock()
-        mock_config.torchair_graph_config.enabled = True
-        mock_get_config.return_value = mock_config
-        mock_get_format.return_value = 1
-
-        mock_npu_cast.return_value = 1
-
-        fused_moe = mock.MagicMock()
-        fused_moe.w13_weight = mock.MagicMock()
-        fused_moe.w2_weight = mock.MagicMock()
-        fused_moe.w13_weight.data = torch.randn(128, 256)
-        fused_moe.w2_weight.data = torch.randn(256, 128)
-        model = mock.MagicMock()
-        model.modules.return_value = [fused_moe]
-
-        utils.maybe_converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
-        self.assertEqual(fused_moe.w13_weight.data, 1)
-
-    @mock.patch('torch_npu.get_npu_format')
-    @mock.patch('torch_npu.npu_format_cast')
-    @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
-                new=mock.MagicMock)
-    @mock.patch('vllm_ascend.utils.is_310p')
-    @mock.patch('vllm_ascend.utils.get_ascend_config')
-    def test_maybe_converting_weight_acl_format_format_true(
-            self, mock_get_config, mock_310p, mock_npu_cast, mock_get_format):
-        ACL_FORMAT_FRACTAL_NZ = 29
-        mock_310p.return_value = True
-
-        mock_config = mock.MagicMock()
-        mock_config.torchair_graph_config.enabled = True
-        mock_get_config.return_value = mock_config
-        mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
-
-        mock_npu_cast.return_value = 1
-
-        fused_moe = mock.MagicMock()
-        fused_moe.w13_weight = mock.MagicMock()
-        fused_moe.w2_weight = mock.MagicMock()
-        fused_moe.w13_weight.data = torch.randn(128, 256)
-        fused_moe.w2_weight.data = torch.randn(256, 128)
-        model = mock.MagicMock()
-        model.modules.return_value = [fused_moe]
-
-        mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
-
-        utils.maybe_converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
-
-    @mock.patch('vllm_ascend.utils.get_ascend_config')
-    @mock.patch('vllm_ascend.utils.is_310p', return_value=False)
-    def test_maybe_converting_weight_acl_format_not_310_not_graph(
-            self, mock_310p, mock_get_config):
-        mock_config = mock.MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-        mock_get_config.return_value = mock_config
-
-        mock_constant = mock.MagicMock()
-
-        mock_model = mock.MagicMock()
-        utils.maybe_converting_weight_acl_format(mock_model, mock_constant)
 
     @mock.patch('importlib.util.find_spec')
     @mock.patch('importlib.import_module')
@@ -328,9 +256,26 @@ class TestUtils(TestBase):
             parallel_config=test_parallel_config,
         )
         utils.update_aclgraph_sizes(test_vllm_config)
+        os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
+        utils.update_aclgraph_sizes(test_vllm_config)
+        del os.environ['HCCL_OP_EXPANSION_MODE']
         self.assertEqual(
-            147,
+            138,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
+
+        test_vllm_config.speculative_config = mock.MagicMock()
+        test_vllm_config.speculative_config.draft_model_config = mock.MagicMock(
+        )
+        test_vllm_config.speculative_config.draft_model_config.hf_config = mock.MagicMock(
+        )
+        test_vllm_config.speculative_config.draft_model_config.hf_config.num_hidden_layers = 2
+        os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
+        utils.update_aclgraph_sizes(test_vllm_config)
+        del os.environ['HCCL_OP_EXPANSION_MODE']
+        self.assertEqual(
+            112,
+            len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
+
         # max_num_batch_sizes >= len(original_sizes)
         test_compilation_config = CompilationConfig(
             cudagraph_capture_sizes=[1, 2, 3])
@@ -340,6 +285,9 @@ class TestUtils(TestBase):
             parallel_config=test_parallel_config,
         )
         utils.update_aclgraph_sizes(test_vllm_config)
+        os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
+        utils.update_aclgraph_sizes(test_vllm_config)
+        del os.environ['HCCL_OP_EXPANSION_MODE']
         self.assertEqual(
             3,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
@@ -355,14 +303,14 @@ class TestUtils(TestBase):
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        # should call register_oot three
-        self.assertEqual(mock_customop.register_oot.call_count, 6)
+        self.assertEqual(mock_customop.register_oot.call_count,
+                         len(REGISTERED_ASCEND_OPS))
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        # should not register_oot again, thus only called three in this ut
-        self.assertEqual(mock_customop.register_oot.call_count, 6)
+        self.assertEqual(mock_customop.register_oot.call_count,
+                         len(REGISTERED_ASCEND_OPS))
 
 
 class TestProfileExecuteDuration(TestBase):

@@ -29,6 +29,9 @@ from vllm.v1.request import Request, RequestStatus
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
+from vllm_ascend.utils import context_parallel_enable, sequence_parallel_enable
+if context_parallel_enable():
+    from vllm.distributed.parallel_state import get_context_model_parallel_rank
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -64,6 +67,8 @@ class ReqMeta:
     remote_port: str
     engine_id: str
     remote_tp_size: str
+    remote_cp_size: str
+    remote_sp_size: str
 
 
 class LLMDataDistCMgrConnectorMetadata(KVConnectorMetadata):
@@ -80,6 +85,8 @@ class LLMDataDistCMgrConnectorMetadata(KVConnectorMetadata):
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
             remote_tp_size=kv_transfer_params["remote_tp_size"],
+            remote_cp_size=kv_transfer_params["remote_cp_size"],
+            remote_sp_size=kv_transfer_params["remote_sp_size"],
         )
 
 
@@ -180,8 +187,10 @@ class LLMDataDistCMgrConnectorScheduler():
         self.tp_size = None
         dp_rank_local = self.vllm_config.parallel_config.data_parallel_rank_local
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        self.cp_size = self.vllm_config.parallel_config.context_parallel_size if context_parallel_enable() else 1
+        self.sp_size = tp_size if (sequence_parallel_enable() and self.vllm_config.parallel_config.enable_sequence_parallel) else 1
 
-        self.port = dp_rank_local * tp_size + envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT
+        self.port = dp_rank_local * self.cp_size * tp_size + envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT
 
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
 
@@ -284,6 +293,8 @@ class LLMDataDistCMgrConnectorScheduler():
             remote_port=self.port,
             remote_tp_size=str(
                 self.vllm_config.parallel_config.tensor_parallel_size),
+            remote_cp_size=str(self.cp_size),
+            remote_sp_size=str(self.sp_size),
         )
 
 
@@ -305,6 +316,9 @@ class LLMDataDistCMgrConnectorWorker():
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_rank = get_tp_group().rank_in_group
         self.rank = get_world_group().rank
+        self.cp_size = vllm_config.parallel_config.context_parallel_size if context_parallel_enable() else 1
+        self.cp_rank = get_context_model_parallel_rank() if context_parallel_enable() else 0
+        self.sp_size = self.tp_size if (sequence_parallel_enable() and vllm_config.parallel_config.enable_sequence_parallel) else 1
         self.local_ip = get_ip()
         self.kv_transfer_config: KVTransferConfig = vllm_config.kv_transfer_config
         self.local_agent_metadata: Optional[
@@ -344,7 +358,8 @@ class LLMDataDistCMgrConnectorWorker():
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
-        port = envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT + self.local_dp_rank * self.tp_size + self.tp_rank if self.local_dp_rank is not None else envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT + self.tp_size + self.tp_rank
+        port = envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT + self.local_dp_rank * self.cp_size * self.tp_size + self.cp_rank * self.tp_size + self.tp_rank \
+            if self.local_dp_rank is not None else envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT + self.tp_size + self.tp_rank
         url = f"tcp://{envs_ascend.VLLM_ASCEND_LLMDD_RPC_IP}:{port}"
         msg_encoder = msgspec.msgpack.Encoder()
         msg_decoder = msgspec.msgpack.Decoder()
@@ -375,40 +390,17 @@ class LLMDataDistCMgrConnectorWorker():
                         )
                 elif event_msg == LLMDataDistCMgrEvent.ReqForFinished:
                     finished_req_id = decode_msg[0]
-                    decode_tp_rank = decode_msg[1]
-                    decode_tp_size = decode_msg[2]
                     with self.thread_lock:
-                        if self._increment_task_count(finished_req_id,
-                                                      decode_tp_rank,
-                                                      decode_tp_size):
-                            logger.debug(
-                                f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
-                            )
-                            self.finished_reqs.add(finished_req_id)
+                        logger.debug(
+                            f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
+                        )
+                        self.finished_reqs.add(finished_req_id)
                     sock.send_multipart(
                         (identity, b"", b"receiving decode finished"))
                 else:
                     raise RuntimeError(
                         f"LLMDataDistCMgrConnectorWorker: Receiving unexpected request event {event_msg} from remote !"
                     )
-
-    def _increment_task_count(self, request_id: str, tp_rank: int,
-                              decode_tp_size: int):
-        if request_id not in self.done_receiving_counts:
-            self.done_receiving_counts[request_id] = set()
-        if tp_rank in self.done_receiving_counts[request_id]:
-            logger.warning(
-                f"Received duplicate done signal for request {request_id} "
-                f"from tp rank {tp_rank}. Ignoring.")
-            return False
-        self.done_receiving_counts[request_id].add(tp_rank)
-        if len(self.done_receiving_counts[request_id]) == decode_tp_size:
-            self.done_receiving_counts.pop(request_id)
-            logger.info("All transfers completed for request: "
-                        f"{request_id}. Total ranks: "
-                        f"{decode_tp_size}.")
-            return True
-        return False
 
     def init_llm_datadist(self):
         assert self.local_agent_metadata is not None
@@ -475,9 +467,9 @@ class LLMDataDistCMgrConnectorWorker():
                 d for d in device_list if d.get("server_id") == self.local_ip
                 and device_filter(d.get("device_id", ""))
             ]
-            if len(device_list) <= self.tp_rank:
+            if len(device_list) <= self.cp_rank * self.tp_size + self.tp_rank:
                 continue
-            device_info = device_list[self.tp_rank]
+            device_info = device_list[self.cp_rank * self.tp_size + self.tp_rank]
             super_pod_id_ = device_info.get("super_pod_id", None)
             server_id_ = device_info["server_id"]
             device_id_ = device_info["device_id"]
@@ -596,6 +588,8 @@ class LLMDataDistCMgrConnectorWorker():
                 remote_engine_id=meta.engine_id,
                 request_id=req_id,
                 remote_tp_size=meta.remote_tp_size,
+                remote_cp_size=meta.remote_cp_size,
+                remote_sp_size=meta.remote_sp_size,
             )
             futures.append(future)
 
@@ -767,24 +761,24 @@ class LLMDataDistCMgrConnectorWorker():
             cluster_id = self.add_remote_agent(metadata)
         return cluster_id
 
-    def send_finish_to_remote(self, host: str, port: int, request_id):
-        url = f"tcp://{host}:{port}"
-        logger.debug(f"Sending finished to remote: {url}")
-        msg_encoder = msgspec.msgpack.Encoder()
-        msg_send = msg_encoder.encode([
-            LLMDataDistCMgrEvent.ReqForFinished,
-            [request_id, self.tp_rank, self.tp_size]
-        ])
-        with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
-            try:
-                sock.send(msg_send)
-                logger.debug(
-                    f"Request id {request_id} finished message send to remote {url}"
-                )
-                _ = sock.recv()
-            except Exception as e:
-                logger.error(
-                    f"Failed to send reqest_id {request_id} to prefill: {e}")
+    def send_finish_to_remote(self, host: str, ports: list[int], request_id):
+        for port in ports:
+            url = f"tcp://{host}:{port}"
+            logger.debug(f"Sending finished to remote: {url}")
+            msg_encoder = msgspec.msgpack.Encoder()
+            msg_send = msg_encoder.encode(
+                [LLMDataDistCMgrEvent.ReqForFinished, [request_id]])
+            with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
+                try:
+                    sock.send(msg_send)
+                    logger.debug(
+                        f"Request id {request_id} finished message send to remote {url}"
+                    )
+                    _ = sock.recv()
+                except Exception as e:
+                    logger.error(
+                        f"Failed to send reqest_id {request_id} to prefill: {e}"
+                    )
 
     def _read_blocks(
         self,
@@ -795,63 +789,108 @@ class LLMDataDistCMgrConnectorWorker():
         remote_engine_id: str,
         request_id: str,
         remote_tp_size: str,
+        remote_cp_size: str,
+        remote_sp_size: str,
     ):
-        # if remote_ip not in self.linked_cluster:
-        tp_offset = self.tp_rank % int(remote_tp_size)
-        remote_cluster_id = self.connect_to_remote_agent(
-            remote_ip, remote_port + tp_offset)
-        num_local_blocks = len(local_block_ids)
-        if num_local_blocks == 0:
-            return
-        num_remote_blocks = len(remote_block_ids)
-        assert num_local_blocks <= num_remote_blocks
-        if num_local_blocks < num_remote_blocks:
-            remote_block_ids = remote_block_ids[-num_local_blocks:]
-
-        logger.info(f"remote cluster id is: {remote_cluster_id}")
-        if self.use_mla:
-            remote_cache_key_k_normed = BlocksCacheKey(
-                cluster_id=remote_cluster_id, model_id=0)
-            remote_cache_key_k_pe = BlocksCacheKey(
-                cluster_id=remote_cluster_id, model_id=1)
-            logger.info("Try pull blocks from remote server")
-            try:
-                self.cache_manager.pull_blocks(
-                    remote_cache_key_k_normed,
-                    self.cache[0],  # type: ignore[has-type]
-                    remote_block_ids,
-                    local_block_ids)
-                self.cache_manager.pull_blocks(
-                    remote_cache_key_k_pe,
-                    self.cache[1],  # type: ignore[has-type]    
-                    remote_block_ids,
-                    local_block_ids)
-            except (TypeError, ValueError):
-                raise RuntimeError(
-                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key_k_normed} {remote_cache_key_k_pe}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}"  # type: ignore[has-type]
-                )
-            except LLMException:
-                raise RuntimeError(
-                    "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
-                )
+        remote_cp_size = int(remote_cp_size)
+        remote_sp_size = int(remote_sp_size)
+        remote_tp_size = int(remote_tp_size)
+        if self.cp_size == remote_cp_size and self.sp_size == remote_sp_size:
+            # same as original, P cpi_spj -> D cpi_spj
+            remote_kv_num = 1
+            # remote_ports = [remote_port + self.tp_rank % int(remote_tp_size)]
+            remote_ports = list(
+                range(remote_port + self.tp_rank,
+                    remote_port + int(remote_tp_size), self.tp_size))
+            num_remote_blocks = [len(remote_block_ids)]
+        elif self.cp_size == 1 and self.sp_size == 1:
+            # only cp/sp in P, each D needs to pull from cp*sp P (to all-gather kv_cache)
+            remote_kv_num = remote_cp_size * remote_sp_size
+            # remote_ports = [remote_port + offset for offset in range(remote_cp_size * remote_sp_size)]
+            remote_ports = [remote_port + self.tp_rank + offset for offset in
+                            range(0, remote_cp_size * remote_tp_size, remote_tp_size // remote_sp_size)]
+            # recompute cp/sp block assign here, maybe we can also pass it from P node meta
+            num_local_blocks = len(local_block_ids)
+            num_remote_blocks = [num_local_blocks // (remote_cp_size * remote_sp_size)] * remote_cp_size * remote_sp_size
+            num_remain_blocks = num_local_blocks % (remote_cp_size * remote_sp_size)
+            for i in range(num_remain_blocks):
+                num_remote_blocks[i] += 1
         else:
-            remote_cache_key = BlocksCacheKey(cluster_id=remote_cluster_id)
-            logger.info("Try pull blocks from remote server")
-            try:
-                self.cache_manager.pull_blocks(
-                    remote_cache_key,
-                    self.cache,  # type: ignore[has-type]
-                    remote_block_ids,
-                    local_block_ids)
-            except (TypeError, ValueError):
-                raise RuntimeError(
-                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}"  # type: ignore[has-type]
-                )
-            except LLMException:
-                raise RuntimeError(
-                    "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
-                )
-        self.send_finish_to_remote(remote_ip, remote_port, request_id)
+            raise NotImplementedError('cp/sp resharding not supported now, only support D cp/sp == 1 or D cp/sp == P cp/sp')
+
+        local_block_offset = 0
+        remote_block_ids_full = remote_block_ids
+        local_block_ids_full = local_block_ids
+        for remote_kv_id in range(remote_kv_num):
+            remote_port = remote_ports[remote_kv_id]
+            num_blocks_to_pull = num_remote_blocks[remote_kv_id]
+            if num_blocks_to_pull == 0:
+                continue
+            remote_block_ids = remote_block_ids_full[:num_blocks_to_pull]
+            local_block_ids = local_block_ids_full[local_block_offset:local_block_offset+num_blocks_to_pull]
+            local_block_offset += num_blocks_to_pull
+            # if remote_ip not in self.linked_cluster:
+            # tp_offset = self.tp_rank % int(remote_tp_size)
+            # remote_cluster_id = self.connect_to_remote_agent(
+            #     remote_ip, remote_port + tp_offset)
+            remote_cluster_id = self.connect_to_remote_agent(remote_ip, remote_port)
+            # TODO maybe this part is for prefix cache, not considered now, need to check
+            assert len(local_block_ids) > 0
+            assert len(local_block_ids) == len(remote_block_ids)
+            """
+            num_local_blocks = len(local_block_ids)
+            if num_local_blocks == 0:
+                return
+            num_remote_blocks = len(remote_block_ids)
+            assert num_local_blocks <= num_remote_blocks
+            if num_local_blocks < num_remote_blocks:
+                remote_block_ids = remote_block_ids[-num_local_blocks:]
+            """
+
+            logger.info(f"remote cluster id is: {remote_cluster_id}")
+            if self.use_mla:
+                remote_cache_key_k_normed = BlocksCacheKey(
+                    cluster_id=remote_cluster_id, model_id=0)
+                remote_cache_key_k_pe = BlocksCacheKey(
+                    cluster_id=remote_cluster_id, model_id=1)
+                logger.info("Try pull blocks from remote server")
+                try:
+                    self.cache_manager.pull_blocks(
+                        remote_cache_key_k_normed,
+                        self.cache[0],  # type: ignore[has-type]
+                        remote_block_ids,
+                        local_block_ids)
+                    self.cache_manager.pull_blocks(
+                        remote_cache_key_k_pe,
+                        self.cache[1],  # type: ignore[has-type]    
+                        remote_block_ids,
+                        local_block_ids)
+                except (TypeError, ValueError):
+                    raise RuntimeError(
+                        f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key_k_normed} {remote_cache_key_k_pe}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}"  # type: ignore[has-type]
+                    )
+                except LLMException:
+                    raise RuntimeError(
+                        "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
+                    )
+            else:
+                remote_cache_key = BlocksCacheKey(cluster_id=remote_cluster_id)
+                logger.info("Try pull blocks from remote server")
+                try:
+                    self.cache_manager.pull_blocks(
+                        remote_cache_key,
+                        self.cache,  # type: ignore[has-type]
+                        remote_block_ids,
+                        local_block_ids)
+                except (TypeError, ValueError):
+                    raise RuntimeError(
+                        f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}"  # type: ignore[has-type]
+                    )
+                except LLMException:
+                    raise RuntimeError(
+                        "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
+                    )
+        self.send_finish_to_remote(remote_ip, remote_ports, request_id)
         with self.thread_lock:
             self.finished_reqs.add(request_id)
 

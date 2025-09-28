@@ -20,10 +20,11 @@
 import atexit
 import functools
 import math
+import os
 from contextlib import contextmanager
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
 import torch_npu  # noqa: F401  # noqa: F401
@@ -39,15 +40,17 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
-# NOTE: Currently, we can only capture 1920 graphs at most,
+# NOTE: Currently, we can only capture 1800 graphs at most,
 # due to the limitation of ACL graph. This number is bounded by
-# the number of streams, which is 2048, we save 128 streams
+# the number of streams, which is 2048, we save 248 streams
 # as a buffer.
 # Maximum number of graphs that can be captured by ACL Graph
-MAX_CAPTURE_SIZE = 1920
+# TODO: Find out whether we need to solve allreduce function
+MAX_CAPTURE_SIZE = 1800
 
-ASCEND_QUATIZATION_METHOD = "ascend"
+ASCEND_QUANTIZATION_METHOD = "ascend"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
+REGISTERED_ASCEND_OPS = {}
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
@@ -170,28 +173,6 @@ def aligned_16(tensor: torch.Tensor):
     return new_tensor
 
 
-def maybe_converting_weight_acl_format(model, format=ACL_FORMAT_FRACTAL_NZ):
-    # currently, there are some operations which do not support ACL_FORMAT_FRACTAL_NZ
-    # in eager mode but support it in torchair graph mode. since ACL_FORMAT_FRACTAL_NZ
-    # is much more preferred than ACL_FORMAT_FRACTAL_ND on 300I Duo, we add this
-    # conversion when using torchair graph mode on 300I Duo platform.
-    # TODO: we will remove this conversion if npu_quant_grouped_matmul_dequant
-    # accepts weight format of ACL_FORMAT_FRACTAL_NZ in eager mode.
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-
-    use_torchair = get_ascend_config().torchair_graph_config.enabled
-    if not is_310p() or not use_torchair:
-        return
-    for module in model.modules():
-        if isinstance(module, FusedMoE):
-            if torch_npu.get_npu_format(module.w13_weight.data) == format:
-                return
-            module.w13_weight.data = torch_npu.npu_format_cast(
-                module.w13_weight.data, format)
-            module.w2_weight.data = torch_npu.npu_format_cast(
-                module.w2_weight.data, format)
-
-
 def try_register_lib(lib_name: str, lib_info: str = ""):
     import importlib
     import importlib.util
@@ -207,7 +188,7 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
 
 def enable_custom_op():
     """
-    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component. 
+    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
     global _CUSTOM_OP_ENABLED
@@ -325,17 +306,56 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         num_hidden_layers = get_max_hidden_layers(hf_config)
     parallel_config = vllm_config.parallel_config
 
+    # Calculate maximum supported batch sizes considering model architecture
+    resources_per_graph = num_hidden_layers + 1
+    if vllm_config.speculative_config is not None:
+        draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
+
     # TODO: Find out whether we need to take into account the pp_size
-    parallel_factor = 1 + sum(size > 1 for size in [
-        parallel_config.data_parallel_size_local,
+    num_comm_groups = sum(size > 1 for size in [
+        parallel_config.data_parallel_size,
         parallel_config.tensor_parallel_size,
     ])
 
-    # Calculate maximum supported batch sizes considering model architecture
-    max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
-                                     (num_hidden_layers + 1) / parallel_factor)
-    logger.info("Calculated maximum supported batch sizes for ACL graph: %s",
-                max_num_batch_sizes)
+    if os.getenv("HCCL_OP_EXPANSION_MODE") == 'AIV':
+        # TODO: Find out whether we need to take into account the pp_size
+        parallel_factor = 1 + num_comm_groups + int(
+            parallel_config.enable_expert_parallel)
+        if is_moe_model(vllm_config):
+            parallel_factor += (parallel_config.data_parallel_size > 1)
+        # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device
+        # Assume the following case:
+        # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
+        # According to the formula, max_num_batch_sizes = math.floor(1920 / (48 + 1) / 2) = 19
+        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
+                                         resources_per_graph / parallel_factor)
+        logger.info(
+            "Calculated maximum supported batch sizes for ACL graph: %s",
+            max_num_batch_sizes)
+    else:
+        # The above describes an empirical formula applicable to the A2 hardware.
+        # Under this configuration, HCCL employs the FFTS+ method for execution unfolding,
+        # which adds only 1 concurrent stream without consuming collective communication execution unfolding streams.
+        # On A3 hardware, HCCL defaults to the AICPU method.
+        # This approach may additionally allocate up to rank_size (max 16) - 1 streams per collective communication domain on the device (worst case).
+        # Using the default collective communication unfolding method on A3 will lead to a significant reduction in the maximum supported sizes.
+        # Therefore, the calculation formula has been modified as follows:
+        # Assume the following case:
+        # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
+        # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
+        max_num_batch_sizes = math.floor(
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph /
+            (1 + num_comm_groups * 2))
+        logger.info(
+            "Calculated maximum supported batch sizes for ACL graph: %s",
+            max_num_batch_sizes)
+        logger.warning(
+            "Currently, communication is performed using FFTS+ method, which reduces "
+            "the number of available streams and, as a result, limits the range of runtime "
+            "shapes that can be handled. To both improve communication performance and "
+            "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
+        )
 
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
@@ -463,10 +483,10 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     return False
 
 
-def register_ascend_customop():
+def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
-    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`, 
+    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
     and ensure this will execute after model config is initilazed.
     """
     global _ASCEND_CUSTOMOP_IS_REIGISTERED
@@ -474,24 +494,45 @@ def register_ascend_customop():
         return
     from vllm.model_executor.custom_op import CustomOp
 
+    from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
-                                        AscendMlpMergedColumnParallelLinear,
-                                        AscendMlpRowParallelLinear)
-    CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
-    CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
-                          name="SiluAndMul")
-    if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
-                              name="ColumnParallelLinear")
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpRowParallelLinear,
-                              name="RowParallelLinear")
-        CustomOp.register_oot(
-            _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
-            name="MergedColumnParallelLinear")
+    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+    from vllm_ascend.ops.layernorm import AscendQuantRMSNorm, AscendRMSNorm
+    from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
+                                        AscendMergedColumnParallelLinear,
+                                        AscendQKVParallelLinear,
+                                        AscendRowParallelLinear)
+    from vllm_ascend.ops.rotary_embedding import (
+        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+    from vllm_ascend.ops.vocab_parallel_embedding import (
+        AscendLogitsProcessor, AscendParallelLMHead,
+        AscendVocabParallelEmbedding)
 
-    from vllm_ascend.ops.layernorm import AscendRMSNorm
-    CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
+    global REGISTERED_ASCEND_OPS
+    REGISTERED_ASCEND_OPS = {
+        "QuickGELU": AscendQuickGELU,
+        "SiluAndMul": AscendSiluAndMul,
+        "RotaryEmbedding": AscendRotaryEmbedding,
+        "ColumnParallelLinear": AscendColumnParallelLinear,
+        "RowParallelLinear": AscendRowParallelLinear,
+        "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
+        "QKVParallelLinear": AscendQKVParallelLinear,
+        "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
+        "VocabParallelEmbedding": AscendVocabParallelEmbedding,
+        "ParallelLMHead": AscendParallelLMHead,
+        "LogitsProcessor": AscendLogitsProcessor,
+        "RMSNorm": AscendRMSNorm,
+        "FusedMoE": AscendFusedMoE,
+        "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
+    }
+
+    if vllm_config is not None and \
+        vllm_config.quant_config is not None and \
+        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
+        REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
+
+    for name, op_cls in REGISTERED_ASCEND_OPS.items():
+        CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
@@ -523,3 +564,64 @@ def get_ascend_soc_version():
     global _ascend_soc_version
     assert _ascend_soc_version is not None
     return _ascend_soc_version
+
+
+def lmhead_tp_enable() -> bool:
+    return get_ascend_config().lmhead_tensor_parallel_size is not None
+
+
+def oproj_tp_enable() -> bool:
+    return get_ascend_config().oproj_tensor_parallel_size is not None
+
+
+def mlp_tp_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE
+
+
+def sequence_parallel_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_SP
+
+
+def context_parallel_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_CP
+
+
+def matmul_allreduce_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
+
+
+def dense_optim_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
+
+
+def is_moe_model(vllm_config: VllmConfig):
+    config = vllm_config.model_config.hf_config
+    return any('experts' in key.lower() for key in config.to_dict())
+
+
+def weak_ref_tensor(tensor: Any) -> Any:
+    """
+    Create a weak reference to a tensor.
+    The new tensor will share the same data as the original tensor,
+    but will not keep the original tensor alive.
+    """
+    if isinstance(tensor, torch.Tensor):
+        return torch.ops._C_ascend.weak_ref_tensor(tensor)
+    else:
+        return tensor
+
+
+def weak_ref_tensors(
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
+    """
+    Convenience function to create weak references to tensors,
+    for single tensor, list of tensors or tuple of tensors.
+    """
+    if isinstance(tensors, torch.Tensor):
+        return weak_ref_tensor(tensors)
+    if isinstance(tensors, list):
+        return [weak_ref_tensor(t) for t in tensors]
+    if isinstance(tensors, tuple):
+        return tuple(weak_ref_tensor(t) for t in tensors)
+    raise ValueError("Invalid type for tensors")

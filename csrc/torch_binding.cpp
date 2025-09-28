@@ -20,7 +20,6 @@
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
-#include <pybind11/pybind11.h>
 #include "acl/acl.h"
 #include "ops.h"
 #include "utils.h"
@@ -142,7 +141,7 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
     TP2, rank 1:
                             |< -----------BASE----------- >|< -BASE PADDING- >|< -----------LORA PADDING----------- >|
     corresponding token_id: | 512 | 513 | 514 | ... | 1009 | -1  | ...  | -1  |  -1  | ... |  -1  | -1  | ... |   -1 |
-                     index: |  0  |  1  |  2  | ... | 497  | 498 | ...  | 511 | 512  | ... | 519  | 520 | ... |  543 | 
+                     index: |  0  |  1  |  2  | ... | 497  | 498 | ...  | 511 | 512  | ... | 519  | 520 | ... |  543 |
     Parameters:
         org_vocab_start_index //base embeddings start
         org_vocab_end_index //base embeddings end
@@ -165,22 +164,22 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
     // Create output tensors
     at::Tensor masked_input = at::empty_like(input);
 	at::Tensor mask = at::empty_like(input).to(at::kBool);
-    
+
     // Get data pointers
     void *input_ptr = input.data_ptr();
     void *masked_input_ptr = masked_input.data_ptr();
     void *mask_ptr = mask.data_ptr();
-    
+
     // Get current stream
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-    
+
     // Get scalar type
     at::ScalarType scalar_type = input.scalar_type();
-    
+
     // Create and configure OpCommand
     at_npu::native::OpCommand cmd;
     cmd.Name("get_masked_input_and_mask");
-    cmd.SetCustomHandler([scalar_type, size, stream, 
+    cmd.SetCustomHandler([scalar_type, size, stream,
                          input_ptr, masked_input_ptr, mask_ptr,
                          org_vocab_start_index, org_vocab_end_index,
                          num_org_vocab_padding, added_vocab_start_index,
@@ -194,7 +193,7 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
         get_masked_input_and_mask_impl(
             stream,
             input_ptr,
-            masked_input_ptr, 
+            masked_input_ptr,
             mask_ptr,
             org_vocab_start_index,
             org_vocab_end_index,
@@ -204,7 +203,7 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
             size,
             loop_cnt,
             aiv_num);
-            
+
         return 0;
     });
     cmd.Run();
@@ -226,6 +225,7 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
     void* x_ptr = x.data_ptr();
     void* weight_ptr = weight.data_ptr();
     void* indices_ptr = indices.data_ptr();
+    int indices_size = indices.size(0);
     void* y_ptr = y.data_ptr();
     int batch_size = x.size(0);
     int input_hidden_token = x.size(1);
@@ -234,7 +234,7 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("bgmv_shrink");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, input_hidden_token,
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, batch_size, input_hidden_token,
                           lora_rank, scale_f]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         int device_id = 0;
@@ -242,7 +242,7 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
         TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
-        bgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, num_tokens_per_core,
+        bgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, batch_size, num_tokens_per_core,
                          input_hidden_token, lora_rank, scale_f);
         return 0;
     });
@@ -271,6 +271,7 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
     void* x_ptr = x.data_ptr();
     void* weight_ptr = weight.data_ptr();
     void* indices_ptr = indices.data_ptr();
+    int indices_size = indices.size(0);
     void* y_ptr = y.data_ptr();
     void* y_out_ptr = y_out.data_ptr();
     int batch_size = x.size(0);
@@ -279,7 +280,7 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("bgmv_expand");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, y_out_ptr, batch_size, lora_rank,
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size, lora_rank,
                           slice_offset, slice_size, output_full_dim]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         int device_id = 0;
@@ -287,7 +288,7 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
         TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
-        bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, y_out_ptr, batch_size,
+        bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, indices_size, y_ptr, y_out_ptr, batch_size,
                          num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim);
         return 0;
     });
@@ -309,6 +310,8 @@ void sgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at
     void* weight_ptr = weight.data_ptr();
     void* lora_indices_ptr = lora_indices.data_ptr();
     void* seq_len_ptr = seq_len.data_ptr();
+    int lora_indices_size = lora_indices.size(0);
+    int seq_len_size = seq_len.size(0);
     void* y_ptr = y.data_ptr();
     int batch_size = x.size(0);
     int input_hidden_token = x.size(1);
@@ -317,7 +320,8 @@ void sgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("sgmv_shrink");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, lora_indices_ptr, seq_len_ptr, y_ptr, 
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, lora_indices_ptr, lora_indices_size,
+                          seq_len_ptr, seq_len_size, y_ptr,
                           batch_size, input_hidden_token, lora_rank, scale_f]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         int device_id = 0;
@@ -325,7 +329,8 @@ void sgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at
         TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
-        sgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, lora_indices_ptr, seq_len_ptr, y_ptr, batch_size, 
+        sgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, lora_indices_ptr, lora_indices_size, seq_len_ptr, seq_len_size,
+                         y_ptr, batch_size,
                          num_tokens_per_core, input_hidden_token, lora_rank, scale_f);
         return 0;
     });
@@ -352,6 +357,8 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     void* weight_ptr = weight.data_ptr();
     void* lora_indices_ptr = lora_indices.data_ptr();
     void* seq_len_ptr = seq_len.data_ptr();
+    int lora_indices_size = lora_indices.size(0);
+    int seq_len_size = seq_len.size(0);
     void* y_ptr = y.data_ptr();
     void* y_out_ptr = y_out.data_ptr();
     int batch_size = x.size(0);
@@ -360,7 +367,7 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("sgmv_expand");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, lora_indices_ptr, seq_len_ptr, y_ptr, y_out_ptr, 
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, lora_indices_ptr, lora_indices_size, seq_len_ptr, seq_len_size, y_ptr, y_out_ptr,
                           batch_size, lora_rank, slice_offset, slice_size, output_full_dim]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         int device_id = 0;
@@ -368,7 +375,7 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
         TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
-        sgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, lora_indices_ptr, seq_len_ptr, y_ptr, y_out_ptr, 
+        sgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, lora_indices_ptr, lora_indices_size, seq_len_ptr, seq_len_size, y_ptr, y_out_ptr,
                          batch_size, num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim);
         return 0;
     });
@@ -377,7 +384,7 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
 }
 } // namespace vllm_ascend
 
-TORCH_LIBRARY_EXPAND(_C, ops)
+TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 {
     // vLLM-Ascend custom ops
     ops.def("weak_ref_tensor(Tensor input) -> Tensor");
@@ -416,5 +423,3 @@ TORCH_LIBRARY_EXPAND(_C, ops)
         "            int slice_offset, int slice_size) -> Tensor");
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
 }
-
-REGISTER_EXTENSION(_C)

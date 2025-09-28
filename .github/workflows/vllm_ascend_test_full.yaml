@@ -1,0 +1,233 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+name: 'test-full'
+
+on:
+  pull_request:
+    branches:
+      - 'main'
+      - '*-dev'
+    types: [ labeled ]
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+# and ignore the lint / 1 card / 4 cards test type
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
+    outputs:
+      e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
+      ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            e2e_tracker:
+              - '.github/workflows/vllm_ascend_test.yaml'
+              - 'vllm_ascend/**'
+              - 'csrc/**'
+              - 'cmake/**'
+              - 'tests/e2e/**'
+              - 'CMakeLists.txt'
+              - 'setup.py'
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'requirements-lint.txt'
+              - 'packages.txt'
+            ut_tracker:
+              - 'tests/ut/**'
+
+  e2e-full:
+    # only trigger full test when pull request is approved
+    needs: [changes]
+    if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
+    strategy:
+      max-parallel: 2
+      matrix:
+        os: [linux-aarch64-a2-1]
+        vllm_version: [v0.10.2]
+    name: singlecard e2e test - full
+    runs-on: ${{ matrix.os }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ matrix.vllm_version }}
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Run e2e test
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+        run: |
+          # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
+          # the test separately.
+
+          pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          pytest -sv tests/e2e/singlecard/test_ascend_scheduler.py
+          pytest -sv tests/e2e/singlecard/test_camem.py
+          pytest -sv tests/e2e/singlecard/test_chunked.py
+          pytest -sv tests/e2e/singlecard/test_embedding.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv tests/e2e/singlecard/test_profile_execute_duration.py
+          pytest -sv tests/e2e/singlecard/test_quantization.py
+          pytest -sv tests/e2e/singlecard/test_sampler.py
+          pytest -sv tests/e2e/singlecard/test_vlm.py
+
+          # ------------------------------------ v1 spec decode test ------------------------------------ #
+          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
+          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_torchair_correctness.py
+          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
+
+          pytest -sv tests/e2e/singlecard/ops/
+
+  e2e-2-cards-full:
+    # only trigger full test when pull request is approved
+    needs: [changes]
+    if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
+    strategy:
+      max-parallel: 2
+      matrix:
+        os: [linux-aarch64-a2-2]
+        vllm_version: [v0.10.2]
+    name: multicard e2e test - full
+    runs-on: ${{ matrix.os }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ matrix.vllm_version }}
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Run vllm-project/vllm-ascend test
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+        run: |
+          pytest -sv tests/e2e/multicard/test_data_parallel.py
+          pytest -sv tests/e2e/multicard/test_expert_parallel.py
+          # external_launcher test is not stable enough. Fix it later
+          # pytest -sv tests/e2e/multicard/test_external_launcher.py
+          pytest -sv tests/e2e/multicard/test_fused_moe_allgather_ep.py
+          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+
+          # To avoid oom, we need to run the test in a single process.
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W8A8
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_sp_for_qwen3_moe
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen_Dense_with_flashcomm_v1
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight
+
+          #pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
+          pytest -sv tests/e2e/multicard/test_prefix_caching.py
+          pytest -sv tests/e2e/multicard/test_qwen3_moe.py
+          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py

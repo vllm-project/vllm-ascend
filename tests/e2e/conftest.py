@@ -33,14 +33,13 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
 from vllm.config import TaskOption, _get_and_verify_dtype
-from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
+from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import is_list_of
 
-from tests.e2e.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
+from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
+from vllm_ascend.ascend_config import clear_ascend_config
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
@@ -62,7 +61,6 @@ PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 _TEST_DIR = os.path.dirname(__file__)
-_TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
@@ -89,13 +87,13 @@ class VllmRunner:
         # Use smaller max model length, otherwise bigger model cannot run due
         # to kv cache size limit.
         max_model_len: int = 1024,
-        dtype: str = "half",
+        dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
         block_size: int = 16,
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
-        enforce_eager: Optional[bool] = True,
+        enforce_eager: Optional[bool] = False,
         quantization: Optional[str] = None,
         **kwargs,
     ) -> None:
@@ -220,26 +218,6 @@ class VllmRunner:
                 if sampling_params.prompt_logprobs is None else
                 toks_str_logsprobs_prompt_logprobs)
 
-    def generate_encoder_decoder_w_logprobs(
-        self,
-        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
-        sampling_params: SamplingParams,
-    ) -> Union[List[TokensTextLogprobs],
-               List[TokensTextLogprobsPromptLogprobs]]:
-        '''
-        Logprobs generation for vLLM encoder/decoder models
-        '''
-
-        assert sampling_params.logprobs is not None
-        req_outputs = self.model.generate(encoder_decoder_prompts,
-                                          sampling_params=sampling_params)
-        toks_str_logsprobs_prompt_logprobs = (
-            self._final_steps_generate_w_logprobs(req_outputs))
-        # Omit prompt logprobs if not required by sampling params
-        return ([x[0:-1] for x in toks_str_logsprobs_prompt_logprobs]
-                if sampling_params.prompt_logprobs is None else
-                toks_str_logsprobs_prompt_logprobs)
-
     def generate_greedy(
         self,
         prompts: List[str],
@@ -284,53 +262,6 @@ class VllmRunner:
                                         audios=audios,
                                         videos=videos)
 
-    def generate_encoder_decoder_greedy_logprobs(
-        self,
-        encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
-        max_tokens: int,
-        num_logprobs: int,
-        num_prompt_logprobs: Optional[int] = None,
-    ) -> Union[List[TokensTextLogprobs],
-               List[TokensTextLogprobsPromptLogprobs]]:
-        greedy_logprobs_params = SamplingParams(
-            temperature=0.0,
-            max_tokens=max_tokens,
-            logprobs=num_logprobs,
-            prompt_logprobs=(num_prompt_logprobs),
-        )
-        '''
-        Greedy logprobs generation for vLLM encoder/decoder models
-        '''
-
-        return self.generate_encoder_decoder_w_logprobs(
-            encoder_decoder_prompts, greedy_logprobs_params)
-
-    def generate_beam_search(
-        self,
-        prompts: Union[List[str], List[List[int]]],
-        beam_width: int,
-        max_tokens: int,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
-        if is_list_of(prompts, str, check="all"):
-            prompts = [TextPrompt(prompt=prompt) for prompt in prompts]
-        else:
-            prompts = [
-                TokensPrompt(prompt_token_ids=tokens) for tokens in prompts
-            ]
-        outputs = self.model.beam_search(
-            prompts,
-            BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
-        returned_outputs = []
-        for output in outputs:
-            token_ids = [x.tokens for x in output.sequences]
-            texts = [x.text for x in output.sequences]
-            returned_outputs.append((token_ids, texts))
-        return returned_outputs
-
-    def classify(self, prompts: List[str]) -> List[List[float]]:
-        req_outputs = self.model.classify(prompts)
-        return [req_output.outputs.probs for req_output in req_outputs]
-
     def encode(
         self,
         prompts: List[str],
@@ -346,49 +277,13 @@ class VllmRunner:
         req_outputs = self.model.embed(inputs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
-    def score(
-        self,
-        text_1: Union[str, List[str]],
-        text_2: Union[str, List[str]],
-    ) -> List[float]:
-        req_outputs = self.model.score(text_1, text_2)
-        return [req_output.outputs.score for req_output in req_outputs]
-
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         del self.model
+        clear_ascend_config()
         cleanup_dist_env_and_memory()
-
-
-@pytest.fixture(scope="session")
-def vllm_runner():
-    return VllmRunner
-
-
-@pytest.fixture(params=list(PROMPT_TEMPLATES.keys()))
-def prompt_template(request):
-    return PROMPT_TEMPLATES[request.param]
-
-
-def _read_prompts(filename: str) -> list[str]:
-    with open(filename) as f:
-        prompts = f.readlines()
-        return prompts
-
-
-@pytest.fixture
-def example_prompts() -> list[str]:
-    prompts = []
-    for filename in _TEST_PROMPTS:
-        prompts += _read_prompts(filename)
-    return prompts
-
-
-@pytest.fixture(scope="session")
-def ilama_lora_files():
-    return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
 
 
 class HfRunner:
@@ -515,5 +410,22 @@ class HfRunner:
 
 
 @pytest.fixture(scope="session")
-def hf_runner():
-    return HfRunner
+def ilama_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
+
+
+def qwen_prompt(questions: List[str]) -> List[str]:
+    placeholder = "<|image_pad|>"
+    return [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+             f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+             f"{q}<|im_end|>\n<|im_start|>assistant\n") for q in questions]
+
+
+PROMPT_TEMPLATES = {
+    "qwen2.5vl": qwen_prompt,
+}
+
+
+@pytest.fixture(params=list(PROMPT_TEMPLATES.keys()))
+def prompt_template(request):
+    return PROMPT_TEMPLATES[request.param]

@@ -90,11 +90,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
                  ),
-    # MOE_ALL2ALL_BUFFER:
-    #   0: default, normal init.
-    #   1: enable moe_all2all_buffer.
-    "MOE_ALL2ALL_BUFFER":
-    lambda: bool(int(os.getenv("MOE_ALL2ALL_BUFFER", '0'))),
     # Some models are optimized by vllm ascend. While in some case, e.g. rlhf
     # training, the optimized model may not be suitable. In this case, set this
     # value to False to disable the optimized model.
@@ -136,15 +131,44 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
-    # Whether to enable the alltoall_seq flag, this provides a basic framework on the basis of alltoall for easy expansion.
-    #   0: default, normal init.
-    #   1: enable moe all2all seq.
-    "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ":
-    lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ', '0'))),
+    # Whether to enable FlashComm optimization when tensor parallel is enabled.
+    # This feature will get better performance when concurrency is large.
+    "VLLM_ASCEND_ENABLE_FLASHCOMM":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))),
+    # Whether to enable MLP weight prefetch, only used in small concurrency.
+    "VLLM_ASCEND_ENABLE_PREFETCH_MLP":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", '0'))),
+    # buffer size for gate up prefetch
+    "VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE":
+    lambda: int(
+        os.getenv("VLLM_ASCEND_MLP_GATE_UP_PREFETCH_SIZE", 18 * 1024 * 1024)),
+    # buffer size for down proj prefetch
+    "VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE":
+    lambda: int(
+        os.getenv("VLLM_ASCEND_MLP_DOWN_PREFETCH_SIZE", 18 * 1024 * 1024)),
+    # Whether to enable dense model and general optimizations for better performance.
+    # Since we modified the base parent class `linear`, this optimization is also applicable to other model types.
+    # However, there might be hidden issues, and it is currently recommended to prioritize its use with dense models.
+    "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE", '0'))),
     # Whether to enable mlp optimize when tensor parallel is enabled.
     # this feature in eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLP_OPTIMIZE", '0'))),
+    # Determine the number of physical devices in a non-full-use scenario
+    # caused by the initialization of the Mooncake connector.
+    "PHYSICAL_DEVICES":
+    lambda: os.getenv("PHYSICAL_DEVICES", None),
+    # Timeout (in seconds) for delayed KVCache block release. In the prefill
+    # node, if a request is marked for delayed KV block release and the blocks
+    # are not freed within this timeout, they will be forcibly released.
+    "VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT":
+    lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
+    # Decide whether we should enable CP parallelism and SP parallelism.
+    "VLLM_ASCEND_ENABLE_SP":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_SP", '0'))),
+    "VLLM_ASCEND_ENABLE_CP":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CP", '0')))
 }
 
 # end-env-vars-definition

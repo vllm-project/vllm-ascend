@@ -32,6 +32,7 @@ export GLOO_SOCKET_IFNAME="xxxxxx"
 export TP_SOCKET_IFNAME="xxxxxx"
 export HCCL_SOCKET_IFNAME="xxxxxx"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export PHYSICAL_DEVICES=$(ls /dev/davinci* 2>/dev/null | grep -o '[0-9]\+' | sort -n | paste -sd',' -)
 
 vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   --host localhost \
@@ -100,6 +101,7 @@ export GLOO_SOCKET_IFNAME="xxxxxx"
 export TP_SOCKET_IFNAME="xxxxxx"
 export HCCL_SOCKET_IFNAME="xxxxxx"
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
+export PHYSICAL_DEVICES=$(ls /dev/davinci* 2>/dev/null | grep -o '[0-9]\+' | sort -n | paste -sd',' -)
 
 vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   --host localhost \
