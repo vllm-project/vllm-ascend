@@ -208,15 +208,16 @@ class AscendScheduler(Scheduler):
                 assert num_new_tokens > 0
                 blocks = new_computed_blocks.blocks[0]
 
-            # Schedule encoder inputs.
-            if request.has_encoder_inputs:
-                (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_budget) = self._try_schedule_encoder_inputs(
-                     request, num_computed_tokens, num_new_tokens,
-                     encoder_budget)
-                if num_new_tokens == 0:
-                    # The request cannot be scheduled.
-                    break
+                # Schedule encoder inputs.
+                if request.has_encoder_inputs:
+                    (encoder_inputs_to_schedule, num_new_tokens,
+                     new_encoder_budget) = self._try_schedule_encoder_inputs(
+                         request, num_computed_tokens, num_new_tokens,
+                         encoder_budget)
+                    if num_new_tokens == 0 or len(
+                            encoder_inputs_to_schedule) == 0:
+                        # The request cannot be scheduled.
+                        break
 
             watermark = getattr(self.scheduler_config, "watermark", 0.01)
             if not self._check_watermark_for_prefill(request, num_new_tokens,
