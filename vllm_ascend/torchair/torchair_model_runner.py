@@ -43,7 +43,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_310p, get_ascend_soc_version,
                                AscendSocVersion)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-import vllm.envs as envs_vllm
 
 
 class NPUTorchairModelRunner(NPUModelRunner):
@@ -378,7 +377,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             self.torchair_compiled_model = torch.compile(
                 self.model,
                 dynamic=not self.ascend_config.use_sfa,
-                fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                fullgraph=True,
                 backend=npu_backend)
             return self.torchair_compiled_model
         else:
@@ -401,7 +400,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 batch_size] = torchair.inference.cache_compile(
                     self.model.__dict__[forward_proxy_name],
                     dynamic=not self.ascend_config.use_sfa,
-                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    fullgraph=True,
                     cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
                     ge_cache=False)

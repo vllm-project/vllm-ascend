@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Type, TypeVar
+from typing import (TYPE_CHECKING, ClassVar, NamedTuple, Optional, Tuple, Type,
+                    TypeVar)
 
 import torch
 import torch_npu
@@ -12,6 +13,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -77,9 +79,9 @@ class AscendSFAPrefillMetadata:
     block_table: torch.Tensor
     max_query_len: int
     max_seq_lens: int
+    sin: torch.Tensor
+    cos: torch.Tensor
     chunked_context: Optional[ChunkedContextMetadata] = None
-    sin: torch.Tensor = None
-    cos: torch.Tensor = None
 
 
 @dataclass
@@ -91,10 +93,10 @@ class AscendSFADecodeMetadata:
     seq_lens: torch.Tensor
     max_seq_lens: int
     seq_lens_list: list[int]
-    actual_seq_lengths_q: Optional[torch.Tensor] = None
+    actual_seq_lengths_q: torch.Tensor
+    sin: torch.Tensor
+    cos: torch.Tensor
     attn_mask: Optional[torch.Tensor] = None
-    sin: torch.Tensor = None
-    cos: torch.Tensor = None
 
 
 @dataclass
@@ -163,6 +165,9 @@ M = TypeVar("M", bound=AscendSFAMetadata)
 
 
 class AscendSFAMetadataBuilder:
+    # Does this backend/builder support ACL Graphs for attention (default: no).
+    aclgraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.NEVER
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -292,11 +297,10 @@ class AscendSFAMetadataBuilder:
         device = self.device
 
         block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
-        slot_mapping = common_attn_metadata.slot_mapping_cpu[:
-                                                             num_actual_tokens].to(
-                                                                 device,
-                                                                 non_blocking=
-                                                                 True)
+        slot_mapping = common_attn_metadata.slot_mapping[:
+                                                         num_actual_tokens].to(
+                                                             device,
+                                                             non_blocking=True)
         input_positions = common_attn_metadata.positions[:
                                                          num_actual_tokens].long(
                                                          )
@@ -686,8 +690,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_indices = self.indexer_select(hidden_states_decode,
                                                decode_q_c,
                                                attn_metadata=attn_metadata,
-                                               kv_cache=kv_cache,
-                                               is_prefill=False)
+                                               kv_cache=kv_cache)
 
             query_states = (decode_q_nope, decode_q_pe)
             key_states = (decode_k_nope, decode_k_rope)
@@ -775,8 +778,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_indices = self.indexer_select(x=hidden_states_prefill,
                                                qr=prefill_qr,
                                                kv_cache=kv_cache,
-                                               attn_metadata=attn_metadata,
-                                               is_prefill=True)
+                                               attn_metadata=attn_metadata)
             query_states = (prefill_q_nope, prefill_q_pe)
             key_states = (prefill_k_nope, prefill_k_pe)
             prefill_preprocess_res = PrefillSFAPreprocessResult(
@@ -826,11 +828,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 query_states=decode_preprocess_res.query_states,
                 key_states=decode_preprocess_res.key_states,
                 attn_metadata=attn_metadata,
-                attention_mask=None,
-                kv_cache=kv_cache,
-                topk_indices=decode_preprocess_res.topk_indices,
-                is_prefill=False,
-                bsz=decode_preprocess_res.bsz)
+                topk_indices=decode_preprocess_res.topk_indices)
             o_proj_input[:num_decode_tokens] = decode_attn_output
 
         if prefill_preprocess_res is not None:
@@ -838,33 +836,19 @@ class AscendSFAImpl(MLAAttentionImpl):
                 query_states=prefill_preprocess_res.query_states,
                 key_states=prefill_preprocess_res.key_states,
                 attn_metadata=attn_metadata,
-                attention_mask=None,
-                kv_cache=kv_cache,
-                topk_indices=prefill_preprocess_res.topk_indices,
-                is_prefill=True,
-                bsz=None)
+                topk_indices=prefill_preprocess_res.topk_indices)
             o_proj_input[num_decode_tokens:] = prefill_attn_output
 
         output[...] = self.mla_epilog(o_proj_input, absorb=True)
         return output
 
-    def apply_attention_fusion(
-            self,
-            query_states,
-            key_states,
-            topk_indices,
-            attn_metadata: M,
-            attention_mask: Optional[torch.Tensor] = None,
-            # actual_seq_qlen: torch.Tensor = None,
-            # actual_seq_lengths_kv: torch.Tensor = None,
-            kv_cache: Tuple[torch.Tensor] = None,
-            is_prefill: bool = True,
-            bsz: int = None):
+    def apply_attention_fusion(self, query_states, key_states, topk_indices,
+                               attn_metadata: M):
         # repeat k/v heads if n_kv_heads < n_heads
         q_nope, q_pe = query_states
         k_nope, k_rope = key_states
 
-        if is_prefill:
+        if attn_metadata.prefill is not None:
 
             prefill_metadata = attn_metadata.prefill
 
@@ -885,7 +869,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 sparse_mode=3,
             )
 
-        else:
+        elif attn_metadata.decode is not None:
             decode_metadata = attn_metadata.decode
 
             slc_fa_fusion = torch.ops.custom.npu_selected_flash_attention(
@@ -937,14 +921,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         qr: torch.Tensor,
         kv_cache: Tuple[torch.Tensor],
         attn_metadata: M,
-        is_prefill: bool = True,
     ):
-        if is_prefill:
+        if attn_metadata.prefill is not None:
             cos = attn_metadata.prefill.cos
             sin = attn_metadata.prefill.sin
-        else:
+            actual_seq_lengths_query = attn_metadata.prefill.query_lens
+            actual_seq_lengths_key = attn_metadata.prefill.seq_lens
+            block_table = attn_metadata.prefill.block_table
+        elif attn_metadata.decode is not None:
             cos = attn_metadata.decode.cos
             sin = attn_metadata.decode.sin
+            actual_seq_lengths_query = attn_metadata.decode.actual_seq_lengths_q
+            actual_seq_lengths_key = attn_metadata.decode.seq_lens
+            block_table = attn_metadata.decode.block_table
 
         cos_q, sin_q = cos, sin
         cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
@@ -982,17 +971,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                                                     k.shape[-1]))  # b, s, n, d
 
         weights = self.weights_proj(x)
-        actual_seq_lengths_query = None
-        actual_seq_lengths_key = None
-        block_table = None
-        if is_prefill:
-            actual_seq_lengths_query = attn_metadata.prefill.query_lens
-            actual_seq_lengths_key = attn_metadata.prefill.seq_lens
-            block_table = attn_metadata.prefill.block_table
-        else:
-            actual_seq_lengths_query = attn_metadata.decode.actual_seq_lengths_q
-            actual_seq_lengths_key = attn_metadata.decode.seq_lens
-            block_table = attn_metadata.decode.block_table
 
         topk_indices = torch.ops.custom.npu_lightning_indexer(
             query=q,
