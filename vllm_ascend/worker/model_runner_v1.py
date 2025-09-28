@@ -2482,8 +2482,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def profile_run(self) -> None:
         # Trigger compilation for general shape.
         with self.set_in_profile_run():
-            hidden_states = self._dummy_run(self.max_num_tokens,
-                                            with_prefill=True)
+            hidden_states = self._dummy_run(
+                self.max_num_tokens // self.cp_size if self.cp_size > 1 else self.max_num_tokens,
+                with_prefill=True)
         output = None
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:

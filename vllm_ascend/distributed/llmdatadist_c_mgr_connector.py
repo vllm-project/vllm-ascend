@@ -794,6 +794,7 @@ class LLMDataDistCMgrConnectorWorker():
     ):
         remote_cp_size = int(remote_cp_size)
         remote_sp_size = int(remote_sp_size)
+        remote_tp_size = int(remote_tp_size)
         if self.cp_size == remote_cp_size and self.sp_size == remote_sp_size:
             # same as original, P cpi_spj -> D cpi_spj
             remote_kv_num = 1
@@ -805,7 +806,9 @@ class LLMDataDistCMgrConnectorWorker():
         elif self.cp_size == 1 and self.sp_size == 1:
             # only cp/sp in P, each D needs to pull from cp*sp P (to all-gather kv_cache)
             remote_kv_num = remote_cp_size * remote_sp_size
-            remote_ports = [remote_port + offset for offset in range(remote_cp_size * remote_sp_size)]
+            # remote_ports = [remote_port + offset for offset in range(remote_cp_size * remote_sp_size)]
+            remote_ports = [remote_port + self.tp_rank + offset for offset in
+                            range(0, remote_cp_size * remote_tp_size, remote_tp_size // remote_sp_size)]
             # recompute cp/sp block assign here, maybe we can also pass it from P node meta
             num_local_blocks = len(local_block_ids)
             num_remote_blocks = [num_local_blocks // (remote_cp_size * remote_sp_size)] * remote_cp_size * remote_sp_size
