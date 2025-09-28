@@ -37,40 +37,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'ready') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') }}
-    outputs:
-      e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
-      ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            e2e_tracker:
-              - '.github/workflows/vllm_ascend_test.yaml'
-              - 'vllm_ascend/**'
-              - 'csrc/**'
-              - 'cmake/**'
-              - 'tests/e2e/**'
-              - 'CMakeLists.txt'
-              - 'setup.py'
-              - 'requirements.txt'
-              - 'requirements-dev.txt'
-              - 'requirements-lint.txt'
-              - 'packages.txt'
-            ut_tracker:
-              - 'tests/ut/**'
-
   e2e-test:
     name: e2e-full
     strategy:
       matrix:
         vllm_version: [releases/v0.11.0, v0.10.2]
-    needs: [changes]
-    if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
