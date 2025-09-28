@@ -234,6 +234,9 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         if vllm_version_is("0.10.2"):
             mock_context.dp_metadata.cu_tokens_across_dp_cpu = torch.tensor(
                 [2, 5, 7])
+        else:
+            mock_context.dp_metadata.cu_tokens_across_sp.return_value = torch.tensor(
+                [2, 5, 7])
         mock_get_forward_context.return_value = mock_context
 
         # Setup DP group mock
