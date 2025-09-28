@@ -1247,7 +1247,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                     ).dp_metadata.cu_tokens_across_dp_cpu
                 else:
                     cu_tokens_across_dp_cpu = get_forward_context(
-                    ).dp_metadata.cu_tokens_across_sp_cpu
+                    ).dp_metadata.cu_tokens_across_sp(1)
                 hidden_states = self.naive_multicast(hidden_states,
                                                      cu_tokens_across_dp_cpu)
                 if self.rm_router_logits:

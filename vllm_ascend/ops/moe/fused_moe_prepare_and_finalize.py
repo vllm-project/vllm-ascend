@@ -421,7 +421,7 @@ class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
                 ).dp_metadata.cu_tokens_across_dp_cpu
             else:
                 self.cu_tokens_across_dp_cpu = get_forward_context(
-                ).dp_metadata.cu_tokens_across_sp_cpu
+                ).dp_metadata.cu_tokens_across_sp(1)
             hidden_states = self._naive_multicast(hidden_states,
                                                   self.cu_tokens_across_dp_cpu)
             if rm_router_logits:
