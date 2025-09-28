@@ -88,7 +88,6 @@ class P2pHcclEngine:
         self.send_stream = torch_npu.npu.Stream()
         self.recv_stream = torch_npu.npu.Stream()
 
-        # todo 如果服务器确实压力大，要发送的kvcache连内存都装不下，应该如何处理？
         mem_pool_size_gb = float(
             self.config.get_from_extra_config("mem_pool_size_gb",
                                               DEFAULT_MEM_POOL_SIZE_GB))
