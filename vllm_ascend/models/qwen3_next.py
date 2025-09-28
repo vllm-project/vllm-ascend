@@ -429,14 +429,9 @@ class CustomQwen3NextDecoderLayer(Qwen3NextDecoderLayer):
 
     def __init__(
         self,
-        config: Qwen3NextConfig,
+        vllm_config: VllmConfig,
         layer_type: str,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        speculative_config: Optional[SpeculativeConfig] = None,
         prefix: str = "",
-        enable_eplb: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.config = config
@@ -468,12 +463,8 @@ class CustomQwen3NextDecoderLayer(Qwen3NextDecoderLayer):
         if (self.layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
             (self.layer_idx + 1) % config.decoder_sparse_step == 0):
-            self.mlp = Qwen3NextSparseMoeBlock(
-                config=config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-                enable_eplb=enable_eplb,
-            )
+            self.mlp = Qwen3NextSparseMoeBlock(vllm_config=vllm_config,
+                                               prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen3NextMLP(
                 hidden_size=config.hidden_size,
@@ -493,14 +484,14 @@ class CustomQwen3NextDecoderLayer(Qwen3NextDecoderLayer):
                 torch.zeros(
                     1,
                     1,
-                    self.config.hidden_size,
+                    config.hidden_size,
                     dtype=config.torch_dtype,
                 ), )
             self.ffn_layer_scale = torch.nn.Parameter(
                 torch.zeros(
                     1,
                     1,
-                    self.config.hidden_size,
+                    config.hidden_size,
                     dtype=config.torch_dtype,
                 ), )
 
@@ -511,13 +502,8 @@ class CustomQwen3NextModel(Qwen3NextModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         config: Qwen3NextConfig = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
         lora_config = vllm_config.lora_config
-        speculative_config = vllm_config.speculative_config
-        enable_eplb = parallel_config.enable_eplb
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
@@ -536,12 +522,7 @@ class CustomQwen3NextModel(Qwen3NextModel):
             return CustomQwen3NextDecoderLayer(
                 config,
                 layer_type=config.layer_types[extract_layer_index(prefix)],
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                speculative_config=speculative_config,
                 prefix=prefix,
-                enable_eplb=enable_eplb,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
