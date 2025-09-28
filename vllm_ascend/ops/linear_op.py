@@ -376,7 +376,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 
 def _get_column_parallel_op(
     prefix, layer
-) -> Tuple[Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp]], int, int]:
+) -> Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp]]:
     if mlp_tp_enable() and "gate_up_proj" in prefix:
         return MLPColumnParallelOp(layer)
     if enable_sp():
@@ -392,9 +392,9 @@ def _get_column_parallel_op(
 
 def _get_row_parallel_op(
     prefix, layer
-) -> Tuple[Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
+) -> Union[MLPRowParallelOp, OProjRowParallelOp,
                           MatmulAllreduceRowParallelOp,
-                          SequenceRowParallelOp]], int, int]:
+                          SequenceRowParallelOp]:
     if "down_proj" in prefix and mlp_tp_enable():
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
