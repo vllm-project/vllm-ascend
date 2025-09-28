@@ -322,8 +322,15 @@ def test_client_handler_mismatch(server_config):
 
         server.register_handler(mock_conn, mock_addr)
 
+        assert isinstance(mismatch_data["content"], dict)
+
         # Verify response
-        expected_ack = {"label": "JOIN_ACK", "content": {}}
+        expected_ack = {
+            "label":
+            "JOIN_NACK",
+            "content":
+            f"Received data {(mismatch_data['content']['device_id'], mismatch_data['content']['model_path'], mismatch_data['content']['tp'], mismatch_data['content']['pp'])} does not consist with this server {(server_config['device_id'], server_config['model_path'], server_config['tp'], server_config['pp'])}"
+        }
         mock_conn.send.assert_called_once_with(
             json.dumps(expected_ack).encode("utf-8"))
         mock_conn.close.assert_called_once()
@@ -371,7 +378,12 @@ def test_client_handler_invalid_requests(server_config, invalid_data,
             server.register_handler(mock_conn, mock_addr)
 
             if should_send:
-                expected_ack = {"label": "JOIN_ACK", "content": {}}
+                expected_ack = {
+                    "label":
+                    "JOIN_NACK",
+                    "content":
+                    f"Received data does not contain required fields: {invalid_data}"
+                }
                 mock_conn.send.assert_called_once_with(
                     json.dumps(expected_ack).encode("utf-8"))
             else:

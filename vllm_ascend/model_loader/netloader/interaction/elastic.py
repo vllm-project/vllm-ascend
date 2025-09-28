@@ -200,6 +200,10 @@ class ElasticClient:
         if ("label" in ack and ack["label"] == 'JOIN_ACK' and "content" in ack
                 and ack["content"] is not None and "name" in ack["content"]):
             return (ack["content"]["name"], free_port)
+        elif ("label" in ack and ack["label"] == 'JOIN_NACK'
+              and "content" in ack):
+            raise RuntimeError(
+                f"Receive nack from server, reason: {ack['content']}")
         else:
             raise RuntimeError(
                 f"Receive ack {ack} from server does not contain required fields"
@@ -358,13 +362,23 @@ class ElasticServer:
                 ack = {"label": "JOIN_ACK", "content": {"name": comm_name}}
             else:
                 logger.warning(
-                    f"Received data ({(device_id, model_path, tp, pp)}) does not consist with this server ({(int(self.device_id), self.model_path, int(self.tp), int(self.pp))}) "
+                    f"Received data {(device_id, model_path, tp, pp)} does not consist with this server {(int(self.device_id), self.model_path, int(self.tp), int(self.pp))}"
                 )
-                ack = {"label": "JOIN_ACK", "content": {}}
+                ack = {
+                    "label":
+                    "JOIN_NACK",
+                    "content":
+                    f"Received data {(device_id, model_path, tp, pp)} does not consist with this server {(int(self.device_id), self.model_path, int(self.tp), int(self.pp))}"
+                }
         else:
             logger.warning(
                 f"Received data does not contain required fields: {data}")
-            ack = {"label": "JOIN_ACK", "content": {}}
+            ack = {
+                "label":
+                "JOIN_NACK",
+                "content":
+                f"Received data does not contain required fields: {data}"
+            }
 
         try:
             ack_str = json.dumps(ack).encode("utf-8")

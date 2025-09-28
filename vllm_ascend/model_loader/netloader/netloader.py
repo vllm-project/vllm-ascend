@@ -18,7 +18,7 @@ import gc
 import json
 import time
 from copy import deepcopy
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -146,26 +146,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
                 ]):
             logger.warning(
                 "Did not get valid source info, use DefaultModelLoader")
-            self.load_config.model_loader_extra_config = {}
-            self.load_config.load_format = "auto"
-            default_model_loader = DefaultModelLoader(self.load_config)
-
-            if model_config.quantization is None:
-                model = default_model_loader.load_model(
-                    vllm_config=vllm_config, model_config=model_config)
-            else:
-                logger.warning(
-                    "Quantization is set, netloader use DefaultModelLoader with process_weights_after_loading "
-                )
-                need_process_weights_after_loading = True
-
-                target_device = torch.device(device_config.device)
-                with set_default_torch_dtype(model_config.dtype):
-                    with target_device:
-                        model = initialize_model(vllm_config=vllm_config,
-                                                 model_config=model_config)
-                    default_model_loader.load_weights(model, model_config)
-                model = model.eval()
+            model, need_process_weights_after_loading = self.revert_to_default(
+                model_config, vllm_config, device_config)
 
         else:
             target_device = torch.device(device_config.device)
@@ -210,28 +192,8 @@ class ModelNetLoaderElastic(BaseModelLoader):
                         logger.info("Empty CUDA cache")
                         torch.cuda.empty_cache()
 
-                    self.load_config.model_loader_extra_config = {}
-                    self.load_config.load_format = "auto"
-                    default_model_loader = DefaultModelLoader(self.load_config)
-
-                    if model_config.quantization is None:
-                        model = default_model_loader.load_model(
-                            vllm_config=vllm_config, model_config=model_config)
-                    else:
-                        logger.warning(
-                            "Quantization is set, netloader use DefaultModelLoader with process_weights_after_loading "
-                        )
-                        need_process_weights_after_loading = True
-
-                        target_device = torch.device(device_config.device)
-                        with set_default_torch_dtype(model_config.dtype):
-                            with target_device:
-                                model = initialize_model(
-                                    vllm_config=vllm_config,
-                                    model_config=model_config)
-                            default_model_loader.load_weights(
-                                model, model_config)
-                        model = model.eval()
+                    model, need_process_weights_after_loading = self.revert_to_default(
+                        model_config, vllm_config, device_config)
 
         start_elastic_server = time.perf_counter()
         # start elastic server
@@ -308,6 +270,50 @@ class ModelNetLoaderElastic(BaseModelLoader):
             return None
 
         return model.eval()
+
+    def revert_to_default(self, model_config, vllm_config,
+                          device_config) -> Tuple[nn.Module, bool]:
+        """
+        Reverts to the default model loading logic when elastic loading fails or is not applicable.
+
+        This method resets the loader's extra config and load format to defaults,
+        then delegates model loading to a DefaultModelLoader.
+        If quantization is enabled, it will load the model and then run the
+        processing of weights (i.e. applying quantization adjustments) before returning.
+
+        Parameters:
+        - model_config: Configuration describing model architecture, quantization, etc.
+        - vllm_config: Configuration for vLLM (device, parallelism, dtype, etc).
+        - device_config: Configuration for the target device (device type, device id, etc).
+
+        Returns:
+        - A tuple (model, need_process_weights_after_loading):
+            * model: The loaded `nn.Module` under default loading logic.
+            * need_process_weights_after_loading: A boolean flag indicating whether
+              weights post-processing (e.g. quantization adjustments) still needs to be applied.
+        """
+        self.load_config.model_loader_extra_config = {}
+        self.load_config.load_format = "auto"
+        default_model_loader = DefaultModelLoader(self.load_config)
+
+        if model_config.quantization is None:
+            model = default_model_loader.load_model(vllm_config=vllm_config,
+                                                    model_config=model_config)
+            need_process_weights_after_loading = False
+        else:
+            logger.warning(
+                "Quantization is set, netloader use DefaultModelLoader with process_weights_after_loading "
+            )
+            need_process_weights_after_loading = True
+            target_device = torch.device(device_config.device)
+            with set_default_torch_dtype(model_config.dtype):
+                with target_device:
+                    model = initialize_model(vllm_config=vllm_config,
+                                             model_config=model_config)
+                default_model_loader.load_weights(model, model_config)
+            model = model.eval()
+
+        return model, need_process_weights_after_loading
 
     def download_model(self, model_config: ModelConfig) -> None:
         pass
