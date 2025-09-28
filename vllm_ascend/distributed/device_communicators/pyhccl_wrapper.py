@@ -230,10 +230,8 @@ class HCCLLibrary:
             content = ""
             with open(cann_version_file, "r") as f:
                 content = '\n'.join(f.readlines())
-                print("content: ", content)
             if m := re.search(r'CANN_VERSION_STR "([^"]+)"', content):
                 cann_version = m.group(1)
-                print("cann_version: ", cann_version)
         except Exception as e:
             logger.info("cannot find cann version file %s: %s", cann_version_file, e)
 
