@@ -2384,7 +2384,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     with_prefill=with_prefill,
                     skip_attn=True,
                     num_reqs=num_reqs,
-                    num_tokens_across_dp=num_tokens_across_dp)
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor)
                 if need_dummy_logits:
                     dummy_compute_logits(hidden_states)
             if self.in_profile_run and self.dynamic_eplb:
