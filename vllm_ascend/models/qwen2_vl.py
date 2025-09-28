@@ -40,6 +40,8 @@ from vllm.model_executor.models.qwen2_vl import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from vllm_ascend.utils import vllm_version_is
+
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
 
@@ -343,10 +345,18 @@ class AscendQwen2VLForConditionalGeneration(Qwen2VLForConditionalGeneration):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.visual = AscendQwen2VisionTransformer(
-            self.config.vision_config,
-            norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(
-                vllm_config.quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-        )
+        if vllm_version_is("0.10.2"):
+            self.visual = AscendQwen2VisionTransformer(
+                self.config.vision_config,
+                norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
+                quant_config=self._maybe_ignore_quant_config(
+                    vllm_config.quant_config),
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+        else:
+            self.visual = AscendQwen2VisionTransformer(
+                self.config.vision_config,
+                norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
+                quant_config=vllm_config.quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )

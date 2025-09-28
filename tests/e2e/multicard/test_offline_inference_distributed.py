@@ -35,6 +35,11 @@ QWEN_DENSE_MODELS = [
     "vllm-ascend/Qwen3-8B-W8A8", "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8"
 ]
 
+DEEPSEEK_W4A8_MODELS = [
+    "vllm-ascend/DeepSeek-V3-W4A8-Pruing",
+    "vllm-ascend/DeepSeek-V3.1-W4A8-puring"
+]
+
 
 def test_models_distributed_QwQ():
     example_prompts = [
@@ -109,14 +114,15 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_MLA_PA": "1"})
-def test_models_distributed_DeepSeek_W4A8DYNAMIC():
+def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
     prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download("vllm-ascend/DeepSeek-V3-W4A8-Pruing"),
+            snapshot_download(model),
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
