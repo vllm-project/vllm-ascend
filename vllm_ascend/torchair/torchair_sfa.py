@@ -81,9 +81,9 @@ class AscendSFATorchairPrefillMetadata:
     block_table: torch.Tensor
     max_query_len: int
     max_seq_lens: int
+    sin: torch.Tensor
+    cos: torch.Tensor
     chunked_context: Optional[TorchairChunkedContextMetadata] = None
-    sin: torch.Tensor = None
-    cos: torch.Tensor = None
 
 
 @dataclass
@@ -95,10 +95,10 @@ class AscendSFATorchairDecodeMetadata:
     seq_lens: torch.Tensor
     max_seq_lens: int
     seq_lens_list: list[int]
-    actual_seq_lengths_q: Optional[torch.Tensor] = None
+    actual_seq_lengths_q: torch.Tensor
+    sin: torch.Tensor
+    cos: torch.Tensor
     attn_mask: Optional[torch.Tensor] = None
-    sin: torch.Tensor = None
-    cos: torch.Tensor = None
 
 
 @dataclass
@@ -410,11 +410,10 @@ class AscendSFATorchairMetadataBuilder:
         device = self.device
 
         block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
-        slot_mapping = common_attn_metadata.slot_mapping_cpu[:
-                                                             num_actual_tokens].to(
-                                                                 device,
-                                                                 non_blocking=
-                                                                 True)
+        slot_mapping = common_attn_metadata.slot_mapping[:
+                                                         num_actual_tokens].to(
+                                                             device,
+                                                             non_blocking=True)
         input_positions = common_attn_metadata.positions[:
                                                          num_actual_tokens].long(
                                                          )
@@ -984,7 +983,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
 
         has_prefill = attn_metadata.is_prefill
         has_decode = attn_metadata.is_decode
-        if has_prefill:
+        if attn_metadata.prefill is not None:
             # num_actual_tokens = attn_metadata.num_actual_tokens
             assert attn_metadata.num_decodes is not None and \
             attn_metadata.num_prefills is not None and \
@@ -1107,7 +1106,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             output[...] = self.o_proj(attn_output, is_force_scatter=True)
             return output
 
-        if has_decode:
+        elif attn_metadata.decode is not None:
             if envs_ascend.VLLM_ASCEND_ENABLE_MLAPO:
                 prep_res = self._sfa_decode_preprocess(hidden_states, kv_cache,
                                                        attn_metadata,
@@ -1227,10 +1226,10 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         attn_metadata: M,
         is_prefill: bool = True,
     ):
-        if is_prefill:
+        if attn_metadata.prefill is not None:
             cos = attn_metadata.prefill.cos
             sin = attn_metadata.prefill.sin
-        else:
+        elif attn_metadata.decode is not None:
             cos = attn_metadata.decode.cos
             sin = attn_metadata.decode.sin
 
@@ -1281,14 +1280,13 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         actual_seq_lengths_query = None
         actual_seq_lengths_key = None
         block_table = None
-        if is_prefill:
+        if attn_metadata.prefill is not None:
             actual_seq_lengths_query = attn_metadata.prefill.query_lens
             actual_seq_lengths_key = attn_metadata.prefill.seq_lens
 
             block_table = attn_metadata.prefill.block_table
-        else:
+        elif attn_metadata.decode is not None:
             actual_seq_lengths_query = attn_metadata.decode.actual_seq_lengths_q
-            # actual_seq_lengths_query = self.actual_seq_length
             actual_seq_lengths_key = attn_metadata.decode.seq_lens.to(
                 torch.int32)
 

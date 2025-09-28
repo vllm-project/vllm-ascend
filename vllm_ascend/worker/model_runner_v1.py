@@ -2511,7 +2511,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # MC2 will consume additional NPU memory.
             # Therefore, we need to run the MC2 path once here to complete its initialization,
             # allowing vLLM to correctly estimate the maximum memory required.
-            if self._select_moe_comm_method(
+            if not self.ascend_config.torchair_graph_config.enabled and self._select_moe_comm_method(
                     self.mc2_tokens_capacity,
                     with_prefill=True) == MoECommType.MC2:
                 self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
@@ -2684,10 +2684,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = (len(self.attn_groups) > 1)
-        # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `GDNAttentionMetadataBuilder`.
+        # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any([
-            isinstance(attn_group[0].metadata_builder,
-                       GDNAttentionMetadataBuilder)
+            isinstance(attn_group[0].kv_cache_spec, MambaSpec)
             for attn_group in self.attn_groups
         ])
         self.may_reinitialize_input_batch(kv_cache_config)
@@ -2721,10 +2720,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
         kv_caches: Dict[str, torch.Tensor] = {}
-        for kv_cache_spec, kv_cache_group in self._kv_cache_spec_attn_group_iterator(
-        ):
-            attn_backend = kv_cache_group.backend
-            for layer_name in kv_cache_group.layer_names:
+        for group in self._kv_cache_spec_attn_group_iterator_dispatcher():
+            if vllm_version_is("0.10.2"):
+                kv_cache_spec, group = group
+            else:
+                kv_cache_spec = group.kv_cache_spec
+            attn_backend = group.backend
+            for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 tensor_size = kv_cache_sizes[layer_name]
