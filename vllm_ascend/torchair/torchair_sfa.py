@@ -971,7 +971,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
     def forward(
         self,
         hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: Tuple[torch.Tensor],
+        kv_cache: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         attn_metadata: M,
         need_gather_q_kv: bool = False,
         output: Optional[torch.Tensor] = None,
@@ -981,21 +981,12 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             # Profiling run.
             return output
 
-        has_prefill = attn_metadata.is_prefill
-        has_decode = attn_metadata.is_decode
+
         if attn_metadata.prefill is not None:
-            # num_actual_tokens = attn_metadata.num_actual_tokens
             assert attn_metadata.num_decodes is not None and \
             attn_metadata.num_prefills is not None and \
             attn_metadata.num_decode_tokens is not None
-            # num_decode_tokens = attn_metadata.num_decode_tokens
-            # Inputs and outputs may be padded for CUDA graphs
-            # has_decode = attn_metadata.num_decodes > 0
-            has_prefill = attn_metadata.num_prefills > 0
-            # num_decode_tokens = attn_metadata.num_decode_tokens
-            # num_actual_tokens = attn_metadata.num_actual_tokens
 
-            # output_padded = output
             bsz = 1
 
             hidden_states_prefill = hidden_states
@@ -1222,7 +1213,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         self,
         x: torch.Tensor,
         qr: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor],
+        kv_cache: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         attn_metadata: M,
         is_prefill: bool = True,
     ):

@@ -890,7 +890,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 attn_cls = TorchairDeepseekV2SFAAttention
                 self.use_sfa = True
             else:
-                attn_cls = TorchairDeepseekV2MLAAttention
+                attn_cls = TorchairDeepseekV2MLAAttention  # type: ignore[assignment]
         else:
             attn_cls = DeepseekV2Attention
         self.self_attn = attn_cls(

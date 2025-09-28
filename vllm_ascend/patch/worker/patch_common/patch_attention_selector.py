@@ -108,7 +108,7 @@ if vllm_version_is("0.10.2"):
         return resolve_obj_by_qualname(attention_cls)
 else:
 
-    def get_attn_backend(
+    def get_attn_backend(  # type: ignore[misc]
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: Optional[str],
