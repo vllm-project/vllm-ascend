@@ -509,7 +509,7 @@ class AscendQwen2_5_VLForConditionalGeneration(
             self.visual = AscendQwen2_5_VisionTransformer(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=self.quant_config,
+                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
