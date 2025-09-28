@@ -28,7 +28,7 @@ from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod)
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_mlp import cumsum_group_list, unified_apply_mlp
-from vllm_ascend.utils import AscendSocVersion, adapt_patch, vllm_version_is
+from vllm_ascend.utils import AscendSocVersion, adapt_patch
 
 adapt_patch(True)
 
@@ -93,18 +93,14 @@ def mock_dist_env(mocker: MockerFixture):
 
     mock_moe_comm_method.finalize.side_effect = mock_finalize
 
-    if vllm_version_is("0.10.2"):
-        dp_metadata = MagicMock(cu_tokens_across_dp_cpu=[5, 10])
-    else:
-        dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
-    mock_forward_context_obj = MagicMock(moe_comm_method=mock_moe_comm_method,
-                                         moe_comm_type=MoECommType.MC2,
-                                         max_tokens_across_dp=10,
-                                         dp_metadata=dp_metadata,
-                                         mc2_mask=torch.zeros(
-                                             16, dtype=torch.bool),
-                                         padded_num_tokens=16,
-                                         with_quant=False)
+    mock_forward_context_obj = MagicMock(
+        moe_comm_method=mock_moe_comm_method,
+        moe_comm_type=MoECommType.MC2,
+        max_tokens_across_dp=10,
+        dp_metadata=MagicMock(cu_tokens_across_dp_cpu=[5, 10]),
+        mc2_mask=torch.zeros(16, dtype=torch.bool),
+        padded_num_tokens=16,
+        with_quant=False)
 
     with patch('torch.distributed.get_rank', return_value=0), \
         patch('torch.distributed.get_world_size', return_value=4), \
