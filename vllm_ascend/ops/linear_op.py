@@ -410,7 +410,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 
 
 def _get_column_parallel_op(
-    disable_tp, prefix, layer
+    prefix, layer
 ) -> Tuple[Optional[Union[MLPColumnParallelOp, SequenceMergedColumnParallelOp,
                           SequenceQKVParallelOp]], int, int]:
     if mlp_tp_enable() and "gate_up_proj" in prefix:
