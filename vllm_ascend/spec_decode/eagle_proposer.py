@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 from typing import Optional
 
 import numpy as np
@@ -71,7 +72,8 @@ class EagleProposer(Proposer):
                                    1,
                                    device=device,
                                    dtype=torch.int32)
-        attn_mask_len = self.vllm_config.model_config.max_model_len
+        attn_mask_len = min(self.vllm_config.model_config.max_model_len,
+                            int(os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)))
         self.attn_mask_builder = AttentionMaskBuilder(
             attn_mask_len, self.vllm_config.model_config.dtype)
 
