@@ -3,6 +3,7 @@ import types
 import torch
 import torch.nn as nn
 import torchair
+import vllm.envs as envs_vllm
 from torchair import patch_for_hcom
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
@@ -26,7 +27,6 @@ from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
                                vllm_version_is)
-import vllm.envs as envs_vllm
 
 PADDING_SLOT_ID = -1
 
@@ -61,7 +61,8 @@ class MtpProposer(Proposer):
         self.torchair_compiled_models = {}  # type: ignore
         self.torchair_graph_enabled = get_ascend_config(
         ).torchair_graph_config.enabled
-        self.enable_shared_expert_dp = get_ascend_config().enable_shared_expert_dp
+        self.enable_shared_expert_dp = get_ascend_config(
+        ).enable_shared_expert_dp
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
         self.arange = torch.arange(vllm_config.scheduler_config.max_num_seqs +
@@ -81,7 +82,9 @@ class MtpProposer(Proposer):
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            if self.torchair_graph_enabled or (self.enable_shared_expert_dp and self.vllm_config.model_config.use_mla):
+            if self.torchair_graph_enabled or (
+                    self.enable_shared_expert_dp
+                    and self.vllm_config.model_config.use_mla):
                 self.model = TorchairDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
             else:

@@ -528,8 +528,7 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.o_proj",
-                return_bias=False
-            )
+                return_bias=False)
         else:
             self.o_proj = TorchairDeepseekV2RowParallelLinear(
                 self.num_heads * self.v_head_dim,
@@ -537,8 +536,7 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.o_proj",
-                return_bias=False
-            )
+                return_bias=False)
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -738,10 +736,10 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
             return_bias=False,
         )
         if (config.n_routed_experts is not None
-              and self.debug_layer_idx >= config.first_k_dense_replace
-              and self.debug_layer_idx % config.moe_layer_freq == 0
-              and (ascend_config.multistream_overlap_shared_expert
-                   or self.enable_shared_expert_dp)):
+                and self.debug_layer_idx >= config.first_k_dense_replace
+                and self.debug_layer_idx % config.moe_layer_freq == 0
+                and (ascend_config.multistream_overlap_shared_expert
+                     or self.enable_shared_expert_dp)):
             self.o_proj = TorchairDeepseekV2RowParallelLinearReplaceAllreduce(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
@@ -827,8 +825,10 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         forward_context = get_forward_context()
         if not self.torchair_graph_enabled:
-            if forward_context.attn_metadata is not None and isinstance(forward_context.attn_metadata, dict):
-                attn_metadata = next(iter(forward_context.attn_metadata.values()), None)
+            if forward_context.attn_metadata is not None and isinstance(
+                    forward_context.attn_metadata, dict):
+                attn_metadata = next(
+                    iter(forward_context.attn_metadata.values()), None)
             else:
                 attn_metadata = forward_context.attn_metadata
             if kv_cache is None:
@@ -843,7 +843,9 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         #     need_gather_q_kv = True
         if not self.enable_shared_expert_dp or self.debug_layer_idx != self.first_k_dense_replace:
             output_shape = hidden_states.shape
-        if self.enable_shared_expert_dp and (self.debug_layer_idx == self.first_k_dense_replace or self.debug_layer_idx ==self.layers):
+        if self.enable_shared_expert_dp and (
+                self.debug_layer_idx == self.first_k_dense_replace
+                or self.debug_layer_idx == self.layers):
             rows = num_tokens // self.tp_size
             if num_tokens % self.tp_size:
                 rows += 1

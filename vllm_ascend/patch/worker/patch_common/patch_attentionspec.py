@@ -31,7 +31,6 @@ class AttentionSpec(KVCacheSpec):
 
 
 vllm.v1.kv_cache_interface.AttentionSpec = AttentionSpec
-from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
 @dataclass(frozen=True)

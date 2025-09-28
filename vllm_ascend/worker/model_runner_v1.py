@@ -900,7 +900,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
-            max_seq_len = max(seq_lens.max().item(),0)
+            max_seq_len = max(seq_lens.max().item(), 0)
             return self.attn_mask_builder.get_attn_mask(
                 max_seq_len, self.dtype, self.device)
         # Prefill with cache hit.
@@ -2685,7 +2685,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = (len(self.attn_groups) > 1)
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `GDNAttentionMetadataBuilder`.
-        self.need_accepted_tokens = any([isinstance(attn_group[0].metadata_builder, GDNAttentionMetadataBuilder) for attn_group in self.attn_groups])
+        self.need_accepted_tokens = any([
+            isinstance(attn_group[0].metadata_builder,
+                       GDNAttentionMetadataBuilder)
+            for attn_group in self.attn_groups
+        ])
         self.may_reinitialize_input_batch(kv_cache_config)
 
         if self.ascend_config.is_deepseek_sfa:
