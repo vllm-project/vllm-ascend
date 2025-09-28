@@ -3418,10 +3418,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 aclgraph_runtime_mode = aclgraph_mode.mixed_mode()
 
                 compilation_cases = list(reversed(self.aclgraph_batch_sizes))
-                self._capture_aclgraphs(
-                    compilation_cases,
-                    aclgraph_runtime_mode=aclgraph_runtime_mode,
-                    uniform_decode=False)
+
+                try:
+                    self._capture_aclgraphs(
+                        compilation_cases,
+                        aclgraph_runtime_mode=aclgraph_runtime_mode,
+                        uniform_decode=False)
+                except Exception as e:
+                    logger.error(
+                        f"ACLgraph sizes capture fail: {type(e).__name__}:\n"
+                        "ACLgraph has insufficient available streams to capture the configured number of sizes. "
+                        "Please verify both the availability of adequate streams and the appropriateness of the configured size count.\n\n"
+                        "Recommended solutions:\n"
+                        "1. Manually configure the compilation_config parameter "
+                        "with a reduced set of sizes: '{\"cudagraph_capture_sizes\":[size1, size2, size3, ...]}'.\n"
+                        "2. Utilize ACLgraph's full graph mode as an alternative to the piece-wise approach.\n\n"
+                        f"{str(e)}")
+                    raise
 
             if aclgraph_mode.decode_mode() == CUDAGraphMode.FULL and \
                 aclgraph_mode.separate_routine():
