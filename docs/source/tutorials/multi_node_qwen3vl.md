@@ -128,6 +128,7 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
 ```
 
 If the service starts successfully, the following information will be displayed on node0:
+
 ```shell
 INFO:     Started server process [44610]
 INFO:     Waiting for application startup.

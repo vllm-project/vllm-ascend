@@ -108,8 +108,9 @@ print(generated_text)
 If you run this script successfully, you can see the info shown below:
 
 ```bash
-****
+This image displays the logo for TONGYI Qwen, a large-scale language model developed by Tongyi Lab in Zhejiang, China. Its specific configuration is Qwen-S138B-Chat-Awq-Inc-122M bin.
 ```
+
 ### Online Serving on Single NPU
 
 Run docker container to start the vLLM server on a single NPU:
