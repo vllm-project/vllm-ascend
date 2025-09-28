@@ -23,6 +23,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -177,6 +178,7 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         return logits
 
 
+@support_torch_compile
 class CustomDeepSeekMTP(DeepSeekMTP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
