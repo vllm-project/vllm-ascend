@@ -10,6 +10,7 @@ from vllm.forward_context import get_forward_context
 from vllm.utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_forward_context import MoECommType
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor,
@@ -147,6 +148,16 @@ def _maybe_wait_prefetch_done_impl_fake(x: torch.Tensor) -> None:
     return
 
 
+def _maybe_all_reduce_tensor_model_parallel_impl(
+        final_hidden_states: torch.Tensor) -> torch.Tensor:
+    forward_context = get_forward_context()
+    moe_comm_type = forward_context.moe_comm_type
+    if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
+        return final_hidden_states
+    else:
+        return tensor_model_parallel_all_reduce(final_hidden_states)
+
+
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
                           fake_impl=lambda x, residual: residual,
@@ -180,5 +191,11 @@ direct_register_custom_op(op_name="maybe_prefetch_mlp_down_proj",
 direct_register_custom_op(op_name="maybe_wait_prefetch_done",
                           op_func=_maybe_wait_prefetch_done_impl,
                           fake_impl=_maybe_wait_prefetch_done_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="maybe_all_reduce_tensor_model_parallel",
+                          op_func=_maybe_all_reduce_tensor_model_parallel_impl,
+                          fake_impl=lambda x: x,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
