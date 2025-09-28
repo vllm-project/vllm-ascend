@@ -22,6 +22,7 @@ import torch_npu
 from vllm.attention.backends.abstract import AttentionType
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.forward_context import get_forward_context
+from vllm.utils import direct_register_custom_op
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.moe.experts_selector import select_experts
@@ -98,30 +99,13 @@ class AscendW8A8LinearMethod:
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
         # TODO(zhoux77899): integrate prefetch qkvo_proj.weight with unquantized layers
-        attn_weight_map = {
-            "AscendQKVParallelLinear": "qkv",
-            "AscendRowParallelLinear": "o",
-        }
-        weight_prefetch_method = get_forward_context().weight_prefetch_method
-        assert weight_prefetch_method is not None
-
-        # prefetch qkvo_proj.weight preprocess
-        weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
-            prefix=attn_weight_map.get(layer.__class__.__name__, ""),
+        x = torch.ops.vllm.maybe_prefetch_with_quant(
+            layer_cls_name=layer.__class__.__name__,
+            hidden_states=x,
             weight=layer.weight,
-            start_flag=x,
+            scale=layer.aclnn_input_scale_reciprocal,
+            offset=layer.aclnn_input_offset,
         )
-
-        if x.dtype != torch.int8:
-            x = quant_per_tensor(
-                x,
-                layer.aclnn_input_scale_reciprocal,
-                layer.aclnn_input_offset,
-            )
-
-        # prefetch qkvo_proj.weight preprocess
-        if layer.__class__.__name__ in attn_weight_map.keys():
-            weight_prefetch_method.maybe_prefetch_attn_weight_postprocess()
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
         if is_310p():
@@ -666,3 +650,58 @@ def fused_experts(
             "currently does not support tensor parallelism")
 
     return final_hidden_states
+
+
+def _maybe_prefetch_with_quant_impl(
+    layer_cls_name: str,
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    offset: torch.Tensor,
+) -> torch.Tensor:
+    if hidden_states.dtype == torch.int8:
+        return hidden_states
+
+    attn_weight_map = {
+        "AscendQKVParallelLinear": "qkv",
+        "AscendRowParallelLinear": "o",
+    }
+    weight_prefetch_method = get_forward_context().weight_prefetch_method
+    assert weight_prefetch_method is not None
+
+    # prefetch qkvo_proj.weight preprocess
+    weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
+        prefix=attn_weight_map.get(layer_cls_name, ""),
+        weight=weight,
+        start_flag=hidden_states,
+    )
+    # quant
+    hidden_states = quant_per_tensor(
+        hidden_states,
+        scale,
+        offset,
+    )
+    # prefetch qkvo_proj.weight preprocess
+    if layer_cls_name in attn_weight_map.keys():
+        weight_prefetch_method.maybe_prefetch_attn_weight_postprocess()
+
+    return hidden_states
+
+
+def _maybe_prefetch_with_quant_impl_fake(
+    layer_cls_name: str,
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    offset: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states, dtype=torch.int8)
+
+
+direct_register_custom_op(
+    op_name="maybe_prefetch_with_quant",
+    op_func=_maybe_prefetch_with_quant_impl,
+    fake_impl=_maybe_prefetch_with_quant_impl_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)

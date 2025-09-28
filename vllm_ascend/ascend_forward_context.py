@@ -1,7 +1,7 @@
 import math
 from contextlib import contextmanager
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -11,8 +11,12 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
 from vllm_ascend.utils import enable_sp
+
+if TYPE_CHECKING:
+    from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
+else:
+    WeightPrefetchMethod = None
 
 
 class FusedMoEState(Enum):
