@@ -398,7 +398,7 @@ class KVCacheRecvingThread(threading.Thread):
                     " %d blocks). local_ip %s local_device_id %s remote_session_id %s", request_id, req_transfer_elapsed,
                     num_transfer_groups, num_blocks, get_ip(), self.tp_rank, session_id)
         if self.num_need_pulls > 1 and offset == self.num_need_pulls -1:
-            self._cat_kv_cache(remote_block_id)
+            self._cat_kv_cache(grouped_local_block_ids)
 
     def _cat_kv_cache(self, block_ids: list[list[int]]):
         # Get necessary parameters
