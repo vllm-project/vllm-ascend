@@ -95,6 +95,8 @@ def mock_dist_env(mocker: MockerFixture):
 
     if vllm_version_is("0.10.2"):
         dp_metadata = MagicMock(cu_tokens_across_dp_cpu=[5, 10])
+    else:
+        dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
     mock_forward_context_obj = MagicMock(moe_comm_method=mock_moe_comm_method,
                                          moe_comm_type=MoECommType.MC2,
                                          max_tokens_across_dp=10,

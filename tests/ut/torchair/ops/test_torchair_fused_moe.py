@@ -56,7 +56,8 @@ def mock_dist_env(mocker: MockerFixture):
     # init dist env patch
     if vllm_version_is("0.10.2"):
         dp_metadata = MagicMock(cu_tokens_across_dp_cpu=[5, 10])
-
+    else:
+        dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
 
     with patch('torch.distributed.get_rank', return_value=0), \
          patch('torch.distributed.get_world_size', return_value=4), \
