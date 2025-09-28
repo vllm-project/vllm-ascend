@@ -212,7 +212,7 @@ class NPUPlatform(Platform):
         vllm_config._set_cudagraph_sizes()
 
         # TODO: Full graph is fully supported later, and the default value will be set to full graph.
-        if not vllm_version_is("v0.10.2"):
+        if not vllm_version_is("0.10.2"):
             if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
