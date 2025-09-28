@@ -20,6 +20,7 @@ from vllm.triton_utils import HAS_TRITON
 if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_common.patch_triton
 
+# isort: off
 import vllm_ascend.patch.worker.patch_common.patch_attention_selector  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_attentionspec  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_attention_layer  # noqa

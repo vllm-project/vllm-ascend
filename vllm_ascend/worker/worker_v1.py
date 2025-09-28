@@ -88,7 +88,7 @@ class NPUWorker(WorkerBase):
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         init_ascend_soc_version()
-        import custom_ops # noqa
+        import custom_ops  # noqa
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
