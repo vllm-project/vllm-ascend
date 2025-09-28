@@ -618,14 +618,19 @@ class Qwen3NextDecoderLayer(nn.Module):
         positions: torch.Tensor = None,
         **kwargs: object,
     ):
+        self_attention_output = torch.empty_like(hidden_states)
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+            forward_context = get_forward_context()
+            if forward_context.sp_enabled:
+                tp_size = get_tensor_model_parallel_world_size()
+                chunk_size = (hidden_states.shape[0] + forward_context.pad_size) // tp_size
+                self_attention_output = self_attention_output[:chunk_size, :]
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-        self_attention_output = torch.empty_like(hidden_states)
         if self.layer_type == "linear_attention":
             self.linear_attn(
                 hidden_states=hidden_states,

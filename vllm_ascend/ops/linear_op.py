@@ -98,9 +98,11 @@ class CustomTensorParallelOp:
 
 class CustomColumnParallelOp(CustomTensorParallelOp):
 
-    def __init__(self, layer):
+    def __init__(self, layer, prefix, skip_first_layer=False):
         super().__init__(layer)
         self.gather_output = None
+        self.prefix = prefix
+        self.skip_first_layer = skip_first_layer
 
     def update_attrs(self):
         super().update_attrs()
@@ -169,7 +171,13 @@ class SequenceMergedColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
-        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        input_ = None
+        if self.skip_first_layer:
+            layer_num = self.prefix.split('.')[2]
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                input_, layer_num != '0')
+        else:
+            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
@@ -182,10 +190,6 @@ class SequenceMergedColumnParallelOp(CustomColumnParallelOp):
 
 
 class SequenceQKVParallelOp(CustomColumnParallelOp):
-
-    def __init__(self, layer, prefix):
-        super().__init__(layer)
-        self.prefix = prefix
 
     def apply_impl(
         self, input_: torch.Tensor
@@ -405,51 +409,58 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         self.reduce_results = self.layer.reduce_results
 
 
-def get_column_parallel_op(
+def _get_column_parallel_op(
     disable_tp, prefix, layer
 ) -> Tuple[Optional[Union[MLPColumnParallelOp, SequenceMergedColumnParallelOp,
                           SequenceQKVParallelOp]], int, int]:
-    if disable_tp:
-        return None, 0, 1
-
-    custom_op: Optional[Union[
-        MLPColumnParallelOp,
-        SequenceMergedColumnParallelOp,
-        SequenceQKVParallelOp,
-    ]] = None
     if mlp_tp_enable() and "gate_up_proj" in prefix:
-        custom_op = MLPColumnParallelOp(layer)
-    elif enable_sp():
-        if "gate_up_proj" in prefix or "in_proj" in prefix:
-            custom_op = SequenceMergedColumnParallelOp(layer)
+        return MLPColumnParallelOp(layer)
+    if enable_sp():
+        if "gate_up_proj" in prefix:
+            return SequenceMergedColumnParallelOp(layer, prefix)
+        if "in_proj" in prefix:
+            return SequenceMergedColumnParallelOp(layer, prefix, True)
         if "qkv_proj" in prefix or "conv1d" in prefix:
-            custom_op = SequenceQKVParallelOp(layer, prefix)
+            return SequenceQKVParallelOp(layer, prefix, True)
 
-    if custom_op is not None:
-        return custom_op, custom_op.tp_rank, custom_op.tp_size
-
-    return None, get_tp_group().rank_in_group, get_tp_group().world_size
+    return None
 
 
-def get_row_parallel_op(
-    disable_tp, prefix, layer
+def _get_row_parallel_op(
+    prefix, layer
 ) -> Tuple[Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                           MatmulAllreduceRowParallelOp,
                           SequenceRowParallelOp]], int, int]:
+    if "down_proj" in prefix and mlp_tp_enable():
+        return MLPRowParallelOp(layer)
+    if "o_proj" in prefix and oproj_tp_enable():
+        return OProjRowParallelOp(layer)
+    if matmul_allreduce_enable():
+        return MatmulAllreduceRowParallelOp(layer)
+    if enable_sp():
+        if "o_proj" in prefix or "out_proj" in prefix:
+            return SequenceRowParallelOp(layer, prefix)
+
+    return None
+
+
+def get_parallel_op(disable_tp, prefix, layer, direct):
     if disable_tp:
         return None, 0, 1
+    custom_op: Optional[Union[
+            MLPColumnParallelOp,
+            SequenceMergedColumnParallelOp,
+            SequenceQKVParallelOp,
+            MLPRowParallelOp,
+            OProjRowParallelOp,
+            MatmulAllreduceRowParallelOp,
+            SequenceRowParallelOp
+        ]] = None
+    if direct == "row":
+        custom_op = _get_row_parallel_op(prefix, layer)
 
-    custom_op: Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
-                              MatmulAllreduceRowParallelOp,
-                              SequenceRowParallelOp]] = None
-    if "down_proj" in prefix and mlp_tp_enable():
-        custom_op = MLPRowParallelOp(layer)
-    elif "o_proj" in prefix and oproj_tp_enable():
-        custom_op = OProjRowParallelOp(layer)
-    elif matmul_allreduce_enable():
-        custom_op = MatmulAllreduceRowParallelOp(layer)
-    elif ("o_proj" in prefix or "out_proj" in prefix) and enable_sp():
-        custom_op = SequenceRowParallelOp(layer, prefix)
+    if direct == "column":
+        custom_op = _get_column_parallel_op(prefix, layer)
 
     if custom_op is not None:
         return custom_op, custom_op.tp_rank, custom_op.tp_size
