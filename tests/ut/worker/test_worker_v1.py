@@ -41,7 +41,6 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1._register_atb_extensions")
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
-    @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch("vllm.utils.init_cached_hf_modules")
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
@@ -50,7 +49,6 @@ class TestNPUWorker(TestBase):
         mock_init_profiler,
         mock_init_cached_hf_modules,
         mock_try_register_lib,
-        mock_init_ascend_soc_version,
         mock_init_ascend_config,
         mock_register_ascend_customop,
         mock_register_atb_extensions,
@@ -78,7 +76,6 @@ class TestNPUWorker(TestBase):
         mock_register_atb_extensions.assert_called_once()
         mock_register_ascend_customop.assert_called_once()
         mock_init_ascend_config.assert_called_once_with(self.vllm_config_mock)
-        mock_init_ascend_soc_version.assert_called_once()
 
         # Verify try_register_lib call
         mock_try_register_lib.assert_called_once_with(
@@ -98,7 +95,6 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1._register_atb_extensions")
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
-    @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch("vllm.utils.init_cached_hf_modules")
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
@@ -107,7 +103,6 @@ class TestNPUWorker(TestBase):
         mock_init_profiler,
         mock_init_cached_hf_modules,
         mock_try_register_lib,
-        mock_init_ascend_soc_version,
         mock_init_ascend_config,
         mock_register_ascend_customop,
         mock_register_atb_extensions,
@@ -138,7 +133,6 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1._register_atb_extensions")
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
-    @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
     @patch("vllm.utils.init_cached_hf_modules")
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
@@ -147,7 +141,6 @@ class TestNPUWorker(TestBase):
         mock_init_profiler,
         mock_init_cached_hf_modules,
         mock_try_register_lib,
-        mock_init_ascend_soc_version,
         mock_init_ascend_config,
         mock_register_ascend_customop,
         mock_register_atb_extensions,

@@ -119,9 +119,9 @@ from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               AscendSocVersion, ProfileExecuteDuration,
-                               get_ascend_soc_version, is_310p,
-                               lmhead_tp_enable, vllm_version_is)
+                               ProfileExecuteDuration, get_graph_params,
+                               is_310p, lmhead_tp_enable, set_graph_params,
+                               vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -1868,14 +1868,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         Returns:
             MoECommType: The selected MoE communication method.
         """
-        soc_version = get_ascend_soc_version()
+        from vllm_ascend import _build_info  # type: ignore
+        soc_version = _build_info.__ascend_soc_version__
         quant_type = getattr(self.vllm_config.model_config.hf_config,
                              'moe_quantize', None)
         model_type = self.vllm_config.model_config.hf_config.model_type
 
         if not self.parallel_config.enable_expert_parallel:
             moe_comm_type = MoECommType.ALLGATHER
-        elif soc_version in {AscendSocVersion.A2}:
+        elif soc_version in {"A2"}:
             if (num_tokens <= self.mc2_tokens_capacity
                     and self.parallel_config.world_size_across_dp >= 16):
                 moe_comm_type = MoECommType.MC2
@@ -1886,10 +1887,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     moe_comm_type = MoECommType.ALLGATHER
 
-        elif soc_version in {AscendSocVersion.A3}:
+        elif soc_version in {"A3"}:
             moe_comm_type = (MoECommType.MC2
                              if num_tokens <= self.mc2_tokens_capacity else
                              MoECommType.ALLTOALL)
+        elif soc_version in {"310P"}:
+            moe_comm_type = MoECommType.ALLGATHER
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 

@@ -32,6 +32,11 @@ from setuptools.command.develop import develop
 from setuptools.command.install import install
 from setuptools_scm import get_version
 
+# Supported SOC_VERSION codes
+ASCEND_A2_SOC_VERSION = ["ASCEND910B1"]
+ASCEND_A3_SOC_VERSION = ["ASCEND910_9392"]
+ASCEND_310P_SOC_VERSION = ["ASCEND310P3"]
+
 
 def load_module_from_path(module_name, path):
     spec = importlib.util.spec_from_file_location(module_name, path)
@@ -91,11 +96,20 @@ class custom_build_info(build_py):
             raise ValueError(
                 "SOC version 310 only supports custom kernels. Please set COMPILE_CUSTOM_KERNELS=1 to enable custom kernels."
             )
+        if soc_version in ASCEND_A2_SOC_VERSION:
+            ascend_soc_version = "A2"
+        elif soc_version in ASCEND_A3_SOC_VERSION:
+            ascend_soc_version = "A3"
+        elif soc_version in ASCEND_310P_SOC_VERSION:
+            ascend_soc_version = "310P"
+        else:
+            ascend_soc_version = "UNDEFINED"
 
         package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
         with open(package_dir, "w+") as f:
             f.write('# Auto-generated file\n')
             f.write(f"__soc_version__ = '{soc_version}'\n")
+            f.write(f"__ascend_soc_version__ = '{ascend_soc_version}'\n")
             f.write(
                 f"__sleep_mode_enabled__ = {envs.COMPILE_CUSTOM_KERNELS}\n")
         logging.info(
