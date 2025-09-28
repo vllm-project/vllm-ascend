@@ -43,7 +43,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
 from vllm.v1.worker.worker_base import WorkerBase
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
@@ -88,7 +88,14 @@ class NPUWorker(WorkerBase):
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         init_ascend_soc_version()
-        import custom_ops  # noqa
+        if get_ascend_config().use_sfa:
+            # Direct import instead of using try_register_lib to ensure proper error handling when
+            # custom_ops is necessary but not available (e.g., in DeepSeek v3.2 deployments)
+            import custom_ops  # type: ignore[import-untyped] # noqa
+            logger.info(
+                "custom_ops module loaded successfully. Custom operators like "
+                "torch.ops.custom.npu_selected_flash_attention are now available."
+            )
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,

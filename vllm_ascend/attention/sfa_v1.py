@@ -796,7 +796,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     def forward(
         self,
         hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: Tuple[torch.Tensor],
+        kv_cache: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         attn_metadata: M,
         need_gather_q_kv: bool = False,
         output: Optional[torch.Tensor] = None,
@@ -919,7 +919,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self,
         x: torch.Tensor,
         qr: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor],
+        kv_cache: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         attn_metadata: M,
     ):
         if attn_metadata.prefill is not None:
