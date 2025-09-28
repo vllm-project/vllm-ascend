@@ -1242,8 +1242,12 @@ class TorchairAscendFusedMoE(FusedMoE):
                     router_logits = get_dp_group().all_gather(router_logits, 0)
 
             elif fused_moe_state == FusedMoEState.NaiveMulticast:
-                cu_tokens_across_dp_cpu = get_forward_context(
-                ).dp_metadata.cu_tokens_across_dp_cpu
+                if vllm_version_is("0.10.2"):
+                    cu_tokens_across_dp_cpu = get_forward_context(
+                    ).dp_metadata.cu_tokens_across_dp_cpu
+                else:
+                    cu_tokens_across_dp_cpu = get_forward_context(
+                    ).dp_metadata.cu_tokens_across_sp_cpu
                 hidden_states = self.naive_multicast(hidden_states,
                                                      cu_tokens_across_dp_cpu)
                 if self.rm_router_logits:
