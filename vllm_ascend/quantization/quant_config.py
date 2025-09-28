@@ -36,12 +36,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
-                                                    get_otp_group)
+                                                    get_otp_group,
+                                                    get_flashcomm2_otp_group)
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, mlp_tp_enable,
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, flashcomm2_enable, mlp_tp_enable,
                                oproj_tp_enable)
 
 from .utils import get_quant_method
+from vllm_ascend.ascend_config import get_ascend_config
 
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
@@ -301,6 +303,11 @@ class AscendLinearMethod(LinearMethodBase):
                 tp_rank = get_otp_group().rank_in_group
             elif layer.prefix.find("down_proj") != -1 and mlp_tp_enable():
                 tp_rank = get_mlp_tp_group().rank_in_group
+            elif layer.prefix.find("o_proj") != -1 and flashcomm2_enable():
+                if get_ascend_config().flashcomm2_oproj_tensor_parallel_size == 1:
+                    tp_rank = 0
+                else:
+                    tp_rank = get_flashcomm2_otp_group().rank_in_group
             else:
                 tp_rank = get_tensor_model_parallel_rank()
         else:

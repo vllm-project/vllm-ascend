@@ -650,3 +650,25 @@ def npu_stream_switch(target_stream: torch.npu.Stream,
         return nullcontext()
     assert target_stream is not None
     return torch.npu.stream(target_stream)
+
+
+def flashcomm2_enable() -> bool:
+    return get_ascend_config().flashcomm2_oproj_tensor_parallel_size is not None
+
+
+def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
+    # Reorganize batch_ids so that, after the all2all and reduce-scatter operation, each batch_id corresponds to the rank_id within the DP domain. 
+    # For example, when DP = [0, 1, 2, ..., 15] and flashcomm2_oproj_tensor_parallel_size = 2, 
+    # the reorganized batch_ids will be [[batch0, batch8], [batch1, batch9], ..., [batch7, batch15]].
+    flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
+    num_oproj_tensor_parallel_groups: int = (global_tp_size // flashcomm2_otp_size)
+
+    reorgnized_batch_ids = []
+    for i in range(num_oproj_tensor_parallel_groups):
+        ranks = []
+        for j in range(flashcomm2_otp_size):
+            rank_idx = i + j * num_oproj_tensor_parallel_groups
+            ranks.append(rank_idx)
+        reorgnized_batch_ids.append(ranks)
+
+    return reorgnized_batch_ids
