@@ -262,6 +262,7 @@ class AscendLogitsProcessor(LogitsProcessor):
         sampling_metadata=None,  # type: ignore
         embedding_bias: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
-        return super().forward(lm_head,
-                               hidden_states,
-                               embedding_bias=embedding_bias)
+        return LogitsProcessor.forward(self,
+                                       lm_head,
+                                       hidden_states,
+                                       embedding_bias=embedding_bias)
