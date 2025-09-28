@@ -57,14 +57,13 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         nn.Module.__init__(self)
 
         self.forward_type = None
-        if lmhead_tp_enable() and prefix.find("lm_head") != -1:
+        if lmhead_tp_enable() and "lm_head" in prefix:
             self.comm_group = get_lmhead_tp_group()
-        elif embedding_tp_enable() and prefix.find("embed_tokens") != -1:
+        elif embedding_tp_enable() and "embed_tokens" in prefix:
             self.comm_group = get_embed_tp_group()
             self.forward_type = "embed_tp"
             self.is_decode_only = get_current_vllm_config(
             ).kv_transfer_config.is_kv_consumer
-
         else:
             self.comm_group = get_tp_group()
 
