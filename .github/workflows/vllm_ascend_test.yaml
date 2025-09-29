@@ -56,6 +56,7 @@ jobs:
         with:
           filters: |
             e2e_tracker:
+                          - '.github/workflows/vllm_ascend_test.yaml'
               - '.github/workflows/vllm_ascend_test.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
