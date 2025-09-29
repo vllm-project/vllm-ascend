@@ -166,6 +166,11 @@ def register_torchair_model():
     )
 
     ModelRegistry.register_model(
+        "DeepseekV32ForCausalLM",
+        "vllm_ascend.torchair.models.torchair_deepseek_v3:TorchairDeepseekV3ForCausalLM"
+    )
+
+    ModelRegistry.register_model(
         "Qwen2ForCausalLM",
         "vllm_ascend.torchair.models.qwen2:CustomQwen2ForCausalLM")
 
