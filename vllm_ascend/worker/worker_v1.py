@@ -91,7 +91,10 @@ class NPUWorker(WorkerBase):
         if get_ascend_config().use_sfa:
             # Direct import instead of using try_register_lib to ensure proper error handling when
             # custom_ops is necessary but not available (e.g., in DeepSeek v3.2 deployments)
-            import custom_ops  # type: ignore[import-untyped] # noqa
+            # yapf: disable
+            import custom_ops  # type: ignore # noqa
+
+            # yapf: enable
             logger.info(
                 "custom_ops module loaded successfully. Custom operators like "
                 "torch.ops.custom.npu_sparse_flash_attention are now available."

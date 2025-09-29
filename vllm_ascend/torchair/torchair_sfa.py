@@ -981,7 +981,6 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             # Profiling run.
             return output
 
-
         if attn_metadata.prefill is not None:
             assert attn_metadata.num_decodes is not None and \
             attn_metadata.num_prefills is not None and \
