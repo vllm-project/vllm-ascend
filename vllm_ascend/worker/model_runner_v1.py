@@ -2439,7 +2439,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 })
 
             # filter out the valid batch descriptor
-            _cg_mode, batch_descriptor = \
+            _ag_mode, batch_descriptor = \
                 self.aclgraph_dispatcher.dispatch(
                     BatchDescriptor(num_tokens=num_tokens,
                                     uniform_decode=uniform_decode))
@@ -2447,11 +2447,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # we allow forcing NONE when the dispatcher disagrees to support
                 # warm ups for aclgraph capture
                 assert aclgraph_runtime_mode == CUDAGraphMode.NONE or \
-                    aclgraph_runtime_mode == _cg_mode, (
+                    aclgraph_runtime_mode == _ag_mode, (
                     f"Aclgraph runtime mode mismatch at dummy_run. "
-                    f"Expected {_cg_mode}, but got {aclgraph_runtime_mode}.")
+                    f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}.")
             else:
-                aclgraph_runtime_mode = _cg_mode
+                aclgraph_runtime_mode = _ag_mode
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
