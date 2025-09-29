@@ -597,11 +597,12 @@ def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
 
 
-def enable_sp() -> bool:
-    from vllm.config import get_cached_compilation_config
-
+def enable_sp(vllm_config=None) -> bool:
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
     return (
-        get_cached_compilation_config().pass_config.enable_sequence_parallelism
+        vllm_config.compilation_config.pass_config.enable_sequence_parallelism
         or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM)
 
 
