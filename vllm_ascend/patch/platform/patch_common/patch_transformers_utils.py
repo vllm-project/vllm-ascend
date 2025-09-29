@@ -5,8 +5,6 @@ from vllm.transformers_utils import config
 
 logger = logging.get_logger(__name__)
 
-DEEPSEEK_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
-
 
 class DeepseekV3Config(PretrainedConfig):
     r"""
