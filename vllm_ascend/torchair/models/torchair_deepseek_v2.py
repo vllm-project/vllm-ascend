@@ -437,6 +437,7 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        decoder_layer=None,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -473,8 +474,7 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                              self.q_lora_rank,
                                              bias=False,
                                              quant_config=quant_config,
-                                             prefix=f"{prefix}.q_a_proj",
-                                             return_bias=False)
+                                             prefix=f"{prefix}.q_a_proj")
             self.q_a_layernorm = RMSNorm(self.q_lora_rank,
                                          eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(q_lora_rank,
@@ -482,24 +482,21 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                                  self.qk_head_dim,
                                                  bias=False,
                                                  quant_config=quant_config,
-                                                 prefix=f"{prefix}.q_b_proj",
-                                                 return_bias=False)
+                                                 prefix=f"{prefix}.q_b_proj")
         else:
             self.q_proj = ColumnParallelLinear(self.hidden_size,
                                                self.num_heads *
                                                self.qk_head_dim,
                                                bias=False,
                                                quant_config=quant_config,
-                                               prefix=f"{prefix}.q_proj",
-                                               return_bias=False)
+                                               prefix=f"{prefix}.q_proj")
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
             self.kv_lora_rank + self.qk_rope_head_dim,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.kv_a_proj_with_mqa",
-            return_bias=False)
+            prefix=f"{prefix}.kv_a_proj_with_mqa")
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
@@ -507,16 +504,14 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj",
-            return_bias=False)
+            prefix=f"{prefix}.kv_b_proj")
 
         if oproj_tp_enable():
             self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
                                             self.hidden_size,
                                             bias=False,
                                             quant_config=quant_config,
-                                            prefix=f"{prefix}.o_proj",
-                                            return_bias=False)
+                                            prefix=f"{prefix}.o_proj")
         elif (config.n_routed_experts is not None
               and self.debug_layer_idx >= config.first_k_dense_replace
               and self.debug_layer_idx % config.moe_layer_freq == 0
@@ -527,16 +522,14 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 self.hidden_size,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.o_proj",
-                return_bias=False)
+                prefix=f"{prefix}.o_proj")
         else:
             self.o_proj = TorchairDeepseekV2RowParallelLinear(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.o_proj",
-                return_bias=False)
+                prefix=f"{prefix}.o_proj")
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -592,7 +585,7 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         enable_multistream_mla = (self.enable_multistream_mla
                                   and attn_metadata is not None
                                   and not forward_context.with_prefill
-                                  and not attn_metadata.is_prefill)
+                                  and attn_metadata.num_decodes > 0)
         forward_kwargs = {"enable_multistream_mla": enable_multistream_mla}
         if self.q_lora_rank is not None:
             npu_prefetch(self.q_a_proj.weight,
@@ -950,8 +943,11 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         replace_allreduce: bool = False,
     ) -> torch.Tensor:
         # Self Attention
-        if attn_metadata is not None and not attn_metadata.is_prefill:
-            mla_moe_communication = self.mla_moe_communication and replace_allreduce
+        if attn_metadata is not None:
+            decoding_condition_met = (
+                not attn_metadata.is_prefill if self.use_sfa else
+                attn_metadata.num_decodes > 0 if self.use_mla else False)
+            mla_moe_communication = decoding_condition_met and self.mla_moe_communication and replace_allreduce
         else:
             mla_moe_communication = False
 
