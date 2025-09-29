@@ -94,7 +94,7 @@ class NPUWorker(WorkerBase):
             import custom_ops  # type: ignore[import-untyped] # noqa
             logger.info(
                 "custom_ops module loaded successfully. Custom operators like "
-                "torch.ops.custom.npu_selected_flash_attention are now available."
+                "torch.ops.custom.npu_sparse_flash_attention are now available."
             )
 
         super().__init__(vllm_config=vllm_config,
