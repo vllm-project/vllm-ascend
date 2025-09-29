@@ -295,6 +295,7 @@ class AscendFusedMoE(FusedMoE):
                 in_dtype=params_dtype,
             )
         self.moe_config = moe
+        # TODO: The self.moe_config.tp_size here is not correct, fixme soon
 
         if quant_config is None:
             self.quant_method = AscendUnquantizedFusedMoEMethod(moe)
