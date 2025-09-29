@@ -1,5 +1,29 @@
 # Release note
 
+## v0.11.0rc0 - 2025.09.30
+
+This is the special release candidate of v0.11.0 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started.
+
+### Highlights
+
+- DeepSeek V3.2 is supported now. [#3270](https://github.com/vllm-project/vllm-ascend/pull/3270)
+- Qwen3-vl is supported now. [#3103](https://github.com/vllm-project/vllm-ascend/pull/3103)
+
+### Core
+
+- DeepSeek works with aclgraph now. [#2707](https://github.com/vllm-project/vllm-ascend/pull/2707)
+- MTP works with aclgraph now. [#2932](https://github.com/vllm-project/vllm-ascend/pull/2932)
+- EPLB is supported now. [#2956](https://github.com/vllm-project/vllm-ascend/pull/2956)
+- Mooncacke store kvcache connector is supported now. [#2913](https://github.com/vllm-project/vllm-ascend/pull/2913)
+- CPU offload connector is supported now. [#1659](https://github.com/vllm-project/vllm-ascend/pull/1659)
+
+### Other
+
+- Qwen3-next is stable now. [#3007](https://github.com/vllm-project/vllm-ascend/pull/3007)
+- Fixed a lot of bugs introduced in v0.10.2 by Qwen3-next. [#2964](https://github.com/vllm-project/vllm-ascend/pull/2964) [#2781](https://github.com/vllm-project/vllm-ascend/pull/2781) [#3070](https://github.com/vllm-project/vllm-ascend/pull/3070) [#3113](https://github.com/vllm-project/vllm-ascend/pull/3113)
+- The LoRA feature is back now. [#3044](https://github.com/vllm-project/vllm-ascend/pull/3044)
+- Eagle3 spec decode method is back now. [#2949](https://github.com/vllm-project/vllm-ascend/pull/2949)
+
 ## v0.10.2rc1 - 2025.09.16
 
 This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started.
