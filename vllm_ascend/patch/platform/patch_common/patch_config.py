@@ -1,7 +1,10 @@
+import ast
+
+import vllm.envs as envs
 from transformers import PretrainedConfig
 from vllm.config import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
-
+from vllm.logger import logger
 
 
 # mypy: ignore-errors
@@ -93,7 +96,8 @@ def __post_init__(self):
         # TODO(Shangming): Refactor mtp configuration logic when supporting
         if (self.target_model_config
                 and self.target_model_config.hf_text_config.model_type
-                in ("deepseek_v3", "deepseek_v32", "mimo", "ernie4_5_moe", "qwen3_next")):
+                in ("deepseek_v3", "deepseek_v32", "mimo", "ernie4_5_moe",
+                    "qwen3_next")):
             # use the draft model from the same model:
             self.model = self.target_model_config.model
             # Align the quantization of draft model for cases such as
@@ -103,9 +107,8 @@ def __post_init__(self):
         elif self.method in ("ngram", "[ngram]"):
             self.model = "ngram"
         else:
-            raise ValueError(
-                "num_speculative_tokens was provided but without "
-                "speculative model.")
+            raise ValueError("num_speculative_tokens was provided but without "
+                             "speculative model.")
 
     # Automatically configure the method for ngram when "model" is used
     # instead of "method"
@@ -117,8 +120,7 @@ def __post_init__(self):
         # Unified to "ngram" internally
         self.method = "ngram"
         # Set default values if not provided
-        if (self.prompt_lookup_min is None
-                and self.prompt_lookup_max is None):
+        if (self.prompt_lookup_min is None and self.prompt_lookup_max is None):
             # TODO(woosuk): Tune these values. They are arbitrarily chosen.
             self.prompt_lookup_min = 5
             self.prompt_lookup_max = 5
@@ -159,8 +161,7 @@ def __post_init__(self):
                 runner="draft",
                 tokenizer=self.target_model_config.tokenizer,
                 tokenizer_mode=self.target_model_config.tokenizer_mode,
-                trust_remote_code=self.target_model_config.
-                trust_remote_code,
+                trust_remote_code=self.target_model_config.trust_remote_code,
                 allowed_local_media_path=self.target_model_config.
                 allowed_local_media_path,
                 allowed_media_domains=self.target_model_config.
@@ -169,8 +170,7 @@ def __post_init__(self):
                 seed=self.target_model_config.seed,
                 revision=self.revision,
                 code_revision=self.code_revision,
-                tokenizer_revision=self.target_model_config.
-                tokenizer_revision,
+                tokenizer_revision=self.target_model_config.tokenizer_revision,
                 spec_target_max_model_len=self.target_model_config.
                 max_model_len,
                 quantization=self.quantization,
@@ -193,10 +193,10 @@ def __post_init__(self):
             elif self.draft_model_config.hf_config.model_type == "medusa":
                 self.method = "medusa"
             elif (self.draft_model_config.hf_config.model_type ==
-                    "mlp_speculator"):
+                  "mlp_speculator"):
                 self.method = "mlp_speculator"
             elif (self.draft_model_config.hf_config.model_type
-                    in ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp")):
+                  in ("deepseek_mtp", "mimo_mtp", "glm4_moe_mtp")):
                 self.method = "deepseek_mtp"
                 if self.num_speculative_tokens > 1:
                     logger.warning(
@@ -204,8 +204,7 @@ def __post_init__(self):
                             "one layer. Might need some code changes " \
                             "to support multiple layers."
                         )
-            elif (self.draft_model_config.hf_config.model_type ==
-                    "ernie_mtp"):
+            elif (self.draft_model_config.hf_config.model_type == "ernie_mtp"):
                 self.method = "ernie_mtp"
                 if self.num_speculative_tokens > 1:
                     logger.warning(
@@ -214,7 +213,7 @@ def __post_init__(self):
                             "to support multiple layers."
                         )
             elif (self.draft_model_config.hf_config.model_type ==
-                    "qwen3_next_mtp"):
+                  "qwen3_next_mtp"):
                 self.method = "qwen3_next_mtp"
                 if self.num_speculative_tokens > 1:
                     logger.warning(
@@ -223,7 +222,7 @@ def __post_init__(self):
                             "to support multiple layers."
                         )
             elif (self.draft_model_config.hf_config.model_type
-                    in ("longcat_flash_mtp")):
+                  in ("longcat_flash_mtp")):
                 self.method = "longcat_flash_mtp"
                 if self.num_speculative_tokens > 1:
                     logger.warning(
@@ -246,13 +245,11 @@ def __post_init__(self):
                         "Chunked prefill and EAGLE are not compatible "
                         "when using V0.")
 
-                from vllm.transformers_utils.configs import (
-                    SpeculatorsConfig)
-                from vllm.transformers_utils.configs.eagle import (
-                    EAGLEConfig)
+                from vllm.transformers_utils.configs import SpeculatorsConfig
+                from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
                 if isinstance(self.draft_model_config.hf_config,
-                                (EAGLEConfig, SpeculatorsConfig)):
+                              (EAGLEConfig, SpeculatorsConfig)):
                     pass
                 else:
                     eagle_config = EAGLEConfig(
@@ -267,8 +264,8 @@ def __post_init__(self):
                 self.draft_model_config.hf_config.num_lookahead_tokens = \
                 self.num_speculative_tokens
 
-            n_predict = getattr(self.draft_model_config.hf_config,
-                                "n_predict", None)
+            n_predict = getattr(self.draft_model_config.hf_config, "n_predict",
+                                None)
             if n_predict is not None:
                 if self.num_speculative_tokens is None:
                     # Default to max value defined in draft model config.
@@ -283,13 +280,11 @@ def __post_init__(self):
             if self.speculative_token_tree is None:
                 # Generate chain of tokens.
                 self.speculative_token_tree = str([
-                    (i + 1) * (0, )
-                    for i in range(self.num_speculative_tokens)
+                    (i + 1) * (0, ) for i in range(self.num_speculative_tokens)
                 ])
             else:
                 # Sort the token tree breadth-first.
-                tree_choices = ast.literal_eval(
-                    self.speculative_token_tree)
+                tree_choices = ast.literal_eval(self.speculative_token_tree)
                 self.speculative_token_tree = str(
                     sorted(tree_choices, key=lambda t: (len(t), t)))
 
