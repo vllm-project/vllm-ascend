@@ -211,3 +211,6 @@ Recommended mitigation strategies:
 
 Root cause analysis:
 The current stream requirement calculation for size captures only accounts for measurable factors including: data parallel size, tensor parallel size, expert parallel configuration, piece graph count, multistream overlap shared expert settings, and HCCL communication mode (AIV/AICPU). However, numerous unquantifiable elements - such as operator characteristics and specific hardware features - consume additional streams outside of this calculation framework, resulting in stream resource exhaustion during size capture operations.
+
+### 21. Installing vllm-ascend will overwrite the existing torch-npu package？
+Installing vllm-ascend will overwrite the existing torch-npu package. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after installing vllm-ascend.
