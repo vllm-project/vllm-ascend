@@ -77,7 +77,7 @@ myst_substitutions = {
     # CANN image tag
     'cann_image_tag': "8.2.rc1-910b-ubuntu22.04-py3.11",
     # vllm version in ci
-    'ci_vllm_version': 'v0.10.2',
+    'ci_vllm_version': 'v0.11.0rc3',
 }
 
 # Add any paths that contain templates here, relative to this directory.
