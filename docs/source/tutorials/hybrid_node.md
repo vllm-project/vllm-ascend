@@ -1,4 +1,4 @@
-# Tutorial on DeepSeek-V3.2-Exp
+# Multi-Node-DP (DeepSeek V3.2)
 
 :::{note}
 Only machines with Atlas 800 A3 and aarch64 is supported currently, Atlas 800 A2 and x86 is coming soon.
@@ -54,7 +54,6 @@ Two Atlas 800 A3(64G*16) nodes are required for deploying `DeepSeek-V3.2-Exp` an
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-<!-- TODO: CHANGE THE IMAGE TAG -->
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
 export NAME=vllm-ascend
 
@@ -140,8 +139,9 @@ docker run --rm \
 ```bash
 wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/CANN-custom_ops-sfa-linux.aarch64.run
 chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-./CANN-custom_ops-sfa-linux.aarch64.run --quiet --install-path=/usr/local/Ascend/ascend-toolkit/latest/opp
-source /usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/bin/set_env.bash
+./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
 wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 ```
@@ -150,8 +150,15 @@ pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 
 ```bash
 wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/CANN-custom_ops-mlapo-linux.aarch64.run
-chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run
-todo: so, whl ...
+# please set a custom install-path, here take `/`vllm-workspace/CANN` as example.
+chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
+pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/libopsproto_rt2.0.so
+cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
+# Don't forget to replace `/vllm-workspace/CANN/` to the custom path you set before.
+source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
+export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
 ```
 
 ::::

@@ -1,5 +1,9 @@
 # Multi-Node-DP (Qwen3-VL-235B-A22B)
 
+:::{note}
+Qwen3 VL rely on the newest version of `transformers`(>4.56.2). Please install it from source until it's released.
+:::
+
 ## Verify Multi-Node Communication Environment
 
 referring to [multi_node.md](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-process)
