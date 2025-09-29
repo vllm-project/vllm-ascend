@@ -17,7 +17,6 @@
 # limitations under the License.
 #
 import json
-import os
 from typing import Any, Dict
 
 import jsonschema
@@ -35,7 +34,6 @@ from vllm.outputs import RequestOutput
 
 from tests.e2e.conftest import VllmRunner
 
-os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
