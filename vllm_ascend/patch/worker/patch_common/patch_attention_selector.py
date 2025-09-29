@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+# mypy: ignore-errors
 from functools import cache
 from typing import Optional
 
@@ -73,8 +74,8 @@ if vllm_version_is("0.10.2"):
         # use the placeholder NO_ATTENTION
         if is_attention_free:
             from vllm.attention.backends.placeholder_attn import \
-                PlaceholderAttentionBackend  # type: ignore
-            return PlaceholderAttentionBackend  # type: ignore
+                PlaceholderAttentionBackend
+            return PlaceholderAttentionBackend
 
         # Check whether a particular choice of backend was
         # previously forced.
