@@ -2685,10 +2685,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = (len(self.attn_groups) > 1)
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
-        self.need_accepted_tokens = any([
-            isinstance(attn_group[0].kv_cache_spec, MambaSpec)
-            for attn_group in self.attn_groups
-        ])
+        if vllm_version_is("0.10.2"):
+            self.need_accepted_tokens = any([
+                isinstance(
+                    self.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+                    MambaSpec) for attn_group in self.attn_groups
+            ])
+        else:
+            self.need_accepted_tokens = any([
+                isinstance(attn_group[0].kv_cache_spec, MambaSpec)
+                for attn_group in self.attn_groups
+            ])
+
         self.may_reinitialize_input_batch(kv_cache_config)
 
         if self.ascend_config.is_deepseek_sfa:
