@@ -392,9 +392,9 @@ def _get_column_parallel_op(
 
 def _get_row_parallel_op(
     prefix, layer
-) -> Union[MLPRowParallelOp, OProjRowParallelOp,
+) -> Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                           MatmulAllreduceRowParallelOp,
-                          SequenceRowParallelOp]:
+                          SequenceRowParallelOp]]:
     if "down_proj" in prefix and mlp_tp_enable():
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
