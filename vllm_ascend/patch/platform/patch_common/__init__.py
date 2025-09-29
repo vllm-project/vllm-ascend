@@ -15,6 +15,10 @@
 # limitations under the License.
 #
 
+import vllm_ascend.patch.platform.patch_common.patch_config  # noqa
 import vllm_ascend.patch.platform.patch_common.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_common.patch_mamba_config  # noqa
 import vllm_ascend.patch.platform.patch_common.patch_multimodal_merge  # noqa
+import vllm_ascend.patch.platform.patch_common.patch_transformers_utils  # noqa
+import vllm_ascend.patch.worker.patch_common.patch_attention_selector  # noqa
+import vllm_ascend.patch.worker.patch_common.patch_attentionspec  # noqa

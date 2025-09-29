@@ -300,6 +300,7 @@ class NPUPlatform(Platform):
                              block_size,
                              use_v1,
                              use_mla,
+                             use_sfa,
                              has_sink=False):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
@@ -307,21 +308,28 @@ class NPUPlatform(Platform):
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:
-            return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
+            if use_mla and not use_sfa:
+                return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
+            if use_mla and use_sfa:
+                return "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend"
 
         use_torchair = ascend_config.torchair_graph_config.enabled
         # choose attention backend based on use_mla and use_torchair
         backend_map = {
-            (True, True):
+            (True, False, True):
             "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend",
-            (True, False):
+            (True, False, False):
             "vllm_ascend.attention.mla_v1.AscendMLABackend",
-            (False, True):
+            (False, False, True):
             "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend",
-            (False, False):
-            "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+            (False, False, False):
+            "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+            (True, True, False):
+            "vllm_ascend.attention.sfa_v1.AscendSFABackend",
+            (True, True, True):
+            "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend",
         }
-        return backend_map[(use_mla, use_torchair)]
+        return backend_map[(use_mla, use_sfa, use_torchair)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

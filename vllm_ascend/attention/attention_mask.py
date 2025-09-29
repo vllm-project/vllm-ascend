@@ -73,7 +73,7 @@ class AttentionMaskBuilder:
                       device: torch.device):
         self._update_attn_cache(max_seq_len, dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
-        ).to(device)
+        ).to(device, non_blocking=True)
 
     def get_splitfuse_attn_mask(
         self,

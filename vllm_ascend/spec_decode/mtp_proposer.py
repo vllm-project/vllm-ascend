@@ -603,10 +603,11 @@ class MtpProposer(Proposer):
         torch.npu.set_compile_mode(jit_compile=False)
         if not self.runner.use_cached_npu_graph:
             npu_backend = torchair.get_npu_backend(compiler_config=config)
-            self.torchair_compiled_model = torch.compile(self.model,
-                                                         dynamic=True,
-                                                         fullgraph=True,
-                                                         backend=npu_backend)
+            self.torchair_compiled_model = torch.compile(
+                self.model,
+                dynamic=not get_ascend_config().use_sfa,
+                fullgraph=True,
+                backend=npu_backend)
             return self.torchair_compiled_model
         else:
             # Generate a new forward proxy code object to prevent the invalidation of
@@ -627,7 +628,7 @@ class MtpProposer(Proposer):
             self.torchair_compiled_models[
                 batch_size] = torchair.inference.cache_compile(
                     self.model.__dict__[forward_proxy_name],
-                    dynamic=True,
+                    dynamic=not get_ascend_config().use_sfa,
                     fullgraph=True,
                     cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
