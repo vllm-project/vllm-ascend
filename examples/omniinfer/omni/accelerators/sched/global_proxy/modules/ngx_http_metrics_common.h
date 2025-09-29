@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
 #ifndef _NGX_HTTP_METRICS_COMMON_H_INCLUDED_

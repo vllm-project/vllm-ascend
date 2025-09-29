@@ -1,5 +1,5 @@
 #!/bin/bash
-# SPDX-License-Identifier: MIT
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Set BASE_DIR to the directory where this script is located
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
