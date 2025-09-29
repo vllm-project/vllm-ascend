@@ -119,3 +119,22 @@
 #       - this is a bug by Ascend only. It can' be fixed in vLLM.
 #    Future Plan:
 #       Fix this bug in torch-npu, bump torch-npu version and remove this patch.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.roberta.RobertaEmbedding.forward`
+#    Why:
+#       shift operation in `_encode_token_type_ids` and `_decode_token_type_ids` cannot run in ascend aclgraph mode
+#    How：
+#       Replace shift operation with multiplication and division.
+#    Related PR (if no, explain why):
+#       No, this need CANN add an aclnn shift operation
+#    Future Plan:
+#       Revert this when CANN support shift aclnn operation
+#   2. `vllm.model_executor.models.roberta.RobertaForSequenceClassification.forward `
+#    Why:
+#       shift operation in `_encode_token_type_ids` and `_decode_token_type_ids` cannot run in ascend aclgraph mode
+#    How：
+#       Replace shift operation with multiplication and division.
+#    Related PR (if no, explain why):
+#       No, this need CANN add an aclnn shift operation
+#    Future Plan:
+#       Revert this when CANN support shift aclnn operation
