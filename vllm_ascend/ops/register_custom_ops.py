@@ -1,13 +1,12 @@
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_dp_group, get_ep_group,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
-                              tensor_model_parallel_reduce_scatter,
-                              get_dp_group,
-                              get_ep_group)
+                              tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
 from vllm.utils import direct_register_custom_op
 
@@ -38,8 +37,10 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
     return residual
 
 
-def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
-                                           label: bool, is_ep_comm: bool = False) -> torch.Tensor:
+def _maybe_all_gather_and_maybe_unpad_impl(
+        x: torch.Tensor,
+        label: bool,
+        is_ep_comm: bool = False) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
@@ -58,8 +59,8 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
             # unpad
             cu_tokens_across_dp_cpu = dp_metadata.cu_tokens_across_dp_cpu
             result = torch.empty((cu_tokens_across_dp_cpu[-1], *x.shape[1:]),
-                                        device=x.device,
-                                        dtype=x.dtype)
+                                 device=x.device,
+                                 dtype=x.dtype)
             dp_size = get_dp_group().world_size
             x = x.view(dp_size, forward_context.padded_length, *x.shape[1:])
             for idx in range(dp_size):
@@ -72,7 +73,8 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
     return x
 
 
-def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> torch.Tensor:
+def _maybe_pad_and_reduce_impl(x: torch.Tensor,
+                               is_ep_comm: bool = False) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
@@ -90,17 +92,20 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
     else:
         # padding
         dp_size = get_dp_group().world_size
-        cu_tokens_across_dp_cpu = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
-        padded_x = torch.empty((dp_size, forward_context.padded_length, *x.shape[1:]),
-                                           device=x.device,
-                                           dtype=x.dtype)
+        cu_tokens_across_dp_cpu = \
+            get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
+        padded_x = torch.empty(
+            (dp_size, forward_context.padded_length, *x.shape[1:]),
+            device=x.device,
+            dtype=x.dtype)
         for idx in range(dp_size):
             start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
             end = cu_tokens_across_dp_cpu[idx]
             num_tokens_dp = end - start
             padded_x[idx, :num_tokens_dp] = x[start:end]
 
-        return get_ep_group().reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
+        return get_ep_group().reduce_scatter(padded_x.view(-1, *x.shape[1:]),
+                                             0)
 
 
 def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
@@ -216,7 +221,9 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
         final_hidden_states: torch.Tensor) -> torch.Tensor:
     forward_context = get_forward_context()
     moe_comm_type = forward_context.moe_comm_type
-    if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.EP_ALLGATHER}:
+    if moe_comm_type in {
+            MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.EP_ALLGATHER
+    }:
         return final_hidden_states
     else:
         return tensor_model_parallel_all_reduce(final_hidden_states)

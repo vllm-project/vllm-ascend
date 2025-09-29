@@ -26,8 +26,10 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.moe.fused_moe_prepare_and_finalize import (
     FusedMoEPrepareAndFinalizeWithAll2All,
-    FusedMoEPrepareAndFinalizeWithAllGather, FusedMoEPrepareAndFinalizeWithMC2,
-    FusedMoEPrepareAndFinalizeWithNaiveMulticast, FusedMoEPrepareAndFinalizeWithEPAllgather)
+    FusedMoEPrepareAndFinalizeWithAllGather,
+    FusedMoEPrepareAndFinalizeWithEPAllgather,
+    FusedMoEPrepareAndFinalizeWithMC2,
+    FusedMoEPrepareAndFinalizeWithNaiveMulticast)
 from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.moe.token_dispatcher import (TokenDispatcherWithAll2AllV,
                                                   TokenDispatcherWithAllGather,

@@ -77,7 +77,7 @@ def set_ascend_forward_context(
     can be attention metadata, etc.
     We add some additional param into forward_context.
     """
-    with set_forward_context(
+    with (set_forward_context(
             attn_metadata,
             vllm_config,
             virtual_engine=virtual_engine,
@@ -85,7 +85,7 @@ def set_ascend_forward_context(
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=aclgraph_runtime_mode,
             batch_descriptor=batch_descriptor,
-    ):
+    )):
         forward_context = get_forward_context()
 
         from vllm_ascend.ops.moe.moe_comm_method import get_moe_comm_method
@@ -174,11 +174,13 @@ def set_ascend_forward_context(
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             # FIXME cu_tokens_across_dp_cpu and max_tokens_across_dp_cpu should be cpu tensor
-            forward_context.dp_metadata.cu_tokens_across_dp_cpu = forward_context.dp_metadata.cu_tokens_across_dp_cpu.cpu()
-            max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
-            )
+            forward_context.dp_metadata.cu_tokens_across_dp_cpu = \
+                forward_context.dp_metadata.cu_tokens_across_dp_cpu.cpu()
+            max_tokens_across_dp = \
+                forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
             if sp_enabled:
-                padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
+                padded_length = (max_tokens_across_dp + tp_world_size -
+                                 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
                 forward_context.padded_length = padded_length
                 forward_context.pad_size = pad_size

@@ -412,7 +412,8 @@ def get_column_parallel_op(
     disable_tp, prefix, layer
 ) -> Tuple[Optional[Union[MLPColumnParallelOp, SequenceMergedColumnParallelOp,
                           SequenceQKVParallelOp]], int, int]:
-    if disable_tp or ("shared_experts" in prefix and shared_expert_dp_enabled()):
+    if disable_tp or ("shared_experts" in prefix
+                      and shared_expert_dp_enabled()):
         return None, 0, 1
 
     custom_op: Optional[Union[
@@ -440,7 +441,8 @@ def get_row_parallel_op(
 ) -> Tuple[Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                           MatmulAllreduceRowParallelOp,
                           SequenceRowParallelOp]], int, int]:
-    if disable_tp or ("shared_experts" in prefix and shared_expert_dp_enabled()):
+    if disable_tp or ("shared_experts" in prefix
+                      and shared_expert_dp_enabled()):
         return None, 0, 1
 
     custom_op: Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
