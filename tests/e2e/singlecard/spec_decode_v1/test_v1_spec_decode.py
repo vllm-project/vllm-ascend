@@ -11,6 +11,7 @@ from vllm import LLM, SamplingParams
 from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
 @pytest.fixture
