@@ -23,7 +23,7 @@ The engine(v0/v1) supports two sleep levels to manage memory during idle periods
     - Memory: The content of both the model weights and kv cache is forgotten.
     - Use Case: Ideal when switching to a different model or updating the current one.
 
-Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) and building from source, if you are using v0.7.3, remember to set `export COMPILE_CUSTOM_KERNELS=1`, for the latest version(v0.9.x+), the environment variable `COMPILE_CUSTOM_KERNELS` will be set 1 by default while building from source.
+Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/installation.html) and building from source, if you are using v0.7.3, remember to set `export COMPILE_CUSTOM_KERNELS=1`, for the latest version(v0.9.x+), the environment variable `COMPILE_CUSTOM_KERNELS` will be set 1 by default while building from source.
 
 ## Usage
 
@@ -33,6 +33,7 @@ The following is a simple example of how to use sleep mode.
 
     ```python
     import os
+    os.environ["VLLM_USE_V1"] = "1"
 
     import torch
     from vllm import LLM, SamplingParams
@@ -77,6 +78,7 @@ The following is a simple example of how to use sleep mode.
     export VLLM_SERVER_DEV_MODE="1"
     export VLLM_WORKER_MULTIPROC_METHOD="spawn"
     export VLLM_USE_MODELSCOPE="True"
+    export VLLM_USE_V1="1"
 
     vllm serve Qwen/Qwen2.5-0.5B-Instruct --enable-sleep-mode
 

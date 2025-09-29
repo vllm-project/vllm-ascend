@@ -1,5 +1,81 @@
 # Release note
 
+## v0.9.1 - 2025.09.03
+
+We are excited to announce the newest official release of vLLM Ascend. This release includes many feature supports, performance improvements and bug fixes. We recommend users to upgrade from 0.7.3 to this version. Please always set `VLLM_USE_V1=1` to use V1 engine.
+
+In this release, we added many enhancements for large scale expert parallel case. It's recommended to follow the [official guide](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/large_scale_ep.html).
+
+Please note that this release note will list all the important changes from last official release(v0.7.3)
+
+### Highlights
+
+- DeepSeek V3/R1 is supported with high quality and performance. MTP can work with DeepSeek as well. Please refer to [muliti node tutorials](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/multi_node.html) and [Large Scale Expert Parallelism](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/large_scale_ep.html).
+- Qwen series models work with graph mode now. It works by default with V1 Engine. Please refer to [Qwen tutorials](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/index.html).
+- Disaggregated Prefilling support for V1 Engine. Please refer to [Large Scale Expert Parallelism](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/large_scale_ep.html) tutorials.
+- Automatic prefix caching and chunked prefill feature is supported.
+- Speculative decoding feature works with Ngram and MTP method.
+- MOE and dense w4a8 quantization support now. Please refer to [quantization guide](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/user_guide/feature_guide/quantization.html).
+- Sleep Mode feature is supported for V1 engine. Please refer to [Sleep mode tutorials](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/user_guide/feature_guide/sleep_mode.html).
+- Dynamic and Static EPLB support is added. This feature is still experimental.
+
+### Note
+The following notes are especially for reference when upgrading from last final release (v0.7.3):
+
+- V0 Engine is not supported from this release. Please always set `VLLM_USE_V1=1` to use V1 engine with vLLM Ascend.
+- Mindie Turbo is not needed with this release. And the old version of Mindie Turbo is not compatible. Please do not install it. Currently all the function and enhancement is included in vLLM Ascend already. We'll consider to add it back in the future in needed.
+- Torch-npu is upgraded to 2.5.1.post1. CANN is upgraded to 8.2.RC1. Don't forget to upgrade them.
+
+### Core
+
+- The Ascend scheduler is added for V1 engine. This scheduler is more affine with Ascend hardware.
+- Structured output feature works now on V1 Engine.
+- A batch of custom ops are added to improve the performance.
+
+### Changes
+
+- EPLB support for Qwen3-moe model. [#2000](https://github.com/vllm-project/vllm-ascend/pull/2000)
+- Fix the bug that MTP doesn't work well with Prefill Decode Disaggregation. [#2610](https://github.com/vllm-project/vllm-ascend/pull/2610) [#2554](https://github.com/vllm-project/vllm-ascend/pull/2554) [#2531](https://github.com/vllm-project/vllm-ascend/pull/2531)
+- Fix few bugs to make sure Prefill Decode Disaggregation works well. [#2538](https://github.com/vllm-project/vllm-ascend/pull/2538) [#2509](https://github.com/vllm-project/vllm-ascend/pull/2509) [#2502](https://github.com/vllm-project/vllm-ascend/pull/2502)
+- Fix file not found error with shutil.rmtree in torchair mode. [#2506](https://github.com/vllm-project/vllm-ascend/pull/2506)
+
+### Known Issues
+- When running MoE model, Aclgraph mode only work with tensor parallel. DP/EP doesn't work in this release.
+- Pipeline parallelism is not supported in this release for V1 engine.
+- If you use w4a8 quantization with eager mode, please set `VLLM_ASCEND_MLA_PARALLEL=1` to avoid oom error.
+- Accuracy test with some tools may not be correct. It doesn't affect the real user case. We'll fix it in the next post release. [#2654](https://github.com/vllm-project/vllm-ascend/pull/2654)
+- We notice that there are still some problems when running vLLM Ascend with Prefill Decode Disaggregation. For example, the memory may be leaked and the service may be stuck. It's caused by known issue by vLLM and vLLM Ascend. We'll fix it in the next post release. [#2650](https://github.com/vllm-project/vllm-ascend/pull/2650) [#2604](https://github.com/vllm-project/vllm-ascend/pull/2604) [vLLM#22736](https://github.com/vllm-project/vllm/pull/22736) [vLLM#23554](https://github.com/vllm-project/vllm/pull/23554) [vLLM#23981](https://github.com/vllm-project/vllm/pull/23981)
+
+## v0.9.1rc3 - 2025.08.22
+
+This is the 3rd release candidate of v0.9.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/) to get started.
+
+### Core
+
+- MTP supports V1 scheduler [#2371](https://github.com/vllm-project/vllm-ascend/pull/2371)
+- Add LMhead TP communication groups [#1956](https://github.com/vllm-project/vllm-ascend/pull/1956)
+- Fix the bug that qwen3 moe doesn't work with aclgraph [#2478](https://github.com/vllm-project/vllm-ascend/pull/2478)
+- Fix `grammar_bitmask` IndexError caused by outdated `apply_grammar_bitmask` method [#2314](https://github.com/vllm-project/vllm-ascend/pull/2314)
+- Remove `chunked_prefill_for_mla` [#2177](https://github.com/vllm-project/vllm-ascend/pull/2177)
+- Fix bugs and refactor cached mask generation logic [#2326](https://github.com/vllm-project/vllm-ascend/pull/2326)
+- Fix configuration check logic about ascend scheduler [#2327](https://github.com/vllm-project/vllm-ascend/pull/2327)
+- Cancel the verification between deepseek-mtp and non-ascend scheduler in disaggregated-prefill deployment [#2368](https://github.com/vllm-project/vllm-ascend/pull/2368)
+- Fix issue that failed with ray distributed backend [#2306](https://github.com/vllm-project/vllm-ascend/pull/2306)
+- Fix incorrect req block length in ascend scheduler [#2394](https://github.com/vllm-project/vllm-ascend/pull/2394)
+- Fix header include issue in rope [#2398](https://github.com/vllm-project/vllm-ascend/pull/2398)
+- Fix mtp config bug [#2412](https://github.com/vllm-project/vllm-ascend/pull/2412)
+- Fix error info and adapt `attn_metedata` refactor [#2402](https://github.com/vllm-project/vllm-ascend/pull/2402)
+- Fix torchair runtime error caused by configuration mismtaches and `.kv_cache_bytes` file missing [#2312](https://github.com/vllm-project/vllm-ascend/pull/2312)
+- Move `with_prefill` allreduce from cpu to npu [#2230](https://github.com/vllm-project/vllm-ascend/pull/2230)
+
+### Docs
+
+- Add document for deepseek large EP [#2339](https://github.com/vllm-project/vllm-ascend/pull/2339)
+
+### Known Issues
+
+- `test_aclgraph.py` failed with `"full_cuda_graph": True` on A2 (910B1) [#2182](https://github.com/vllm-project/vllm-ascend/issues/2182)
+
 ## v0.9.1rc2 - 2025.08.06
 This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/) to get started.
 
@@ -120,7 +196,7 @@ This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please follow the [
 - Fix the accuracy problem with deploy models with parallel parameters. [#1678](https://github.com/vllm-project/vllm-ascend/pull/1678)
 - The pre-built wheel package now requires lower version of glibc. Users can use it by `pip install vllm-ascend` directly. [#1582](https://github.com/vllm-project/vllm-ascend/pull/1582)
 
-## Other
+### Other
 - Official doc has been updated for better read experience. For example, more deployment tutorials are added, user/developer docs are updated. More guide will coming soon.
 - Fix accuracy problem for deepseek V3/R1 models with torchair graph in long sequence predictions. [#1331](https://github.com/vllm-project/vllm-ascend/pull/1331)
 - A new env variable `VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP` has been added. It enables the fused allgather-experts kernel for Deepseek V3/R1 models. The default value is `0`. [#1335](https://github.com/vllm-project/vllm-ascend/pull/1335)

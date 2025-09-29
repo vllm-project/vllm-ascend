@@ -69,10 +69,10 @@ myst_substitutions = {
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    'vllm_ascend_version': 'v0.9.1rc2',
+    'vllm_ascend_version': 'v0.9.1',
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    'pip_vllm_ascend_version': "0.9.1rc2",
+    'pip_vllm_ascend_version': "0.9.1",
     'pip_vllm_version': "0.9.1",
     # CANN image tag
     'cann_image_tag': "8.2.rc1-910b-ubuntu22.04-py3.11",
@@ -86,8 +86,8 @@ templates_path = ['_templates']
 #
 # This is also used if you do content translation via gettext catalogs.
 # Usually you set "language" from the command line for these cases.
-language = 'en'
-
+locale_dirs = ['locale/']
+gettext_compact = False
 # List of patterns, relative to source directory, that match files and
 # directories to ignore when looking for source files.
 # This pattern also affects html_static_path and html_extra_path.

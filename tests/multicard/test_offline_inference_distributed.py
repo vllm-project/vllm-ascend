@@ -32,6 +32,8 @@ from tests.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
+DIST_EXECUTOR_BACKEND = ["mp", "ray"]
+
 
 def test_models_distributed_QwQ():
     example_prompts = [
@@ -59,6 +61,23 @@ def test_models_distributed_DeepSeek():
             dtype=dtype,
             tensor_parallel_size=4,
             distributed_executor_backend="mp",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.skipif(os.environ["VLLM_USE_V1"] == "1")
+@pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
+def test_v0_pp(distributed_executor_backend):
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    dtype = "half"
+    max_tokens = 5
+    with VllmRunner(
+            "Qwen/Qwen3-0.6B-Base",
+            dtype=dtype,
+            pipeline_parallel_size=2,
+            distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -113,17 +132,13 @@ def test_models_distributed_DeepSeek_dbo():
 def test_models_distributed_DeepSeek_w8a8_ep_dbo():
     example_prompts = ["The president of the United States is"] * 100
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
-    with VllmRunner(
-            snapshot_download("vllm-ascend/DeepSeek-V2-Lite-W8A8"),
-            dtype="auto",
-            quantization="ascend",
-            tensor_parallel_size=4,
-            enforce_eager=True,
-            enable_expert_parallel=True,
-            distributed_executor_backend="mp",
-            additional_config={"ascend_scheduler_config": {
-                "enabled": True,
-            }}) as vllm_model:
+    with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V2-Lite-W8A8"),
+                    dtype="auto",
+                    quantization="ascend",
+                    tensor_parallel_size=4,
+                    enforce_eager=True,
+                    enable_expert_parallel=True,
+                    distributed_executor_backend="mp") as vllm_model:
         model_arch = 'DeepseekV2ForCausalLM'
         registed_models = ModelRegistry.models
         assert registed_models[

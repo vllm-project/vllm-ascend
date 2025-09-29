@@ -32,15 +32,22 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.rank_id = dist.get_rank()
         self.world_size = dist.get_world_size()
         self.param_dict = dict(self.model.named_parameters())
-        self.num_dense_layers = self.model.config.first_k_dense_replace
+        if self.model.config.model_type == "qwen3_moe":
+            self.num_dense_layers = 0
+            self.global_expert_num = self.model.config.num_experts
+        else:
+            self.num_dense_layers = self.model.config.first_k_dense_replace
+            self.global_expert_num = self.model.config.n_routed_experts
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
-        self.global_expert_num = self.model.config.n_routed_experts
 
-        # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 is supported here
-        self.expert_weight_names = [
-            "w13_weight", "w2_weight", "w13_weight_scale", "w13_weight_offset",
-            "w2_weight_scale", "w2_weight_offset"
-        ]
+        # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 and qwen3-moe is supported here
+        if self.model.quant_config is not None:
+            self.expert_weight_names = [
+                "w13_weight", "w2_weight", "w13_weight_scale",
+                "w13_weight_offset", "w2_weight_scale", "w2_weight_offset"
+            ]
+        else:
+            self.expert_weight_names = ["w13_weight", "w2_weight"]
 
         self.expert_map_per_layer = dict(
         )  # reference to expert map on device for expert map update
@@ -127,8 +134,12 @@ class VllmEplbAdaptor(EplbAdaptor):
             expert_map_all = self.determine_expert_map_all()
 
         for layer_idx in range(num_moe_layers):
-            self.expert_map_per_layer_cpu[layer_idx + 3] = \
-                expert_map_all[layer_idx][self.rank_id]
+            if self.model.config.model_type == "qwen3_moe":
+                self.expert_map_per_layer_cpu[layer_idx] = \
+                    expert_map_all[layer_idx][self.rank_id]
+            else:
+                self.expert_map_per_layer_cpu[layer_idx + 3] = \
+                    expert_map_all[layer_idx][self.rank_id]
         return expert_map_all
 
     def _expert_file_to_tensor(self, expert_map_path: str):

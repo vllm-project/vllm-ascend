@@ -19,3 +19,11 @@ help:
 %: Makefile
 	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
 
+po:
+	make gettext
+	sphinx-intl update -p _build/gettext -l zh_CN
+
+intl:
+	sphinx-intl build
+	@$(SPHINXBUILD) -b html -D language=zh_CN "$(SOURCEDIR)" "$(BUILDDIR)/html/zh-cn" $(SPHINXOPTS) $(O)
+

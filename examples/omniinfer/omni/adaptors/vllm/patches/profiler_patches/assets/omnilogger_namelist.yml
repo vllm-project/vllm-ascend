@@ -1,0 +1,204 @@
+type: "marker"
+targets:
+  - module: "vllm.entrypoints.openai.serving_engine:OpenAIServing"
+    function_name: _preprocess_chat
+    entry_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      raw_request_id = args[0].raw_request_id
+      if os.getenv('ROLE') == "prefill":
+          safe_print(trace_output_directory, f"<<<Action: Get prefill engine request and start pickle; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+    exit_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      raw_request_id = args[0].raw_request_id
+      if os.getenv('ROLE') == "prefill":
+          safe_print(trace_output_directory, f"<<<Action: Finish process request in prefill engine; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  - module: "vllm.entrypoints.openai.serving_chat:OpenAIServingChat"
+    function_name: create_chat_completion
+    entry_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      raw_request_id = "chatcmpl-" + args[1].headers.get('X-Request-Id')
+      args[0].raw_request_id = raw_request_id
+      if os.getenv('ROLE') == "prefill":
+          safe_print(trace_output_directory, f"<<<Action: PD api server get request; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+      else:
+          safe_print(trace_output_directory, f"<<<Action: Enter decode to generate; Timestamp:{time.time()}; RequestID:{raw_request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  - module: "vllm.v1.core.sched.scheduler:Scheduler"
+    function_name: add_request
+    entry_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      if os.getenv('ROLE') == "prefill":
+          safe_print(trace_output_directory, f"<<<Action: Prefill add waiting queue; Timestamp:{time.time()}; RequestID:{args[0].request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+ # Prefill free kv blocks
+  - module: "vllm.v1.core.sched.scheduler:Scheduler"
+    function_name: _update_from_kv_xfer_finished
+    entry_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      for req_id in (args[0].finished_sending or ()):
+          if req_id in self.requests and req_id not in self._cached_reqs_data:
+              safe_print(trace_output_directory, f"<<<Action: Prefill free kv blocks; Timestamp:{time.time()}; RequestID:{req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # start pull kv
+  - module: "omni.accelerators.pd.llmdatadist_connector_v1:DecodeConnectorWorker"
+    function_name: _read_blocks
+    entry_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      request_id = kwargs['request_id']
+      safe_print(trace_output_directory, f"<<<Action: Start pull kv; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  # finish pull kv
+  - module: "omni.accelerators.pd.llmdatadist_connector_v1:DecodeConnectorWorker"
+    function_name: _send_pulled_kv_req_list
+    entry_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      request_id = args[1][0]
+      safe_print(trace_output_directory, f"<<<Action: Finish pull kv; Timestamp:{time.time()}; RequestID:{request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  - module: "vllm.v1.engine.core_client:AsyncMPClient"
+    function_name: get_output_async
+    exit_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      from vllm.v1.engine import EngineCoreOutputs
+      if isinstance(result, EngineCoreOutputs) and os.getenv('ROLE') == "prefill":
+          for request in getattr(result, 'outputs', []):
+              safe_print(trace_output_directory, f"<<<Action: Finish prefill pickle and start response; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  - module: "vllm.v1.core.kv_cache_manager:KVCacheManager"
+    function_name: allocate_slots
+    exit_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      load_kv_async = False
+      if "delay_cache_blocks" in kwargs:
+          load_kv_async = kwargs['delay_cache_blocks']
+          if result and load_kv_async == False and os.getenv('ROLE') == "prefill": # block is not none
+              safe_print(trace_output_directory, f"<<<Action: Prefill get new_blocks; Timestamp:{time.time()}; RequestID:{args[0].request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          elif result and load_kv_async: #delay_cache_blocks is True
+              safe_print(trace_output_directory, f"<<<Action: Add need pulling sequence; Timestamp:{time.time()}; RequestID:{args[0].request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  - module: "vllm.v1.core.sched.scheduler:Scheduler"
+    function_name: schedule
+    entry_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      class CustomList(list):
+          def append(self, item):
+              if os.getenv('ROLE') == "prefill":
+                  safe_print(trace_output_directory, f"<<<Action: success add to seq groups; Timestamp:{time.time()}; RequestID:{item.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+              else:
+                  safe_print(trace_output_directory, f"<<<Action: Start append running sequece for decode; Timestamp:{time.time()}; RequestID:{item.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+              super().append(item)
+      self.running = CustomList(self.running)
+      for request in self.waiting: 
+          safe_print(trace_output_directory, f"<<<Action: try to schedule in waiting queue; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+    exit_operation: |
+      self.schedule_output = result # for accessing schedule_output in engine core
+
+  - module: "vllm.v1.engine.core:EngineCore"
+    function_name: execute_model
+    entry_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      self.execute_model_start_time = time.time()
+      for req in args[0].scheduled_new_reqs:
+          if os.getenv('ROLE') == "prefill":
+              safe_print(trace_output_directory, f"<<<Action: Prefill start execute_model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+          else:
+              safe_print(trace_output_directory, f"<<<Action: Start to send output; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+    exit_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      self.execute_model_end_time = time.time()
+      for req in args[0].scheduled_new_reqs:
+          if os.getenv('ROLE') == "prefill":
+              safe_print(trace_output_directory, f"<<<Action: Prefill done execute_model; Timestamp:{time.time()}; RequestID:{req.req_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+
+  - module: "vllm.v1.engine.core:EngineCoreProc"
+    function_name: process_input_socket
+    entry_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      from vllm.v1.engine import EngineCoreRequestType
+      def patch_queue_put_nowait(queue):
+          original_put_nowait = queue.put_nowait
+          def patched_put_nowait(item):
+              request_type, request = item
+              if request_type == EngineCoreRequestType.ADD:
+                  if os.getenv('ROLE') == "prefill":
+                      safe_print(trace_output_directory, f"<<<Action: Start process request in prefill engine; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+                  else:
+                      safe_print(trace_output_directory, f"<<<Action: Start to dispatch decode request; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+              original_put_nowait(item)
+          queue.put_nowait = patched_put_nowait
+          return queue
+      self.input_queue = patch_queue_put_nowait(self.input_queue)
+
+  - module: "vllm.v1.engine.core:EngineCoreProc"
+    function_name: process_output_socket
+    entry_operation: |
+      import os, time
+      import queue
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      def patch_queue_get(queue):
+          original_get = queue.get
+          def patch_get():
+              value = original_get()
+              for request in getattr(value, 'outputs', []):
+                  if os.getenv('ROLE') == "prefill":
+                      safe_print(trace_output_directory, f"<<<Action: Start to send output in prefill stage; Timestamp:{time.time()}; RequestID:{request.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+              return value
+          queue.get = patch_get
+          return queue
+      self.output_queue = patch_queue_get(self.output_queue)
+
+# engine step profiling
+  - module: "vllm.v1.engine.core:EngineCore"
+    function_name: step
+    entry_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      self.engine_step_start_time = time.time()
+      self.start_free_block_num = self.scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+    exit_operation: |
+      import os, time
+      from omni.adaptors.vllm.patches.profiler_patches.utils import ip_str, safe_print, trace_output_directory
+      scheduler_output = self.scheduler.schedule_output # this is passed from above schedule marker
+      engine_step_finish_time = time.time()
+      engine_step_execute_cost = (engine_step_finish_time - self.engine_step_start_time) * 1000
+      execute_model_cost_time = (self.execute_model_end_time - self.execute_model_start_time) * 1000
+      waiting_reqs_num_after_step = len(self.scheduler.waiting)
+      running_reqs_num_after_step = len(scheduler_output.scheduled_new_reqs) + len(scheduler_output.scheduled_cached_reqs)
+      total_tokens = scheduler_output.total_num_scheduled_tokens
+      reqs_ids = []
+      bs_tokens = []
+      if os.getenv('ROLE') == "prefill":
+          for req_id, num_scheduled_token in scheduler_output.num_scheduled_tokens.items(): 
+              reqs_ids.append(req_id)
+              bs_tokens.append(num_scheduled_token)
+      else:
+          for req in scheduler_output.scheduled_new_reqs:
+              total_tokens += req.num_computed_tokens
+          for req in scheduler_output.scheduled_cached_reqs:
+              total_tokens += req.num_computed_tokens
+      kv_blocks_num = self.scheduler.kv_cache_config.num_blocks
+      end_free_block_num = self.scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
+      cost_blocks_num = self.start_free_block_num - end_free_block_num
+      kv_cache_usage = result.scheduler_stats.gpu_cache_usage
+      engine_core_str = f'{os.getpid()}-{self.execute_model_start_time}'
+      if scheduler_output.total_num_scheduled_tokens != 0:
+          safe_print(trace_output_directory, f"profile: {os.getenv('ROLE')}_{ip_str}|{self.engine_step_start_time}|"
+              f"{engine_step_finish_time}|{engine_step_execute_cost}|{running_reqs_num_after_step}|{total_tokens}|"
+              f"{waiting_reqs_num_after_step}|{reqs_ids}|{bs_tokens}|{self.execute_model_start_time}|"
+              f"{self.execute_model_end_time}|{execute_model_cost_time}|{kv_cache_usage}|{kv_blocks_num}|"
+              f"{self.start_free_block_num}|{end_free_block_num}|{cost_blocks_num}|{engine_core_str}"
+          )

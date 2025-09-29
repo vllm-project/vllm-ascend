@@ -1,0 +1,97 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the omni-infer project.
+#
+# Usage: rename this file to Dockerfile
+# run docker build -t omni_infer:dev .
+
+FROM registry-cbu.huawei.com/openeuler/openeuler-aarch64:22.03-lts
+
+ARG PIP_INDEX_URL="http://mirrors.tools.huawei.com/pypi/simple"
+ARG PIP_TRUSTED_HOST="mirrors.tools.huawei.com"
+
+RUN rm -f /etc/yum.repos.d/*.repo && \
+    echo -e "[openEuler-everything]\n\
+name=openEuler-everything\n\
+baseurl=http://mirrors.tools.huawei.com/openeuler/openEuler-22.03-LTS-SP4/everything/aarch64/\n\
+enabled=1\n\
+gpgcheck=0\n\
+gpgkey=http://mirrors.tools.huawei.com/openeuler/openEuler-22.03-LTS-SP4/everything/aarch64/RPM-GPG-KEY-openEuler\n\n\
+[openEuler-EPOL]\n\
+name=openEuler-epol\n\
+baseurl=http://mirrors.tools.huawei.com/openeuler/openEuler-22.03-LTS-SP4/EPOL/main/aarch64/\n\
+enabled=1\n\
+gpgcheck=0\n\n\
+[openEuler-update]\n\
+name=openEuler-update\n\
+baseurl=http://mirrors.tools.huawei.com/openeuler/openEuler-22.03-LTS-SP4/update/aarch64/\n\
+enabled=1\n\
+gpgcheck=0" > /etc/yum.repos.d/openeuler.repo && \
+    yum clean all && yum makecache
+
+RUN yum install -y git vim wget net-tools openssl-devel bzip2-devel libffi-devel pciutils kmod systemd systemd-udev sqlite-devel pcre libuuid-devel cjson-devel xz-devel hostname grep && \
+    yum -y groupinstall "Development Tools" && \
+    yum clean all && rm -rf /var/cache/yum && rm -rf /tmp/*
+
+COPY python_pkg /copy_data/python_pkg
+RUN cd /copy_data/python_pkg && \
+    tar -xzf Python-3.11.4.tgz && \
+    cd Python-3.11.4 && ./configure --enable-optimizations && \
+    make -j8 && make install && \
+    cd .. && rm -rf Python-3.11.4 && \
+    ln -s /usr/local/bin/python3.11 /usr/bin/python && \
+    ln -s /usr/local/bin/pip3 /usr/bin/pip && \
+    rm -rf /copy_data/python_pkg/*
+
+# Using the High Performance Computing subpackage
+COPY ascend_pkg /copy_data/ascend_pkg
+RUN cd /copy_data/ascend_pkg && \
+    chmod +x *.run && \
+    echo y | ./CANN-compiler*.run  --full --pylocal --quiet --nox11 --install-for-all && \
+    echo y | ./CANN-toolkit*.run  --full --pylocal --quiet --nox11 --install-for-all && \
+    echo y | ./CANN-runtime*.run  --full --quiet --nox11 --install-for-all && \
+    echo y | ./CANN-opp*.run  --full --quiet --nox11 --install-for-all && \
+    echo y | ./CANN-hccl*.run  --full --pylocal --quiet --nox11 --install-for-all && \
+    echo y | ./CANN-aoe*.run  --full --quiet --nox11 --install-for-all && \
+    echo y | ./CANN-ncs*.run  --full --quiet --nox11 --install-for-all && \
+    echo y | ./CANN-fwkplugin*.run  --full --quiet --nox11 --install-for-all && \
+    echo y | ./Ascend-aicpu*.run  --full --quiet --nox11 --install-for-all && \
+    echo y | ./Ascend910_93-opp_kernel*.run  --full --quiet --nox11 --install-for-all && \
+    cd /copy_data/ascend_pkg && \
+    cp /copy_data/ascend_pkg/set_env.sh /usr/local/Ascend && \
+    cp /copy_data/ascend_pkg/acl.so /usr/local/Ascend && \
+    cp /copy_data/ascend_pkg/acl.so /usr/local/Ascend/latest/toolkit/python/site-packages && \
+    chmod 555 /usr/local/Ascend/set_env.sh && \
+    chmod 555 /usr/local/Ascend/acl.so && \
+    echo "source /usr/local/Ascend/set_env.sh" >> ~/.bashrc && \
+    echo "export PYTHONPATH=/usr/local/Ascend${PYTHONPATH:+:}$PYTHONPATH" >> ~/.bashrc && \
+    rm -rf /copy_data/ascend_pkg/*.run && rm -rf /tmp/*
+
+RUN source ~/.bashrc && \
+    cd /copy_data/ascend_pkg/nnal && \
+    chmod +x ./Ascend-cann-nnal_8.1.RC1_linux-aarch64.run && \
+    ./Ascend-cann-nnal_8.1.RC1_linux-aarch64.run -q --install && \
+    source /usr/local/Ascend/nnal/atb/set_env.sh && \
+    echo "source /usr/local/Ascend/nnal/atb/set_env.sh" >> ~/.bashrc && \
+    echo "export LD_LIBRARY_PATH=/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/lib:/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/examples:/usr/local/Ascend/nnal/atb/latest/atb/cxx_abi_1/tests/atbopstest:/usr/local/Ascend/driver/lib64/driver:/usr/local/Ascend/driver/lib64/driver:$LD_LIBRARY_PATH">> ~/.bashrc && \
+    echo "source /usr/local/Ascend/CANN-7.7/bin/setenv.bash" >> ~/.bashrc && \
+    rm -rf *.run && rm -rf /tmp/*
+
+RUN python -m pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} --upgrade pip && \
+    sed -i '$d' /etc/bashrc && \
+    pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} --upgrade setuptools wheel && \
+    pip install -i ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions ray ml-dtypes tornado numba setuptools_scm
+
+CMD ["/bin/bash"]

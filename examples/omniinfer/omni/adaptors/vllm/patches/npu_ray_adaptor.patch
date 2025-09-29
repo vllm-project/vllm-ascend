@@ -1,0 +1,25 @@
+diff --git a/vllm/executor/ray_utils.py b/vllm/executor/ray_utils.py
+index 37cc07bfb..59134c9e3 100644
+--- a/vllm/executor/ray_utils.py
++++ b/vllm/executor/ray_utils.py
+@@ -88,8 +88,9 @@ try:
+             # executes on a background thread, so we need to reset torch's
+             # current device.
+             import torch
++            import torch_npu
+             if not self.compiled_dag_cuda_device_set:
+-                torch.cuda.set_device(self.worker.device)
++                torch.npu.set_device(self.worker.device)
+                 self.compiled_dag_cuda_device_set = True
+ 
+             output = self.worker._execute_model_spmd(execute_model_req,
+@@ -114,7 +115,8 @@ try:
+                     pass
+                 else:
+                     import torch
+-                    torch.cuda.set_device(self.worker.device)
++                    import torch_npu
++                    torch.npu.set_device(self.worker.device)
+ 
+                 self.compiled_dag_cuda_device_set = True
+ 

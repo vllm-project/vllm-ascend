@@ -35,6 +35,9 @@ export VLLM_USE_MODELSCOPE=True
 
 # Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+
+# Enable V1 Engine
+export VLLM_USE_V1=1
 ```
 
 ### Online Inference on Multi-NPU
@@ -44,7 +47,7 @@ Run the following script to start the vLLM server on Multi-NPU:
 For an Atlas A2 with 64GB of NPU card memory, tensor-parallel-size should be at least 2, and for 32GB of memory, tensor-parallel-size should be at least 4.
 
 ```bash
-vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 4 --enable_expert_parallel
+vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 4
 ```
 
 Once your server is started, you can query the model with input prompts

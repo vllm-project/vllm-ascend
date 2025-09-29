@@ -1,0 +1,333 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:1
+msgid "Adding a New Model"
+msgstr "添加新模型"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:3
+msgid ""
+"This guide demonstrates how to integrate a novel or customized model into "
+"vllm-ascend. For foundational concepts, it is highly recommended to refer to"
+" [vllm official doc: Adding a New "
+"Model](https://docs.vllm.ai/en/stable/contributing/model/) first."
+msgstr ""
+"本指南演示如何将新颖或自定义的模型集成到 vllm-ascend 中。对于基础概念，强烈建议先参考 [vllm "
+"官方文档：添加新模型](https://docs.vllm.ai/en/stable/contributing/model/)。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:6
+msgid "Step 1: Implementing Models with `torch` and `torch_npu`"
+msgstr "步骤 1：使用 `torch` 和 `torch_npu` 实现模型"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:8
+msgid ""
+"This section provides instructions for implementing new models compatible "
+"with vllm and vllm-ascend."
+msgstr "本节提供了实现与 vllm 和 vllm-ascend 兼容的新模型的相关说明。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:10
+msgid "**Before starting:**"
+msgstr "**开始之前：**"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:12
+msgid ""
+"Verify whether your model already exists in vllm's "
+"[models](https://github.com/vllm-"
+"project/vllm/tree/main/vllm/model_executor/models) directory."
+msgstr ""
+"请确认你的模型是否已经存在于 vllm 的 [models](https://github.com/vllm-"
+"project/vllm/tree/main/vllm/model_executor/models) 目录中。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:13
+msgid ""
+"Use existing models' implementation as templates to accelerate your "
+"development."
+msgstr "使用已有模型的实现作为模板以加速您的开发。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:15
+msgid "Method 1: Implementing New Models from Scratch"
+msgstr "方法一：从零开始实现新模型"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:17
+msgid ""
+"Follow vllm's [OPT model "
+"adaptation](https://docs.vllm.ai/en/stable/contributing/model/basic.html) "
+"example for guidance."
+msgstr ""
+"请参考 vllm 的 [OPT "
+"模型适配](https://docs.vllm.ai/en/stable/contributing/model/basic.html) 示例进行操作。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:19
+msgid "**Key implementation requirements:**"
+msgstr "**关键实现要求：**"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:21
+msgid "Place model files in `vllm_ascend/models/` directory."
+msgstr "请将模型文件放在 `vllm_ascend/models/` 目录下。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:23
+msgid ""
+"Standard module structure for decoder-only LLMs (please checkout vllm's "
+"implementations for other kinds of model):"
+msgstr "解码器-only LLMs 的标准模块结构（请参考 vllm 对其他类型模型的实现）："
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:25
+msgid "`*ModelForCausalLM` (top-level wrapper)"
+msgstr "`*ModelForCausalLM`（顶层包装器）"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:26
+msgid "`*Model` (main architecture)"
+msgstr "`*Model`（主架构）"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:27
+msgid "`*DecoderLayer` (transformer block)"
+msgstr "`*DecoderLayer` （transformer 块）"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:28
+msgid "`*Attention` and `*MLP` (specific computation unit)"
+msgstr "`*Attention` 和 `*MLP`（特定计算单元）"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:31
+msgid "`*` denotes your model's unique identifier."
+msgstr "`*` 表示你的模型的唯一标识符。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:34
+msgid "Critical Implementation Details:"
+msgstr "关键实现细节："
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:36
+msgid "All modules must include a `prefix` argument in `__init__()`."
+msgstr "所有模块在 `__init__()` 方法中都必须包含一个 `prefix` 参数。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:38
+msgid "**Required interfaces:**"
+msgstr "**必需的接口：**"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:30
+msgid "Module Type"
+msgstr "模块类型"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:30
+msgid "Required Methods"
+msgstr "必需的方法"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:30
+msgid "`*ModelForCausalLM`"
+msgstr "`*ModelForCausalLM`"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:30
+msgid "`get_input_embeddings`, `compute_logits`, `load_weights`"
+msgstr "`get_input_embeddings`，`compute_logits`，`load_weights`"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:30
+msgid "`*Model`"
+msgstr "`*模型`"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:30
+msgid "`get_input_embeddings`, `load_weights`"
+msgstr "`get_input_embeddings`，`load_weights`"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:45
+msgid "Attention Backend Integration:"
+msgstr "注意后端集成："
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:47
+msgid ""
+"Importing attention via `from vllm.attention import Attention` can "
+"automatically leverage the attention backend routing of vllm-ascend (see: "
+"`get_attn_backend_cls()` in `vllm_ascend/platform.py`)."
+msgstr ""
+"通过 `from vllm.attention import Attention` 导入 attention 可以自动利用 vllm-ascend "
+"的注意力后端路由（详见：`vllm_ascend/platform.py` 中的 `get_attn_backend_cls()`）。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:49
+msgid "Tensor Parallelism:"
+msgstr "张量并行："
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:51
+msgid ""
+"Use vllm's parallel layers (`ColumnParallelLinear`, "
+"`VocabParallelEmbedding`, etc.) to implement models supporting tensor "
+"parallelism. Note that Ascend-specific customizations are implemented in "
+"`vllm_ascend/ops/` directory (RMSNorm, VocabParallelEmbedding, etc.)."
+msgstr ""
+"使用 vllm 的并行层（如 `ColumnParallelLinear`、`VocabParallelEmbedding` "
+"等）来实现支持张量并行的模型。需要注意的是，Ascend 特有的自定义实现（如 RMSNorm、VocabParallelEmbedding 等）位于 "
+"`vllm_ascend/ops/` 目录下。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:53
+msgid ""
+"**Reference Implementation Template** (assumed path: "
+"`vllm_ascend/models/custom_model.py`):"
+msgstr "**参考实现模板**（假定路径：`vllm_ascend/models/custom_model.py`）："
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:135
+msgid "Method 2: Customizing Existing vLLM Models"
+msgstr "方法二：自定义已有的 vLLM 模型"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:137
+msgid ""
+"For most use cases, extending existing implementations is preferable. We "
+"demonstrate an example to inherit from base classes and implement a custom "
+"deepseek model below (assumed path: `vllm_ascend/models/deepseek_v2.py`)."
+msgstr ""
+"对于大多数使用场景，建议扩展已有的实现。我们在下面演示了一个示例，通过继承基类并实现一个自定义的 deepseek "
+"模型（假定路径：`vllm_ascend/models/deepseek_v2.py`）。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:175
+msgid ""
+"For a complete implementation reference, see: "
+"`vllm_ascend/models/deepseek_v2.py`."
+msgstr "完整的实现参考请见：`vllm_ascend/models/deepseek_v2.py`。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:178
+msgid "Step 2: Registering Custom Models using ModelRegistry Plugins in vLLM"
+msgstr "第2步：使用 vLLM 中的 ModelRegistry 插件注册自定义模型"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:180
+msgid ""
+"vllm provides a plugin mechanism for registering externally implemented "
+"models without modifying its codebase."
+msgstr "vllm 提供了一种插件机制，可用于注册外部实现的模型，而无需修改其代码库。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:182
+msgid ""
+"To integrate your implemented model from `vllm_ascend/models/` directory:"
+msgstr "要集成你在 `vllm_ascend/models/` 目录下实现的模型："
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:184
+msgid ""
+"Import your model implementation in `vllm_ascend/models/__init__.py` using "
+"relative imports."
+msgstr "使用相对导入在 `vllm_ascend/models/__init__.py` 中导入你的模型实现。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:185
+msgid ""
+"Register the model wrapper class via `vllm.ModelRegistry.register_model()` "
+"function."
+msgstr "通过 `vllm.ModelRegistry.register_model()` 函数注册模型包装类。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:187
+msgid ""
+"**Reference Registration Template** (an example of registering new models in"
+" `vllm_ascend/models/__init__.py`):"
+msgstr "**参考注册模板**（在 `vllm_ascend/models/__init__.py` 注册新模型的示例）："
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:210
+msgid ""
+"The first argument of `vllm.ModelRegistry.register_model()` indicates the "
+"unique architecture identifier which must match `architectures` in "
+"`config.json` of the model."
+msgstr ""
+"`vllm.ModelRegistry.register_model()` 的第一个参数表示唯一的架构标识符，这个标识符必须与模型的 "
+"`config.json` 文件中的 `architectures` 匹配。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:221
+msgid "Step 3: Verification"
+msgstr "第 3 步：验证"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:223
+msgid "Case 1: Overriding Existing vLLM Model Architecture"
+msgstr "案例 1：重载已有的 vLLM 模型架构"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:225
+msgid ""
+"If you're registering a customized model architecture based on vllm's "
+"existing implementation (overriding vllm's original class), when executing "
+"vllm offline/online inference (using any model), you'll observe warning logs"
+" similar to the following output from "
+"`vllm/models_executor/models/registry.py`."
+msgstr ""
+"如果你基于 vllm 的现有实现注册了一个自定义的模型架构（覆盖了 vllm 的原始类），在执行 vllm "
+"的离线/在线推理（无论使用哪个模型）时，你会看到类似于 `vllm/models_executor/models/registry.py` "
+"输出的警告日志。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:231
+msgid "Case 2: Registering New Model Architecture"
+msgstr "案例2：注册新模型架构"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:233
+msgid ""
+"If you're registering a novel model architecture not present in vllm "
+"(creating a completely new class), current logs won't provide explicit "
+"confirmation by default. It's recommended to add the following logging "
+"statement at the end of the `register_model` method in "
+"`vllm/models_executor/models/registry.py`."
+msgstr ""
+"如果你注册了 vllm 中不存在的新模型架构（创建一个全新的类），当前日志默认不会提供明确的确认信息。建议在 "
+"`vllm/models_executor/models/registry.py` 文件中的 `register_model` "
+"方法末尾添加如下日志语句。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:239
+msgid ""
+"After adding this line, you will see confirmation logs shown below when "
+"running vllm offline/online inference (using any model)."
+msgstr "添加这一行之后，当你运行 vllm 离线/在线推理（使用任何模型）时，将会看到如下确认日志。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:245
+msgid ""
+"This log output confirms your novel model architecture has been successfully"
+" registered in vllm."
+msgstr "该日志输出确认了你的新模型架构已成功在 vllm 中注册。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:247
+msgid "Step 4: Testing"
+msgstr "第4步：测试"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:249
+msgid ""
+"After adding a new model, we should do basic functional test (offline/online"
+" inference), accuracy test and performance benchmark for the model."
+msgstr "在添加新模型后，我们应对该模型进行基本功能测试（离线/在线推理）、准确率测试和性能基准测试。"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:251
+msgid "Find more details at:"
+msgstr "更多详情请见："
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:253
+msgid ""
+"[Accuracy test guide](https://vllm-"
+"ascend.readthedocs.io/en/latest/developer_guide/evaluation/index.html)"
+msgstr ""
+"[精度测试指南](https://vllm-"
+"ascend.readthedocs.io/en/latest/developer_guide/evaluation/index.html)"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:254
+msgid ""
+"[Performance benchmark guide](https://vllm-"
+"ascend.readthedocs.io/en/latest/developer_guide/performance/performance_benchmark.html)"
+msgstr ""
+"[性能基准指南](https://vllm-"
+"ascend.readthedocs.io/en/latest/developer_guide/performance/performance_benchmark.html)"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:256
+msgid "Step 5: Updating Supported Models Doc"
+msgstr "第5步：更新支持的模型文档"
+
+#: ../../developer_guide/modeling/adding_a_new_model.md:258
+msgid ""
+"At last, if all the steps above are completed, you should add the new model "
+"into our [Supported Models](https://vllm-"
+"ascend.readthedocs.io/en/latest/user_guide/supported_models.html) doc."
+msgstr ""
+"最后，如果以上所有步骤都已完成，你应该将新模型添加到我们的[支持的模型](https://vllm-"
+"ascend.readthedocs.io/en/latest/user_guide/supported_models.html)文档中。"

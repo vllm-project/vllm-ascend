@@ -48,6 +48,8 @@ Run the following script to execute offline inference on a single NPU:
 ```{code-block} python
    :substitutions:
 import os
+os.environ["VLLM_USE_V1"] = "1"
+
 from vllm import LLM, SamplingParams
 
 prompts = [
@@ -74,6 +76,8 @@ for output in outputs:
 ```{code-block} python
    :substitutions:
 import os
+os.environ["VLLM_USE_V1"] = "1"
+
 from vllm import LLM, SamplingParams
 
 prompts = [
@@ -130,6 +134,7 @@ docker run --rm \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
+-e VLLM_USE_V1=1 \
 -it $IMAGE \
 vllm serve Qwen/Qwen3-8B --max_model_len 26240
 ```
@@ -156,6 +161,7 @@ docker run --rm \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
+-e VLLM_USE_V1=1 \
 -it $IMAGE \
 vllm serve Qwen/Qwen3-8B --max_model_len 26240 --enforce-eager
 ```

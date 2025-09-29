@@ -9,4 +9,5 @@ multi_npu
 multi_npu_qwen3_moe
 multi_npu_quantization
 multi_node
+large_scale_ep
 :::

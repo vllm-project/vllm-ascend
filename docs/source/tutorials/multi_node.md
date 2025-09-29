@@ -87,6 +87,7 @@ docker run --rm \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /mnt/sfs_turbo/.cache:/root/.cache \
+-e VLLM_USE_V1=1 \
 -it $IMAGE bash
 ```
 
@@ -115,7 +116,7 @@ export OMP_NUM_THREADS=100
 export HCCL_BUFFSIZE=1024
 
 # The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3-W8A8
-# If you want to the quantization manually, please refer to https://vllm-ascend.readthedocs.io/en/latest/user_guide/feature_guide/quantization.html
+# If you want to the quantization manually, please refer to https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/user_guide/feature_guide/quantization.html
 vllm serve /root/.cache/ds_v3 \
 --host 0.0.0.0 \
 --port 8004 \

@@ -1,0 +1,41 @@
+type: "viztracer" # should be one of (torchnpu, viztracer, timer)
+base_params:  # Default profiling parameters
+  save_dir: "viztracer_output/"
+  max_stack_depth: -1
+  tracer_entries: 100000
+  log_async: True
+targets:
+  - module: "vllm.entrypoints.openai.serving_completion:OpenAIServingCompletion"
+    function_name: create_completion
+  - module: "vllm.entrypoints.openai.serving_completion:OpenAIServingCompletion"
+    function_name: _preprocess_completion
+  - module: "vllm.v1.worker.gpu_model_runner:GPUModelRunner"
+    function_name: _prepare_inputs
+  - module: "vllm.v1.worker.gpu_model_runner:GPUModelRunner"
+    function_name: execute_model
+  - module: "vllm.v1.worker.gpu_model_runner:GPUModelRunner"
+    function_name: _update_states
+  - module: "vllm.v1.core.sched.scheduler:Scheduler"
+    function_name: schedule
+  - module: "vllm.v1.engine.core:EngineCore"
+    function_name: execute_model
+  - module: "vllm.v1.engine.core:EngineCore"
+    function_name: step
+  - module: "vllm.v1.engine.core:EngineCore"
+    function_name: add_request
+  - module: "vllm.v1.engine.core:EngineCore"
+    function_name: _initialize_kv_caches
+  - module: "omni.models.deepseek.deepseek_v2:CustomDeepseekV2Model"
+    function_name: forward
+  - module: "omni.models.deepseek.deepseek_v3:CustomDeepseekV3ForCausalLM"
+    function_name: forward
+  - module: "omni.models.deepseek.deepseek_v3:CustomDeepseekV3ForCausalLM"
+    function_name: compute_logits
+  - module: "omni.adaptors.vllm.worker.npu_model_runner:NPUModelRunner"
+    function_name: _update_states
+  - module: "omni.adaptors.vllm.worker.npu_model_runner:NPUModelRunner"
+    function_name: _process_reqs
+  - module: "omni.adaptors.vllm.worker.npu_model_runner:WrapModel"
+    function_name: forward
+  - module: "omni.adaptors.vllm.worker.npu_model_runner:WrapModel"
+    function_name: _forward

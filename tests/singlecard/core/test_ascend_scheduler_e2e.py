@@ -18,6 +18,7 @@ def model() -> LLM:
         MODEL,
         enforce_eager=True,
         enable_prefix_caching=True,
+        max_model_len=200,
         max_num_batched_tokens=200,
         max_num_seqs=3,
         additional_config={"ascend_scheduler_config": {

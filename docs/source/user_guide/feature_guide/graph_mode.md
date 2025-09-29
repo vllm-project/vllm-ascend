@@ -21,6 +21,7 @@ offline example:
 
 ```python
 import os
+os.environ["VLLM_USE_V1"] = "1"
 
 from vllm import LLM
 
@@ -42,6 +43,8 @@ offline example:
 
 ```python
 import os
+os.environ["VLLM_USE_V1"] = "1"
+
 from vllm import LLM
 
 # TorchAirGraph is only work without chunked-prefill now
@@ -52,7 +55,7 @@ outputs = model.generate("Hello, how are you?")
 online example:
 
 ```shell
-vllm serve Qwen/Qwen2-7B-Instruct --additional-config='{"torchair_graph_config": {"enabled": true},"ascend_scheduler_config": {"enabled": true,}}'
+VLLM_USE_V1=1 vllm serve Qwen/Qwen2-7B-Instruct --additional-config='{"torchair_graph_config": {"enabled": true},"ascend_scheduler_config": {"enabled": true,}}'
 ```
 
 You can find more detail about additional config [here](../configuration/additional_config.md).
@@ -65,6 +68,8 @@ offline example:
 
 ```python
 import os
+os.environ["VLLM_USE_V1"] = "1"
+
 from vllm import LLM
 
 model = LLM(model="someother_model_weight", enforce_eager=True)

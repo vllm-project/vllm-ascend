@@ -2,8 +2,7 @@
 
 ## Version Specific FAQs
 
-- [[v0.7.3.post1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1007)
-- [[v0.9.0rc2] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1115)
+- [[v0.9.1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2643)
 
 ## General FAQs
 
@@ -12,6 +11,7 @@
 Currently, **ONLY Atlas A2 series**  (Ascend-cann-kernels-910b) are supported:
 
 - Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
+- Atlas A3 Training series
 - Atlas 800I A2 Inference series (Atlas 800I A2)
 
 Below series are NOT supported yet:
@@ -29,13 +29,13 @@ If you are in China, you can use `daocloud` to accelerate your downloading:
 
 ```bash
 # Replace with tag you want to pull
-TAG=v0.7.3rc2
+TAG=v0.9.1
 docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:$TAG
 ```
 
 ### 3. What models does vllm-ascend supports?
 
-Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_models.html).
+Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/user_guide/support_matrix/supported_models.html).
 
 ### 4. How to get in touch with our community?
 
@@ -48,9 +48,17 @@ There are many channels that you can communicate with our community developers /
 
 ### 5. What features does vllm-ascend V1 supports?
 
-Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html).
+Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/user_guide/support_matrix/supported_features.html).
 
-### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
+### 6. How to get better performance in Non-MLA LLMs?
+
+`Non-MLA` LLMs forcibly disable the `chunked prefill` feature, as the performance of operators supporting this feature functionality is currently suboptimal. Therefore, in this scenario, we enforce the `Ascend scheduler` and forcibly disable `chunked prefill`. It is important to note that when you launch a non-MLA model with a simple script, the underlying behavior deviates from vLLM’s default of enabling chunked prefill: chunked prefill is effectively turned off, and prefill and decode are scheduled separately. Consequently, inference performance may drop significantly compared to expectations.
+
+Accordingly, we recommend the following serving configuration to achieve optimal performance on a single node:
+1. We recommend `--max-model-len` to a value just slightly larger than `max_input_len + max_output_len`; this reserves more KV-cache allocation headroom and reduces the risk of OOM. 
+2. We recommend aligning `--max-num-batched-tokens` with `–-max-model-len`, or setting it a few times larger than the average input length in your dataset; this helps maintain a good load balance between prefill and decode phases.
+
+### 7. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
 
 Basically, the reason is that the NPU environment is not configured correctly. You can:
 1. try `source /usr/local/Ascend/nnal/atb/set_env.sh` to enable NNAL package.
@@ -67,40 +75,36 @@ import vllm
 
 If all above steps are not working, feel free to submit a GitHub issue.
 
-### 7. How does vllm-ascend perform?
+### 8. How does vllm-ascend perform?
 
-Currently, only some models are improved. Such as `Qwen2.5 VL`, `Qwen3`, `Deepseek  V3`. Others are not good enough. From 0.9.0rc2, Qwen and Deepseek works with graph mode to play a good performance. What's more, you can install `mindie-turbo` with `vllm-ascend v0.7.3` to speed up the inference as well.
+Currently, only some models are improved. Such as `Qwen2.5 VL`, `Qwen3`, `Deepseek  V3`. Others are not good enough. From 0.9.0rc2, Qwen and Deepseek works with graph mode to play a good performance.
 
-### 8. How vllm-ascend work with vllm?
-vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
+### 9. How vllm-ascend work with vllm?
+vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.9.1, you should use vllm-ascend 0.9.1 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
 
-### 9. Does vllm-ascend support Prefill Disaggregation feature?
+### 10. Does vllm-ascend support Prefill Disaggregation feature?
 
-Currently, only 1P1D is supported on V0 Engine. For V1 Engine or NPND support, We will make it stable and supported by vllm-ascend in the future.
+Yes, Prefill Disaggregation feature is supported on V1 Engine for NPND support.
 
-### 10. Does vllm-ascend support quantization method?
+### 11. Does vllm-ascend support quantization method?
 
-Currently, w8a8 quantization is already supported by vllm-ascend originally on v0.8.4rc2 or higher, If you're using vllm 0.7.3 version, w8a8 quantization is supporeted with the integration of vllm-ascend and mindie-turbo, please use `pip install vllm-ascend[mindie-turbo]`.
+w8a8 and w4a8 quantization is already supported by vllm-ascend originally on v0.8.4rc2 or higher, 
 
-### 11. How to run w8a8 DeepSeek model?
+### 12. How to run w8a8 DeepSeek model?
 
-Please following the [inferencing tutorail](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html) and replace model to DeepSeek.
-
-### 12. There is no output in log when loading models using vllm-ascend, How to solve it?
-
-If you're using vllm 0.7.3 version, this is a known progress bar display issue in VLLM, which has been resolved in [this PR](https://github.com/vllm-project/vllm/pull/12428), please cherry-pick it locally by yourself. Otherwise, please fill up an issue.
+Please following the [inferencing tutorail](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/tutorials/multi_node.html) and replace model to DeepSeek.
 
 ### 13. How vllm-ascend is tested
 
 vllm-ascend is tested by functional test, performance test and accuracy test.
 
-- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functionality、popular models availability and [supported features](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html) via e2e test
+- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functionality、popular models availability and [supported features](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/user_guide/support_matrix/supported_features.html) via e2e test
 
 - **Performance test**: we provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for end-to-end performance benchmark which can easily to re-route locally, we'll publish a perf website to show the performance test results for each pull request
 
 - **Accuracy test**: we're working on adding accuracy test to CI as well.
 
-Finnall, for each release, we'll publish the performance test and accuracy test report in the future.
+Final, for each release, we'll publish the performance test and accuracy test report in the future.
 
 ### 14. How to fix the error "InvalidVersion" when using vllm-ascend?
 It's usually because you have installed an dev/editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use. Please set the env variable `VLLM_VERSION` to the version of vLLM package you have installed. The format of `VLLM_VERSION` should be `X.Y.Z`.
@@ -133,6 +137,9 @@ There are several factors that affect output certainty:
 1. Sampler Method: using **Greedy sample** by setting `temperature=0` in `SamplingParams`, e.g.:
 
 ```python
+import os
+os.environ["VLLM_USE_V1"] = "1"
+
 from vllm import LLM, SamplingParams
 
 prompts = [
@@ -158,12 +165,58 @@ for output in outputs:
 2. Set the following enveriments parameters:
 
 ```bash
-export LCCL_DETERMINISTIC = 1
-export HCCL_DETERMINISTIC = 1
-export ATB_MATMUL_SHUFFLE_K_ENABLE = 0
-export ATB_LLM_LCOC_ENABLE = 0
+export LCCL_DETERMINISTIC=1
+export HCCL_DETERMINISTIC=true
+export ATB_MATMUL_SHUFFLE_K_ENABLE=0
+export ATB_LLM_LCOC_ENABLE=0
 ```
 
 ### 19. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？
 The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met `pip install qwen-omni-utils`,
 this package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring audio processing functionality works correctly.
+
+### 20. Failed to run with `ray` distributed backend?
+You might facing the following errors when running with ray backend in distributed scenarios:
+
+```
+TypeError: can't convert npu:0 device type tensor to numpy. Use Tensor.cpu() to copy the tensor to host memory first.
+```
+
+```
+AttributeError: 'str' object has no attribute 'DESCRIPTOR' when packaging message to dict
+```
+
+This has been solved in `ray>=2.47.1`, thus we could solve this as following:
+
+```
+python3 -m pip install modelscope 'ray>=2.47.1' 'protobuf>3.20.0'
+```
+
+### 21. Failed with inferencing Qwen3 MoE due to `Alloc sq cq fail` issue?
+
+When running Qwen3 MoE with tp/dp/ep, etc., you may encounter an error shown in [#2629](https://github.com/vllm-project/vllm-ascend/issues/2629).
+
+This is more likely to happen when you're using A3. Please refer to the empirical formula below to estimate a suitable value for this argument:
+
+```python
+# pg_num: the number of process groups for communication
+pg_num = sum(size > 1 for size in [
+    parallel_config.data_parallel_size,
+    parallel_config.tensor_parallel_size,
+])
+# num_hidden_layer: number of hidden layers of the model
+
+# for A2:
+num_capture_sizes = (1920) / (num_hidden_layer + 1) / (1 + pg_num * 1)
+# for A3:
+num_capture_sizes = (1920 - pg_num * 40) / (num_hidden_layer + 1) / (1 + pg_num * 2)
+```
+
+Find more details about how to calculate this value at [#2629](https://github.com/vllm-project/vllm-ascend/issues/2629).
+
+Try to adjust the arg `cuda-capture-sizes` to address this:
+
+```bash
+vllm serve ... \
+--cuda-capture-sizes=num_capture_sizes
+```

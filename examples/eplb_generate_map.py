@@ -1,7 +1,31 @@
 import argparse
 import json
+import random
 
 import numpy as np
+
+
+def add_unique_number_with_retry(existing_numbers,
+                                 valid_range,
+                                 max_attempts=100):
+    '''
+    generate an unique number not in existing_numbers
+    Args:
+        existing_numbers:
+        valid_range:
+        max_attempts:
+
+    Returns:
+
+    '''
+    existing_set = set(existing_numbers)
+    min_val, max_val = valid_range
+    for _ in range(max_attempts):
+        candidate = random.randint(min_val, max_val)
+        if candidate not in existing_set:
+            return candidate
+
+    raise ValueError('No unique number found')
 
 
 def split_and_insert(n, k, m):
@@ -13,13 +37,12 @@ def split_and_insert(n, k, m):
 
     A = np.arange(n)
 
-    B = np.random.choice(n, size=m, replace=False)
-
     groups = np.array_split(A, k)
 
     for j in range(m // k):
         for i in range(k):
-            groups[i] = np.append(groups[i], B[i + j * k])
+            candidate = add_unique_number_with_retry(groups[i], (0, n - 1))
+            groups[i] = np.append(groups[i], candidate)
     return np.concatenate(groups)
 
 

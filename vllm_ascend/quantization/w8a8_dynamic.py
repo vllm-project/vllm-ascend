@@ -526,7 +526,9 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
 
         gather_sizes = global_expert_tokens.new_empty(
             global_expert_tokens.shape[0])
-        dist.all_to_all_single(gather_sizes, global_expert_tokens)
+        dist.all_to_all_single(gather_sizes,
+                               global_expert_tokens,
+                               group=ep_group.device_group)
 
         token_counts_combined = torch.stack(
             [gather_sizes, global_expert_tokens], dim=0)
@@ -542,10 +544,16 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
         gather_size_list = token_counts_combined_cpu[1]
         scatter_size_list = token_counts_combined_cpu[0]
 
-        dist.all_to_all_single(gathered_tokens, quantized_tokens,
-                               scatter_size_list, gather_size_list)
-        dist.all_to_all_single(dynamic_scale, token_scales, scatter_size_list,
-                               gather_size_list)
+        dist.all_to_all_single(gathered_tokens,
+                               quantized_tokens,
+                               scatter_size_list,
+                               gather_size_list,
+                               group=ep_group.device_group)
+        dist.all_to_all_single(dynamic_scale,
+                               token_scales,
+                               scatter_size_list,
+                               gather_size_list,
+                               group=ep_group.device_group)
 
         hidden_states, dynamic_scale, inverse_indices, expert_tokens = torch_npu.npu_moe_re_routing(
             gathered_tokens,
@@ -593,8 +601,11 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
             index=inverse_indices.to(torch.float32).argsort().to(torch.int32))
 
         hidden_states = reordered_outputs.new_empty(*quantized_tokens.shape)
-        dist.all_to_all_single(hidden_states, reordered_outputs,
-                               gather_size_list, scatter_size_list)
+        dist.all_to_all_single(hidden_states,
+                               reordered_outputs,
+                               gather_size_list,
+                               scatter_size_list,
+                               group=ep_group.device_group)
 
         final_hidden_states = torch_npu.npu_moe_finalize_routing(
             hidden_states,

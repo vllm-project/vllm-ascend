@@ -1,0 +1,288 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-09-03 17:45+0800\n"
+"PO-Revision-Date: 2025-07-18 10:09+0800\n"
+"Last-Translator: \n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/installation.md:1
+msgid "Installation"
+msgstr "安装"
+
+#: ../../source/installation.md:3
+msgid "This document describes how to install vllm-ascend manually."
+msgstr "本文档介绍如何手动安装 vllm-ascend。"
+
+#: ../../source/installation.md:5
+msgid "Requirements"
+msgstr "要求"
+
+#: ../../source/installation.md:7
+msgid "OS: Linux"
+msgstr "操作系统：Linux"
+
+#: ../../source/installation.md:8
+msgid "Python: >= 3.9, < 3.12"
+msgstr "Python：>= 3.9，< 3.12"
+
+#: ../../source/installation.md:9
+msgid "A hardware with Ascend NPU. It's usually the Atlas 800 A2 series."
+msgstr "配备有昇腾NPU的硬件，通常是Atlas 800 A2系列。"
+
+#: ../../source/installation.md:10
+msgid "Software:"
+msgstr "软件："
+
+#: ../../source/installation.md
+msgid "Software"
+msgstr "软件"
+
+#: ../../source/installation.md
+msgid "Supported version"
+msgstr "支持的版本"
+
+#: ../../source/installation.md
+msgid "Note"
+msgstr "注释"
+
+#: ../../source/installation.md
+msgid "CANN"
+msgstr "CANN"
+
+#: ../../source/installation.md
+#, fuzzy
+msgid ">= 8.2.RC1"
+msgstr ">= 8.1.RC1"
+
+#: ../../source/installation.md
+msgid "Required for vllm-ascend and torch-npu"
+msgstr "vllm-ascend 和 torch-npu 必需"
+
+#: ../../source/installation.md
+msgid "torch-npu"
+msgstr "torch-npu"
+
+#: ../../source/installation.md
+#, fuzzy
+msgid ">= 2.5.1.post1"
+msgstr ">= 2.5.1"
+
+#: ../../source/installation.md
+msgid ""
+"Required for vllm-ascend, No need to install manually, it will be auto "
+"installed in below steps"
+msgstr "vllm-ascend 必需，无需手动安装，后续步骤会自动安装。"
+
+#: ../../source/installation.md
+msgid "torch"
+msgstr "torch"
+
+#: ../../source/installation.md
+msgid ">= 2.5.1"
+msgstr ">= 2.5.1"
+
+#: ../../source/installation.md
+msgid "Required for torch-npu and vllm"
+msgstr "torch-npu 和 vllm 所需"
+
+#: ../../source/installation.md:18
+msgid "You have 2 way to install:"
+msgstr "你有两种安装方式："
+
+#: ../../source/installation.md:19
+msgid ""
+"**Using pip**: first prepare env manually or via CANN image, then install"
+" `vllm-ascend` using pip."
+msgstr "**使用 pip**：首先手动准备环境或通过 CANN 镜像准备环境，然后使用 pip 安装 `vllm-ascend`。"
+
+#: ../../source/installation.md:20
+msgid "**Using docker**: use the `vllm-ascend` pre-built docker image directly."
+msgstr "**使用 docker**：直接使用 `vllm-ascend` 预构建的 docker 镜像。"
+
+#: ../../source/installation.md:22
+msgid "Configure a new environment"
+msgstr "配置一个新环境"
+
+#: ../../source/installation.md:24
+msgid ""
+"Before installing, you need to make sure firmware/driver and CANN are "
+"installed correctly, refer to "
+"[link](https://ascend.github.io/docs/sources/ascend/quick_install.html) "
+"for more details."
+msgstr ""
+"在安装之前，您需要确保固件/驱动和 CANN 已正确安装，更多详情请参考 "
+"[链接](https://ascend.github.io/docs/sources/ascend/quick_install.html)。"
+
+#: ../../source/installation.md:26
+msgid "Configure hardware environment"
+msgstr "配置硬件环境"
+
+#: ../../source/installation.md:28
+msgid ""
+"To verify that the Ascend NPU firmware and driver were correctly "
+"installed, run:"
+msgstr "要验证 Ascend NPU 固件和驱动程序是否正确安装，请运行："
+
+#: ../../source/installation.md:34
+msgid ""
+"Refer to [Ascend Environment Setup "
+"Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) "
+"for more details."
+msgstr "更多详情请参考[Ascend环境搭建指南](https://ascend.github.io/docs/sources/ascend/quick_install.html)。"
+
+#: ../../source/installation.md:36
+msgid "Configure software environment"
+msgstr "配置软件环境"
+
+#: ../../source/installation.md
+msgid "Before using pip"
+msgstr "在使用 pip 之前"
+
+#: ../../source/installation.md:46
+msgid ""
+"The easiest way to prepare your software environment is using CANN image "
+"directly:"
+msgstr "最简单的方式是直接使用 CANN 镜像来准备您的软件环境："
+
+#: ../../source/installation.md
+msgid "Click here to see \"Install CANN manually\""
+msgstr "点击此处查看“手动安装 CANN”"
+
+#: ../../source/installation.md:72
+msgid "You can also install CANN manually:"
+msgstr "你也可以手动安装 CANN："
+
+#: ../../source/installation.md
+msgid "Before using docker"
+msgstr "在使用 docker 之前"
+
+#: ../../source/installation.md:103
+msgid "No more extra step if you are using `vllm-ascend` prebuilt docker image."
+msgstr "如果你使用 `vllm-ascend` 预构建的 docker 镜像，就无需额外的步骤。"
+
+#: ../../source/installation.md:107
+msgid "Once it's done, you can start to set up `vllm` and `vllm-ascend`."
+msgstr "完成后，你可以开始配置 `vllm` 和 `vllm-ascend`。"
+
+#: ../../source/installation.md:109
+msgid "Setup vllm and vllm-ascend"
+msgstr "安装 vllm 和 vllm-ascend"
+
+#: ../../source/installation.md
+msgid "Using pip"
+msgstr "使用 pip"
+
+#: ../../source/installation.md:120
+msgid "First install system dependencies and config pip mirror:"
+msgstr "首先安装系统依赖并配置 pip 镜像："
+
+#: ../../source/installation.md:132
+msgid ""
+"**[Optional]** Then config the extra-index of `pip` if you are working on"
+" a x86 machine or using torch-npu dev version:"
+msgstr "**[可选]** 如果你在 x86 机器上工作或使用 torch-npu 开发版，请配置 `pip` 的额外索引："
+
+#: ../../source/installation.md:139
+msgid "Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:"
+msgstr "然后你可以从**预编译的 wheel 包**安装 `vllm` 和 `vllm-ascend`："
+
+#: ../../source/installation.md
+msgid "Click here to see \"Build from source code\""
+msgstr "点击此处查看“从源代码构建”"
+
+#: ../../source/installation.md:152
+msgid "or build from **source code**:"
+msgstr "或者从**源代码**构建："
+
+#: ../../source/installation.md:170
+msgid ""
+"vllm-ascend will build custom ops by default. If you don't want to build "
+"it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it."
+msgstr "vllm-ascend 默认会编译自定义算子。如果你不想编译它，可以设置环境变量 `COMPILE_CUSTOM_KERNELS=0` 来禁用。"
+
+#: ../../source/installation.md:174
+msgid ""
+"If you are building from v0.7.3-dev and intend to use sleep mode feature,"
+" you should set `COMPILE_CUSTOM_KERNELS=1` manually. To build custom ops,"
+" gcc/g++ higher than 8 and c++ 17 or higher is required. If you're using "
+"`pip install -e .` and encourage a torch-npu version conflict, please "
+"install with `pip install --no-build-isolation -e .` to build on system "
+"env. If you encounter other problems during compiling, it is probably "
+"because unexpected compiler is being used, you may export `CXX_COMPILER` "
+"and `C_COMPILER` in env to specify your g++ and gcc locations before "
+"compiling."
+msgstr ""
+"如果你是从 v0.7.3-dev 版本开始构建，并且打算使用休眠模式功能，你需要手动设置 "
+"`COMPILE_CUSTOM_KERNELS=1`。构建自定义算子时，要求 gcc/g++ 版本高于 8 且支持 c++ 17 "
+"或更高标准。如果你正在使用 `pip install -e .` 并且出现了 torch-npu 版本冲突，请使用 `pip install "
+"--no-build-isolation -e .` "
+"在系统环境下进行安装。如果在编译过程中遇到其它问题，可能是因为使用了非预期的编译器，你可以在编译前通过环境变量导出 `CXX_COMPILER` "
+"和 `C_COMPILER`，以指定你的 g++ 和 gcc 路径。"
+
+#: ../../source/installation.md
+msgid "Using docker"
+msgstr "使用 docker"
+
+#: ../../source/installation.md:183
+msgid "You can just pull the **prebuilt image** and run it with bash."
+msgstr "你可以直接拉取**预构建镜像**并用 bash 运行它。"
+
+#: ../../source/installation.md
+msgid "Click here to see \"Build from Dockerfile\""
+msgstr "点击这里查看“从 Dockerfile 构建”"
+
+#: ../../source/installation.md:186
+msgid "or build IMAGE from **source code**:"
+msgstr "或从**源代码**构建 IMAGE："
+
+#: ../../source/installation.md:218
+#, fuzzy
+msgid ""
+"The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed"
+" in `/vllm-workspace` and installed in [development "
+"mode](https://setuptools.pypa.io/en/v0.9.1-dev/userguide/development_mode.html)(`pip"
+" install -e`) to help developer immediately take place changes without "
+"requiring a new installation."
+msgstr ""
+"默认的工作目录是 `/workspace`，vLLM 和 vLLM Ascend 代码被放置在 `/vllm-"
+"workspace`，并以[开发模式](https://setuptools.pypa.io/en/v0.9.1-dev/userguide/development_mode.html)（`pip"
+" install -e`）安装，以便开发者能够即时生效更改，而无需重新安装。"
+
+#: ../../source/installation.md:222
+msgid "Extra information"
+msgstr "额外信息"
+
+#: ../../source/installation.md:224
+msgid "Verify installation"
+msgstr "验证安装"
+
+#: ../../source/installation.md:226
+msgid "Create and run a simple inference test. The `example.py` can be like:"
+msgstr "创建并运行一个简单的推理测试。`example.py` 可以如下："
+
+#: ../../source/installation.md:254
+msgid "Then run:"
+msgstr "然后运行："
+
+#: ../../source/installation.md:262
+msgid "The output will be like:"
+msgstr "输出将会像这样："
+
+#~ msgid ">= 2.5.1.post1.dev20250619"
+#~ msgstr ">= 2.5.1.post1.dev20250619"
+

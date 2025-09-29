@@ -1,0 +1,215 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version:  vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-08-30 16:51+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language: zh_CN\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../source/user_guide/feature_guide/quantization.md:1
+msgid "Quantization Guide"
+msgstr "量化指南"
+
+#: ../../source/user_guide/feature_guide/quantization.md:3
+msgid ""
+"Model quantization is a technique that reduces the size and computational"
+" requirements of a model by lowering the data precision of the weights "
+"and activation values in the model, thereby saving the memory and "
+"improving the inference speed."
+msgstr "模型量化是一种通过降低模型中权重和激活值的数据精度，从而减少模型大小和计算需求的技术，这样可以节省内存并提高推理速度。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:5
+msgid ""
+"Since 0.9.0rc2 version, quantization feature is experimentally supported "
+"in vLLM Ascend. Users can enable quantization feature by specifying "
+"`--quantization ascend`. Currently, only Qwen, DeepSeek series models are"
+" well tested. We’ll support more quantization algorithm and models in the"
+" future."
+msgstr ""
+"自 0.9.0rc2 版本起，vLLM Ascend 实验性地支持量化特性。用户可以通过指定 `--quantization ascend` "
+"启用量化功能。目前，只有 Qwen、DeepSeek 系列模型经过了充分测试。未来我们将支持更多的量化算法和模型。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:7
+msgid "Install modelslim"
+msgstr "安装 modelslim"
+
+#: ../../source/user_guide/feature_guide/quantization.md:9
+msgid ""
+"To quantize a model, users should install "
+"[ModelSlim](https://gitee.com/ascend/msit/blob/master/msmodelslim/README.md)"
+" which is the Ascend compression and acceleration tool. It is an "
+"affinity-based compression tool designed for acceleration, using "
+"compression as its core technology and built upon the Ascend platform."
+msgstr "要对模型进行量化，用户应安装[ModelSlim](https://gitee.com/ascend/msit/blob/master/msmodelslim/README.md)，这是昇腾的压缩与加速工具。它是一种基于亲和性的压缩工具，专为加速设计，以压缩为核心技术，并基于昇腾平台构建。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:11
+msgid ""
+"Currently, only the specific tag [modelslim-"
+"VLLM-8.1.RC1.b020_001](https://gitee.com/ascend/msit/blob/modelslim-"
+"VLLM-8.1.RC1.b020_001/msmodelslim/README.md) of modelslim works with vLLM"
+" Ascend. Please do not install other version until modelslim master "
+"version is available for vLLM Ascend in the future."
+msgstr ""
+"目前，只有 modelslim 的特定标签 [modelslim-"
+"VLLM-8.1.RC1.b020_001](https://gitee.com/ascend/msit/blob/modelslim-"
+"VLLM-8.1.RC1.b020_001/msmodelslim/README.md) 支持 vLLM Ascend。在未来 modelslim"
+" 的主版本支持 vLLM Ascend 之前，请不要安装其他版本。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:13
+msgid "Install modelslim:"
+msgstr "安装 modelslim："
+
+#: ../../source/user_guide/feature_guide/quantization.md:22
+msgid "Quantize model"
+msgstr "量化模型"
+
+#: ../../source/user_guide/feature_guide/quantization.md:24
+#, python-format
+msgid ""
+"Take [DeepSeek-V2-Lite](https://modelscope.cn/models/deepseek-"
+"ai/DeepSeek-V2-Lite) as an example, you just need to download the model, "
+"and then execute the convert command. The command is shown below. More "
+"info can be found in modelslim doc [deepseek w8a8 dynamic quantization "
+"docs](https://gitee.com/ascend/msit/blob/modelslim-"
+"VLLM-8.1.RC1.b020_001/msmodelslim/example/DeepSeek/README.md#deepseek-v2-w8a8-dynamic%E9%87%8F%E5%8C%96)."
+msgstr ""
+"以 [DeepSeek-V2-Lite](https://modelscope.cn/models/deepseek-"
+"ai/DeepSeek-V2-Lite) 为例，你只需要下载模型，然后执行转换命令。命令如下所示。更多信息可参考 modelslim 文档 "
+"[deepseek w8a8 动态量化文档](https://gitee.com/ascend/msit/blob/modelslim-"
+"VLLM-8.1.RC1.b020_001/msmodelslim/example/DeepSeek/README.md#deepseek-v2-w8a8-dynamic%E9%87%8F%E5%8C%96)。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:32
+msgid ""
+"You can also download the quantized model that we uploaded. Please note "
+"that these weights should be used for test only. For example, "
+"https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-W8A8"
+msgstr ""
+"你也可以下载我们上传的量化模型。请注意，这些权重仅应用于测试。例如：https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-V2-Lite-W8A8"
+
+#: ../../source/user_guide/feature_guide/quantization.md:35
+msgid "Once convert action is done, there are two important files generated."
+msgstr "转换操作完成后，会生成两个重要的文件。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:37
+msgid ""
+"[config.json](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2"
+"-Lite-W8A8/file/view/master/config.json?status=1). Please make sure that "
+"there is no `quantization_config` field in it."
+msgstr ""
+"[config.json](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2"
+"-Lite-W8A8/file/view/master/config.json?status=1)。请确保其中没有 "
+"`quantization_config` 字段。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:39
+msgid ""
+"[quant_model_description.json](https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-V2-Lite-"
+"W8A8/file/view/master/quant_model_description.json?status=1). All the "
+"converted weights info are recorded in this file."
+msgstr ""
+"[quant_model_description.json](https://www.modelscope.cn/models/vllm-"
+"ascend/DeepSeek-V2-Lite-"
+"W8A8/file/view/master/quant_model_description.json?status=1)。所有被转换的权重信息都记录在该文件中。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:41
+msgid "Here is the full converted model files:"
+msgstr "以下是完整转换后的模型文件："
+
+#: ../../source/user_guide/feature_guide/quantization.md:61
+msgid "Run the model"
+msgstr "运行模型"
+
+#: ../../source/user_guide/feature_guide/quantization.md:63
+msgid ""
+"Now, you can run the quantized models with vLLM Ascend. Here is the "
+"example for online and offline inference."
+msgstr "现在，你可以使用 vLLM Ascend 运行量化模型。下面是在线和离线推理的示例。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:65
+msgid "Offline inference"
+msgstr "离线推理"
+
+#: ../../source/user_guide/feature_guide/quantization.md:91
+msgid "Online inference"
+msgstr "在线推理"
+
+#: ../../source/user_guide/feature_guide/quantization.md:98
+msgid "FAQs"
+msgstr "常见问题解答"
+
+#: ../../source/user_guide/feature_guide/quantization.md:100
+msgid ""
+"1. How to solve the KeyError: 'xxx.layers.0.self_attn.q_proj.weight' "
+"problem?"
+msgstr "1. 如何解决 KeyError: 'xxx.layers.0.self_attn.q_proj.weight' 问题？"
+
+#: ../../source/user_guide/feature_guide/quantization.md:102
+msgid ""
+"First, make sure you specify `ascend` quantization method. Second, check "
+"if your model is converted by this `modelslim-VLLM-8.1.RC1.b020_001` "
+"modelslim version. Finally, if it still doesn't work, please submit a "
+"issue, maybe some new models need to be adapted."
+msgstr ""
+"首先，请确保你指定了 `ascend` 量化方法。其次，检查你的模型是否由 `modelslim-VLLM-8.1.RC1.b020_001` "
+"这个 modelslim 版本转换。如果仍然无法使用，请提交一个 issue，可能有一些新模型需要适配。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:105
+msgid ""
+"2. How to solve the error \"Could not locate the "
+"configuration_deepseek.py\"?"
+msgstr "2. 如何解决“无法找到 configuration_deepseek.py”错误？"
+
+#: ../../source/user_guide/feature_guide/quantization.md:107
+msgid ""
+"Please convert DeepSeek series models using `modelslim-"
+"VLLM-8.1.RC1.b020_001` modelslim, this version has fixed the missing "
+"configuration_deepseek.py error."
+msgstr ""
+"请使用 `modelslim-VLLM-8.1.RC1.b020_001` 的 modelslim 转换 DeepSeek "
+"系列模型，该版本已修复缺少 configuration_deepseek.py 的错误。"
+
+#: ../../source/user_guide/feature_guide/quantization.md:109
+msgid ""
+"3. When converting deepseek series models with modelslim, what should you"
+" pay attention?"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/quantization.md:111
+msgid ""
+"When using the weight generated by modelslim with the `--dynamic` "
+"parameter, if torchair graph mode is enabled, please modify the "
+"configuration file in the CANN package to prevent incorrect inference "
+"results."
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/quantization.md:113
+msgid "The operation steps are as follows:"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/quantization.md:115
+msgid ""
+"Search in the CANN package directory used, for example: find "
+"/usr/local/Ascend/ -name fusion_config.json"
+msgstr ""
+
+#: ../../source/user_guide/feature_guide/quantization.md:118
+msgid ""
+"Add `\"AddRmsNormDynamicQuantFusionPass\":\"off\",` to the "
+"fusion_config.json you find, the location is as follows:"
+msgstr ""
+

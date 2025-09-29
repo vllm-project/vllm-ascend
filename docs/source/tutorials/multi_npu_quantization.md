@@ -1,10 +1,6 @@
 # Multi-NPU (QwQ 32B W8A8)
 
 ## Run docker container
-:::{note}
-w8a8 quantization feature is supported by v0.8.4rc2 or higher
-:::
-
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
@@ -24,6 +20,7 @@ docker run --rm \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
+-e VLLM_USE_V1=1 \
 -p 8000:8000 \
 -it $IMAGE bash
 ```
@@ -69,10 +66,6 @@ The converted model files looks like:
 ```
 
 Run the following script to start the vLLM server with quantized model:
-
-:::{note}
-The value "ascend" for "--quantization" argument will be supported after [a specific PR](https://github.com/vllm-project/vllm-ascend/pull/877) is merged and released, you can cherry-pick this commit for now.
-:::
 
 ```bash
 vllm serve /home/models/QwQ-32B-w8a8  --tensor-parallel-size 4 --served-model-name "qwq-32b-w8a8" --max-model-len 4096 --quantization ascend

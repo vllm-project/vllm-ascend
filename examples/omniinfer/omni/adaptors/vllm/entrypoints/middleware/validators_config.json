@@ -1,0 +1,75 @@
+{
+    "chat_template_kwargs": {
+        "type": "supported",
+        "subfield": ["thinking", "enable_thinking"]
+    },
+    "frequency_penalty": {
+        "type": "supported"
+    },
+    "ignore_eos": {
+        "type": "supported"
+    },
+    "kv_transfer_params": {
+        "type": "supported"
+    },
+    "length_penalty": {
+        "type": "supported"
+    },
+    "max_completion_tokens": {
+        "type": "supported"
+    },
+    "max_tokens": {
+        "type": "supported"
+    },
+    "messages": {
+        "type": "supported",
+        "subfield": ["role", "content", "tool_calls", "tool_call_id", "name"]
+    },
+    "min_p": {
+        "type": "supported"
+    },
+    "model": {
+        "type": "supported"
+    },
+    "n": {
+        "type": "supported"
+    },
+    "presence_penalty": {
+        "type": "supported"
+    },
+    "repetition_penalty": {
+        "type": "supported"
+    },
+    "request_id": {
+        "type": "supported"
+    },
+    "skip_special_tokens": {
+        "type": "supported"
+    },
+    "stop": {
+        "type": "supported"
+    },
+    "stream": {
+        "type": "supported"
+    },
+    "stream_options": {
+        "type": "supported",
+        "subfield": ["include_usage", "continuous_usage_stats"]
+    },
+    "temperature": {
+        "type": "supported"
+    },
+    "top_k": {
+        "type": "supported"
+    },
+    "top_p": {
+        "type": "supported"
+    },
+    "tool_choice": {
+        "type": "supported"
+    },
+    "tools": {
+        "type": "supported",
+        "subfield": ["function", "type"]
+    }  
+}

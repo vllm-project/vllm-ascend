@@ -1,0 +1,79 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: 2025-07-18 10:05+0800\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+"X-Generator: Poedit 3.5\n"
+
+#: ../../index.md:33
+msgid "Getting Started"
+msgstr "快速开始"
+
+#: ../../index.md:43
+msgid "User Guide"
+msgstr "用户指南"
+
+#: ../../index.md:53
+msgid "Developer Guide"
+msgstr "开发者指南"
+
+#: ../../index.md:64
+msgid "Community"
+msgstr "社区"
+
+#: ../../index.md:1
+msgid "Welcome to vLLM Ascend Plugin"
+msgstr "欢迎使用 vLLM Ascend 插件"
+
+#: ../../index.md:3
+msgid "vLLM"
+msgstr "vLLM"
+
+#: ../../index.md:24
+msgid ""
+"vLLM Ascend plugin (vllm-ascend) is a community maintained hardware plugin "
+"for running vLLM on the Ascend NPU."
+msgstr ""
+"vLLM Ascend 插件（vllm-ascend）是一个由社区维护的硬件插件，用于在 Ascend "
+"NPU 上运行 vLLM。"
+
+#: ../../index.md:26
+msgid ""
+"This plugin is the recommended approach for supporting the Ascend backend "
+"within the vLLM community. It adheres to the principles outlined in the "
+"[[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/"
+"issues/11162), providing a hardware-pluggable interface that decouples the "
+"integration of the Ascend NPU with vLLM."
+msgstr ""
+"该插件是 vLLM 社区推荐用于支持 Ascend 后端的方法。它遵循 [[RFC]: Hardware "
+"pluggable](https://github.com/vllm-project/vllm/issues/11162) 中提出的原"
+"则，提供了一个硬件可插拔接口，实现了 Ascend NPU 与 vLLM 集成的解耦。"
+
+#: ../../index.md:28
+msgid ""
+"By using vLLM Ascend plugin, popular open-source models, including "
+"Transformer-like, Mixture-of-Expert, Embedding, Multi-modal LLMs can run "
+"seamlessly on the Ascend NPU."
+msgstr ""
+"通过使用 vLLM Ascend 插件，流行的开源模型，包括 Transformer 类、混合专家、"
+"嵌入式、多模态大模型等，都可以在 Ascend NPU 上无缝运行。"
+
+#: ../../index.md:30
+msgid "Documentation"
+msgstr "文档"

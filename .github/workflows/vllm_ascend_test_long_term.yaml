@@ -39,7 +39,7 @@ jobs:
     strategy:
       max-parallel: 2
       matrix:
-        os: [linux-arm64-npu-1, linux-arm64-npu-4]
+        os: [linux-aarch64-a2-1, linux-aarch64-a2-4]
         vllm_version: [v0.9.1]
     name: vLLM Ascend long term test
     runs-on: ${{ matrix.os }}
@@ -91,7 +91,7 @@ jobs:
 
       - name: Run vllm-project/vllm-ascend long term test
         run: |
-          if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
+          if [[ "${{ matrix.os }}" == "llinux-aarch64-a2-1" ]]; then
             # v0 spec decode test
             # VLLM_USE_MODELSCOPE=True pytest -sv tests/long_term/spec_decode_v0/e2e/test_mtp_correctness.py  # it needs a clean process
             # pytest -sv tests/long_term/spec_decode_v0 --ignore=tests/long_term/spec_decode_v0/e2e/test_mtp_correctness.py

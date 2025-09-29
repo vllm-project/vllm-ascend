@@ -31,6 +31,7 @@ The following table lists the additional configuration options available in vLLM
 | `refresh`                     | bool | `false` | Whether to refresh global ascend config content. This value is usually used by rlhf or ut/e2e test case.     |
 | `expert_map_path`             | str  | `None` | When using expert load balancing for the MOE model, an expert map path needs to be passed in. |
 | `kv_cache_dtype`     | str | `None` | When using the kv cache quantization method, kv cache dtype needs to be set, currently only int8 is supported. |
+| `enable_prefill_optimizations`     | bool | `false` | Whether to enable  prefill optimizations. 
 
 The details of each config option are as follows:
 
@@ -46,6 +47,7 @@ The details of each config option are as follows:
 | `graph_batch_sizes` | list[int] | `[]` | The batch size for torchair graph cache |
 | `graph_batch_sizes_init` | bool | `False` | Init graph batch size dynamically if `graph_batch_sizes` is empty |
 | `enable_kv_nz`| bool | `False` | Whether to enable kvcache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek). |
+| `enable_super_kernel`| bool | `False` | Whether to enable super kernel |
 
 **ascend_scheduler_config**
 

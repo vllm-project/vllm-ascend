@@ -1,0 +1,288 @@
+diff --git a/vllm/engine/arg_utils.py b/vllm/engine/arg_utils.py
+index 81aa039bf..e86fbd6c1 100644
+--- a/vllm/engine/arg_utils.py
++++ b/vllm/engine/arg_utils.py
+@@ -1215,10 +1215,10 @@ class EngineArgs:
+                                recommend_to_remove=False)
+             return False
+ 
+-        if self.preemption_mode != SchedulerConfig.preemption_mode:
+-            _raise_or_fallback(feature_name="--preemption-mode",
+-                               recommend_to_remove=True)
+-            return False
++        # if self.preemption_mode != SchedulerConfig.preemption_mode:
++        #     _raise_or_fallback(feature_name="--preemption-mode",
++        #                        recommend_to_remove=True)
++        #     return False
+ 
+         if (self.disable_async_output_proc
+                 != EngineArgs.disable_async_output_proc):
+diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
+index 74313be9c..4965df17e 100644
+--- a/vllm/v1/core/kv_cache_manager.py
++++ b/vllm/v1/core/kv_cache_manager.py
+@@ -6,7 +6,7 @@ from typing import Optional
+ 
+ from vllm.distributed.kv_events import KVCacheEvent
+ from vllm.logger import init_logger
+-from vllm.utils import sha256
++from vllm.utils import (sha256, Device)
+ from vllm.v1.core.block_pool import BlockPool
+ from vllm.v1.core.kv_cache_utils import (BlockHashType, KVCacheBlock,
+                                          hash_request_tokens)
+@@ -177,6 +177,7 @@ class KVCacheManager:
+         num_draft_tokens: int = 0,
+         num_lookahead_tokens: int = 0,
+         delay_cache_blocks: bool = False,
++        is_swap: bool = False
+     ) -> Optional[KVCacheBlocks]:
+         """Add slots for a request with new tokens to append.
+ 
+@@ -213,7 +214,7 @@ class KVCacheManager:
+         Returns:
+             A list of new allocated blocks.
+         """
+-        if num_new_tokens == 0:
++        if num_new_tokens == 0 and not is_swap:
+             raise ValueError("num_new_tokens must be greater than 0")
+ 
+         if new_computed_blocks is not None:
+@@ -372,3 +373,60 @@ class KVCacheManager:
+             return [[]]
+         return KVCacheBlocks(self.single_type_manager.req_to_blocks[request_id]
+                              ).get_block_ids()
++
++class CpuNpuKVCacheManager:
++
++    def __init__(self, npu_cache_manager: KVCacheManager, cpu_cache_manager: KVCacheManager,max_model_len: int) -> None:
++        self.allocators = {
++            Device.GPU: npu_cache_manager,
++            Device.CPU: cpu_cache_manager
++        }
++        self.max_model_len = max_model_len
++
++    def _can_swap(self, device: Device, num_need_blocks: int = 0) -> bool:
++        num_free_blocks = self.allocators[device].single_type_manager.block_pool.get_num_free_blocks()
++        if num_free_blocks < num_need_blocks:
++            return False
++        return True
++
++    def can_swap_in(self, request: Request, num_new_tokens: int, num_new_computed_tokens: int = 0, num_lookahead_tokens: int = 0) -> bool:
++        num_computed_tokens = (request.num_computed_tokens +
++                               num_new_computed_tokens)
++        num_tokens_need_slot = min(
++            num_computed_tokens + num_new_tokens + num_lookahead_tokens,
++            self.max_model_len)
++        num_blocks_to_allocate = (
++            self.allocators[Device.GPU].single_type_manager.get_num_blocks_to_allocate(
++                request_id=request.request_id,
++                num_tokens=num_tokens_need_slot,
++                new_computed_blocks=[],
++            ))
++        return self._can_swap(Device.GPU, num_blocks_to_allocate)
++
++    def can_swap_out(self, request: Request) -> bool:
++        num_cached_blocks = len(self.allocators[Device.GPU].single_type_manager.req_to_blocks[request.request_id])
++        return self._can_swap(Device.CPU, num_cached_blocks)
++
++    def swap(self,request: Request, src_device: Device, dst_device: Device)-> list[tuple[int, int]]:
++        src_block_ids = self._swap_out(request, src_device)
++        dst_block_ids = self._swap_in(request, dst_device)
++        block_id_mapping = []
++        for src_block_id, dst_block_id in zip(src_block_ids, dst_block_ids):
++            block_id_mapping.append((src_block_id, dst_block_id))
++        return block_id_mapping
++
++    def _swap_in(self,request: Request, device: Device) -> list[tuple[int, int]]:
++        kv_cache_blocks = self.allocators[device].allocate_slots(request, 0, is_swap=True)
++        if kv_cache_blocks is None:
++            return []
++        dst_block_ids = [block.block_id for block in kv_cache_blocks.blocks]
++        return dst_block_ids
++
++    def _swap_out(self,request: Request, device: Device) -> list[int]:
++        src_blocks = self.allocators[device].single_type_manager.req_to_blocks[request.request_id]
++        src_block_ids = [block.block_id for block in src_blocks]
++        self.allocators[device].free(request)
++        return src_block_ids
++
++    def free(self, request: Request, device: Device) -> None:
++        self.allocators[device].free(request)
+\ No newline at end of file
+diff --git a/vllm/v1/core/sched/output.py b/vllm/v1/core/sched/output.py
+index 3ed7dc664..6ef0d7687 100644
+--- a/vllm/v1/core/sched/output.py
++++ b/vllm/v1/core/sched/output.py
+@@ -152,4 +152,6 @@ class SchedulerOutput:
+     # KV Cache Connector metadata.
+     kv_connector_metadata: Optional[KVConnectorMetadata] = None
+     # Number of steps to schedule
+-    num_step: Optional[int] = 1
+\ No newline at end of file
++    num_step: Optional[int] = 1
++    blocks_to_swap_in: list[tuple[int, int]] = None
++    blocks_to_swap_out: list[tuple[int, int]] = None
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index ffebd194c..147432785 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -5,6 +5,8 @@ from __future__ import annotations
+ import time
+ from collections import defaultdict, deque
+ from collections.abc import Iterable
++import copy
++import enum
+ from typing import Any, Optional, Union
+ 
+ from vllm.config import VllmConfig
+@@ -14,10 +16,11 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
+ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
+                                                           KVConnectorRole)
+ from vllm.logger import init_logger
++from vllm.utils import Device
+ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
+                                                 compute_encoder_budget)
+-from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
++from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, CpuNpuKVCacheManager
+ from vllm.v1.core.sched.interface import SchedulerInterface
+ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
+                                        SchedulerOutput)
+@@ -37,6 +40,9 @@ import os
+ reuse_prefilled_tokens = os.getenv("OMNI_REUSE_PREFILLED_TOKENS", "0") == "1"
+ FORCE_ENABLE_CHUNK_PREFILL = os.getenv("FORCE_ENABLE_CHUNK_PREFILL", "0") == "1"
+ 
++class PreemptionMode(enum.Enum):
++    SWAP = enum.auto()
++    RECOMPUTE = enum.auto()
+ 
+ class Scheduler(SchedulerInterface):
+ 
+@@ -157,6 +163,22 @@ class Scheduler(SchedulerInterface):
+             enable_kv_cache_events=self.enable_kv_cache_events,
+         )
+ 
++        self.preemption_mode = PreemptionMode.RECOMPUTE
++        if self.scheduler_config.preemption_mode == "swap":
++            self.preemption_mode = PreemptionMode.SWAP
++            cpu_kv_cache_config = copy.deepcopy(kv_cache_config)
++            cpu_kv_cache_spec = cpu_kv_cache_config.kv_cache_groups[0].kv_cache_spec
++            cpu_kv_cache_config.num_blocks = int(self.vllm_config.cache_config.swap_space_bytes //
++                                           cpu_kv_cache_spec.page_size_bytes // len(cpu_kv_cache_config.tensors))
++
++            cpu_kv_cache_manager = KVCacheManager(
++                kv_cache_config=cpu_kv_cache_config,
++                max_model_len=self.max_model_len,
++                enable_caching=False,
++            )
++
++            self.cpu_npu_kv_cache_manager = CpuNpuKVCacheManager(self.kv_cache_manager, cpu_kv_cache_manager, self.max_model_len)
++
+     def schedule(self) -> SchedulerOutput:
+         # NOTE(woosuk) on the scheduling algorithm:
+         # There's no "decoding phase" nor "prefill phase" in the scheduler.
+@@ -173,6 +195,7 @@ class Scheduler(SchedulerInterface):
+         scheduled_resumed_reqs: list[Request] = []
+         scheduled_running_reqs: list[Request] = []
+         preempted_reqs: list[Request] = []
++        swap_reqs: list[Request] = []
+ 
+         # NOTE: structured_output_request_ids maps
+         # a request's (request that uses structured output)
+@@ -191,6 +214,10 @@ class Scheduler(SchedulerInterface):
+         # Spec decode-related.
+         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+ 
++        # Blocks that need to be swapped or copied before model execution.
++        blocks_to_swap_out: list[tuple[int, int]] = []
++        blocks_to_swap_in: list[tuple[int, int]] = []
++
+         # For logging.
+         scheduled_timestamp = time.monotonic()
+ 
+@@ -259,9 +286,19 @@ class Scheduler(SchedulerInterface):
+                     # The request cannot be scheduled.
+                     # Preempt the lowest-priority request.
+                     preempted_req = self.running.pop()
+-                    self.kv_cache_manager.free(preempted_req)
++                    if self.preemption_mode == PreemptionMode.SWAP:
++                        if not self.cpu_npu_kv_cache_manager.can_swap_out(preempted_req):
++                            preempted_req.status = RequestStatus.FINISHED_LENGTH_CAPPED
++                            self.finish_requests(preempted_req.request_id, RequestStatus.FINISHED_ABORTED)
++                            logger.info(f"Preempting request {preempted_req.request_id} has been released.")
++                            can_schedule = False
++                            break
++                        self._swap_out(preempted_req, blocks_to_swap_out)
++                        logger.info(f"Request {request.request_id} swapped out, blocks_to_swap_out:{blocks_to_swap_out}")
++                    else:
++                        self.kv_cache_manager.free(preempted_req)
++                        preempted_req.num_computed_tokens = 0
+                     preempted_req.status = RequestStatus.PREEMPTED
+-                    preempted_req.num_computed_tokens = 0
+                     if self.log_stats:
+                         preempted_req.record_event(
+                             EngineCoreEventType.PREEMPTED, scheduled_timestamp)
+@@ -428,6 +465,12 @@ class Scheduler(SchedulerInterface):
+                         if num_new_tokens == 0:
+                             # The request cannot be scheduled.
+                             break
++                if self.preemption_mode == PreemptionMode.SWAP and request.status == RequestStatus.PREEMPTED:
++                    if not self.cpu_npu_kv_cache_manager.can_swap_in(request, num_new_tokens, num_new_local_computed_tokens, self.num_lookahead_tokens):
++                        logger.info(f"Request {request.request_id} cannot be swapped in")
++                        break
++                    self._swap_in(request, blocks_to_swap_in)
++                    logger.info(f"Request {request.request_id} swapped in, blocks_to_swap_in:{blocks_to_swap_in}")
+ 
+                 new_blocks = self.kv_cache_manager.allocate_slots(
+                     request,
+@@ -440,7 +483,6 @@ class Scheduler(SchedulerInterface):
+                 if new_blocks is None:
+                     # The request cannot be scheduled.
+                     break
+-
+                 # KVConnector: update internal state after allocation.
+                 # This information is used to determine if a load is
+                 # needed for this request.
+@@ -575,6 +617,8 @@ class Scheduler(SchedulerInterface):
+             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+             structured_output_request_ids=structured_output_request_ids,
+             grammar_bitmask=grammar_bitmask,
++            blocks_to_swap_in=blocks_to_swap_in,
++            blocks_to_swap_out=blocks_to_swap_out,
+         )
+ 
+         # NOTE(Kuntai): this function is designed for multiple purposes:
+@@ -605,6 +649,22 @@ class Scheduler(SchedulerInterface):
+         self.finished_req_ids = set()
+         return scheduler_output
+ 
++    def _swap_in(
++            self,
++            req: Request,
++            blocks_to_swap_in: list[tuple[int, int]],
++    ) -> None:
++        mapping = self.cpu_npu_kv_cache_manager.swap(req, Device.CPU, Device.GPU)
++        blocks_to_swap_in.extend(mapping)
++
++    def _swap_out(
++            self,
++            req: Request,
++            blocks_to_swap_out: list[tuple[int, int]],
++    ) -> None:
++        mapping = self.cpu_npu_kv_cache_manager.swap(req, Device.GPU, Device.CPU)
++        blocks_to_swap_out.extend(mapping)
++
+     def _make_cached_request_data(
+         self,
+         request: Request,
+@@ -943,6 +1003,10 @@ class Scheduler(SchedulerInterface):
+     def _free_blocks(self, request: Request):
+         assert request.is_finished()
+         assert request.request_id not in self._cached_reqs_data
++        if self.scheduler_config.preemption_mode == "swap":
++           logger.info(f"Request {request.request_id} free cpu blocks")
++           self.cpu_npu_kv_cache_manager.free(request, Device.CPU)
++
+         self.kv_cache_manager.free(request)
+         self.kv_cache_manager.free_block_hashes(request)
+         del self.requests[request.request_id]

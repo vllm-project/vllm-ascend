@@ -78,7 +78,12 @@ def test_mtp_correctness(
                        },
                        max_model_len=256,
                        gpu_memory_utilization=0.8,
-                       enforce_eager=True)
+                       enforce_eager=True,
+                       additional_config={
+                           "ascend_scheduler_config": {
+                               "enabled": True
+                           },
+                       })
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
         misses = 0

@@ -1,0 +1,138 @@
+metrics_collect_interval: 5
+metrics_request_timeout: 10
+configurations:
+- metric_name: "vllm:num_requests_running"
+  acting_instance: "api_server"
+  operation: "sum"
+  type: "Gauge"
+
+- metric_name: "vllm:num_requests_waiting"
+  acting_instance: "api_server"
+  operation: "sum"
+  type: "Gauge"
+
+- metric_name: "vllm:gpu_cache_usage_perc"
+  acting_instance: "api_server"
+  operation: "union"
+  type: "Gauge"
+
+- metric_name: "vllm:gpu_prefix_cache_queries_total"
+  acting_instance: "prefill"
+  operation: "sum"
+  type: "Counter"
+
+- metric_name: "vllm:gpu_prefix_cache_hits_total"
+  acting_instance: "prefill"
+  operation: "sum"
+  type: "Counter"
+
+- metric_name: "vllm:num_preemptions_total"
+  acting_instance: "api_server"
+  operation: "sum"
+  type: "Counter"
+
+- metric_name: "vllm:prompt_tokens_total"
+  acting_instance: "prefill"
+  operation: "sum"
+  type: "Counter"
+
+- metric_name: "vllm:generation_tokens_total"
+  acting_instance: "decode"
+  operation: "sum"
+  type: "Counter"
+
+- metric_name: "vllm:request_success_total"
+  acting_instance: "option"
+  operation: "sum"
+  type: "Counter"
+
+- metric_name: "vllm:request_prompt_tokens"
+  acting_instance: "prefill"
+  operation: "histogram_combine"
+  type: "Histogram"
+
+- metric_name: "vllm:request_generation_tokens"
+  acting_instance: "decode"
+  operation: "histogram_combine"
+  type: "Histogram"
+
+- metric_name: "vllm:iteration_tokens_total"
+  acting_instance: "api_server"
+  operation: "histogram_combine"
+  type: "Histogram"
+
+- metric_name: "vllm:request_max_num_generation_tokens"
+  acting_instance: "decode"
+  operation: "histogram_combine"
+  type: "Histogram"
+
+- metric_name: "vllm:request_params_n"
+  acting_instance: "api_server"
+  operation: "histogram_combine"
+  type: "Histogram"
+
+- metric_name: "vllm:time_to_first_token_seconds"
+  acting_instance: "scheduler"
+  operation: "histogram_combine"
+  type: "Histogram"
+
+- metric_name: "vllm:time_per_output_token_seconds"
+  acting_instance: "scheduler"
+  operation: "histogram_combine"
+  type: "Histogram"
+
+- metric_name: "vllm:e2e_request_latency_seconds"
+  acting_instance: "scheduler"
+  operation: "histogram_combine"
+  type: "Histogram"
+
+- metric_name: "vllm:request_queue_time_seconds"
+  acting_instance: "api_server"
+  operation: "union"
+  type: "Histogram"
+
+- metric_name: "vllm:request_inference_time_seconds"
+  acting_instance: "api_server"
+  operation: "union"
+  type: "Histogram"
+
+- metric_name: "vllm:request_prefill_time_seconds"
+  acting_instance: "prefill"
+  operation: "histogram_combine"
+  type: "Histogram"
+
+- metric_name: "vllm:request_decode_time_seconds"
+  acting_instance: "decode"
+  operation: "histogram_combine"
+  type: "Histogram"
+
+- metric_name: "vllm:cache_config_info"
+  acting_instance: "api_server"
+  operation: "union"
+  type: "Gauge"
+
+- metric_name: "vllm:lora_requests_info"
+  acting_instance: "api_server"
+  operation: "union"
+  type: "Gauge"
+
+- metric_name: "vllm:spec_decode_num_drafts_total"
+  acting_instance: "decode"
+  operation: "sum"
+  type: "Counter"
+
+- metric_name: "vllm:spec_decode_num_draft_tokens_total"
+  acting_instance: "decode"
+  operation: "sum"
+  type: "Counter"
+
+- metric_name: "vllm:spec_decode_num_accepted_tokens_total"
+  acting_instance: "decode"
+  operation: "sum"
+  type: "Counter"
+
+- metric_name: "vllm:spec_decode_num_accepted_tokens_per_pos_total"
+  acting_instance: "decode"
+  operation: "sum"
+  type: "Counter"
+

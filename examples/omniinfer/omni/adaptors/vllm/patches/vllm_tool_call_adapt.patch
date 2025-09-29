@@ -1,0 +1,222 @@
+diff --git a/vllm/entrypoints/openai/protocol.py b/vllm/entrypoints/openai/protocol.py
+index 393cf38..7743ae4 100644
+--- a/vllm/entrypoints/openai/protocol.py
++++ b/vllm/entrypoints/openai/protocol.py
+@@ -673,7 +673,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
+             return data
+ 
+         # if "tool_choice" is specified -- validation
+-        if "tool_choice" in data:
++        if "tool_choice" in data and data["tool_choice"] is not None:
+ 
+             # ensure that if "tool choice" is specified, tools are present
+             if "tools" not in data or data["tools"] is None:
+@@ -685,7 +685,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
+             if data["tool_choice"] not in [
+                     "auto", "required"
+             ] and not isinstance(data["tool_choice"], dict):
+-                raise NotImplementedError(
++                raise ValueError(
+                     f'Invalid value for `tool_choice`: {data["tool_choice"]}! '\
+                     'Only named tools, "none", "auto" or "required" '\
+                     'are supported.'
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 7a0a804..943abbe 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -5,7 +5,7 @@ import json
+ import time
+ from collections.abc import AsyncGenerator, AsyncIterator
+ from collections.abc import Sequence as GenericSequence
+-from typing import Callable, Final, Optional, Union
++from typing import Callable, Final, Optional, Union, List
+ 
+ import jinja2
+ import partial_json_parser
+@@ -97,6 +97,9 @@ class OpenAIServingChat(OpenAIServing):
+                 raise TypeError(
+                     f"{reasoning_parser=} has not been registered") from e
+         self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
++        # adapt begin
++        self.tool_parser_name = tool_parser
++        # adapt end
+         if self.enable_auto_tools:
+             try:
+                 if (tool_parser == "pythonic" and
+@@ -421,8 +424,17 @@ class OpenAIServingChat(OpenAIServing):
+         num_prompt_tokens = 0
+         num_cached_tokens = None
+ 
++        # adapt begin
++        # turn id for kimi
++        turn_id = 0
++        # adapt end
++
+         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
+             tool_choice_function_name = request.tool_choice.function.name
++            # adapt begin
++            if self.tool_parser_name == "ascend_kimi_k2" or self.tool_parser_name == "kimi_k2":
++                turn_id = get_turn_id(conversation)
++            # adapt end
+         else:
+             tool_choice_function_name = None
+ 
+@@ -638,14 +650,26 @@ class OpenAIServingChat(OpenAIServing):
+                                         arguments=delta_text),
+                                     index=i)
+                             else:
+-                                delta_tool_call = DeltaToolCall(
+-                                    id=random_tool_call_id(),
+-                                    type="function",
+-                                    function=DeltaFunctionCall(
+-                                        name=tool_choice_function_name,
+-                                        arguments=delta_text),
+-                                    index=i)
+-                                function_name_returned[i] = True
++                                # adapt begin
++                                if self.tool_parser_name == "ascend_kimi_k2" or self.tool_parser_name == "kimi_k2":
++                                    delta_tool_call = DeltaToolCall(
++                                        id=f"functions.{tool_choice_function_name}:{turn_id}",
++                                        type="function",
++                                        function=DeltaFunctionCall(
++                                            name=tool_choice_function_name,
++                                            arguments=delta_text),
++                                        index=i)
++                                    function_name_returned[i] = True
++                                else:
++                                    delta_tool_call = DeltaToolCall(
++                                        id=random_tool_call_id(),
++                                        type="function",
++                                        function=DeltaFunctionCall(
++                                            name=tool_choice_function_name,
++                                            arguments=delta_text),
++                                        index=i)
++                                    function_name_returned[i] = True
++                                # adapt end
+ 
+                             delta_message = DeltaMessage(tool_calls=[
+                                 delta_tool_call,
+@@ -765,8 +789,30 @@ class OpenAIServingChat(OpenAIServing):
+                     # "control token" for tool calls or the parser otherwise
+                     # wasn't ready to send a token, then
+                     #   get the next token without streaming a chunk
++                    # adapt begin
++                    auto_tools_called = False
+                     if delta_message is None:
+-                        continue
++                        if output.finish_reason is not None:
++                            if self.tool_parser_name in {"ascend_kimi_k2", "kimi_k2", "ascend_deepseek_v3", "deepseek_v3"} or \
++                                "ascend_adapt" in self.tool_parser_name:
++                                delta_message = (
++                                    tool_parser.extract_tool_calls_streaming(
++                                        previous_text=previous_text,
++                                        current_text=current_text,
++                                        delta_text='\0',
++                                        previous_token_ids=[],
++                                        current_token_ids=[],
++                                        delta_token_ids=[],
++                                        request=request))
++
++                            if tool_parser:
++                                auto_tools_called = len(tool_parser.prev_tool_call_arr) > 0
++
++                            if delta_message is not None and auto_tools_called:
++                                delta_message.content = ""
++                        else:
++                            continue
++                    # adapt end
+ 
+                     if output.finish_reason is None:
+                         # Send token-by-token response for each request.n
+@@ -828,14 +874,19 @@ class OpenAIServingChat(OpenAIServing):
+                                               model_dump(exclude_none=True))
+                             ])
+ 
++                        # adapt begin
++                        if delta_message is None:
++                            delta_message = DeltaMessage(content="")
++
+                         # Send the finish response for each request.n only once
+                         choice_data = ChatCompletionResponseStreamChoice(
+                             index=i,
+                             delta=delta_message,
+                             logprobs=logprobs,
+                             finish_reason=output.finish_reason
+-                            if not auto_tools_called else "tool_calls",
++                            if not auto_tools_called and not tool_choice_function_name else "tool_calls",
+                             stop_reason=output.stop_reason)
++                        # adapt end
+ 
+                         finish_reason_sent[i] = True
+ 
+@@ -921,6 +972,12 @@ class OpenAIServingChat(OpenAIServing):
+ 
+         assert final_res is not None
+ 
++        # adapt begin
++        turn_id = 0
++        if self.tool_parser_name == "ascend_kimi_k2" or self.tool_parser_name == "kimi_k2":
++            turn_id = get_turn_id(conversation)
++        # adapt end
++
+         if reuse_prefilled_tokens:
+             if request.kv_transfer_params and "prefilled_token" in request.kv_transfer_params:
+                 prompt_token_ids = request.kv_transfer_params["prefilled_token"]
+@@ -984,18 +1041,33 @@ class OpenAIServingChat(OpenAIServing):
+             elif request.tool_choice and type(
+                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
+ 
++                # adapt begin
++                auto_tools_called = True
+                 tool_call_class = MistralToolCall if isinstance(
+                     tokenizer, MistralTokenizer) else ToolCall
+-                message = ChatMessage(
+-                    role=role,
+-                    reasoning_content=reasoning_content,
+-                    content="",
+-                    tool_calls=[
+-                        tool_call_class(function=FunctionCall(
+-                            name=request.tool_choice.function.name,
+-                            arguments=content))
+-                    ])
+-
++                if self.tool_parser_name == "ascend_kimi_k2" or self.tool_parser_name == "kimi_k2":
++                    message = ChatMessage(
++                        role=role,
++                        reasoning_content=reasoning_content,
++                        content="",
++                        tool_calls=[
++                            tool_call_class(
++                                id=f"functions.{tool_choice_function_name}:{turn_id}",
++                                function=FunctionCall(
++                                name=request.tool_choice.function.name,
++                                arguments=content))
++                        ])
++                else:
++                    message = ChatMessage(
++                        role=role,
++                        reasoning_content=reasoning_content,
++                        content="",
++                        tool_calls=[
++                            tool_call_class(function=FunctionCall(
++                                name=request.tool_choice.function.name,
++                                arguments=content))
++                        ])
++                # adapt end
+             elif request.tool_choice and request.tool_choice == "required":
+                 tool_call_class = MistralToolCall if isinstance(
+                     tokenizer, MistralTokenizer) else ToolCall
+@@ -1216,3 +1288,13 @@ class OpenAIServingChat(OpenAIServing):
+             and delta_message.tool_calls[0].function
+             and delta_message.tool_calls[0].function.arguments is not None
+         )
++
++# adapt begin
++def get_turn_id(conversation: List[ConversationMessage]):
++    turn_id = 0
++    for i in range(len(conversation) - 1, -1, -1):
++        msg = conversation[i]
++        if msg.get("role") == "tool" and msg.get("tool_call_id") is not None:
++            turn_id += 1
++    return turn_id
++# adapt end

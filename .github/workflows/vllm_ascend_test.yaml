@@ -22,18 +22,9 @@ on:
     branches:
       - 'main'
       - '*-dev'
-    paths:
-      - '*.txt'
-      - '**/*.py'
-      - '.github/workflows/vllm_ascend_test.yaml'
-      - '!docs/**'
-      - 'pytest.ini'
-      - '!benchmarks/**'
-      - 'tools/mypy.sh'
-      - 'mypy.ini'
-      - '.github/workflows/*.ya?ml'
-      - '.github/workflows/actionlint.*'
-      - '.github/workflows/matchers/actionlint.json'
+    paths-ignore:
+      - 'examples/**'
+      - 'benchmarks/**'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -114,12 +105,12 @@ jobs:
     strategy:
       max-parallel: 2
       matrix:
-        os: [linux-arm64-npu-1, linux-arm64-npu-4]
+        os: [linux-aarch64-a2-1, linux-aarch64-a2-4]
         vllm_version: [v0.9.1]
     concurrency:
       group: >
         ${{
-        matrix.os == 'linux-arm64-npu-4'
+        matrix.os == 'linux-aarch64-a2-4'
           && github.event.pull_request.number
           && format('pr-{0}-limit-npu-4', github.event.pull_request.number)
         || format('job-{0}-{1}-{2}', matrix.os, matrix.vllm_version, github.event.pull_request.number)
@@ -177,10 +168,9 @@ jobs:
           VLLM_USE_V1: 1
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
+          if [[ "${{ matrix.os }}" == "linux-aarch64-a2-1" ]]; then
             VLLM_USE_MODELSCOPE=True pytest -sv tests/singlecard/test_offline_inference.py
-            # guided decoding doesn't work, fix it later
-            # pytest -sv tests/singlecard/test_guided_decoding.py.py
+            pytest -sv tests/singlecard/test_guided_decoding.py
             # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
             pytest -sv tests/singlecard/test_ascend_config.py
             pytest -sv tests/singlecard/test_camem.py
@@ -214,10 +204,9 @@ jobs:
         env:
           VLLM_USE_V1: 0
         run: |
-          if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
+          if [[ "${{ matrix.os }}" == "linux-aarch64-a2-1" ]]; then
             VLLM_USE_MODELSCOPE=True  pytest -sv tests/singlecard/test_offline_inference.py
-            # guided decoding doesn't work, fix it later
-            # pytest -sv tests/singlecard/test_guided_decoding.py.py
+            pytest -sv tests/singlecard/test_guided_decoding.py
             pytest -sv tests/singlecard/test_camem.py
             # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
             pytest -sv tests/singlecard/test_ascend_config.py

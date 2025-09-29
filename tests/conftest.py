@@ -35,6 +35,7 @@ from vllm.utils import is_list_of
 
 from tests.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
                                TokensTextLogprobsPromptLogprobs)
+from vllm_ascend.ascend_config import clear_ascend_config
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
@@ -348,6 +349,7 @@ class VllmRunner:
 
     def __exit__(self, exc_type, exc_value, traceback):
         del self.model
+        clear_ascend_config()
         cleanup_dist_env_and_memory()
 
 

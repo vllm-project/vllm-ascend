@@ -1,0 +1,104 @@
+# Name of the addon
+ngx_addon_name=ngx_http_omni_proxy_module
+
+# Module type: HTTP
+ngx_module_type=HTTP
+
+# Module name (used by NGINX build system)
+ngx_module_name=ngx_http_omni_proxy_module
+
+# Source files for the module
+ngx_module_srcs="$ngx_addon_dir/ngx_http_omni_proxy_module.c \
+                 $ngx_addon_dir/omni_pd_body_rewrite.c \
+                 $ngx_addon_dir/omni_scheduler.c \
+                 $ngx_addon_dir/omni_utils.c \
+                 $ngx_addon_dir/omni_tokenizer.c \
+                 $ngx_addon_dir/omni_tokenizer_worker.c \
+                 $ngx_addon_dir/omni_radix_tree.c \
+                 $ngx_addon_dir/omni_apc.c \
+                 $ngx_addon_dir/omni_metrics.c \
+                 $ngx_addon_dir/omni_zmq_handler.c" 
+
+# Include directories for the module
+ngx_module_incs="$ngx_addon_dir"
+
+detect_python_config() {
+    if command -v python3.11-config >/dev/null 2>&1; then
+        PYTHON_INCLUDES=$(python3.11-config --includes)
+        PYTHON_LDFLAGS=$(python3.11-config --ldflags --embed 2>/dev/null || python3.11-config --ldflags)
+    elif command -v python3-config >/dev/null 2>&1; then
+        PYTHON_INCLUDES=$(python3-config --includes)
+        PYTHON_LDFLAGS=$(python3-config --ldflags --embed 2>/dev/null || python3-config --ldflags)
+    elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists python-3.11; then
+        PYTHON_INCLUDES=$(pkg-config --cflags python-3.11)
+        PYTHON_LDFLAGS=$(pkg-config --libs python-3.11)
+    elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists python3; then
+        PYTHON_INCLUDES=$(pkg-config --cflags python3)
+        PYTHON_LDFLAGS=$(pkg-config --libs python3)
+    else
+        PYTHON_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>/dev/null || echo "3.11")
+        PYTHON_INCLUDES="-I/usr/include/python${PYTHON_VERSION}"
+        PYTHON_LDFLAGS="-lpython${PYTHON_VERSION}"
+    fi
+
+    echo "$PYTHON_INCLUDES $PYTHON_LDFLAGS"
+}
+
+detect_zeromq_config() {
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists libzmq; then
+        ZMQ_CFLAGS=$(pkg-config --cflags libzmq)
+        ZMQ_LIBS=$(pkg-config --libs libzmq)
+    elif [ -f /usr/include/zmq.h ] || [ -f /usr/local/include/zmq.h ]; then
+        ZMQ_CFLAGS=""
+        ZMQ_LIBS="-lzmq"
+    else
+        ZMQ_PATHS="/usr /usr/local /opt/local"
+        for path in $ZMQ_PATHS; do
+            if [ -f "$path/include/zmq.h" ]; then
+                ZMQ_CFLAGS="-I$path/include"
+                ZMQ_LIBS="-L$path/lib -lzmq"
+                break
+            fi
+        done
+        if [ -z "$ZMQ_LIBS" ]; then
+            echo "ZeroMQ not found, using default flags" >&2
+            ZMQ_CFLAGS=""
+            ZMQ_LIBS="-lzmq"
+        fi
+    fi
+    
+    echo "$ZMQ_CFLAGS $ZMQ_LIBS"
+}
+
+detect_msgpack_config() {
+    if [ -f /usr/include/msgpack.h ]; then
+        MSGPACK_CFLAGS="-I/usr/include"
+        MSGPACK_LIBS="-L/usr/lib64 -lmsgpack-c"
+    elif [ -f /usr/local/include/msgpack/msgpack.h ]; then
+        MSGPACK_CFLAGS="-I/usr/local/include"
+        MSGPACK_LIBS="-L/usr/local/lib64 -lmsgpack-c"
+    else
+        echo "msgpack-c not found!" >&2
+        MSGPACK_CFLAGS=""
+        MSGPACK_LIBS="-lmsgpack-c"
+    fi
+
+    echo "$MSGPACK_CFLAGS $MSGPACK_LIBS"
+}
+
+MSGPACK_FLAGS=$(detect_msgpack_config)
+PYTHON_FLAGS=$(detect_python_config)
+ZMQ_FLAGS=$(detect_zeromq_config)
+
+CFLAGS="$CFLAGS $PYTHON_FLAGS $ZMQ_FLAGS $MSGPACK_FLAGS"
+ngx_module_libs="$ngx_module_libs $PYTHON_FLAGS $ZMQ_FLAGS $MSGPACK_FLAGS"
+
+CFLAGS="$CFLAGS -Wno-unused-function -Wno-unused-variable"
+
+echo "Python flags: $PYTHON_FLAGS"
+echo "ZeroMQ flags: $ZMQ_FLAGS"
+echo "Final CFLAGS: $CFLAGS"
+echo "Final libs: $ngx_module_libs"
+
+# This sources NGINX's auto/module script to register the module
+. auto/module
