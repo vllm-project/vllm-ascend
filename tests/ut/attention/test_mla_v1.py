@@ -186,10 +186,39 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
 
+        mock_vllm_config.speculative_config = None
+
         ascend_config = MagicMock()
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
                    return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
+            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                               mock_device)
+
+            self.assertEqual(builder.block_size,
+                             mock_vllm_config.cache_config.block_size)
+            self.assertEqual(
+                builder.chunked_prefill_enabled,
+                mock_vllm_config.scheduler_config.chunked_prefill_enabled)
+
+    def test_ascend_mla_metadata_builder_spec_decode(self):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+
+        mock_spec_config = MagicMock()
+        mock_spec_config.num_speculative_tokens = 3
+        mock_vllm_config.speculative_config = mock_spec_config
+
+        ascend_config = MagicMock()
+        with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
+                   return_value=ascend_config):
+            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                               mock_device)
 
             self.assertEqual(builder.block_size,
                              mock_vllm_config.cache_config.block_size)
@@ -207,9 +236,12 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
 
+        mock_vllm_config.speculative_config = None
+
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
                    return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
+            builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                               mock_device)
             builder.decode_threshold = 1
 
         input_batch = MagicMock()
@@ -238,13 +270,19 @@ class TestAscendMLAImpl(TestBase):
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm.distributed.get_tensor_model_parallel_world_size",
            return_value=2)
-    @patch("vllm.config.get_current_vllm_config")
+    @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
-    def setUp(self, ascend_config, vllm_config, mock_get_tp_size, mock_tp):
+    def setUp(self, ascend_config, get_current_vllm_config, mock_get_tp_size,
+              mock_tp):
         mock_tp.world_size = 2
+        vllm_config = MagicMock()
         speculative_config = MagicMock()
+        model_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
+        model_config.dtype = torch.float16
+        vllm_config.model_config = model_config
+        get_current_vllm_config.return_value = vllm_config
 
         num_heads = 256
         head_size = 1024
@@ -516,7 +554,11 @@ class TestAscendMLAImpl(TestBase):
         self.impl.num_kv_heads = self.impl.num_heads
 
         decode_res, prefill_res = self.impl._mla_preprocess(
-            hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False)
+            "mock_layer",
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            need_gather_q_kv=False)
 
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)

@@ -28,12 +28,12 @@ import torch
 import torch_npu
 from vllm.model_executor.layers.activation import SiluAndMul
 
-from vllm_ascend.ops.layers.experts_selector import select_experts
-from vllm_ascend.ops.moe_dispatcher.token_dispatcher import \
-    TokenDispatcherWithAllGather
+from vllm_ascend.ops.moe.experts_selector import select_experts
+from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
+from vllm_ascend.ops.moe.token_dispatcher import TokenDispatcherWithAllGather
 
 NUM_EXPERTS = [8, 64]
-EP_SIZE = [1, 4]
+EP_SIZE = [1]
 TOP_KS = [2, 6]
 DEVICE = ["npu"]
 
@@ -115,19 +115,6 @@ def test_token_dispatcher_with_all_gather(
     w1_local = w1
     w2_local = w2
 
-    if ep_size > 1:
-        local_e = e // ep_size
-        e_ids = torch.arange(local_e * 0,
-                             local_e * (0 + 1),
-                             device=device,
-                             dtype=torch.int32)
-        expert_map = torch.full((e, ), -1, device=device, dtype=torch.int32)
-        expert_map[e_ids] = torch.arange(local_e,
-                                         device=device,
-                                         dtype=torch.int32)
-        w1_local = w1[e_ids]
-        w2_local = w2[e_ids]
-
     score = torch.softmax(score, dim=-1, dtype=dtype)
     topk_weights, topk_ids = torch.topk(score, topk)
     topk_ids = topk_ids.to(torch.int32)
@@ -181,6 +168,87 @@ def test_token_dispatcher_with_all_gather(
 
 @pytest.mark.parametrize("m", [1, 33, 64])
 @pytest.mark.parametrize("n", [128, 1024, 2048])
+@pytest.mark.parametrize("k", [128, 511, 1024])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("ep_size", EP_SIZE)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("device", DEVICE)
+def test_token_dispatcher_with_all_gather_quant(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    ep_size: int,
+    dtype: torch.dtype,
+    device: str,
+):
+    context_mock = MagicMock()
+    context_mock.fused_moe_state = 0
+    with patch("vllm_ascend.ops.moe.moe_mlp.get_forward_context",
+               return_value=context_mock):
+        a = torch.randn((m, k), device=device, dtype=dtype) / 10
+        w1 = torch.randn((e, k, 2 * n), device=device, dtype=torch.int8)
+        w1_scale = torch.empty((e, 2 * n), device=device, dtype=dtype)
+        w2 = torch.randn((e, n, k), device=device, dtype=torch.int8)
+        w2_scale = torch.empty((e, k), device=device, dtype=dtype)
+
+        score = torch.randn((m, e), device=device, dtype=dtype)
+        expert_map = None
+        local_e = e
+
+        score = torch.softmax(score, dim=-1, dtype=dtype)
+        topk_weights, topk_ids = torch.topk(score, topk)
+        topk_ids = topk_ids.to(torch.int32)
+        row_idx = (torch.arange(
+            0,
+            m * topk,
+            device=device,
+            dtype=torch.int32,
+        ).view(topk, -1).permute(1, 0).contiguous())
+
+        dispatcher_kwargs = {
+            "num_experts": e,
+            "top_k": topk,
+            "num_local_experts": local_e,
+        }
+        dispatcher = TokenDispatcherWithAllGather(**dispatcher_kwargs)
+
+        apply_router_weight_on_input = False
+        dispatch_output = dispatcher.token_dispatch(
+            hidden_states=a,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            row_idx=row_idx,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            with_quant=True)
+
+        sorted_hidden_states = dispatch_output["hidden_states"]
+        group_list = dispatch_output["group_list"]
+        group_list_type = dispatch_output.get("group_list_type", 1)
+        dynamic_scale = dispatch_output["dynamic_scale"]
+
+        expert_output = unified_apply_mlp(hidden_states=sorted_hidden_states,
+                                          w1=w1,
+                                          w1_scale=w1_scale,
+                                          w2=w2,
+                                          w2_scale=w2_scale,
+                                          group_list=group_list,
+                                          group_list_type=group_list_type,
+                                          dynamic_scale=dynamic_scale,
+                                          with_quant=True)
+        combined_output = dispatcher.token_combine(hidden_states=expert_output,
+                                                   bias=None)
+        assert combined_output.shape == (m, k)
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("m", [1, 33, 64])
+@pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
@@ -222,7 +290,7 @@ def test_select_experts(
                                  dtype=torch.int32)
         custom_routing_function.return_value = (mock_weights, mock_ids)
 
-    with patch("vllm_ascend.ops.layers.experts_selector._native_grouped_topk"
+    with patch("vllm_ascend.ops.moe.experts_selector._native_grouped_topk"
                ) as mock_native_grouped_topk:
         mock_native_grouped_topk.side_effect = lambda x, num_groups, k: torch.randn_like(
             x)

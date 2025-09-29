@@ -24,10 +24,10 @@ from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
-from vllm_ascend.quantization.quantizer import W8A8Quantizer
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
     TorchairAscendFusedMoE, TorchairAscendUnquantizedFusedMoEMethod)
-from vllm_ascend.utils import AscendSocVersion, adapt_patch  # noqa E402
+from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import AscendSocVersion, vllm_version_is
 
 adapt_patch(True)
 
@@ -54,6 +54,10 @@ def mock_dp_and_tp_group(mocker):
 @pytest.fixture
 def mock_dist_env(mocker: MockerFixture):
     # init dist env patch
+    if vllm_version_is("0.10.2"):
+        dp_metadata = MagicMock(cu_tokens_across_dp_cpu=[5, 10])
+    else:
+        dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
 
     with patch('torch.distributed.get_rank', return_value=0), \
          patch('torch.distributed.get_world_size', return_value=4), \
@@ -67,13 +71,13 @@ def mock_dist_env(mocker: MockerFixture):
          patch('torch.distributed.all_to_all_single', return_value=torch.randn(8, 32)), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.tensor_model_parallel_all_reduce',
                return_value=torch.randn(5, 32)), \
-         patch('vllm_ascend.torchair.ops.torchair_fused_moe.data_parallel_reduce_scatter',
-               return_value=torch.randn(5, 32)), \
          patch('vllm.model_executor.layers.fused_moe.config.get_dp_group',
                return_value=mock_dp_and_tp_group(mocker)), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_config',
                return_value=MagicMock(
-                   torchair_graph_config=MagicMock(enabled=False, enable_multistream_moe=False),
+                   torchair_graph_config=MagicMock(enabled=False),
+                   enable_multistream_moe=False,
+                   enable_shared_expert_dp=False,
                    expert_map_path=None
                )), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.determine_expert_map',
@@ -81,7 +85,7 @@ def mock_dist_env(mocker: MockerFixture):
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context',
                return_value=MagicMock(
                    max_tokens_across_dp=10,
-                   dp_metadata=MagicMock(cu_tokens_across_dp_cpu=[5, 10])
+                   dp_metadata=dp_metadata,
                )), \
         patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_current_vllm_config',
                return_value=MagicMock(
@@ -154,6 +158,8 @@ def default_moe_config():
 def moe_method(mock_dist_env):
     moe = MagicMock()
     moe.moe_parallel_config.return_value = MagicMock(ep_size=4)
+    moe.moe_parallel_config.use_ep = False
+    moe.moe_parallel_config.dp_size = 1
     return TorchairAscendUnquantizedFusedMoEMethod(moe)
 
 
@@ -199,6 +205,9 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
               expert_weights: torch.Tensor) -> torch.Tensor:
         pass
 
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
+        pass
+
 
 class TestTorchairAscendFusedMoe:
 
@@ -236,12 +245,9 @@ class TestTorchairAscendFusedMoe:
         mock_quant_method = MockFusedMoEMethod()
         mock_quant_config.get_quant_method.return_value = mock_quant_method
         mock_quant_config.is_layer_skipped_ascend.return_value = False
-        with patch(
-                'vllm_ascend.quantization.quantizer.AscendQuantizer.get_quantizer',
-                return_value=W8A8Quantizer):
+        with patch("vllm_ascend.quantization.quant_config.get_quant_method"):
             moe = TorchairAscendFusedMoE(**default_moe_config,
                                          quant_config=mock_quant_config)
-
             assert moe.quant_method is not None
             assert isinstance(moe.quant_method, AscendFusedMoEMethod)
 

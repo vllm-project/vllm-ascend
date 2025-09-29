@@ -258,7 +258,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
-
+            worker._sleep_saved_buffers = {}
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
@@ -354,6 +354,28 @@ class TestNPUWorker(TestBase):
                 worker.profile()
 
             self.assertIn("Profiler is not enabled", str(cm.exception))
+
+    @patch("vllm_ascend.worker.worker_v1.envs_vllm")
+    @patch("vllm_ascend.worker.worker_v1.envs_ascend")
+    def test_profile_and_msmonitor_both_enabled_raises_error(
+            self, mock_envs_vllm, mock_envs_ascend):
+        """Test profile method raises exception when both profiler and msmonitor are enabled"""
+        from vllm_ascend.worker.worker_v1 import NPUWorker
+
+        mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = "/path/to/traces"
+        mock_envs_ascend.MSMONITOR_USE_DAEMON = 1
+
+        # Create worker mock
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+
+            # Test should raise exception
+            with self.assertRaises(RuntimeError) as cm:
+                _ = worker._init_profiler()
+
+            self.assertIn(
+                "MSMONITOR_USE_DAEMON and VLLM_TORCH_PROFILER_DIR cannot be both set at the same time.",
+                str(cm.exception))
 
     def test_lora_methods(self):
         """Test LoRA related methods"""
@@ -828,6 +850,7 @@ class TestNPUWorker(TestBase):
 
             # Mock scheduler_output and return result
             mock_scheduler_output = MagicMock()
+            mock_scheduler_output.total_num_scheduled_tokens = 1
             # Create a real ModelRunnerOutput instance or mock
             mock_model_output = MagicMock(spec=ModelRunnerOutput)
             worker.model_runner.execute_model.return_value = mock_model_output
@@ -842,9 +865,8 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker_v1.get_pp_group")
     @patch("vllm_ascend.worker.worker_v1.get_tp_group")
-    @patch("vllm_ascend.worker.worker_v1.has_kv_transfer_group")
-    def test_execute_model_middle_rank(self, mock_has_kv_transfer_group,
-                                       mock_get_tp_group, mock_get_pp_group):
+    def test_execute_model_middle_rank(self, mock_get_tp_group,
+                                       mock_get_pp_group):
         """Test execute_model method - middle rank case"""
         from vllm.sequence import IntermediateTensors
 
@@ -875,10 +897,8 @@ class TestNPUWorker(TestBase):
             )
             worker.model_runner.execute_model.return_value = mock_intermediate_output
 
-            # Set has_kv_transfer_group returns False
-            mock_has_kv_transfer_group.return_value = False
-
             mock_scheduler_output = MagicMock()
+            mock_scheduler_output.total_num_scheduled_tokens = 1
 
             # Test execute_model
             result = worker.execute_model(mock_scheduler_output)
@@ -926,6 +946,7 @@ class TestNPUWorker(TestBase):
 
             # Mock return result
             mock_scheduler_output = MagicMock()
+            mock_scheduler_output.total_num_scheduled_tokens = 1
             mock_model_output = MagicMock(spec=ModelRunnerOutput)
             worker.model_runner.execute_model.return_value = mock_model_output
 
@@ -1009,7 +1030,9 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker_v1.NPUPlatform.seed_everything")
     @patch("vllm_ascend.worker.worker_v1.logger")
-    def test_compile_or_warm_up_model_with_eager_mode(self, mock_logger,
+    @patch("vllm_ascend.worker.worker_v1.NPUWorker._warm_up_atb")
+    def test_compile_or_warm_up_model_with_eager_mode(self, mock_warm_up_atb,
+                                                      mock_logger,
                                                       mock_seed_everything):
         """Test compile_or_warm_up_model method - eager mode"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
@@ -1051,10 +1074,14 @@ class TestNPUWorker(TestBase):
             # Verify seed setting
             mock_seed_everything.assert_called_once_with(12345)
 
+            # Verify atb warm up
+            mock_warm_up_atb.assert_called_once()
+
     @patch("vllm_ascend.worker.worker_v1.NPUPlatform.seed_everything")
     @patch("vllm_ascend.worker.worker_v1.logger")
+    @patch("vllm_ascend.worker.worker_v1.NPUWorker._warm_up_atb")
     def test_compile_or_warm_up_model_with_graph_capture(
-            self, mock_logger, mock_seed_everything):
+            self, mock_warm_up_atb, mock_logger, mock_seed_everything):
         """Test compile_or_warm_up_model method - with graph capture enabled"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
 
@@ -1086,6 +1113,9 @@ class TestNPUWorker(TestBase):
 
             # Verify seed setting
             mock_seed_everything.assert_called_once_with(67890)
+
+            # Verify atb warm up
+            mock_warm_up_atb.assert_called_once()
 
     @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
     def test_initialize_from_config_with_sleep_mode(self,
@@ -1141,3 +1171,55 @@ class TestNPUWorker(TestBase):
             # Verify calls
             worker.model_runner.initialize_kv_cache.assert_called_once_with(
                 mock_kv_cache_config)
+
+    @patch("vllm_ascend.worker.worker_v1.get_pp_group")
+    @patch("vllm_ascend.worker.worker_v1.get_tp_group")
+    @patch("vllm_ascend.worker.worker_v1.EMPTY_MODEL_RUNNER_OUTPUT")
+    def test_execute_model_kv_connector_not_finished(self, mock_empty_output,
+                                                     mock_get_tp_group,
+                                                     mock_get_pp_group):
+        """Test execute_model method - kv_connector_output not finished sending/recving case"""
+        from vllm.sequence import IntermediateTensors
+
+        from vllm_ascend.worker.worker_v1 import NPUWorker
+
+        # Create worker mock
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.model_runner = MagicMock()
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.parallel_config = MagicMock()
+            worker.vllm_config.parallel_config.distributed_executor_backend = "ray"
+
+            # Set as middle rank (not first, not last)
+            mock_pp_group = MagicMock()
+            mock_pp_group.is_first_rank = False
+            mock_pp_group.is_last_rank = False
+            mock_get_pp_group.return_value = mock_pp_group
+
+            # Setup tensor reception data
+            mock_pp_group.recv_tensor_dict.return_value = {"tensor": "data"}
+
+            # Create mock kv_connector_output - both finished_sending and finished_recving are False
+            mock_kv_connector_output = MagicMock()
+            mock_kv_connector_output.finished_sending = False
+            mock_kv_connector_output.finished_recving = False
+
+            # Mock return IntermediateTensors with kv_connector_output
+            mock_intermediate_output = MagicMock(spec=IntermediateTensors)
+            mock_intermediate_output.tensors = {"output_tensor": "data"}
+            mock_intermediate_output.kv_connector_output = mock_kv_connector_output
+            worker.model_runner.execute_model.return_value = mock_intermediate_output
+
+            mock_scheduler_output = MagicMock()
+            mock_scheduler_output.total_num_scheduled_tokens = 1
+
+            # Test execute_model
+            result = worker.execute_model(mock_scheduler_output)
+
+            # Verify tensor reception and sending
+            mock_pp_group.recv_tensor_dict.assert_called_once()
+            mock_pp_group.send_tensor_dict.assert_called_once()
+
+            # When both finished_sending and finished_recving are False, should return EMPTY_MODEL_RUNNER_OUTPUT directly
+            self.assertEqual(result, mock_empty_output)

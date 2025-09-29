@@ -21,13 +21,13 @@ import atexit
 import functools
 import math
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
-import torch_npu  # noqa: F401  # noqa: F401
+import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
@@ -40,15 +40,9 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
-# NOTE: Currently, we can only capture 1920 graphs at most,
-# due to the limitation of ACL graph. This number is bounded by
-# the number of streams, which is 2048, we save 128 streams
-# as a buffer.
-# Maximum number of graphs that can be captured by ACL Graph
-MAX_CAPTURE_SIZE = 1920
-
 ASCEND_QUANTIZATION_METHOD = "ascend"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
+REGISTERED_ASCEND_OPS = {}
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
@@ -186,7 +180,7 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
 
 def enable_custom_op():
     """
-    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component. 
+    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
     global _CUSTOM_OP_ENABLED
@@ -291,6 +285,14 @@ def get_max_hidden_layers(hf_config) -> int:
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
+    # NOTE: Currently, we can only capture 1800 graphs at most,
+    # due to the limitation of ACL graph. This number is bounded by
+    # the number of streams, which is 2048, we save 248 streams
+    # as a buffer.
+    # Maximum number of graphs that can be captured by ACL Graph
+    # TODO: Find out whether we need to solve allreduce function
+    MAX_CAPTURE_SIZE = 1800
+
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = \
@@ -304,6 +306,12 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         num_hidden_layers = get_max_hidden_layers(hf_config)
     parallel_config = vllm_config.parallel_config
 
+    # Calculate maximum supported batch sizes considering model architecture
+    resources_per_graph = num_hidden_layers + 1
+    if vllm_config.speculative_config is not None:
+        draft_model_hf_config = vllm_config.speculative_config.draft_model_config.hf_config
+        resources_per_graph += draft_model_hf_config.num_hidden_layers + 1
+
     # TODO: Find out whether we need to take into account the pp_size
     num_comm_groups = sum(size > 1 for size in [
         parallel_config.data_parallel_size,
@@ -313,13 +321,22 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     if os.getenv("HCCL_OP_EXPANSION_MODE") == 'AIV':
         # TODO: Find out whether we need to take into account the pp_size
         parallel_factor = 1 + num_comm_groups + int(
-            parallel_config.enable_expert_parallel)
+            parallel_config.enable_expert_parallel) + int(
+                vllm_config.additional_config.get(
+                    "multistream_overlap_shared_expert", False))
+        if is_moe_model(vllm_config):
+            parallel_factor += (parallel_config.data_parallel_size > 1)
+        else:
+            # When AIV mode is enabled, the allreduce operator of the dense
+            # layer model will occupy additional streams, which are buffered here.
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - parallel_factor * resources_per_graph
+
         # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor(1920 / (48 + 1) / 2) = 19
-        max_num_batch_sizes = math.floor(
-            MAX_CAPTURE_SIZE / (num_hidden_layers + 1) / parallel_factor)
+        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
+                                         resources_per_graph / parallel_factor)
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes)
@@ -335,8 +352,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
         # According to the formula, max_num_batch_sizes = math.floor((1920 - 1 * 40) / (48 + 1) / (1 + 1 * 2)) = 12
         max_num_batch_sizes = math.floor(
-            (MAX_CAPTURE_SIZE - num_comm_groups * 40) /
-            (num_hidden_layers + 1) / (1 + num_comm_groups * 2))
+            (MAX_CAPTURE_SIZE - num_comm_groups * 40) / resources_per_graph /
+            (1 + num_comm_groups * 2))
         logger.info(
             "Calculated maximum supported batch sizes for ACL graph: %s",
             max_num_batch_sizes)
@@ -473,10 +490,10 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     return False
 
 
-def register_ascend_customop():
+def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
-    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`, 
+    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
     and ensure this will execute after model config is initilazed.
     """
     global _ASCEND_CUSTOMOP_IS_REIGISTERED
@@ -484,43 +501,49 @@ def register_ascend_customop():
         return
     from vllm.model_executor.custom_op import CustomOp
 
+    from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.linear import (AscendMlpColumnParallelLinear,
-                                        AscendMlpMergedColumnParallelLinear,
-                                        AscendMlpRowParallelLinear)
+    from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
+                                                  AscendSharedFusedMoE)
+    from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
+                                           AscendQuantRMSNorm, AscendRMSNorm)
+    from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
+                                        AscendMergedColumnParallelLinear,
+                                        AscendQKVParallelLinear,
+                                        AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
-    CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
-    CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
-                          name="SiluAndMul")
-    CustomOp.register_oot(_decorated_op_cls=AscendRotaryEmbedding,
-                          name="RotaryEmbedding")
-    CustomOp.register_oot(
-        _decorated_op_cls=AscendDeepseekScalingRotaryEmbedding,
-        name="DeepseekScalingRotaryEmbedding")
-    CustomOp.register_oot(_decorated_op_cls=AscendVocabParallelEmbedding,
-                          name="VocabParallelEmbedding")
-    CustomOp.register_oot(_decorated_op_cls=AscendParallelLMHead,
-                          name="ParallelLMHead")
-    CustomOp.register_oot(_decorated_op_cls=AscendLogitsProcessor,
-                          name="LogitsProcessor")
-    if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE:
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpColumnParallelLinear,
-                              name="ColumnParallelLinear")
-        CustomOp.register_oot(_decorated_op_cls=AscendMlpRowParallelLinear,
-                              name="RowParallelLinear")
-        CustomOp.register_oot(
-            _decorated_op_cls=AscendMlpMergedColumnParallelLinear,
-            name="MergedColumnParallelLinear")
 
-    from vllm_ascend.ops.layernorm import AscendRMSNorm
-    CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
+    global REGISTERED_ASCEND_OPS
+    REGISTERED_ASCEND_OPS = {
+        "QuickGELU": AscendQuickGELU,
+        "SiluAndMul": AscendSiluAndMul,
+        "RotaryEmbedding": AscendRotaryEmbedding,
+        "ColumnParallelLinear": AscendColumnParallelLinear,
+        "RowParallelLinear": AscendRowParallelLinear,
+        "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
+        "QKVParallelLinear": AscendQKVParallelLinear,
+        "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
+        "VocabParallelEmbedding": AscendVocabParallelEmbedding,
+        "ParallelLMHead": AscendParallelLMHead,
+        "LogitsProcessor": AscendLogitsProcessor,
+        "RMSNorm": AscendRMSNorm,
+        "GemmaRMSNorm": AscendGemmaRMSNorm,
+        "FusedMoE": AscendFusedMoE,
+        "SharedFusedMoE": AscendSharedFusedMoE,
+        "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
+    }
 
-    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
-    CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
+    if vllm_config is not None and \
+        vllm_config.quant_config is not None and \
+        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
+        REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
+
+    for name, op_cls in REGISTERED_ASCEND_OPS.items():
+        CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
@@ -556,3 +579,74 @@ def get_ascend_soc_version():
 
 def lmhead_tp_enable() -> bool:
     return get_ascend_config().lmhead_tensor_parallel_size is not None
+
+
+def oproj_tp_enable() -> bool:
+    return get_ascend_config().oproj_tensor_parallel_size is not None
+
+
+def mlp_tp_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE
+
+
+def matmul_allreduce_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE
+
+
+def dense_optim_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
+
+
+def enable_sp(vllm_config=None) -> bool:
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+    return (
+        vllm_config.compilation_config.pass_config.enable_sequence_parallelism
+        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM)
+
+
+def is_moe_model(vllm_config: VllmConfig):
+    config = vllm_config.model_config.hf_config
+    return any('experts' in key.lower() for key in config.to_dict())
+
+
+def weak_ref_tensor(tensor: Any) -> Any:
+    """
+    Create a weak reference to a tensor.
+    The new tensor will share the same data as the original tensor,
+    but will not keep the original tensor alive.
+    """
+    if isinstance(tensor, torch.Tensor):
+        return torch.ops._C_ascend.weak_ref_tensor(tensor)
+    else:
+        return tensor
+
+
+def weak_ref_tensors(
+    tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
+) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
+    """
+    Convenience function to create weak references to tensors,
+    for single tensor, list of tensors or tuple of tensors.
+    """
+    if isinstance(tensors, torch.Tensor):
+        return weak_ref_tensor(tensors)
+    if isinstance(tensors, list):
+        return [weak_ref_tensor(t) for t in tensors]
+    if isinstance(tensors, tuple):
+        return tuple(weak_ref_tensor(t) for t in tensors)
+    raise ValueError("Invalid type for tensors")
+
+
+def npu_stream_switch(target_stream: torch.npu.Stream,
+                      *,
+                      enabled: bool = True):
+    """
+    Switch to the target stream if enabled is True.
+    Otherwise, do nothing.
+    """
+    if not enabled:
+        return nullcontext()
+    assert target_stream is not None
+    return torch.npu.stream(target_stream)

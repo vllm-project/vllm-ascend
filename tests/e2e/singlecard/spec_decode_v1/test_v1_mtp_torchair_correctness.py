@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import os
-
 import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
-
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 @pytest.fixture

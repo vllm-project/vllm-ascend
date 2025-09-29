@@ -17,6 +17,10 @@ parser.add_argument("--decode-device-cnt",
                     type=int,
                     required=True,
                     help="number of decode devices")
+parser.add_argument("--local-device-ids",
+                    type=str,
+                    required=False,
+                    help="local device ids")
 args = parser.parse_args()
 local_host = args.local_host
 prefill_device_cnt = args.prefill_device_cnt
@@ -54,39 +58,49 @@ chips_per_card = get_cmd_stdout("npu-smi info -l | grep \"Chip Count\"").split(
     "\n")[0].split(":")[1].strip()
 chips_per_card = int(chips_per_card)
 
+if args.local_device_ids:
+    local_device_ids = args.local_device_ids.split(',')
+else:
+    local_device_ids = []
+    for card_id in range(num_cards):
+        for chip_id in range(chips_per_card):
+            device_id = card_id * chips_per_card + chip_id
+            local_device_ids.append(device_id)
+
 # generate local device list for local rank 0, and gather it to all ranks
 local_device_list: list[dict[str, str]] = list()
 if local_rank == "0":
     super_pod_id = "0"
-    for card_id in range(num_cards):
-        for chip_id in range(chips_per_card):
-            device_id = card_id * chips_per_card + chip_id
-            if soc_info == AscendSocVersion.A3:
-                device_ip = get_cmd_stdout(
-                    f"{hccn_tool_path} -i {device_id} -vnic -g | grep ipaddr"
-                ).split(":")[1].strip()
-                super_device_id = get_cmd_stdout(
-                    f"npu-smi info -t spod-info -i {card_id} -c {chip_id} | grep SDID"
-                ).split(":")[1].strip()
-                super_pod_id = get_cmd_stdout(
-                    f"npu-smi info -t spod-info -i {card_id} -c {chip_id} | grep \"Super Pod ID\""
-                ).split(":")[1].strip()
-            else:
-                device_ip = get_cmd_stdout(
-                    f"{hccn_tool_path} -i {device_id} -ip -g | grep ipaddr"
-                ).split(":")[1].strip()
+    for idx in range(len(local_device_ids)):
+        device_id = local_device_ids[idx]
+        chip_id = device_id % chips_per_card
+        card_id = device_id // chips_per_card
+        if soc_info == AscendSocVersion.A3:
+            device_ip = get_cmd_stdout(
+                f"{hccn_tool_path} -i {device_id} -vnic -g | grep ipaddr"
+            ).split(":")[1].strip()
+            super_device_id = get_cmd_stdout(
+                f"npu-smi info -t spod-info -i {card_id} -c {chip_id} | grep SDID"
+            ).split(":")[1].strip()
+            super_pod_id = get_cmd_stdout(
+                f"npu-smi info -t spod-info -i {card_id} -c {chip_id} | grep \"Super Pod ID\""
+            ).split(":")[1].strip()
+        else:
+            device_ip = get_cmd_stdout(
+                f"{hccn_tool_path} -i {device_id} -ip -g | grep ipaddr"
+            ).split(":")[1].strip()
 
-            device_info = {
-                "server_id": local_host,
-                "device_id": str(device_id),
-                "device_ip": str(device_ip),
-            }
-            if soc_info == AscendSocVersion.A3:
-                device_info.update({
-                    "super_pod_id": str(super_pod_id),
-                    "super_device_id": str(super_device_id)
-                })
-            local_device_list.append(device_info)
+        device_info = {
+            "server_id": local_host,
+            "device_id": str(device_id),
+            "device_ip": str(device_ip),
+        }
+        if soc_info == AscendSocVersion.A3:
+            device_info.update({
+                "super_pod_id": str(super_pod_id),
+                "super_device_id": str(super_device_id)
+            })
+        local_device_list.append(device_info)
 
 dist.init_process_group(backend=dist.Backend.GLOO)
 global_device_list = [None] * dist.get_world_size()

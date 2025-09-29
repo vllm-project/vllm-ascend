@@ -20,19 +20,14 @@
 
 Run `pytest tests/test_offline_inference.py`.
 """
-import os
 
-import pytest
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner
 
-os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
-
-@pytest.mark.skip(reason="fix me")
 def test_multimodal_vl(prompt_template):
     image = ImageAsset("cherry_blossom") \
         .pil_image.convert("RGB")
@@ -52,9 +47,12 @@ def test_multimodal_vl(prompt_template):
                         "fps": 1,
                     },
                     enforce_eager=True) as vllm_model:
-        vllm_model.generate_greedy(prompts=prompts,
-                                   images=images,
-                                   max_tokens=64)
+        outputs = vllm_model.generate_greedy(prompts=prompts,
+                                             images=images,
+                                             max_tokens=64)
+        assert len(outputs) == len(prompts)
+        for _, output_str in outputs:
+            assert output_str, "Generated output should not be empty."
 
 
 def test_multimodal_audio():
@@ -86,4 +84,7 @@ def test_multimodal_audio():
                     dtype="bfloat16",
                     limit_mm_per_prompt={"audio": 2},
                     gpu_memory_utilization=0.9) as runner:
-        runner.generate(inputs, sampling_params=sampling_params)
+        outputs = runner.generate(inputs, sampling_params=sampling_params)
+
+        assert outputs is not None, "Generated outputs should not be None."
+        assert len(outputs) > 0, "Generated outputs should not be empty."

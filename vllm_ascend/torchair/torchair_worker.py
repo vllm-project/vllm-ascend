@@ -17,9 +17,9 @@ import torch
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.torchair.torchair_model_runner import NPUTorchairModelRunner
 from vllm_ascend.torchair.utils import (check_kv_cache_bytes_cache_exist,
-                                        check_torchair_cache_exist,
                                         delete_torchair_cache_file,
                                         read_kv_cache_bytes_from_file)
 from vllm_ascend.worker.worker_v1 import NPUWorker
@@ -32,26 +32,28 @@ class NPUTorchairWorker(NPUWorker):
         """Override determine_available_memory to use cached torchair kv_cache_bytes."""
 
         available_kv_cache_memory = super().determine_available_memory()
-
-        if check_torchair_cache_exist() and check_kv_cache_bytes_cache_exist():
-            old_kv_cache_bytes = read_kv_cache_bytes_from_file(
-                torch.distributed.get_rank())
-            if 0 < old_kv_cache_bytes <= available_kv_cache_memory:
-                logger.info(
-                    f"Use cached torchair kv_cache_bytes: {old_kv_cache_bytes}"
-                )
-                self.model_runner.new_kv_cache_bytes = old_kv_cache_bytes
-                return old_kv_cache_bytes
-            else:
-                logger.info(
-                    "Cached torchair kv_cache_bytes is too big, invalidate old torchair_cache"
-                )
-                delete_torchair_cache_file()
-        bytes_floating_tolerance = 1024 * 1024 * envs_ascend.VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE
-        available_kv_cache_memory -= bytes_floating_tolerance
-        logger.info(f"Use new kv_cache_bytes: {available_kv_cache_memory}")
-        self.model_runner.new_kv_cache_bytes = available_kv_cache_memory
-
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_shared_expert_dp:
+            return available_kv_cache_memory
+        if ascend_config.torchair_graph_config.use_cached_kv_cache_bytes:
+            if check_kv_cache_bytes_cache_exist():
+                old_kv_cache_bytes = read_kv_cache_bytes_from_file(
+                    torch.distributed.get_rank())
+                if 0 < old_kv_cache_bytes <= available_kv_cache_memory:
+                    logger.info(
+                        f"Use cached torchair kv_cache_bytes: {old_kv_cache_bytes}"
+                    )
+                    self.model_runner.new_kv_cache_bytes = old_kv_cache_bytes
+                    return old_kv_cache_bytes
+                else:
+                    logger.info(
+                        "Cached torchair kv_cache_bytes is too big, invalidate old torchair_cache"
+                    )
+                    delete_torchair_cache_file()
+            bytes_floating_tolerance = 1024 * 1024 * envs_ascend.VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE
+            available_kv_cache_memory -= bytes_floating_tolerance
+            logger.info(f"Use new kv_cache_bytes: {available_kv_cache_memory}")
+            self.model_runner.new_kv_cache_bytes = available_kv_cache_memory
         return available_kv_cache_memory
 
     def init_device(self):

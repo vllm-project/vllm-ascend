@@ -4,23 +4,19 @@ import vllm_ascend.envs as envs_ascend
 
 
 def register_model():
-    from .deepseek_dbo import CustomDeepseekDBOForCausalLM  # noqa: F401
-    from .deepseek_mtp import CustomDeepSeekMTP  # noqa: F401
-    from .deepseek_v2 import CustomDeepseekV2ForCausalLM  # noqa: F401
-    from .deepseek_v3 import CustomDeepseekV3ForCausalLM  # noqa: F401
-    from .longcat_flash import CustomLongcatFlashForCausalLM  # noqa: F401
-    from .qwen2_5_vl import \
-        AscendQwen2_5_VLForConditionalGeneration  # noqa: F401
-    from .qwen2_vl import AscendQwen2VLForConditionalGeneration  # noqa: F401
-    from .qwen3 import CustomQwen3ForCausalLM  # noqa: F401
-
-    ModelRegistry.register_model(
-        "DeepSeekMTPModel",
-        "vllm_ascend.models.deepseek_mtp:CustomDeepSeekMTP")
-
     ModelRegistry.register_model(
         "Qwen2VLForConditionalGeneration",
         "vllm_ascend.models.qwen2_vl:AscendQwen2VLForConditionalGeneration")
+
+    ModelRegistry.register_model(
+        "Qwen3VLMoeForConditionalGeneration",
+        "vllm_ascend.models.qwen2_5_vl_without_padding:AscendQwen3VLMoeForConditionalGeneration"
+    )
+
+    ModelRegistry.register_model(
+        "Qwen3VLForConditionalGeneration",
+        "vllm_ascend.models.qwen2_5_vl_without_padding:AscendQwen3VLForConditionalGeneration"
+    )
 
     if envs_ascend.USE_OPTIMIZED_MODEL:
         ModelRegistry.register_model(
@@ -33,33 +29,31 @@ def register_model():
             "vllm_ascend.models.qwen2_5_vl_without_padding:AscendQwen2_5_VLForConditionalGeneration_Without_Padding"
         )
 
-    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
-        ModelRegistry.register_model(
-            "DeepseekV2ForCausalLM",
-            "vllm_ascend.models.deepseek_dbo:CustomDeepseekDBOForCausalLM")
+    ModelRegistry.register_model(
+        "DeepseekV2ForCausalLM",
+        "vllm_ascend.models.deepseek_v2:CustomDeepseekV2ForCausalLM")
 
-        ModelRegistry.register_model(
-            "DeepseekV3ForCausalLM",
-            "vllm_ascend.models.deepseek_dbo:CustomDeepseekDBOForCausalLM")
-    else:
-        ModelRegistry.register_model(
-            "DeepseekV2ForCausalLM",
-            "vllm_ascend.models.deepseek_v2:CustomDeepseekV2ForCausalLM")
+    ModelRegistry.register_model(
+        "DeepseekV3ForCausalLM",
+        "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
 
-        ModelRegistry.register_model(
-            "DeepseekV3ForCausalLM",
-            "vllm_ascend.models.deepseek_v3:CustomDeepseekV3ForCausalLM")
+    ModelRegistry.register_model(
+        "DeepSeekMTPModel",
+        "vllm_ascend.models.deepseek_mtp:CustomDeepSeekMTP")
 
     ModelRegistry.register_model(
         "Qwen3MoeForCausalLM",
         "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
 
-    ModelRegistry.register_model(
-        "Qwen3ForCausalLM", "vllm_ascend.models.qwen3:CustomQwen3ForCausalLM")
-
+    # There is no PanguProMoEForCausalLM in vLLM, so we should register it before vLLM config initialization
+    # to make sure the model can be loaded correctly. This register step can be removed once vLLM support PanguProMoEForCausalLM.
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
-        "vllm_ascend.models.pangu_moe:PanguProMoEForCausalLM")
+        "vllm_ascend.torchair.models.torchair_pangu_moe:PanguProMoEForCausalLM"
+    )
+    ModelRegistry.register_model(
+        "Qwen3NextForCausalLM",
+        "vllm_ascend.models.qwen3_next:CustomQwen3NextForCausalLM")
 
     ModelRegistry.register_model(
         "LongcatFlashForCausalLM", 

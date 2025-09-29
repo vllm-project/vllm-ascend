@@ -66,7 +66,6 @@ def test_models_distributed_Qwen3_MOE_W8A8():
             max_model_len=8192,
             tensor_parallel_size=2,
             quantization="ascend",
-            enforce_eager=True,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 

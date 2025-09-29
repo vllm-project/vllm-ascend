@@ -5,8 +5,9 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
-    custom_rotary_embedding_enabled, native_rope_deepseek_forward,
-    rope_forward_oot, rotate_half, yarn_find_correction_dim, yarn_get_mscale)
+    _set_cos_sin_cache, custom_rotary_embedding_enabled,
+    native_rope_deepseek_forward, rope_forward_oot, rotate_half,
+    yarn_find_correction_dim, yarn_get_mscale)
 
 
 class TestCustomRotaryEmbeddingEnabled(TestBase):
@@ -103,7 +104,7 @@ class TestRopeForwardOot(TestBase):
         self.assertTrue(torch.equal(result_q, self.query))
         self.assertTrue(torch.equal(result_k, self.key))
 
-    @patch('torch.ops._C')
+    @patch('torch.ops._C_ascend')
     @patch(
         'vllm_ascend.torchair.ops.torchair_rotary_embedding.get_ascend_config')
     @patch('vllm_ascend.torchair.ops.torchair_rotary_embedding.is_310p',
@@ -200,6 +201,28 @@ class MockRopeModule:
         self.sin_cached = None
         self.rotary_dim = 1
         self.base = 1
+        self.beta_fast = 32
+        self.beta_slow = 1
+        self.max_position_embeddings = 4096
+        self.mscale = 1.0
+        self.scaling_factor = 40
+
+    def register_buffer(self):
+        pass
+
+
+class TestSetSinCosCache(TestBase):
+
+    def test_set_cos_sin_cache(self):
+        module = MockRopeModule()
+
+        with patch.object(module, "register_buffer") as mock_register_buffer:
+            _set_cos_sin_cache(module,
+                               1024,
+                               device="cpu",
+                               dtype=torch.bfloat16)
+
+        mock_register_buffer.assert_called()
 
 
 class TestNativeRopeDeepseekForward(TestBase):
@@ -216,30 +239,6 @@ class TestNativeRopeDeepseekForward(TestBase):
 
         q_pe, k_pe = native_rope_deepseek_forward(module, positions, query,
                                                   key)
-
-        assert q_pe.shape == query.shape
-        assert k_pe.shape == key.shape
-
-    @patch(
-        'vllm_ascend.torchair.ops.torchair_rotary_embedding._set_cos_sin_cache'
-    )
-    @patch(
-        'vllm_ascend.torchair.ops.torchair_rotary_embedding.rope_forward_oot')
-    def test_native_rope_deepseek_forward_cache_handling(
-            self, mock_rope_forward_oot, mock_set_cache):
-        # Test cache situation is true
-        module = MockRopeModule(max_seq_len=1024)
-        positions = torch.tensor([1, 2, 3])
-        query = torch.randn(1, 8, 128)
-        key = torch.randn(1, 8, 128)
-
-        mock_rope_forward_oot.return_value = (query, key)
-
-        q_pe, k_pe = native_rope_deepseek_forward(module,
-                                                  positions,
-                                                  query,
-                                                  key,
-                                                  max_seq_len=2048)
 
         assert q_pe.shape == query.shape
         assert k_pe.shape == key.shape

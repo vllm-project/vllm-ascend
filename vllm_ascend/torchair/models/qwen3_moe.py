@@ -54,8 +54,9 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
-from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
-                                               init_metadata_for_sp)
+from vllm_ascend.torchair.ops.sequence_parallel import (MetadataForPadding,
+                                                        init_metadata_for_sp)
+from vllm_ascend.utils import vllm_version_is
 
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
@@ -311,9 +312,14 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                                                 quant_config=quant_config,
                                                 prefix=f"{prefix}.mlp")
             else:
-                self.mlp = Qwen3MoeSparseMoeBlock(config=config,
-                                                  quant_config=quant_config,
-                                                  prefix=f"{prefix}.mlp")
+                if vllm_version_is("0.10.2"):
+                    self.mlp = Qwen3MoeSparseMoeBlock(
+                        config=config,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.mlp")
+                else:
+                    self.mlp = Qwen3MoeSparseMoeBlock(vllm_config=vllm_config,
+                                                      prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,
                                    intermediate_size=config.intermediate_size,
@@ -394,7 +400,8 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         quant_config = vllm_config.quant_config
 
         parallel_config = vllm_config.parallel_config
-        self.num_redundant_experts = parallel_config.num_redundant_experts
+        eplb_config = parallel_config.eplb_config
+        self.num_redundant_experts = eplb_config.num_redundant_experts
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.config = config

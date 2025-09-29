@@ -42,6 +42,8 @@ from vllm.model_executor.models.qwen2_5_vl import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from vllm_ascend.utils import vllm_version_is
+
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
 
@@ -291,6 +293,40 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
                 self.hidden_size, -1)
         return out_weight
 
+    def pad_qkv_weight_scale_offset(self, data):
+        reshaped_data = data.reshape(
+            -1, 3, self.origin_hidden_size_per_attention_head, 1)
+        data1 = reshaped_data[:, :, :self.
+                              half_origin_hidden_size_per_attention_head, :]
+        data2 = reshaped_data[:, :, self.
+                              half_origin_hidden_size_per_attention_head:, :]
+        data1_paded = torch.nn.functional.pad(
+            data1, (0, 0, 0, self.half_pad_hidden_size_per_attention_head, 0,
+                    0, 0, 0))
+        data2_paded = torch.nn.functional.pad(
+            data2, (0, 0, 0, self.half_pad_hidden_size_per_attention_head, 0,
+                    0, 0, 0))
+        res = torch.cat([data1_paded, data2_paded], dim=2)
+        res = res.reshape(-1, 1)
+        return res
+
+    def pad_qkv_deq_scale_quant_bias(self, data):
+        reshaped_data = data.reshape(
+            -1, 3, self.origin_hidden_size_per_attention_head)
+        data1 = reshaped_data[:, :, :self.
+                              half_origin_hidden_size_per_attention_head]
+        data2 = reshaped_data[:, :,
+                              self.half_origin_hidden_size_per_attention_head:]
+
+        data1_paded = torch.nn.functional.pad(
+            data1, (0, self.half_pad_hidden_size_per_attention_head))
+        data2_paded = torch.nn.functional.pad(
+            data2, (0, self.half_pad_hidden_size_per_attention_head))
+
+        res = torch.cat([data1_paded, data2_paded], dim=2)
+        res = res.reshape(-1)
+        return res
+
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping: list[tuple[str, str, Union[str, int]]] = [
@@ -318,11 +354,23 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-                if ("attn.proj.weight" in name) and self.enable_pad:
+                if ("attn.proj.weight_scale" in name or
+                        "attn.proj.weight_offset" in name) and self.enable_pad:
+                    continue
+                elif ("attn.proj.deq_scale" in name
+                      or "attn.proj.quant_bias" in name) and self.enable_pad:
+                    continue
+                elif ("attn.qkv.weight_scale" in name
+                      or "attn.qkv.weight_offset" in name) and self.enable_pad:
+                    param.data = self.pad_qkv_weight_scale_offset(param.data)
+                elif ("attn.qkv.deq_scale" in name
+                      or "attn.qkv.quant_bias" in name) and self.enable_pad:
+                    param.data = self.pad_qkv_deq_scale_quant_bias(param.data)
+                elif ("attn.proj.weight" in name) and self.enable_pad:
                     param.data = self.pad_proj_weight(param.data)
-                if ("attn.qkv.weight" in name) and self.enable_pad:
+                elif ("attn.qkv.weight" in name) and self.enable_pad:
                     param.data = self.pad_qkv_weight(param.data)
-                if ("attn.qkv.bias" in name) and self.enable_pad:
+                elif ("attn.qkv.bias" in name) and self.enable_pad:
                     param.data = self.pad_qkv_bias(param.data)
             loaded_params.add(name)
         return loaded_params
@@ -450,12 +498,20 @@ class AscendQwen2_5_VLForConditionalGeneration(
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config: Qwen2_5_VLConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        self.visual = AscendQwen2_5_VisionTransformer(
-            vision_config=config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-        )
+        if vllm_version_is("0.10.2"):
+            self.visual = AscendQwen2_5_VisionTransformer(
+                vision_config=config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=self._maybe_ignore_quant_config(quant_config),
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+        else:
+            self.visual = AscendQwen2_5_VisionTransformer(
+                vision_config=config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "visual"),
+            )
 
     def _process_image_input(self, image_input) -> tuple[torch.Tensor, ...]:
 
