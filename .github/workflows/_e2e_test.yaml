@@ -82,8 +82,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
-          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
-          PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256,expandable_segments:True
           NPU_MEMORY_FRACTION: 0.96
           OMP_NUM_THREADS: 1
         if: ${{ inputs.type == 'full' }}

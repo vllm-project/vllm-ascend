@@ -57,7 +57,6 @@ jobs:
           filters: |
             e2e_tracker:
               - '.github/workflows/vllm_ascend_test.yaml'
-              - '.github/workflows/_e2e_test.yaml'
               - 'vllm_ascend/**'
               - 'csrc/**'
               - 'cmake/**'
@@ -157,4 +156,3 @@ jobs:
       runner: linux-aarch64-a2
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
       type: light
-
