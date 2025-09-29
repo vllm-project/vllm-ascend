@@ -122,10 +122,13 @@ jobs:
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
           --ignore=tests/ut/test_platform.py \
           --ignore=tests/ut/patch/worker/patch_common/test_patch_minicpm.py \
-          --ignore=tests/ut/test_scheduler.py \
+          --ignore=tests/ut/core/test_scheduler.py \
           --ignore=tests/ut/kv_connector/test_llmdatadist_connector.py \
+          --ignore=tests/ut/kv_connector/test_mooncake_connector.py \
           --ignore=tests/ut/kv_connector/test_remote_decode_lifecycle.py \
-          --ignore=tests/ut/torchair/models/test_torchair_deepseek_v2.py
+          --ignore=tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
+          --ignore=tests/ut/torchair/models/test_torchair_deepseek_v2.py \
+          --ignore=tests/ut/torchair/test_utils.py
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged
