@@ -345,12 +345,9 @@ class NPUWorker(WorkerBase):
         return self.model_runner.pin_lora(lora_id)
 
     def execute_dummy_batch(self) -> None:
-        uniform_decode = self.compilation_config.cudagraph_mode in [
-            CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.PIECEWISE
-        ]
         force_attention = self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
         self.model_runner._dummy_run(num_tokens=1,
-                                     uniform_decode=uniform_decode,
+                                     uniform_decode=True,
                                      force_attention=force_attention)
 
     def _init_worker_distributed_environment(self) -> None:
