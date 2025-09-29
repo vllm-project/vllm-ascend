@@ -196,6 +196,7 @@ class AscendAttention(Attention, nn.Module, AttentionLayerBase):
         self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+        self.query_quant = None
 
 
 vllm.attention.Attention = AscendAttention
