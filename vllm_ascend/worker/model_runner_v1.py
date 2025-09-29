@@ -2513,7 +2513,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self._select_moe_comm_method(
                     self.mc2_tokens_capacity,
                     with_prefill=True) == MoECommType.MC2:
-                self._dummy_run(self.mc2_tokens_capacity)
+                self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
 
         output = None
         if get_pp_group().is_last_rank:
