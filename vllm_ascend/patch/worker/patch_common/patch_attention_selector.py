@@ -73,8 +73,8 @@ if vllm_version_is("0.10.2"):
         # use the placeholder NO_ATTENTION
         if is_attention_free:
             from vllm.attention.backends.placeholder_attn import \
-                PlaceholderAttentionBackend
-            return PlaceholderAttentionBackend
+                PlaceholderAttentionBackend  # type: ignore[import-untyped]
+            return PlaceholderAttentionBackend  # type: ignore[import-untyped]
 
         # Check whether a particular choice of backend was
         # previously forced.
