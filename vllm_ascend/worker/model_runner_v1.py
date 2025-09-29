@@ -1593,7 +1593,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return attn_state
 
     def _update_graph_pad_size(self, with_prefill, graph_pad_size):
-        self.graph_pad_size = -1
+        if not with_prefill:
+            self.graph_pad_size = graph_pad_size
+        else:
+            self.graph_pad_size = -1
 
     def _update_input_ids_and_positions(self, input_ids, positions,
                                         num_input_tokens, with_prefill,
