@@ -15,6 +15,8 @@
 # limitations under the License.
 #
 
+import vllm_ascend.patch.platform.patch_common.patch_transformers_utils # noqa
+import vllm_ascend.patch.platform.patch_common.patch_config  # noqa
 import vllm_ascend.patch.platform.patch_common.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_common.patch_mamba_config  # noqa
 import vllm_ascend.patch.platform.patch_common.patch_multimodal_merge  # noqa
