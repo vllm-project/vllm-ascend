@@ -157,7 +157,7 @@ def _maybe_npu_prefetch_impl(inputs: torch.Tensor,
     if not enabled:
         return
     input_size = inputs.element_size() * inputs.numel()
-    if max_size < 0 or max_size > input_size:
+    if max_size <= 0 or max_size > input_size:
         max_size = input_size
     torch_npu.npu_prefetch(inputs, dependency, max_size, offset)
 
