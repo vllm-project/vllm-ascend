@@ -153,8 +153,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 self.q_lora_rank,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.q_a_proj",
-                return_bias=False,
+                prefix=f"{prefix}.q_a_proj"
             )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank,
                                          eps=config.rms_norm_eps)
@@ -163,8 +162,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.q_b_proj",
-                return_bias=False,
+                prefix=f"{prefix}.q_b_proj"
             )
         else:
             self.q_proj = ColumnParallelLinear(
@@ -172,8 +170,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.q_proj",
-                return_bias=False,
+                prefix=f"{prefix}.q_proj"
             )
 
         self.kv_a_proj_with_mqa = ReplicatedLinear(
@@ -181,8 +178,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             self.kv_lora_rank + self.qk_rope_head_dim,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.kv_a_proj_with_mqa",
-            return_bias=False,
+            prefix=f"{prefix}.kv_a_proj_with_mqa"
         )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
@@ -191,16 +187,14 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj",
-            return_bias=False,
+            prefix=f"{prefix}.kv_b_proj"
         )
         self.o_proj = CustomDeepseekV2RowParallelLinear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-            return_bias=False,
+            prefix=f"{prefix}.o_proj"
         )
 
         if rope_scaling:
