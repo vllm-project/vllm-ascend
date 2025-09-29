@@ -1070,13 +1070,13 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             k_nope, k_rope = key_states
             prefill_metadata = attn_metadata.prefill
 
-            slc_fa_fusion = torch.ops.custom.npu_selected_flash_attention(
+            slc_fa_fusion = torch.ops.custom.npu_sparse_flash_attention(
                 query=q_nope,
                 key=k_nope,
                 value=k_nope,
-                selected_indices=topk_indices,
+                sparse_indices=topk_indices,
                 scale_value=self.scale,
-                selected_block_size=1,
+                sparse_block_size=1,
                 block_table=prefill_metadata.block_table,
                 actual_seq_lengths_query=prefill_metadata.query_lens,
                 actual_seq_lengths_kv=prefill_metadata.seq_lens,
@@ -1175,13 +1175,13 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
                 k_nope, k_rope = key_states
 
             decode_metadata = attn_metadata.decode
-            slc_fa_fusion = torch.ops.custom.npu_selected_flash_attention(
+            slc_fa_fusion = torch.ops.custom.npu_sparse_flash_attention(
                 query=q_nope,
                 key=k_nope,
                 value=k_nope,
-                selected_indices=topk_indices,
+                sparse_indices=topk_indices,
                 scale_value=self.scale,
-                selected_block_size=1,
+                sparse_block_size=1,
                 block_table=attn_metadata.decode.block_table,
                 actual_seq_lengths_query=decode_metadata.actual_seq_lengths_q,
                 actual_seq_lengths_kv=decode_metadata.seq_lens,
@@ -1292,7 +1292,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             block_table=block_table,
             layout_query="TND",
             layout_key="PA_BSND",
-            selected_count=2048,
+            sparse_count=2048,
             sparse_mode=3)
         return topk_indices
 
