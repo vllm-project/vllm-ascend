@@ -2400,7 +2400,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # TODO(cmq): check if with_prefill is reasonable
         attn_metadata = self._build_attention_metadata(
-            create_mixed_batch=False,
+            False,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
             max_query_len=max_query_len,
