@@ -501,7 +501,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
-            kernel_block_sizes=None,
+            kernel_block_sizes=[[self.vllm_config.cache_config.block_size]],
         )
         self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
                                                      dtype=torch.int64)
@@ -2510,7 +2510,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # MC2 will consume additional NPU memory.
             # Therefore, we need to run the MC2 path once here to complete its initialization,
             # allowing vLLM to correctly estimate the maximum memory required.
-            if self._select_moe_comm_method(
+            if self.max_num_tokens > self.mc2_tokens_capacity and \
+                self._select_moe_comm_method(
                     self.mc2_tokens_capacity,
                     with_prefill=True) == MoECommType.MC2:
                 self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
@@ -3014,7 +3015,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # of mamba block. In this case, BlockTable.block_size will never equal
                 # to kernel_block_sizes[0]
                 kernel_block_sizes.append([0])
-        if kernel_block_sizes != [self.cache_config.block_size]:
+        if kernel_block_sizes != [[self.cache_config.block_size]]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
