@@ -1,0 +1,16 @@
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 03e262960..376041a19 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -440,9 +440,8 @@ class OpenAIServingChat(OpenAIServing):
+         function_name_returned = [False] * num_choices
+ 
+         enable_thinking = self.reasoning_parser is not None
+-        if enable_thinking:
+-            enable_thinking = request.chat_template_kwargs.get("thinking", False) is True \
+-                if request.chat_template_kwargs is not None else enable_thinking
++        if request.chat_template_kwargs is None or request.chat_template_kwargs.get("thinking", False) is False:
++            enable_thinking = False
+ 
+         # Only one of these will be used, thus previous_texts and
+         # all_previous_token_ids will not be used twice in the same iteration.

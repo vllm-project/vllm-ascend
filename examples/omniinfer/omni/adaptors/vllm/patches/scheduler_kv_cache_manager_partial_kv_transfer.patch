@@ -1,0 +1,76 @@
+diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
+index 0f6098d2b..787a8825c 100644
+--- a/vllm/v1/core/kv_cache_manager.py
++++ b/vllm/v1/core/kv_cache_manager.py
+@@ -367,6 +367,7 @@ class KVCacheManager:
+ 
+     def get_block_ids(self, request_id: str) -> list[list[int]]:
+         """Get the block ids of a request."""
+-        assert request_id in self.single_type_manager.req_to_blocks
++        if request_id not in self.single_type_manager.req_to_blocks:
++            return [[]]
+         return KVCacheBlocks(self.single_type_manager.req_to_blocks[request_id]
+                              ).get_block_ids()
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 4c6b3eea0..7a0d54071 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -827,11 +827,12 @@ class Scheduler(SchedulerInterface):
+             if req_data.req_id not in self.finished_req_ids:
+                 self._cached_reqs_data[req_data.req_id].append(req_data)
+ 
+-        self.running = new_running
++        # switch the order of self.make_stats() and self.running = new_running to make the statistic of running request accurate
+         engine_core_outputs = EngineCoreOutputs(
+             outputs=outputs,
+             scheduler_stats=self.make_stats(spec_decoding_stats),
+         )
++        self.running = new_running
+         if self.include_finished_set:
+             #TODO currently sending duplicates here, improve this
+             engine_core_outputs.finished_requests = (
+@@ -869,7 +870,7 @@ class Scheduler(SchedulerInterface):
+ 
+             if request.status == RequestStatus.RUNNING:
+                 self.running.remove(request)
+-            else:
++            elif request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
+                 self.waiting.remove(request)
+             request.status = finished_status
+             self._free_request(request)
+@@ -982,14 +983,9 @@ class Scheduler(SchedulerInterface):
+         num_computed_tokens = len(block_ids) * self.block_size
+         if num_computed_tokens == request.num_tokens:
+             num_computed_tokens -= 1
+-        self.kv_cache_manager.single_type_manager.cache_blocks(
+-            request,
+-            self.kv_cache_manager.req_to_block_hashes[request.request_id],
+-            num_computed_tokens,
+-        )
+ 
+         # Update the request state for scheduling.
+-        request.num_computed_tokens = num_computed_tokens
++        request.num_computed_tokens = request.num_tokens - 1
+ 
+         # Return that we are ready.
+         self.finished_recving_kv_req_ids.remove(request.request_id)
+@@ -1012,4 +1008,5 @@ class Scheduler(SchedulerInterface):
+             self.finished_recving_kv_req_ids.add(req_id)
+         for req_id in (model_runner_output.finished_sending or ()):
+             logger.debug("Finished sending KV transfer for request %s", req_id)
+-            self._free_blocks(self.requests[req_id])
++            if req_id in self.requests:
++                self._free_blocks(self.requests[req_id])
+diff --git a/vllm/v1/executor/multiproc_executor.py b/vllm/v1/executor/multiproc_executor.py
+index eb5f9d4bf..ac02a0905 100644
+--- a/vllm/v1/executor/multiproc_executor.py
++++ b/vllm/v1/executor/multiproc_executor.py
+@@ -38,7 +38,7 @@ logger = init_logger(__name__)
+ POLLING_TIMEOUT_MS = 5000
+ POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
+ 
+-EXECUTE_MODEL_TIMEOUT_S = 300
++EXECUTE_MODEL_TIMEOUT_S = 6000
+ 
+ 
+ class MultiprocExecutor(Executor):

@@ -1,0 +1,41 @@
+diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
+index 787a8825c..74313be9c 100644
+--- a/vllm/v1/core/kv_cache_manager.py
++++ b/vllm/v1/core/kv_cache_manager.py
+@@ -272,9 +272,10 @@ class KVCacheManager:
+         # Speculated tokens might be rejected in the future, so we does
+         # not cache any speculated tokens. We only cache blocks with
+         # generated (accepted) tokens.
++        num_tokens_to_cache = min(num_computed_tokens + num_new_tokens, request.num_tokens)
+         self.single_type_manager.cache_blocks(
+             request, self.req_to_block_hashes[request.request_id],
+-            num_computed_tokens + num_new_tokens - num_draft_tokens)
++            num_tokens_to_cache)
+ 
+         return KVCacheBlocks(new_blocks)
+ 
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index d91f80b5a..085f006cb 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -35,6 +35,8 @@ logger = init_logger(__name__)
+ 
+ import os
+ reuse_prefilled_tokens = os.getenv("OMNI_REUSE_PREFILLED_TOKENS", "0") == "1"
++FORCE_ENABLE_CHUNK_PREFILL = os.getenv("FORCE_ENABLE_CHUNK_PREFILL", "0") == "1"
++
+ 
+ class Scheduler(SchedulerInterface):
+ 
+@@ -410,7 +412,10 @@ class Scheduler(SchedulerInterface):
+                             < num_new_tokens):
+                         num_new_tokens = (
+                             self.scheduler_config.long_prefill_token_threshold)
+-                    num_new_tokens = min(num_new_tokens, token_budget)
++                    if FORCE_ENABLE_CHUNK_PREFILL:
++                        num_new_tokens = min(num_new_tokens, token_budget)
++                    elif num_new_tokens > token_budget:
++                        break
+                     assert num_new_tokens > 0
+ 
+                     # Schedule encoder inputs.

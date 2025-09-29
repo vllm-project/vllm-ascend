@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omni_cli"
+version = "0.4.0"
+description = "Standalone CLI tool from Omni Infer"
+authors = [
+    { name="Huawei" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "ansible>=8.0",
+    "pyyaml>=6.0",
+    "chardet",
+]
+
+[project.scripts]
+omni_cli = "omni_cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["omni_cli*"]

@@ -1,0 +1,13 @@
+diff --git a/vllm/entrypoints/openai/api_server.py b/vllm/entrypoints/openai/api_server.py
+index 0ab6fcdca..e9192e9ba 100644
+--- a/vllm/entrypoints/openai/api_server.py
++++ b/vllm/entrypoints/openai/api_server.py
+@@ -101,7 +101,7 @@ from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
+                         is_valid_ipv6_address, set_ulimit)
+ from vllm.version import __version__ as VLLM_VERSION
+ 
+-TIMEOUT_KEEP_ALIVE = 5  # seconds
++TIMEOUT_KEEP_ALIVE = 120  # seconds
+ 
+ prometheus_multiproc_dir: tempfile.TemporaryDirectory
+ 

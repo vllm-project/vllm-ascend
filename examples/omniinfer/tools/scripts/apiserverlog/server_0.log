@@ -1,0 +1,102 @@
+Warning : ASCEND_HOME_PATH environment variable is not set.
+INFO 06-13 18:12:00 [importing.py:16] Triton not installed or not compatible; certain GPU-related functions will not be available.
+WARNING 06-13 18:12:00 [importing.py:28] Triton is not installed. Using dummy decorators. Install it via `pip install triton` to enable kernel compilation.
+INFO 06-13 18:12:02 [__init__.py:30] Available plugins for group vllm.platform_plugins:
+INFO 06-13 18:12:02 [__init__.py:32] name=npu, value=omni.adaptors.vllm.platform:register
+INFO 06-13 18:12:02 [__init__.py:34] all available plugins for group vllm.platform_plugins will be loaded.
+INFO 06-13 18:12:02 [__init__.py:36] set environment variable VLLM_PLUGINS to control which plugins to load.
+INFO 06-13 18:12:02 [__init__.py:44] plugin npu loaded.
+DEBUG 06-13 18:12:02 [__init__.py:34] Checking if TPU platform is available.
+DEBUG 06-13 18:12:02 [__init__.py:44] TPU platform is not available because: No module named 'libtpu'
+DEBUG 06-13 18:12:02 [__init__.py:52] Checking if CUDA platform is available.
+DEBUG 06-13 18:12:02 [__init__.py:76] Exception happens when checking CUDA platform: NVML Shared Library Not Found
+DEBUG 06-13 18:12:02 [__init__.py:93] CUDA platform is not available because: NVML Shared Library Not Found
+DEBUG 06-13 18:12:02 [__init__.py:100] Checking if ROCm platform is available.
+DEBUG 06-13 18:12:02 [__init__.py:114] ROCm platform is not available because: No module named 'amdsmi'
+DEBUG 06-13 18:12:02 [__init__.py:122] Checking if HPU platform is available.
+DEBUG 06-13 18:12:02 [__init__.py:129] HPU platform is not available because habana_frameworks is not found.
+DEBUG 06-13 18:12:02 [__init__.py:140] Checking if XPU platform is available.
+DEBUG 06-13 18:12:02 [__init__.py:150] XPU platform is not available because: No module named 'intel_extension_for_pytorch'
+DEBUG 06-13 18:12:02 [__init__.py:158] Checking if CPU platform is available.
+DEBUG 06-13 18:12:02 [__init__.py:181] Checking if Neuron platform is available.
+INFO 06-13 18:12:02 [__init__.py:239] Platform plugin npu is activated
+WARNING 06-13 18:12:04 [_custom_ops.py:21] Failed to import from vllm._C with ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 06-13 18:12:06 [api_server.py:988] Torch Profiler is enabled in the API server. This should ONLY be used for local development!
+INFO 06-13 18:12:06 [__init__.py:30] Available plugins for group vllm.general_plugins:
+INFO 06-13 18:12:06 [__init__.py:32] name=kv_connectors, value=omni.accelerators.pd:register
+INFO 06-13 18:12:06 [__init__.py:32] name=npu_optimized_models, value=omni.models:register_model
+INFO 06-13 18:12:06 [__init__.py:32] name=lora_filesystem_resolver, value=vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver
+INFO 06-13 18:12:06 [__init__.py:34] all available plugins for group vllm.general_plugins will be loaded.
+INFO 06-13 18:12:06 [__init__.py:36] set environment variable VLLM_PLUGINS to control which plugins to load.
+INFO 06-13 18:12:06 [__init__.py:44] plugin kv_connectors loaded.
+[WARNING] Config file not found: , using default configuration.
+++++++++++++++++++++++++patch_vllm_distributed++++++++++++++++++++++++++
++++++++++++++++++++++++patch_rope+++++++++++++++++++++++++++
+++++++++++++++++++++++patch_sampler++++++++++++++++++++++++++++
+INFO 06-13 18:12:06 [__init__.py:44] plugin npu_optimized_models loaded.
+INFO 06-13 18:12:06 [__init__.py:44] plugin lora_filesystem_resolver loaded.
+WARNING 06-13 18:12:06 [registry.py:395] Model architecture DeepseekV2ForCausalLM is already registered, and will be overwritten by the new model class omni.models.deepseek.deepseek_v2:CustomDeepseekV2ForCausalLM.
+WARNING 06-13 18:12:06 [registry.py:395] Model architecture DeepseekV3ForCausalLM is already registered, and will be overwritten by the new model class omni.models.deepseek.deepseek_v3:DeepseekV3ForCausalLM.
+INFO 06-13 18:12:07 [config.py:1899] Disabled the custom all-reduce kernel because it is not supported on current platform.
+INFO 06-13 18:12:08 [config.py:1899] Disabled the custom all-reduce kernel because it is not supported on current platform.
+INFO 06-13 18:12:09 [config.py:1899] Disabled the custom all-reduce kernel because it is not supported on current platform.
+INFO 06-13 18:12:09 [api_server.py:1289] vLLM API server version 0.9.1.dev7+gef81ab61c
+INFO 06-13 18:12:10 [config.py:1899] Disabled the custom all-reduce kernel because it is not supported on current platform.
+INFO 06-13 18:12:10 [cli_args.py:297] non-default args: {'port': 9090, 'trust_remote_code': True, 'max_model_len': 16384, 'enforce_eager': True, 'served_model_name': ['deepseek'], 'data_parallel_size_local': 1, 'data_parallel_address': '7.150.8.141', 'data_parallel_rpc_port': 8080, 'enable_expert_parallel': True, 'block_size': 128}
+INFO 06-13 18:12:10 [config.py:214] Replacing legacy 'type' key with 'rope_type'
+ERROR 06-13 18:12:20 [registry.py:361] Error in inspecting model architecture 'DeepseekV2ForCausalLM'
+ERROR 06-13 18:12:20 [registry.py:361] Traceback (most recent call last):
+ERROR 06-13 18:12:20 [registry.py:361]   File "/home/lc/omni_infer/infer_engines/vllm/vllm/model_executor/models/registry.py", line 592, in _run_in_subprocess
+ERROR 06-13 18:12:20 [registry.py:361]     returned.check_returncode()
+ERROR 06-13 18:12:20 [registry.py:361]   File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/subprocess.py", line 501, in check_returncode
+ERROR 06-13 18:12:20 [registry.py:361]     raise CalledProcessError(self.returncode, self.args, self.stdout,
+ERROR 06-13 18:12:20 [registry.py:361] subprocess.CalledProcessError: Command '['/home/ma-user/anaconda3/envs/py311/bin/python', '-m', 'viztracer', '--quiet', '--quiet', '--ignore_frozen', '--tracer_entries', '9999999', '--log_async', '--subprocess_child', '--dump_raw', '--subprocess_child', '--dump_raw', '-o', '/tmp/tmpbxytxvpv/result.json', '-m', 'vllm.model_executor.models.registry', '--']' returned non-zero exit status 1.
+ERROR 06-13 18:12:20 [registry.py:361] 
+ERROR 06-13 18:12:20 [registry.py:361] The above exception was the direct cause of the following exception:
+ERROR 06-13 18:12:20 [registry.py:361] 
+ERROR 06-13 18:12:20 [registry.py:361] Traceback (most recent call last):
+ERROR 06-13 18:12:20 [registry.py:361]   File "/home/lc/omni_infer/infer_engines/vllm/vllm/model_executor/models/registry.py", line 359, in _try_inspect_model_cls
+ERROR 06-13 18:12:20 [registry.py:361]     return model.inspect_model_cls()
+ERROR 06-13 18:12:20 [registry.py:361]            ^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 06-13 18:12:20 [registry.py:361]   File "/home/lc/omni_infer/infer_engines/vllm/vllm/model_executor/models/registry.py", line 330, in inspect_model_cls
+ERROR 06-13 18:12:20 [registry.py:361]     return _run_in_subprocess(
+ERROR 06-13 18:12:20 [registry.py:361]            ^^^^^^^^^^^^^^^^^^^
+ERROR 06-13 18:12:20 [registry.py:361]   File "/home/lc/omni_infer/infer_engines/vllm/vllm/model_executor/models/registry.py", line 595, in _run_in_subprocess
+ERROR 06-13 18:12:20 [registry.py:361]     raise RuntimeError(f"Error raised in subprocess:\n"
+ERROR 06-13 18:12:20 [registry.py:361] RuntimeError: Error raised in subprocess:
+ERROR 06-13 18:12:20 [registry.py:361] <frozen runpy>:128: RuntimeWarning: 'vllm.model_executor.models.registry' found in sys.modules after import of package 'vllm.model_executor.models', but prior to execution of 'vllm.model_executor.models.registry'; this may result in unpredictable behaviour
+ERROR 06-13 18:12:20 [registry.py:361] Traceback (most recent call last):
+ERROR 06-13 18:12:20 [registry.py:361]   File "<frozen runpy>", line 198, in _run_module_as_main
+ERROR 06-13 18:12:20 [registry.py:361]   File "<frozen runpy>", line 88, in _run_code
+ERROR 06-13 18:12:20 [registry.py:361]   File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/site-packages/viztracer/__main__.py", line 8, in <module>
+ERROR 06-13 18:12:20 [registry.py:361]     main()
+ERROR 06-13 18:12:20 [registry.py:361]   File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/site-packages/viztracer/main.py", line 698, in main
+ERROR 06-13 18:12:20 [registry.py:361]     success, err_msg = ui.run()
+ERROR 06-13 18:12:20 [registry.py:361]                        ^^^^^^^^
+ERROR 06-13 18:12:20 [registry.py:361]   File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/site-packages/viztracer/main.py", line 330, in run
+ERROR 06-13 18:12:20 [registry.py:361]     return self.run_module()
+ERROR 06-13 18:12:20 [registry.py:361]            ^^^^^^^^^^^^^^^^^
+ERROR 06-13 18:12:20 [registry.py:361]   File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/site-packages/viztracer/main.py", line 413, in run_module
+ERROR 06-13 18:12:20 [registry.py:361]     return self.run_code(code, global_dict)
+ERROR 06-13 18:12:20 [registry.py:361]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ERROR 06-13 18:12:20 [registry.py:361]   File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/site-packages/viztracer/main.py", line 384, in run_code
+ERROR 06-13 18:12:20 [registry.py:361]     exec(code, global_dict)
+ERROR 06-13 18:12:20 [registry.py:361] RuntimeError: VizTracer: Unexpected type. Might be an event mismatch.
+ERROR 06-13 18:12:20 [registry.py:361] 
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/site-packages/viztracer/__main__.py", line 8, in <module>
+    main()
+  File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/site-packages/viztracer/main.py", line 698, in main
+    success, err_msg = ui.run()
+                       ^^^^^^^^
+  File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/site-packages/viztracer/main.py", line 332, in run
+    return self.run_command()
+           ^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/site-packages/viztracer/main.py", line 468, in run_command
+    return self.run_code(code, main_mod.__dict__)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ma-user/anaconda3/envs/py311/lib/python3.11/site-packages/viztracer/main.py", line 384, in run_code
+    exec(code, global_dict)
+RuntimeError: VizTracer: Unexpected type. Might be an event mismatch.

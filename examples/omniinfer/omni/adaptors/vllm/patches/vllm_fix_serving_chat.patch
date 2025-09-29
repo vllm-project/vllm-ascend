@@ -1,0 +1,288 @@
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index 943abbe..b5ca1ac 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -97,9 +97,7 @@ class OpenAIServingChat(OpenAIServing):
+                 raise TypeError(
+                     f"{reasoning_parser=} has not been registered") from e
+         self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
+-        # adapt begin
+         self.tool_parser_name = tool_parser
+-        # adapt end
+         if self.enable_auto_tools:
+             try:
+                 if (tool_parser == "pythonic" and
+@@ -424,17 +422,12 @@ class OpenAIServingChat(OpenAIServing):
+         num_prompt_tokens = 0
+         num_cached_tokens = None
+
+-        # adapt begin
+         # turn id for kimi
+         turn_id = 0
+-        # adapt end
+-
+         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
+             tool_choice_function_name = request.tool_choice.function.name
+-            # adapt begin
+             if self.tool_parser_name == "ascend_kimi_k2" or self.tool_parser_name == "kimi_k2":
+                 turn_id = get_turn_id(conversation)
+-            # adapt end
+         else:
+             tool_choice_function_name = None
+
+@@ -493,6 +486,7 @@ class OpenAIServingChat(OpenAIServing):
+         else:
+             include_usage, include_continuous_usage = False, False
+
++        last_delta_message = None
+         try:
+             async for res in result_generator:
+                 if res.prompt_token_ids is not None:
+@@ -574,6 +568,10 @@ class OpenAIServingChat(OpenAIServing):
+                 for output in res.outputs:
+                     i = output.index
+                     tool_parser = tool_parsers[i]
++                    do_ascend_adapt = tool_parser is not None and (
++                            self.tool_parser_name in {"ascend_kimi_k2", "kimi_k2", "ascend_deepseek_v3",
++                                                      "deepseek_v3"} or
++                            "ascend_adapt" in self.tool_parser_name)
+
+                     if finish_reason_sent[i]:
+                         continue
+@@ -650,7 +648,6 @@ class OpenAIServingChat(OpenAIServing):
+                                         arguments=delta_text),
+                                     index=i)
+                             else:
+-                                # adapt begin
+                                 if self.tool_parser_name == "ascend_kimi_k2" or self.tool_parser_name == "kimi_k2":
+                                     delta_tool_call = DeltaToolCall(
+                                         id=f"functions.{tool_choice_function_name}:{turn_id}",
+@@ -669,7 +666,6 @@ class OpenAIServingChat(OpenAIServing):
+                                             arguments=delta_text),
+                                         index=i)
+                                     function_name_returned[i] = True
+-                                # adapt end
+
+                             delta_message = DeltaMessage(tool_calls=[
+                                 delta_tool_call,
+@@ -789,12 +785,11 @@ class OpenAIServingChat(OpenAIServing):
+                     # "control token" for tool calls or the parser otherwise
+                     # wasn't ready to send a token, then
+                     #   get the next token without streaming a chunk
+-                    # adapt begin
+                     auto_tools_called = False
++                    streamed_remaining_function_call = False
+                     if delta_message is None:
+                         if output.finish_reason is not None:
+-                            if self.tool_parser_name in {"ascend_kimi_k2", "kimi_k2", "ascend_deepseek_v3", "deepseek_v3"} or \
+-                                "ascend_adapt" in self.tool_parser_name:
++                            if do_ascend_adapt:
+                                 delta_message = (
+                                     tool_parser.extract_tool_calls_streaming(
+                                         previous_text=previous_text,
+@@ -810,10 +805,12 @@ class OpenAIServingChat(OpenAIServing):
+
+                             if delta_message is not None and auto_tools_called:
+                                 delta_message.content = ""
++
++                            streamed_remaining_function_call = True
+                         else:
+                             continue
+-                    # adapt end
+
++                    last_delta_message = delta_message
+                     if output.finish_reason is None:
+                         # Send token-by-token response for each request.n
+                         choice_data = ChatCompletionResponseStreamChoice(
+@@ -824,57 +821,26 @@ class OpenAIServingChat(OpenAIServing):
+
+                     # if the model is finished generating
+                     else:
+-                        # check to make sure we haven't "forgotten" to stream
+-                        #   any tokens that were generated but previously
+-                        #   matched by partial json parsing
+-                        # only happens if we are NOT using guided decoding
+-                        auto_tools_called = False
+-                        if tool_parser:
+-                            auto_tools_called = len(
+-                                tool_parser.prev_tool_call_arr) > 0
+-                            index = len(tool_parser.prev_tool_call_arr
+-                                        ) - 1 if auto_tools_called else 0
+-                        else:
+-                            index = 0
+-
+-                        if self._should_check_for_unstreamed_tool_arg_tokens(
+-                                delta_message, output) and tool_parser:
+-                            latest_delta_len = 0
+-                            if ((isinstance(
+-                                    delta_message.tool_calls[0].function,
+-                                    DeltaFunctionCall)) and isinstance(
+-                                        delta_message.tool_calls[0].function.
+-                                        arguments, str)):
+-                                latest_delta_len = len(
+-                                    delta_message.tool_calls[0].function.
+-                                    arguments)
+-
+-                            # get the expected call based on partial JSON
+-                            # parsing which "autocompletes" the JSON
+-                            expected_call = json.dumps(
+-                                tool_parser.prev_tool_call_arr[index].get(
+-                                    "arguments", {}),
+-                                ensure_ascii=False)
+-
+-                            # get what we've streamed so far for arguments
+-                            # for the current tool
+-                            actual_call = tool_parser.streamed_args_for_tool[
+-                                index]
+-                            if (latest_delta_len > 0):
+-                                actual_call = actual_call[:-latest_delta_len]
+-
+-                            # check to see if there's anything left to stream
+-                            remaining_call = expected_call.replace(
+-                                actual_call, "", 1)
+-                            # set that as a delta message
+-                            delta_message = DeltaMessage(tool_calls=[
+-                                DeltaToolCall(index=index,
+-                                              function=DeltaFunctionCall(
+-                                                  arguments=remaining_call).
+-                                              model_dump(exclude_none=True))
+-                            ])
++                        if not streamed_remaining_function_call:
++                            end_delta_message = None
++                            if do_ascend_adapt:
++                                end_delta_message = (
++                                    tool_parser.extract_tool_calls_streaming(
++                                        previous_text=previous_text,
++                                        current_text=current_text,
++                                        delta_text='\0',
++                                        previous_token_ids=[],
++                                        current_token_ids=[],
++                                        delta_token_ids=[],
++                                        request=request))
++
++                            auto_tools_called, delta_message = self.stream_remaining_function_call(
++                                tool_parser, delta_message, last_delta_message, output)
++
++                            if delta_message is not None and do_ascend_adapt and end_delta_message is not None and \
++                                    not auto_tools_called:
++                                delta_message.content = delta_message.content + end_delta_message.content
+
+-                        # adapt begin
+                         if delta_message is None:
+                             delta_message = DeltaMessage(content="")
+
+@@ -886,7 +852,6 @@ class OpenAIServingChat(OpenAIServing):
+                             finish_reason=output.finish_reason
+                             if not auto_tools_called and not tool_choice_function_name else "tool_calls",
+                             stop_reason=output.stop_reason)
+-                        # adapt end
+
+                         finish_reason_sent[i] = True
+
+@@ -972,11 +937,9 @@ class OpenAIServingChat(OpenAIServing):
+
+         assert final_res is not None
+
+-        # adapt begin
+         turn_id = 0
+         if self.tool_parser_name == "ascend_kimi_k2" or self.tool_parser_name == "kimi_k2":
+             turn_id = get_turn_id(conversation)
+-        # adapt end
+
+         if reuse_prefilled_tokens:
+             if request.kv_transfer_params and "prefilled_token" in request.kv_transfer_params:
+@@ -1040,8 +1003,6 @@ class OpenAIServingChat(OpenAIServing):
+             # if the request uses tools and specified a tool choice
+             elif request.tool_choice and type(
+                     request.tool_choice) is ChatCompletionNamedToolChoiceParam:
+-
+-                # adapt begin
+                 auto_tools_called = True
+                 tool_call_class = MistralToolCall if isinstance(
+                     tokenizer, MistralTokenizer) else ToolCall
+@@ -1067,7 +1028,6 @@ class OpenAIServingChat(OpenAIServing):
+                                 name=request.tool_choice.function.name,
+                                 arguments=content))
+                         ])
+-                # adapt end
+             elif request.tool_choice and request.tool_choice == "required":
+                 tool_call_class = MistralToolCall if isinstance(
+                     tokenizer, MistralTokenizer) else ToolCall
+@@ -1289,7 +1249,71 @@ class OpenAIServingChat(OpenAIServing):
+             and delta_message.tool_calls[0].function.arguments is not None
+         )
+
+-# adapt begin
++    def stream_remaining_function_call(self, tool_parser, delta_message, last_delta_message, output):
++        # check to make sure we haven't "forgotten" to stream
++        #   any tokens that were generated but previously
++        #   matched by partial json parsing
++        # only happens if we are NOT using guided decoding
++        auto_tools_called = False
++        if tool_parser:
++            auto_tools_called = len(
++                tool_parser.prev_tool_call_arr) > 0
++            index = len(tool_parser.prev_tool_call_arr
++                        ) - 1 if auto_tools_called else 0
++        else:
++            index = 0
++
++        is_delta_message_none = False
++        if delta_message is None:
++            delta_message = last_delta_message
++            is_delta_message_none = True
++
++        remaining_call = ''
++        if self._should_check_for_unstreamed_tool_arg_tokens(
++                delta_message, output) and tool_parser:
++            latest_delta_len = 0
++            if ((isinstance(
++                    delta_message.tool_calls[-1].function,
++                    DeltaFunctionCall)) and isinstance(
++                delta_message.tool_calls[-1].function.
++                        arguments, str)):
++                latest_delta_len = len(delta_message.tool_calls[-1].function.arguments)
++
++            # get the expected call based on partial JSON
++            # parsing which "autocompletes" the JSON
++            expected_call = tool_parser.prev_tool_call_arr[index].get("arguments", '{}')
++
++            # get what we've streamed so far for arguments
++            # for the current tool
++            actual_call = tool_parser.streamed_args_for_tool[index]
++            if (latest_delta_len > 0 and not is_delta_message_none):
++                actual_call = actual_call[:-latest_delta_len]
++
++            # check to see if there's anything left to stream
++            remaining_call = expected_call.replace(
++                actual_call, "", 1)
++            # set that as a delta message
++            if delta_message.tool_calls[-1].function.name is not None:
++                delta_message = DeltaMessage(tool_calls=[
++                    DeltaToolCall(index=index,
++                                  function=DeltaFunctionCall(
++                                      name=delta_message.tool_calls[-1].function.name,
++                                      arguments=remaining_call).
++                                  model_dump(exclude_none=True))
++                ])
++            else:
++                delta_message = DeltaMessage(tool_calls=[
++                    DeltaToolCall(index=index,
++                                  function=DeltaFunctionCall(
++                                      arguments=remaining_call).
++                                  model_dump(exclude_none=True))
++                ])
++
++        if not auto_tools_called and is_delta_message_none:
++            delta_message = None
++
++        return auto_tools_called, delta_message
++
+ def get_turn_id(conversation: List[ConversationMessage]):
+     turn_id = 0
+     for i in range(len(conversation) - 1, -1, -1):
+@@ -1297,4 +1321,3 @@ def get_turn_id(conversation: List[ConversationMessage]):
+         if msg.get("role") == "tool" and msg.get("tool_call_id") is not None:
+             turn_id += 1
+     return turn_id
+-# adapt end

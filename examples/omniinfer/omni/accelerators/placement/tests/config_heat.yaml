@@ -1,0 +1,35 @@
+# Patterns: Path to the pattern file specifying expert deployment configuration.
+
+#     The placement pattern is represented as a three-dimensional binary matrix (`expert_mapping`) indicating
+#     the presence (`1`) or absence (`0`) of experts (EPs) across dimensions of devices, layers, and expert IDs (`epid`).
+#     Specifically, the three dimensions are:
+
+#         - deviceid: Identifier of the device.
+#         - layerid: Identifier of the MoE layer.
+#         - epid: Identifier of the expert within a layer.
+#                 Note that experts in different layers may share the same `epid`, but they represent distinct experts.
+
+#     Thus, `expert_mapping[deviceid][layerid][epid] = 1` indicates that the expert identified by `epid` at layer `layerid`
+#     is deployed on device `deviceid`. Conversely, a value of `0` indicates the absence of that expert on the specified device and layer.
+
+#     Note: The same `epid` within the same `layerid` can have multiple entries with the value `1` across different devices.
+#     This means the combination `(layerid, epid)` alone does not uniquely identify a deployment;
+#     rather, experts may be replicated across multiple devices to enable parallelism or redundancy.
+
+#     Defaults to None.
+pattern_path: "../tests/patterns/DSV3_RedFullLays_+58_58_MoELayers_64_dies_Rand_0411.npy"
+
+#define max_layer_num as a constant 58 (for deepseek moe layer num 58)
+max_moe_layer_num: 58
+
+# Optimizers
+Optimizers:
+  # - ada_router_optimizer.AdaRouter:   # moudlue_name.class_name, moudlue_name equal to py file name
+  #     threshold: 0.9
+  #     entropy_bound: 0.5
+  #     method: "threshold"
+#  - token_balance_optimizer.TokenBalance:
+#      capacity_factor: 1.0
+
+  - heat_optimizer.HEAT_ExpertsBalancer:
+      is_global_maximum_offset: True

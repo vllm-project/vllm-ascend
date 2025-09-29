@@ -1,0 +1,95 @@
+# Copyright 2025 Huawei Technologies Co., Ltd
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ============================================================================
+base:
+  env:
+    GLOO_SOCKET_IFNAME: "enp23s0f3" # DP communication parameter. Your network interface. Query with: ip -4 route list 0/0 | awk '{print $5}' | head -n 1
+    TP_SOCKET_IFNAME: "enp23s0f3" # DP communication parameter. Your network interface. Query with: ip -4 route list 0/0 | awk '{print $5}' | head -n 1
+    VLLM_LOGGING_LEVEL: "INFO" # VLLM logging level. Default INFO, set to DEBUG for debugging
+    VLLM_USE_V1: "1" # Use VLLM V1 version (1 to enable)
+    VLLM_WORKER_MULTIPROC_METHOD: "fork" # VLLM worker process method (fork or spawn)
+    ASCEND_RT_VISIBLE_DEVICES: "0,1" # Visible physical devices for the instance. such as "0,1,2,3"
+    HCC_INTRA_ROCE_ENABLE: "1" # Set to 1 for A3, enable intra-HCCL ROCE
+    HCC_INTRA_PCIE_ENABLE: "0" # Set to 0 for A3, enable intra-HCCL PCIE
+    MODEL_EXTRA_CFG_PATH: "/workspace/omni_infer/tests/test_config/test_config.json" # p/d is different, p is test_config_prefill.json, d is test_config_decode.json
+    OMNI_USE_DSV3: "1"
+  api_servers_params:
+    --model-path: "/data/models/DeepSeek-R1" # Model path
+    --max-model-len: 16384
+    --max-num-seqs: 16
+    --max-num-batched-tokens: 30000
+    --tp: 4
+    --served-model-name: "deepseek"
+    --log-dir: "/data/logs"
+    --gpu-util: 0.9
+    --extra-args": "--enable-expert-parallel"
+pd_disaggregation:
+  env:
+    GLOBAL_RANK_TABLE_FILE_PATH: ""  # Global rank table file path. For merged P/D instances,usually global_ranktable_merge.json
+    RANK_TABLE_FILE_PATH: ""  # Local rank table file path for P or D instances. Usually local_ranktable_{IP}_rank.json; for cross-machine D instances, use local_ranktable_merge*.json
+    LOCAL_DECODE_SERVER_IP_LIST: "" # IP list of current D instance. Separate multiple IPs with commas, maintaining same order as ranktable
+    GLOBAL_DECODE_SERVER_IP_LIST: "" # IP list of all D instances. Combination of all d instances' LOCAL_DECODE_SERVER_IP_LIST, separated by ';'. For 1d scenarios, same as LOCAL_DECODE_SERVER_IP_LIST
+    ROLE: "prefill" # Instance role type. Use 'prefill' for P, 'decode' for D
+    PREFILL_POD_NUM: "" # Number of P instances
+    DECODE_POD_NUM: "" # Number of D instances
+    VLLM_LLMDATADIST_ZMQ_PORT: "5568" # ZMQ port for llmdatadist connector (must be string)
+  api_servers_params:
+    --kv-transfer-config: '{"kv_connector": "AscendHcclConnectorV1", "kv_buffer_device": "npu", "kv_role": "kv_producer", "kv_rank": 0, "engine_id": 0, "kv_parallel_size": 2}'
+    kv_connector: "AscendHcclConnectorV1" # kv connector name
+    kv_buffer_device: "npu" # kv transfer buffer device
+    kv_role: "kv_producer" # kv role (p: kv_producer, d: kv_consumer)
+    kv_rank: 0 # kv rank (p_num/d_num-1)
+    engine_id: 0 # kv engine ID equal to kv_rank
+    kv_parallel_size: 3 # kv parallel size (equal to num_p + num_d) 2p1d
+multi_api_servers_dp:
+  env:
+    SERVER_OFFSET: "0" # Server offset for multi-node dp setup. For dual-node A3, set to 16 on d_2 instance
+  api_servers_params:
+    --num-servers: 0 # Number of API servers
+    --num-dp: 0 # Number of data parallel size
+    --server-offset: 0 # Server offset for multi-node setup. For dual-node A3, set to 16 on d_2 instance
+    --master-ip: 172.0.0.1 # Master node IP for multi-node setup. For dual-node A3, set to head node IP (corresponds to vllm data-parallel-address)
+    --master-port: 1234 # Master node Gloo socket communication port
+    --base-api-port: 4567 # Base API port for multi API servers
+graph:
+  env:
+    HCCL_BUFFSIZE: "1000" # hccl buffer size , MB
+    HCCL_OP_EXPANSION_MODE: "AIV" # use is AIV
+    VLLM_ENABLE_MC2: "1"
+  api_servers_params:
+    --additional-config: '{"graph_model_compile_config": {"level":1, "use_ge_graph_cached":true, "block_num_floating_range":50}}'
+mtp:
+  api_servers_params:
+    --speculative_config: '{"method": "deepseek_mtp", "num_speculative_tokens": 1}'
+mock_model:
+  env:
+    RANDOM_MODE: "1" # Enable mock model when set to 1 p/d node
+    KV_CACHE_MODE: "1" # Enable mock model when set to 1 p/d node
+    PREFILL_PROCESS: "1" # Enable mock model when set to 1 only p node
+    FORWARD: "10" # Forward time in ms
+async_schedule:
+  api_servers_params:
+    --additional-config: '{"async_schedule": true}' # Enable async scheduler at D node. DO NOT enable it at P side
+omni_attention:
+  api_servers_params:
+    --additional-config: '{"enable_omni_attn": true}'  # if p/d, set this on both sides
+tfas_scheduler: #set only on p
+  api_servers_params:
+    --scheduler-cls: "omni.adaptors.vllm.worker.tfas.tfas_scheduler.TFASScheduler"
+    --additional-config: '{"tfas_scheduler_config": {"adjust_param": 3.6, "token_budget": 9154}}'
+    --max-num-seqs: 128
+tfas_profiler_scheduler: #set only on p
+  api_servers_params:
+    --scheduler-cls: "omni.adaptors.vllm.worker.tfas.tfas_scheduler.TFASProfilerScheduler"
+    --max-num-seqs: 128

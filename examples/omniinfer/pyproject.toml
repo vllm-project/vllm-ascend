@@ -1,0 +1,51 @@
+[build-system]
+requires = [
+    "setuptools>=64",
+    "wheel",
+    "pybind11",
+    "torch",
+    "numpy",
+    "concurrent_log_handler"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omni_infer"
+version = "0.4.2"
+description = "Omni_Infer is a powerful suite of inference accelerators tailored for the Ascend NPU platform, fully compatible with vLLM, and designed to deliver high-performance, enterprise-grade inference with native support and a growing feature set."
+authors = [
+    { name = "Huawei" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "torch",
+    "pybind11",
+    "pyyaml>=6.0",
+    "chardet",
+    "concurrent_log_handler"
+]
+
+[project.entry-points."vllm.platform_plugins"]
+npu = "omni.adaptors.vllm.platform:register"
+
+[project.entry-points."vllm.general_plugins"]
+npu_optimized_models = "omni.models:register_model"
+kv_connectors = "omni.accelerators.pd:register"
+tool_parsers = "omni.adaptors.vllm.entrypoints.openai.tool_parsers:register_tool"
+reasoning = "omni.adaptors.vllm.reasoning:register_reasoning"
+
+[tool.setuptools]
+packages.find.where = ["."]
+packages.find.include = ["omni*"]
+packages.find.exclude = [
+    "omni.accelerators.placement.tests",
+    "omni.accelerators.placement.utils",
+    "omni.accelerators.placement.scripts",
+    "omni.accelerators.placement.patterns",
+    "omni.accelerators.placement..cloudbuild"   
+]
+
+cmdclass.build_ext = "pybind11.setup_helpers.build_ext"
+include-package-data = true
+license-files = ["LICEN[CS]E*", "COPYING*", "NOTICE*", "AUTHORS*"]

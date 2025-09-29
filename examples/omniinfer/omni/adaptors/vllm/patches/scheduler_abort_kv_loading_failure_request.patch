@@ -1,0 +1,108 @@
+Subject: [PATCH] abort kv loading failure request
+---
+Index: vllm/v1/core/sched/scheduler.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+--- a/vllm/v1/core/sched/scheduler.py	(revision 52a6d55ba620c83720787c1cf7c8d7c5ba8cf764)
++++ b/vllm/v1/core/sched/scheduler.py	(date 1756723482583)
+@@ -811,6 +811,12 @@
+                         kv_transfer_params = self._free_request(request)
+                         del new_token_ids[num_new:]  # Trim new tokens if needed.
+                         break
++                # KVTransfer: if loading kv failed, abort the running request
++                aborted = False
++                if req_id in (model_runner_output.loading_kv_failure or ()):
++                    request.stop_reason = "Abort for KV loading failure"
++                    self.finish_requests(req_id, RequestStatus.FINISHED_ABORTED)
++                    aborted = True
+
+                 # Extract sample logprobs if needed.
+                 if request.sampling_params.logprobs is not None and logprobs:
+@@ -858,8 +864,10 @@
+                     # Invariant: EngineCore returns no partial prefill outputs.
+                     assert not prompt_logprobs_tensors
+
+-                if not stopped:
++                if not stopped and not aborted:
+                     new_running.append(request)
++            # KVTransfer: if loading kv failed, abort the requests
++            self._abort_loading_kv_failure_reqs(model_runner_output, outputs)
+
+             # P/D: update state for finished KV Transfers.
+             self._update_from_kv_xfer_finished(model_runner_output)
+@@ -1061,3 +1069,28 @@
+             logger.debug("Finished sending KV transfer for request %s", req_id)
+             if req_id in self.requests:
+                 self._free_blocks(self.requests[req_id])
++
++    def _abort_loading_kv_failure_reqs(self, model_runner_output: ModelRunnerOutput, outputs: list[EngineCoreOutput]):
++        """
++        get loading kv failure request ids from the output
++        The Worker side connectors add loading_kv_failure to the output.
++        if loading_kv_failure: abort the requests
++
++        return True if request_id in model_runner_output.loading_kv_failure
++        """
++        for req_id in (model_runner_output.loading_kv_failure or ()):
++            logger.debug("Loading KV failed request %s", req_id)
++            request = self.requests.get(req_id)
++            if request is None:
++                # Invalid request ID.
++                continue
++            request.stop_reason = "Abort for KV loading failure"
++            self.finish_requests(req_id, RequestStatus.FINISHED_ABORTED)
++            outputs.append(
++                EngineCoreOutput(
++                    request_id=req_id,
++                    new_token_ids=[0],
++                    finish_reason=request.get_finished_reason(),
++                    stop_reason=request.stop_reason,
++                )
++            )
+Index: vllm/v1/outputs.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/vllm/v1/outputs.py b/vllm/v1/outputs.py
+--- a/vllm/v1/outputs.py	(revision 52a6d55ba620c83720787c1cf7c8d7c5ba8cf764)
++++ b/vllm/v1/outputs.py	(date 1756723413276)
+@@ -103,6 +103,7 @@
+     # [req_ids]
+     finished_sending: Optional[set[str]] = None
+     finished_recving: Optional[set[str]] = None
++    loading_kv_failure: Optional[set[str]] = None
+
+
+ EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
+@@ -112,4 +113,5 @@
+                                               logprobs=None,
+                                               prompt_logprobs_dict={},
+                                               finished_sending=None,
+-                                              finished_recving=None)
++                                              finished_recving=None,
++                                              loading_kv_failure=None)
+Index: vllm/distributed/kv_transfer/kv_connector/v1/base.py
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+diff --git a/vllm/distributed/kv_transfer/kv_connector/v1/base.py b/vllm/distributed/kv_transfer/kv_connector/v1/base.py
+--- a/vllm/distributed/kv_transfer/kv_connector/v1/base.py	(revision 52a6d55ba620c83720787c1cf7c8d7c5ba8cf764)
++++ b/vllm/distributed/kv_transfer/kv_connector/v1/base.py	(date 1756723413277)
+@@ -190,6 +190,12 @@
+         """
+         return None, None
+ 
++    def get_load_kv_failure_reqs(self) -> Optional[set[str]]:
++        """
++        Return kv loading failure requests
++        """
++        return None
++
+     # ==============================
+     # Scheduler-side methods
+     # ==============================

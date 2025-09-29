@@ -1,0 +1,53 @@
+{
+  "formatters": {
+    "vllm": {
+      "class": "vllm.logging_utils.NewLineFormatter",
+      "datefmt": "%m-%d %H:%M:%S",
+      "format": "%(levelname)s %(asctime)s %(name)s [%(filename)s:%(lineno)d] %(threadName)s %(process)d %(message)s"
+    }
+  },
+  "handlers": {
+    "vllm": {
+      "class": "concurrent_log_handler.ConcurrentRotatingFileHandler",
+      "formatter": "vllm",
+      "level": "INFO",
+      "maxBytes": 31457280,
+      "backupCount": 5,
+      "filename": "/home/ma-user/run.log",
+      "delay": true
+    },
+    "console": {
+      "class": "logging.StreamHandler",
+      "formatter": "vllm",
+      "level": "INFO",
+      "stream": "ext://sys.stdout"
+    }
+  },
+  "loggers": {
+    "vllm": {
+      "handlers": [
+        "vllm",
+        "console"
+      ],
+      "level": "DEBUG",
+      "propagate": false
+    },
+    "omni": {
+      "handlers": [
+        "vllm",
+        "console"
+      ],
+      "level": "DEBUG",
+      "propagate": false
+    },
+    "": {
+      "handlers": [
+        "vllm",
+        "console"
+      ],
+      "level": "WARNING"
+    }
+  },
+  "version": 1,
+  "disable_existing_loggers": false
+}

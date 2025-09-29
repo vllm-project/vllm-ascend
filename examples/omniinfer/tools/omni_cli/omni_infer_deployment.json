@@ -1,0 +1,68 @@
+{
+  "deployment": {
+    "prefill": {
+      "group1": {
+        "user": "root",
+        "hosts": "127.0.0.1",
+        "master_port": "8080",
+        "base_api_port": "9000",
+        "private_key": "/workspace/pem/keypair.pem",
+        "ascend_rt_visible_devices": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+      },
+      "group2": {
+        "user": "root",
+        "hosts": "127.0.0.2",
+        "master_port": "8080",
+        "base_api_port": "9000",
+        "private_key": "/workspace/pem/keypair.pem",
+        "ascend_rt_visible_devices": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+      },
+      "group3": {
+        "user": "root",
+        "hosts": "127.0.0.3",
+        "master_port": "8080",
+        "base_api_port": "9000",
+        "private_key": "/workspace/pem/keypair.pem",
+        "ascend_rt_visible_devices": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+      },
+      "group4": {
+        "user": "root",
+        "hosts": "127.0.0.4",
+        "master_port": "8080",
+        "base_api_port": "9000",
+        "private_key": "/workspace/pem/keypair.pem",
+        "ascend_rt_visible_devices": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+      }
+    },
+    "decode": {
+      "group1": {
+        "user": "root",
+        "hosts": "127.0.0.5,127.0.0.6,127.0.0.7,127.0.0.8",
+        "master_port": "8080",
+        "base_api_port": "9000",
+        "private_key": "/workspace/pem/keypair.pem",
+        "ascend_rt_visible_devices": "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
+      }
+    },
+    "proxy": {
+      "user": "root",
+      "host": "127.0.0.1",
+      "listen_port": "8080",
+      "private_key": "/workspace/pem/keypair.pem"
+    }
+  },
+  "services": {
+    "log_path": "/data/omniinfer/log",
+    "log_path_in_executor": "/data/omniinfer/log_path_in_executor",
+    "model_path": "/data/models/DeepSeek-R1-w8a8-fusion",
+    "code_path": "/data/code_path",
+    "http_proxy": "",
+    "docker_image": "REPOSITORY:TAG",
+    "prefill": {
+      "max_model_len": "32000"
+    },
+    "decode": {
+      "max_model_len": "16384"
+    }
+  }
+}

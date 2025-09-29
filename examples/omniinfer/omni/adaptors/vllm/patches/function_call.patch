@@ -1,0 +1,155 @@
+diff --git a/vllm/entrypoints/openai/serving_chat.py b/vllm/entrypoints/openai/serving_chat.py
+index b5ca1acc9..03e262960 100644
+--- a/vllm/entrypoints/openai/serving_chat.py
++++ b/vllm/entrypoints/openai/serving_chat.py
+@@ -439,9 +439,14 @@ class OpenAIServingChat(OpenAIServing):
+         all_previous_token_ids: Optional[list[list[int]]]
+         function_name_returned = [False] * num_choices
+
++        enable_thinking = self.reasoning_parser is not None
++        if enable_thinking:
++            enable_thinking = request.chat_template_kwargs.get("thinking", False) is True \
++                if request.chat_template_kwargs is not None else enable_thinking
++
+         # Only one of these will be used, thus previous_texts and
+         # all_previous_token_ids will not be used twice in the same iteration.
+-        if tool_choice_auto or self.reasoning_parser:
++        if tool_choice_auto or enable_thinking:
+             # These are only required in "auto" tool choice case
+             previous_texts = [""] * num_choices
+             all_previous_token_ids = [[]] * num_choices
+@@ -455,7 +460,7 @@ class OpenAIServingChat(OpenAIServing):
+             previous_texts, all_previous_token_ids = None, None
+
+         try:
+-            if self.reasoning_parser:
++            if enable_thinking:
+                 reasoning_parser = self.reasoning_parser(tokenizer)
+         except RuntimeError as e:
+             logger.exception("Error in reasoning parser creation.")
+@@ -600,7 +605,7 @@ class OpenAIServingChat(OpenAIServing):
+                     delta_message: Optional[DeltaMessage]
+
+                     # just update previous_texts and previous_token_ids
+-                    if tool_choice_auto or self.reasoning_parser:
++                    if tool_choice_auto or enable_thinking:
+                         assert previous_texts is not None
+                         assert all_previous_token_ids is not None
+                         previous_text = previous_texts[i]
+@@ -611,7 +616,7 @@ class OpenAIServingChat(OpenAIServing):
+
+                     # handle streaming deltas for tools with named tool_choice
+                     if tool_choice_function_name:
+-                        if (self.reasoning_parser
++                        if (enable_thinking
+                                 and not reasoning_parser.is_reasoning_end(
+                                     previous_token_ids)):
+                             assert reasoning_parser is not None
+@@ -624,6 +629,7 @@ class OpenAIServingChat(OpenAIServing):
+                                     previous_token_ids,
+                                     current_token_ids,
+                                     output.token_ids,
++                                    request
+                                 ))
+                             # When encountering think end id in delta_token_ids,
+                             # process the `content`. Only keep 'content',
+@@ -638,7 +644,7 @@ class OpenAIServingChat(OpenAIServing):
+                                     current_text = ""
+                         else:
+                             # Just to add remaining `content`
+-                            if self.reasoning_parser:
++                            if enable_thinking:
+                                 delta_text = previous_text + delta_text
+                                 current_text = ""
+
+@@ -689,7 +695,7 @@ class OpenAIServingChat(OpenAIServing):
+
+                     # handle streaming deltas for tools with "auto" tool choice
+                     # and reasoning parser
+-                    elif tool_choice_auto and self.reasoning_parser:
++                    elif tool_choice_auto and enable_thinking:
+                         assert tool_parser is not None
+                         assert reasoning_parser is not None
+                         assert added_content_delta_arr is not None
+@@ -704,6 +710,7 @@ class OpenAIServingChat(OpenAIServing):
+                                     previous_token_ids,
+                                     current_token_ids,
+                                     output.token_ids,
++                                    request
+                                 ))
+
+                             # When encountering think end id in delta_token_ids,
+@@ -757,7 +764,7 @@ class OpenAIServingChat(OpenAIServing):
+                                 delta_token_ids=output.token_ids,
+                                 request=request))
+                     # when only reasoning
+-                    elif self.reasoning_parser:
++                    elif enable_thinking:
+                         delta_message = (reasoning_parser.
+                                          extract_reasoning_content_streaming(
+                                              previous_text,
+@@ -766,13 +773,14 @@ class OpenAIServingChat(OpenAIServing):
+                                              previous_token_ids,
+                                              current_token_ids,
+                                              output.token_ids,
++                                             request
+                                          ))
+                     # handle streaming just a content delta
+                     else:
+                         delta_message = DeltaMessage(content=delta_text)
+
+                     # update the previous values for the next iteration
+-                    if tool_choice_auto or self.reasoning_parser:
++                    if tool_choice_auto or enable_thinking:
+                         assert previous_texts is not None
+                         assert all_previous_token_ids is not None
+                         previous_texts[i] = current_text
+@@ -834,11 +842,12 @@ class OpenAIServingChat(OpenAIServing):
+                                         delta_token_ids=[],
+                                         request=request))
+
+-                            auto_tools_called, delta_message = self.stream_remaining_function_call(
+-                                tool_parser, delta_message, last_delta_message, output)
++                            auto_tools_called, delta_message = self.stream_remaining_function_call(tool_parser,
++                                                                                                   delta_message,
++                                                                                                   last_delta_message,
++                                                                                                   output)
+
+-                            if delta_message is not None and do_ascend_adapt and end_delta_message is not None and \
+-                                    not auto_tools_called:
++                            if delta_message is not None and do_ascend_adapt and end_delta_message is not None and not auto_tools_called:
+                                 delta_message.content = delta_message.content + end_delta_message.content
+
+                         if delta_message is None:
+diff --git a/vllm/reasoning/deepseek_r1_reasoning_parser.py b/vllm/reasoning/deepseek_r1_reasoning_parser.py
+index 1c283c092..ebb0c58c1 100644
+--- a/vllm/reasoning/deepseek_r1_reasoning_parser.py
++++ b/vllm/reasoning/deepseek_r1_reasoning_parser.py
+@@ -63,6 +63,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
+         previous_token_ids: Sequence[int],
+         current_token_ids: Sequence[int],
+         delta_token_ids: Sequence[int],
++        request: ChatCompletionRequest = None,
+     ) -> Union[DeltaMessage, None]:
+         """
+         Extract reasoning content from a delta message.
+@@ -78,6 +79,9 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
+         ]):
+             return None
+
++        if request.chat_template_kwargs is None or request.chat_template_kwargs.get("thinking", False) is False:
++            return DeltaMessage(content=delta_text)
++
+         # Check if <think> is present in previous or delta.
+         # Keep compatibility with models that don't generate <think> tokens.
+         if self.start_token_id in previous_token_ids:
+@@ -150,6 +154,9 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
+             tuple[Optional[str], Optional[str]]: reasoning content and content
+         """
+
++        if request.chat_template_kwargs is None or request.chat_template_kwargs.get("thinking", False) is False:
++            return None, model_output
++
+         # Check if the start token is present in the model output, remove it
+         # if it is present.
+         model_output_parts = model_output.partition(self.start_token)
