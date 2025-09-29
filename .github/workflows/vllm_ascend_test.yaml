@@ -22,19 +22,10 @@ on:
     branches:
       - 'main'
       - '*-dev'
-    paths:
-      - '!examples/**'
-      - '*.txt'
-      - '**/*.py'
+    paths-ignore:
+      - 'examples/omniinfer/**'
+      - 'benchmarks/**'
       - '.github/workflows/vllm_ascend_test.yaml'
-      - '!docs/**'
-      - 'pytest.ini'
-      - '!benchmarks/**'
-      - 'tools/mypy.sh'
-      - 'mypy.ini'
-      - '.github/workflows/*.ya?ml'
-      - '.github/workflows/actionlint.*'
-      - '.github/workflows/matchers/actionlint.json'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
