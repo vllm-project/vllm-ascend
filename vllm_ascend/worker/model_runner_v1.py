@@ -2513,7 +2513,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self._select_moe_comm_method(
                     self.mc2_tokens_capacity,
                     with_prefill=True) == MoECommType.MC2:
-                self._dummy_run(self.mc2_tokens_capacity)
+                self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
 
         output = None
         if get_pp_group().is_last_rank:
@@ -3014,7 +3014,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # of mamba block. In this case, BlockTable.block_size will never equal
                 # to kernel_block_sizes[0]
                 kernel_block_sizes.append([0])
-        if kernel_block_sizes != [self.cache_config.block_size]:
+        if kernel_block_sizes != [[self.cache_config.block_size]]:
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
