@@ -876,6 +876,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
+        self.use_mla = False
         self.use_sfa = False
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
@@ -884,6 +885,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 self.use_sfa = True
             else:
                 attn_cls = TorchairDeepseekV2MLAAttention  # type: ignore[assignment]
+            self.use_mla = True
         else:
             attn_cls = DeepseekV2Attention
         self.self_attn = attn_cls(
