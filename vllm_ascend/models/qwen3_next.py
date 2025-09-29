@@ -51,13 +51,10 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.transformers_utils.configs import Qwen3NextConfig
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
-from vllm.model_executor.models.qwen3_next import Qwen3NextAttention  # isort: skip
-from vllm.model_executor.models.qwen3_next import Qwen3NextDecoderLayer  # isort: skip
-from vllm.model_executor.models.qwen3_next import Qwen3NextForCausalLM  # isort: skip
-from vllm.model_executor.models.qwen3_next import Qwen3NextGatedDeltaNet  # isort: skip
-from vllm.model_executor.models.qwen3_next import Qwen3NextModel  # isort: skip
-from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock  # isort: skip
-from vllm.model_executor.models.qwen3_next import fused_gdn_gating  # isort: skip
+from vllm.model_executor.models.qwen3_next import (  # isort: skip
+    Qwen3NextAttention, Qwen3NextDecoderLayer, Qwen3NextForCausalLM,
+    Qwen3NextGatedDeltaNet, Qwen3NextModel, Qwen3NextSparseMoeBlock,
+    fused_gdn_gating)
 
 
 class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
@@ -434,7 +431,11 @@ class CustomQwen3NextDecoderLayer(Qwen3NextDecoderLayer):
         prefix: str = "",
     ) -> None:
         nn.Module.__init__(self)
-        self.config = config
+        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        speculative_config = vllm_config.speculative_config
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
@@ -520,7 +521,7 @@ class CustomQwen3NextModel(Qwen3NextModel):
 
         def get_layer(prefix: str):
             return CustomQwen3NextDecoderLayer(
-                config,
+                vllm_config,
                 layer_type=config.layer_types[extract_layer_index(prefix)],
                 prefix=prefix,
             )
