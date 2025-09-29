@@ -162,7 +162,8 @@ class KVCacheSendingLayerThread(threading.Thread):
                  side_channel_port: int, metadata: MooncakeAgentMetadata,
                  ready_event: threading.Event, total_layers: int,
                  engine: TransferEngine, local_kv_base_addr: list[int],
-                 block_len: list[int], use_mla: bool, first_kv_cache):
+                 block_len: list[int], use_mla: bool,
+                 first_kv_cache: torch.Tensor):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.tp_rank = tp_rank
         self.tp_size = tp_size
@@ -271,7 +272,7 @@ class SendingLayerThread(threading.Thread):
     def __init__(self, task_tracker: KVCacheTaskTracker, total_layers: int,
                  engine: TransferEngine, local_kv_base_addr: list[int],
                  block_len: list[int], use_mla: bool, tp_rank: int,
-                 first_kv_cache):
+                 first_kv_cache: torch.Tensor):
         super().__init__(daemon=True, name="KVCacheRecvingPrefillerByeThread")
         self.send_queue = queue.Queue[tuple[DecodeMooncakeAgentMetadata, str,
                                             list[int], int, torch.Tensor,
@@ -1246,7 +1247,19 @@ def group_concurrent_contiguous(
     dst: List[int] = []
 ) -> Tuple[List[npt.NDArray[np.int64]], List[npt.NDArray[np.int64]]]:
     """Vectorised NumPy implementation."""
-    if dst is not None:
+    if not dst:
+        src_only_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
+
+        if src_only_indices.size == 0:
+            return [], []
+
+        brk = np.where((np.diff(src_only_indices) != 1))[0] + 1
+        src_groups = np.split(src_only_indices, brk)
+        src_groups = [g.tolist() for g in src_groups]
+
+        return src_groups, []
+
+    else:
         src_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
         dst_indices: npt.NDArray[np.int64] = np.array(dst, dtype=np.int64)
 
@@ -1262,17 +1275,6 @@ def group_concurrent_contiguous(
         dst_groups = [g.tolist() for g in dst_groups]
 
         return src_groups, dst_groups
-    else:
-        src_only_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
-
-        if src_only_indices.size == 0:
-            return [], []
-
-        brk = np.where((np.diff(src_only_indices) != 1))[0] + 1
-        src_groups = np.split(src_only_indices, brk)
-        src_groups = [g.tolist() for g in src_groups]
-
-        return src_groups, []
 
 
 def string_to_int64_hash(input_str):

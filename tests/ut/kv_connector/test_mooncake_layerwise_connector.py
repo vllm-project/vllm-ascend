@@ -4,10 +4,11 @@ import threading
 import time
 import types
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import torch
 import zmq
-from mooncake.engine import TransferEngine  # type: ignore
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -75,8 +76,28 @@ class TestGetAndClearFinishedSingleRequests(unittest.TestCase):
 class TestKVCacheSendingLayerThreadBasic(unittest.TestCase):
 
     def setUp(self):
+        self.p1 = patch(
+            'vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config',
+            new=MagicMock(return_value=SimpleNamespace(pd_tp_ratio=1)))
+        self.p2 = patch(
+            'vllm_ascend.distributed.mooncake_layerwise_connector.get_current_vllm_config',
+            new=MagicMock(return_value=SimpleNamespace(
+                scheduler_config=SimpleNamespace(max_model_len=128))))
+        self.p1.start()
+        self.addCleanup(self.p1.stop)
+        self.p2.start()
+        self.addCleanup(self.p2.stop)
         self.engine = MagicMock()
+        self.engine.register_memory.return_value = 0
         self.ready_event = threading.Event()
+
+        batch_size, seq_len, hidden_dim, num_heads = 8, 128, 512, 8
+        head_dim = hidden_dim // num_heads
+        self.first_kv_cache = torch.zeros(
+            (batch_size, num_heads, seq_len, head_dim),
+            dtype=torch.float32,
+            device='cpu')
+
         self.thread = KVCacheSendingLayerThread(
             tp_rank=0,
             tp_size=4,
@@ -88,9 +109,10 @@ class TestKVCacheSendingLayerThreadBasic(unittest.TestCase):
             ready_event=self.ready_event,
             total_layers=3,
             engine=self.engine,
-            local_kv_base_addr=["0x1000", "0x2000"],
+            local_kv_base_addr=[0x1000, 0x2000],
             block_len=[1024, 2048],
-            use_mla=True)
+            use_mla=True,
+            first_kv_cache=self.first_kv_cache)
 
     def test_add_request(self):
         req_id = "req1"
@@ -107,12 +129,17 @@ class TestKVCacheSendingLayerThreadBasic(unittest.TestCase):
             self.thread.ready_decode[req_id] = meta
 
         local_block_ids = [1, 2]
+        key = torch.zeros((1, 1), dtype=torch.float32)
+        value = torch.zeros((1, 1), dtype=torch.float32)
+
         self.thread.add_request(request_id=req_id,
                                 local_block_ids=local_block_ids,
-                                layer_index=5)
+                                layer_index=5,
+                                key=key,
+                                value=value)
 
         queued = self.thread.send_layer_thread.send_queue.get_nowait()
-        # queued: (metadata, request_id, local_block_ids, layer_index)
+        # queued: (metadata, request_id, local_block_ids, layer_index, key, value)
         self.assertEqual(queued[1], "req1")
         self.assertEqual(queued[0].host, "localhost")
 
@@ -213,8 +240,29 @@ class TestKVCacheSendingLayerThreadBasic(unittest.TestCase):
 class TestSendingLayerThread(unittest.TestCase):
 
     def setUp(self):
+        self.p1 = patch(
+            'vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config',
+            new=MagicMock(return_value=SimpleNamespace(pd_tp_ratio=1)))
+        self.p2 = patch(
+            'vllm_ascend.distributed.mooncake_layerwise_connector.get_current_vllm_config',
+            new=MagicMock(return_value=SimpleNamespace(
+                scheduler_config=SimpleNamespace(max_model_len=128))))
+        self.p1.start()
+        self.addCleanup(self.p1.stop)
+        self.p2.start()
+        self.addCleanup(self.p2.stop)
         self.task_tracker = MagicMock(KVCacheTaskTracker)
-        self.engine = TransferEngine.return_value
+        self.engine = MagicMock()
+        self.engine.register_memory.side_effect = lambda addr, size: 0
+        batch_size = 8
+        seq_len = 128
+        hidden_dim = 512
+        num_heads = 8
+        head_dim = hidden_dim // num_heads  # 512 // 8 = 64
+        self.first_kv_cache = torch.zeros(
+            (batch_size, num_heads, seq_len, head_dim),
+            dtype=torch.float32,
+            device='cpu')
         self.thread = SendingLayerThread(
             task_tracker=self.task_tracker,
             total_layers=3,
@@ -222,25 +270,33 @@ class TestSendingLayerThread(unittest.TestCase):
             local_kv_base_addr=["0x1000", "0x2000"],
             block_len=[1024, 2048],
             use_mla=True,
-            tp_rank=0)
+            tp_rank=0,
+            first_kv_cache=self.first_kv_cache)
 
-    @patch.object(KVCacheTaskTracker, "update_done_task_count")
     @patch.object(SendingLayerThread, "_transfer_kv_cache", autospec=True)
-    def test_handle_request(self, mock_transfer, mock_update_done):
+    def test_handle_request(self, mock_transfer):
         req_id = "req_1"
         req_meta = MagicMock(spec=DecodeMooncakeAgentMetadata)
-        item = (req_meta, req_id, [10, 11], 0)
-        with patch.object(self.thread.send_queue, "task_done",
-                          autospec=True) as mock_task_done:
+        key = torch.zeros((1, 1), dtype=torch.float32)
+        value = torch.zeros((1, 1), dtype=torch.float32)
+        item = (req_meta, req_id, [10, 11], 0, key, value)
+        with patch.object(self.thread.task_tracker, "update_done_task_count") as mock_update_done, \
+            patch.object(self.thread.send_queue, "task_done", autospec=True) as mock_task_done:
             self.thread._handle_request(item)
         mock_transfer.assert_called_once_with(self.thread, req_meta, [10, 11],
-                                              0)
+                                              0, key, value)
+        mock_update_done.assert_called_once_with(req_id)
         mock_task_done.assert_called_once()
 
+    @patch('torch.npu.synchronize')
     @patch(
         'vllm_ascend.distributed.mooncake_layerwise_connector.group_concurrent_contiguous'
     )
-    def test_transfer_kv_cache(self, mock_group):
+    def test_transfer_kv_cache(self, mock_group, mock_sync):
+        key = torch.zeros((1, 1), dtype=torch.float32)
+        value = torch.zeros((1, 1), dtype=torch.float32)
+        mock_sync.return_value = None
+        self.thread.pd_tp_ratio = 1
 
         self.thread.local_kv_base_addr = [1000, 2000]
 
@@ -264,7 +320,9 @@ class TestSendingLayerThread(unittest.TestCase):
 
         self.thread._transfer_kv_cache(meta,
                                        local_block_ids=[123],
-                                       layer_index=0)
+                                       layer_index=0,
+                                       key=key,
+                                       value=value)
 
         # k=0 (block_len=1024):
         #   grp1: src=1000+5*1024=6120,  dst=4000+10*1024=14240, len=3*1024=3072
@@ -840,6 +898,15 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                 MagicMock()),
             patch.dict('sys.modules',
                        {'vllm_ascend.envs': self.envs_ascend_mock}),
+            patch(
+                'vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config',
+                return_value=SimpleNamespace(pd_tp_ratio=1),
+            ),
+            patch(
+                'vllm_ascend.distributed.mooncake_layerwise_connector.get_current_vllm_config',
+                return_value=SimpleNamespace(scheduler_config=SimpleNamespace(
+                    max_model_len=128)),
+            )
         ]
 
         for p in self.patches:
