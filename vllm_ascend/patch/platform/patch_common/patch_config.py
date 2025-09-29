@@ -1,5 +1,6 @@
 from vllm.config import ModelConfig
 
+
 # mypy: ignore-errors
 @property
 def is_deepseek_mla(self: ModelConfig):
@@ -16,5 +17,6 @@ def is_deepseek_mla(self: ModelConfig):
                 ('deepseek_v2', 'deepseek_v3', 'deepseek_v32') \
             and self.hf_text_config.kv_lora_rank is not None
     return False
+
 
 ModelConfig.is_deepseek_mla = is_deepseek_mla
