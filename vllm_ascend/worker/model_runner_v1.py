@@ -102,7 +102,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                set_graph_params,
-                                               update_attn_params)
+                                               update_attn_params,
+                                               update_mla_attn_params)
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
     D2DExpertWeightLoader
@@ -351,6 +352,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.speculative_config.method, self.vllm_config,
                     self.device, self)
                 self.rejection_sampler = AscendRejectionSampler()
+            self.actual_seq_lengths_q = list(
+                range(self.decode_token_per_req, self.max_num_tokens + 1,
+                      self.decode_token_per_req))
 
         # Persistent batch.
         self.input_ids = torch.zeros(self.max_num_tokens,
@@ -368,6 +372,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.slot_mapping = torch.zeros(self.max_num_tokens,
                                         dtype=torch.int32,
                                         device=self.device)
+
+        if self.vllm_config.model_config.use_mla and \
+            self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
+            self.cos = torch.ones(self.max_num_reqs,
+                                  1,
+                                  1,
+                                  rope_dim,
+                                  dtype=self.dtype,
+                                  device=self.device)
+            self.sin = torch.zeros(self.max_num_reqs,
+                                   1,
+                                   1,
+                                   rope_dim,
+                                   dtype=self.dtype,
+                                   device=self.device)
+        else:
+            self.cos = None
+            self.sin = None
 
         self.uses_mrope = self.model_config.uses_mrope
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1518,6 +1541,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max_num_scheduled_tokens,
                 graph_pad_size=self.graph_pad_size,
                 decode_token_per_req=self.decode_token_per_req,
+                cos=self.cos,
+                sin=self.sin,
             )
 
             if self.speculative_config and \
@@ -1547,7 +1572,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
                         common_attn_metadata=common_attn_metadata,
-                        model=self.model,
+                        model=self.get_model(),
                         **extra_attn_metadata_args)
 
                 if self.vllm_config.model_config.use_mla:
@@ -1582,8 +1607,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            update_attn_params(self.update_stream, forward_context,
-                               positions.shape[0])
+            if self.vllm_config.model_config.use_mla:
+                # FIXME: Try using `auto_dispatch_capture=True`
+                update_mla_attn_params(self.update_stream, forward_context,
+                                       positions.shape[0],
+                                       self.speculative_config)
+            else:
+                update_attn_params(self.update_stream, forward_context,
+                                   positions.shape[0])
 
         if get_forward_context().sp_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
@@ -2285,7 +2316,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 block_table_tensor = self.input_batch.block_table[
                     kv_cache_group_id].get_device_tensor()
                 common_attn_metadata = AscendCommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc[:num_reqs + 1],
+                    query_start_loc=torch.tensor(
+                        [0] + self.actual_seq_lengths_q[:num_reqs],
+                        device=self.device,
+                        dtype=torch.int32),
                     query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
                                                                  1],
                     seq_lens_cpu=self.seq_lens_cpu,
@@ -2296,9 +2330,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     block_table_tensor=block_table_tensor[:num_reqs],
                     slot_mapping=self.slot_mapping,
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
+                    positions=self.positions,
+                    attn_mask=self.attn_mask,
+                    spec_attn_mask=self.spec_attn_mask,
+                    attn_state=self.attn_state,
                     max_query_len=max_query_len,
                     decode_token_per_req=self.decode_token_per_req,
+                    cos=self.cos,
+                    sin=self.sin,
                 )
+                attn_state = AscendAttentionState.DecodeOnly
+                if self.speculative_config and \
+                        self.speculative_config.method == "deepseek_mtp":
+                    attn_state = AscendAttentionState.SpecDecoding
 
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     if vllm_version_is("0.10.2"):
@@ -2306,7 +2350,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     else:
                         builder = attn_group.get_metadata_builder()
                     attn_metadata_i = builder.build_for_graph_capture(
-                        common_attn_metadata)
+                        common_attn_metadata, attn_state, self.get_model())
                     for layer_name in kv_cache_group_spec.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
