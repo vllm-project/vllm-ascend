@@ -13,6 +13,8 @@ _MC2: Optional[GroupCoordinator] = None
 _MLP_TP: Optional[GroupCoordinator] = None
 _OTP: Optional[GroupCoordinator] = None
 _LMTP: Optional[GroupCoordinator] = None
+_MLA_DP_REBALANCING_WORLD: Optional[GroupCoordinator] = None
+_MLA_DP_REBALANCING_O_SHARED: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
@@ -35,6 +37,18 @@ def get_lmhead_tp_group() -> GroupCoordinator:
 def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, ("mlp group is not initialized")
     return _MLP_TP
+
+
+def get_mla_dp_rebalancing_world_group() -> GroupCoordinator:
+    assert _MLA_DP_REBALANCING_WORLD is not None, (
+        "MLA DP rebalancing world group is not initialized")
+    return _MLA_DP_REBALANCING_WORLD
+
+
+def get_mla_dp_rebalancing_o_shared_group() -> GroupCoordinator:
+    assert _MLA_DP_REBALANCING_O_SHARED is not None, (
+        "o_proj shared weight group for MLA DP rebalancing is not initialized")
+    return _MLA_DP_REBALANCING_O_SHARED
 
 
 def model_parallel_initialized():
@@ -111,6 +125,22 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                           backend,
                                           group_name="lmheadtp")
 
+    # If MLA prefill DP rebalancing is enabled, we will create one world group and another one for shared weights.
+    if get_ascend_config().enable_mla_prefill_dp_rebalancing:
+        global _MLA_DP_REBALANCING_WORLD
+        global _MLA_DP_REBALANCING_O_SHARED
+        group_ranks = [list(range(torch.distributed.get_world_size()))]
+        _MLA_DP_REBALANCING_WORLD = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="mla_dp_rebalancing_world")
+        _MLA_DP_REBALANCING_O_SHARED = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            group_name="mla_dp_rebalancing_o_shared")
+
 
 def get_mlp_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
@@ -142,3 +172,13 @@ def destroy_ascend_model_parallel():
     if _OTP:
         _OTP.destroy()
     _OTP = None
+
+    global _MLA_DP_REBALANCING_WORLD
+    if _MLA_DP_REBALANCING_WORLD:
+        _MLA_DP_REBALANCING_WORLD.destroy()
+    _MLA_DP_REBALANCING_WORLD = None
+
+    global _MLA_DP_REBALANCING_O_SHARED
+    if _MLA_DP_REBALANCING_O_SHARED:
+        _MLA_DP_REBALANCING_O_SHARED.destroy()
+    _MLA_DP_REBALANCING_O_SHARED = None
