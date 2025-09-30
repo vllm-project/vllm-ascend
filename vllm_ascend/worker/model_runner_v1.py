@@ -1565,7 +1565,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_input_tokens, num_tokens_across_dp,
                 maybe_padded_num_tokens, logits_indices, spec_decode_metadata,
                 input_ids, inputs_embeds, intermediate_tensors,
-                max_num_scheduled_tokens)
+                max_num_scheduled_tokens, spec_decode_common_attn_metadata)
 
     def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill,
                                              maybe_padded_num_tokens,
@@ -1770,6 +1770,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def propose_draft_token_ids(
         self,
         valid_sampled_token_ids: list[list[int]],
+        common_attn_metadata: AscendCommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         scheduler_output: "SchedulerOutput",
         spec_decode_metadata: SpecDecodeMetadata,
@@ -1784,7 +1785,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             draft_token_ids = None
         else:
             draft_token_ids = self.drafter.generate_token_ids(
-                valid_sampled_token_ids, sampling_metadata, scheduler_output,
+                valid_sampled_token_ids, common_attn_metadata, sampling_metadata, scheduler_output,
                 spec_decode_metadata, positions, num_scheduled_tokens,
                 hidden_states, attn_metadata, aux_hidden_states)
         return draft_token_ids
@@ -1928,8 +1929,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             (attn_metadata, positions, num_scheduled_tokens_np,
              num_input_tokens, num_tokens_across_dp, maybe_padded_num_tokens,
              logits_indices, spec_decode_metadata, input_ids, inputs_embeds,
-             intermediate_tensors,
-             max_query_len) = (self._prepare_inputs(scheduler_output,
+             intermediate_tensors,max_query_len, 
+             spec_decode_common_attn_metadata) = (self._prepare_inputs(scheduler_output,
                                                     intermediate_tensors))
 
             if self.dynamic_eplb:
@@ -2164,6 +2165,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.speculative_config:
                 self._draft_token_ids = self.propose_draft_token_ids(
                     valid_sampled_token_ids,
+                    spec_decode_common_attn_metadata,
                     sampling_metadata,
                     scheduler_output,
                     spec_decode_metadata,
