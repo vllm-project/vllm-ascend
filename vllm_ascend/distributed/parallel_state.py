@@ -13,6 +13,7 @@ _MC2: Optional[GroupCoordinator] = None
 _MLP_TP: Optional[GroupCoordinator] = None
 _OTP: Optional[GroupCoordinator] = None
 _LMTP: Optional[GroupCoordinator] = None
+_EMBED_TP: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
@@ -35,6 +36,11 @@ def get_lmhead_tp_group() -> GroupCoordinator:
 def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, ("mlp group is not initialized")
     return _MLP_TP
+
+
+def get_embed_tp_group() -> GroupCoordinator:
+    assert _EMBED_TP is not None, ("emtp group is not initialized")
+    return _EMBED_TP
 
 
 def model_parallel_initialized():
@@ -111,6 +117,23 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                           backend,
                                           group_name="lmheadtp")
 
+    embedding_tensor_parallel_size = get_ascend_config(
+    ).embedding_tensor_parallel_size
+    if embedding_tensor_parallel_size is not None:
+        group_ranks = []
+        global _EMBED_TP
+        num_embedding_tensor_parallel_groups: int = (
+            world_size // embedding_tensor_parallel_size)
+        for i in range(num_embedding_tensor_parallel_groups):
+            ranks = list(
+                range(i * embedding_tensor_parallel_size,
+                      (i + 1) * embedding_tensor_parallel_size))
+            group_ranks.append(ranks)
+        _EMBED_TP = init_model_parallel_group(group_ranks,
+                                              get_world_group().local_rank,
+                                              backend,
+                                              group_name="emtp")
+
 
 def get_mlp_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
@@ -142,3 +165,8 @@ def destroy_ascend_model_parallel():
     if _OTP:
         _OTP.destroy()
     _OTP = None
+
+    global _EMBED_TP
+    if _EMBED_TP:
+        _EMBED_TP.destroy()
+    _EMBED_TP = None
