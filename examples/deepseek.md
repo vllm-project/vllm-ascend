@@ -27,7 +27,7 @@
 
 ## 模型准备
 
-权重下载，请用户自行到huggingface或者modelscope等下载对应权重，本地权重路径与下文中 omni_infer_server_template_a3_ds.yml的配置模型文件路径保持一致，默认/data/models/origin/bf16
+权重下载，https://gitee.com/omniai/omniinfer/releases/tag/v0.4.2 下载BF16类型的权重，本地权重路径与下文中 omni_infer_server_template_a3_ds.yml的配置模型文件路径保持一致，默认/data/models/origin/bf16
 
 ## 部署
 
@@ -48,6 +48,9 @@ yum install libselinux-python3
 ### 修改配置文件
 
 以1P1D为例(4机组P,4机组D)，需要修改`omni_infer_server_template_a3_ds.yml`和 `omni_infer_inventory_used_for_1P32_1D32.yml` 两处配置文件，
+文件获取地址:
+https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/omni_infer_server_template_a3_ds.yml
+https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/omni_infer_inventory_used_for_1P32_1D32.yml
 
 1. **omni_infer_inventory_used_for_1P32_1D32.yml**
 
@@ -97,19 +100,20 @@ yum install libselinux-python3
          c0:
            ansible_host: "127.0.0.1"  # C0 节点的IP，即 Global Proxy 节点
            ...
-  ```
+    ```
 
-生成私钥文件。将`ansible_ssh_private_key_file:`修改为私钥文件路径：
-```bash
-# 首先在执行机生成密钥对:
-ssh-keygen -t ed25519 -C "Your SSH key comment" -f ~/.ssh/my_key  # -t 指定密钥类型（推荐ed25519）， -f 指定文件名
-# 密钥文件默认存放位置为: 私钥：~/.ssh/id_ed25519 公钥：~/.ssh/id_ed25519.pub. 设置密钥文件权限:
-chmod 700 ~/.ssh
-chmod 600 ~/.ssh/my_key   # 私钥必须设为 600
-chmod 644 ~/.ssh/my_key.pub
-# 部署公钥到远程目标机:以下例子是通过密码去传输密钥文件到远程目标机
-ssh-copy-id -i ~/.ssh/my_key.pub user@remote-host
-```
+  生成私钥文件。将ansible_ssh_private_key_file:修改为私钥文件路径：
+
+  ```bash
+  # 首先在执行机生成密钥对:
+  ssh-keygen -t ed25519 -C "Your SSH key comment" -f ~/.ssh/my_key  # -t 指定密钥类型（推荐ed25519）， -f 指定文件名
+  # 密钥文件默认存放位置为: 私钥：~/.ssh/id_ed25519 公钥：~/.ssh/id_ed25519.pub. 设置密钥文件权限:
+  chmod 700 ~/.ssh
+  chmod 600 ~/.ssh/my_key   # 私钥必须设为 600
+  chmod 644 ~/.ssh/my_key.pub
+  # 部署公钥到远程目标机:以下例子是通过密码去传输密钥文件到远程目标机
+  ssh-copy-id -i ~/.ssh/my_key.pub user@remote-host
+  ```
 
 
 2. **omni_infer_server_template_a3_ds.yml**
