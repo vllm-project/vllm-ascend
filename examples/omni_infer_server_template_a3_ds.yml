@@ -180,7 +180,7 @@
       export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
       prefill_server_list=$(echo "$PREFILL_SERVER_LIST" | awk '$1=$1' | tr -d ',')
       KV_PARALLEL_SIZE=$((PREFILL_POD_NUM + 1))
-      MODEL_EXTRA_CFG_PATH="/workspace/omniinfer/tests/test_config/test_config_prefill.json"
+      MODEL_EXTRA_CFG_PATH="/workspace/omniinfer/tests/test_config/test_config_prefill_bf16.json"
       EXTRA_ARGS='--max-num-batched-tokens 66560 --enforce-eager --no-enable-prefix-caching --enable-expert-parallel --disable-log-requests --max-num-seqs 16'
       GPU_UTIL=0.93
       VLLM_ENABLE_MC2=1
