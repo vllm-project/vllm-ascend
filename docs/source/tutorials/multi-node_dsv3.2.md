@@ -1,4 +1,4 @@
-# Multi-Node-DP (DeepSeek V3.2)
+# Multi-Node (DeepSeek V3.2)
 
 :::{note}
 Only machines with Atlas 800 A3 and aarch64 is supported currently, Atlas 800 A2 and x86 is coming soon.
@@ -44,21 +44,25 @@ for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
 hccn_tool -i 0 -ping -g address 10.20.0.20
 ```
 
-### Deploy DeepSeek-V3.2-Exp with vLLM-Ascend:
+## Deploy DeepSeek-V3.2-Exp with vLLM-Ascend:
 
-:::::{tab-set}
-::::{tab-item} Run with `v0.11.0rc0-a3-deepseek-v3.2-exp` docker image
+Currently, we provide a all-in-one image (include CANN 8.2RC1 + [SparseFlashAttention/LightningIndexer](https://gitcode.com/cann/cann-recipes-infer/tree/master/ops/ascendc) + [MLAPO](https://github.com/vllm-project/vllm-ascend/pull/3226)). You can also build your own image refer to [link](https://github.com/vllm-project/vllm-ascend/issues/3278).
 
-Two Atlas 800 A3(64G*16) nodes are required for deploying `DeepSeek-V3.2-Exp` and one Atlas 800 A3(64G*16) node is required for `DeepSeek-V3.2-Exp-w8a8` quantitative model.
+- `DeepSeek-V3.2-Exp`: requreid 2 Atlas 800 A3(64G*16) nodes
+- `DeepSeek-V3.2-Exp-w8a8`: requreid 1 Atlas 800 A3(64G*16) node
+
+Run the following command to start the container in each node:
 
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
+# export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
+export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
-# Note if you are running bridge network with docker, Please expose available ports for multiple nodes communication in advance
+# Note if you are running bridge network with docker, Please expose available ports
+# for multiple nodes communication in advance
 docker run --rm \
 --name $NAME \
 --net=host \
@@ -91,78 +95,6 @@ docker run --rm \
 -p 8000:8000 \
 -it $IMAGE bash
 ```
-
-::::
-
-::::{tab-item} Run with vLLM-Ascend v0.11.0rc0
-
-1. Start the docker container of vLLM-Ascend v0.11.0rc0 on your node:
-
-```{code-block} bash
-   :substitutions:
-# Update the vllm-ascend image
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
-docker run --rm \
---name vllm-ascend \
---net=host \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--p 8000:8000 \
--it $IMAGE bash
-```
-
-2. Install the package `custom-ops` to make the kernels available.
-
-```bash
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/CANN-custom_ops-sfa-linux.aarch64.run
-chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-```
-
-3. Download and install MLAPO
-
-```bash
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/CANN-custom_ops-mlapo-linux.aarch64.run
-# please set a custom install-path, here take `/`vllm-workspace/CANN` as example.
-chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
-pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/libopsproto_rt2.0.so
-cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
-# Don't forget to replace `/vllm-workspace/CANN/` to the custom path you set before.
-source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
-export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
-```
-
-::::
-:::::
 
 :::::{tab-set}
 ::::{tab-item} DeepSeek-V3.2-Exp
