@@ -385,7 +385,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             expanded_permuted_rows=hidden_states,
             skip1=None,
             skip2=None,
-            bias=bias,
+            bias=None,
             expanded_src_to_dst_row=self.expanded_row_idx,
             export_for_source_row=None,
             scales=self.topk_weights,
