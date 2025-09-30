@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.9.1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2643)
-- [[v0.10.2rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2874)
+- [[v0.11.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/3222)
 
 ## General FAQs
 
@@ -211,3 +211,6 @@ Recommended mitigation strategies:
 
 Root cause analysis:
 The current stream requirement calculation for size captures only accounts for measurable factors including: data parallel size, tensor parallel size, expert parallel configuration, piece graph count, multistream overlap shared expert settings, and HCCL communication mode (AIV/AICPU). However, numerous unquantifiable elements - such as operator characteristics and specific hardware features - consume additional streams outside of this calculation framework, resulting in stream resource exhaustion during size capture operations.
+
+### 21. Installing vllm-ascend will overwrite the existing torch-npu package？
+Installing vllm-ascend will overwrite the existing torch-npu package. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after installing vllm-ascend.

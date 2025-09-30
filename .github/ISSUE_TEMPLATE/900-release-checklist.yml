@@ -24,6 +24,8 @@ body:
     value: >
       - [ ] Create a new issue for release feedback
 
+      - [ ] Upgrade vllm version to the new version for CI and Dockerfile
+
       - [ ] Write the release note PR.
 
         - [ ] Update the feedback issue link in docs/source/faqs.md
