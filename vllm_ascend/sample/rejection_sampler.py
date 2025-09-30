@@ -4,10 +4,9 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from vllm.triton_utils import tl, triton
-import vllm.v1.sample.rejection_sampler as rs
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import (RejectionSampler, compute_probs,
-                                              generate_uniform_probs)
+from vllm.v1.sample.rejection_sampler import (RejectionSampler, 
+                                              compute_probs)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 PLACEHOLDER_TOKEN_ID = -1
@@ -494,11 +493,6 @@ def generate_uniform_probs(
             A tensor of shape `(num_tokens, )` containing uniform
             random values in the range [0, 1).
     """
-    # NOTE(woosuk): We deliberately use float64 instead of float32 here
-    # because when using float32, there's a non-negligible chance that
-    # uniform_prob is sampled to be exact 0.0 as reported in
-    # https://github.com/pytorch/pytorch/issues/16706. Using float64
-    # mitigates the issue.
     uniform_probs = torch.rand(
         (num_tokens, ),
         dtype=torch.float32,
@@ -530,7 +524,8 @@ def sample_recovered_tokens_pytorch(
     num_tokens = len(draft_token_ids)
     device = output_token_ids.device
 
-    diff = torch.diff(cu_num_draft_tokens, prepend=torch.tensor([0], device=device))
+    diff = torch.diff(cu_num_draft_tokens,
+                      prepend=torch.tensor([0], device=device))
     q_value_new = torch.repeat_interleave(q, diff, dim=0)
 
     token_positions = torch.arange(num_tokens, device=device)
@@ -543,11 +538,11 @@ def sample_recovered_tokens_pytorch(
         draft_p = draft_probs[token_positions].clone()
         target_p = target_probs[token_positions].clone()
         prob = torch.maximum(target_p - draft_p,
-                                torch.tensor(0.0, device=target_p.device))
+                            torch.tensor(0.0, device=target_p.device))
 
     q_values = torch.full((num_tokens, vocab_size),
-                                  float('-inf'),
-                                  device=q.device)
+                           float('-inf'),
+                           device=q.device)
     q_values[:vocab_size] = q_value_new[token_positions, :vocab_size]
 
     recovered_id = torch.argmax(prob / q_values, dim=-1)
@@ -555,5 +550,3 @@ def sample_recovered_tokens_pytorch(
 
     if IS_NGRAM:
         target_probs[token_positions, draft_token_ids] = orig_prob
-
-rs.generate_uniform_probs = generate_uniform_probs
