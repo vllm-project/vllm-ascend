@@ -92,6 +92,7 @@ import heapq
 import os
 import sys
 import uuid
+import threading
 from contextlib import asynccontextmanager
 from typing import List
 
@@ -150,6 +151,7 @@ class ProxyState:
                              for i, server in enumerate(self.decoders)]
         heapq.heapify(self.prefiller_heap)
         heapq.heapify(self.decoder_heap)
+        self.req_id_future = {}
 
     def _update_prefiller_priority(self, server_idx: int):
         """Update the priority of a prefiller server in the heap."""
@@ -322,7 +324,7 @@ async def listen_for_disconnect(request: Request) -> None:
 
 
 def with_cancellation(handler_func):
-
+    
     @functools.wraps(handler_func)
     async def wrapper(*args, **kwargs):
         request = kwargs["request"]
@@ -335,9 +337,9 @@ def with_cancellation(handler_func):
         if handler_task in done:
             return handler_task.result()
         return None
-
+    
     return wrapper
-
+        
 
 app = FastAPI(lifespan=lifespan)
 
@@ -360,10 +362,10 @@ async def send_request_to_service(client: httpx.AsyncClient,
         "remote_host": None,
         "remote_port": None,
         "aborted_request": list(aborted_requests),
+        "metaserver": f"http://{global_args.host}:{global_args.port}/v1/metaserver"
     }
     req_data["stream"] = False
     req_data["max_tokens"] = 1
-    req_data["min_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
     headers = {
@@ -377,7 +379,10 @@ async def send_request_to_service(client: httpx.AsyncClient,
                                          json=req_data,
                                          headers=headers)
             response.raise_for_status()
-            return response
+            if request_id in proxy_state.req_id_future:
+                result_future = proxy_state.req_id_future[request_id]
+                result_future.set_result(response.json()["kv_transfer_params"])
+            return
         except (httpx.RequestError, httpx.HTTPStatusError) as e:
             logger.warning(
                 f"Attempt {attempt} failed for {endpoint}: {str(e)}")
@@ -443,6 +448,13 @@ async def stream_service_response_with_retry(client: httpx.AsyncClient,
                     raise e
 
 
+def get_api_request_id(api, req_id):
+    if api == "/completions":
+        return "cmpl-" + req_id + "-0"
+    elif api == "/chat/completions":
+        return "chatcmpl-" + req_id
+
+
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
@@ -456,20 +468,24 @@ async def _handle_completions(api: str, request: Request):
         # Select prefiller
         prefiller_idx = proxy_state.select_prefiller(prefiller_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
+        result_future = asyncio.Future()  # type: ignore
+        request_id_api = get_api_request_id(api, request_id)
+        proxy_state.req_id_future[request_id_api] = result_future
         # Send request to prefiller
-        response = await send_request_to_service(
+        asyncio.get_running_loop().create_task(send_request_to_service(
             prefiller.client,
             prefiller_idx,
             api,
             req_data,
             request_id,
             max_retries=global_args.max_retries,
-            base_delay=global_args.retry_delay)
+            base_delay=global_args.retry_delay))
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        response_json = response.json()
-        kv_transfer_params = response_json.get('kv_transfer_params', {})
-        if kv_transfer_params:
-            req_data["kv_transfer_params"] = kv_transfer_params
+        
+        response = await result_future
+        del proxy_state.req_id_future[request_id_api]
+        req_data["kv_transfer_params"] = response
+
         # Select decoder
         decoder_score = proxy_state.calculate_decode_scores(request_length)
         logger.debug("Decoder score: %f", decoder_score)
@@ -479,7 +495,6 @@ async def _handle_completions(api: str, request: Request):
         logger.debug("Using %s %s", prefiller.url, decoder.url)
         # Stream response from decoder
         released_kv = False
-
         async def generate_stream():
             nonlocal released_kv
             # Only one await per chunk, minimal logic in loop
@@ -538,6 +553,20 @@ async def healthcheck():
         "prefill_instances": len(proxy_state.prefillers),
         "decode_instances": len(proxy_state.decoders)
     }
+
+
+@app.post("/v1/metaserver")
+async def metaserver(request: Request):
+    try:
+        req_data = await request.json()
+        request_id = req_data.pop("request_id", None)
+        if request_id in proxy_state.req_id_future:
+            result_future = proxy_state.req_id_future[request_id]
+            result_future.set_result(req_data)
+    except Exception as e:
+        logger.error(
+            f"Post metaserver failed with: {str(e)}"
+        )
 
 
 if __name__ == '__main__':

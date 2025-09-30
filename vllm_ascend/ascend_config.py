@@ -94,6 +94,17 @@ class AscendConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
+        self.pd_tp_ratio = 1
+        if vllm_config.kv_transfer_config is not None and not vllm_config.model_config.is_deepseek_mla:
+            prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config(
+                "prefill", {"tp_size": 1})["tp_size"]
+            decode_tp_size = vllm_config.kv_transfer_config.get_from_extra_config(
+                "decode", {"tp_size": 1})["tp_size"]
+            pd_tp_ratio: int = prefill_tp_size // decode_tp_size
+            self.pd_tp_ratio = pd_tp_ratio
+            if self.pd_tp_ratio == 0:
+                raise AssertionError(
+                    "Only support P node tp size lagger then D node tp size")
 
 
 class TorchairGraphConfig:
