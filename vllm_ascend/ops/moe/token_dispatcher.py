@@ -381,6 +381,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                       hidden_states: torch.Tensor,
                       bias: torch.Tensor = None):
         assert self.original_shape is not None
+        
+        self.expanded_row_idx = torch.abs(self.expanded_row_idx)
         final_hidden_states = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
             sorted_indices=self.expanded_row_idx,

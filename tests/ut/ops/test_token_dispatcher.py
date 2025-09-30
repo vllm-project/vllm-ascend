@@ -274,6 +274,8 @@ class TestTokenDispatcherWithAllGather(TestBase):
         self.dispatcher.original_shape = (3, 128)
         self.dispatcher.mask = torch.tensor([0, 1, 1, 0])
         hidden_states = torch.randn(6, 128)
+        self.dispatcher.expanded_row_idx = torch.tensor([0, 1, 1, 1, 1, 1],
+                                                        dtype=torch.int32)
 
         final_hidden_states = self.dispatcher.token_combine(hidden_states)
         self.assertEqual(final_hidden_states.shape, (6, 128))
