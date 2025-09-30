@@ -179,7 +179,7 @@ We also provide openEuler based image, just need to replace `IMAGE` to `quay.io/
 :::
 
 :::::{tab-set}
-::::{tab-item} DeepSeek-V3.2-Exp
+::::{tab-item} DeepSeek-V3.2-Exp A3 series
 
 Run the following scripts on two nodes respectively
 
@@ -267,7 +267,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 
 ::::
 
-::::{tab-item} DeepSeek-V3.2-Exp-W8A8
+::::{tab-item} DeepSeek-V3.2-Exp-W8A8 A3 series
 
 ```shell
 #!/bin/sh
@@ -288,6 +288,10 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp-W8A8 \
 --gpu-memory-utilization 0.92 \
 --additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
+
+::::
+::::{tab-item} A2 series
+Just like A3 series, the only difference is to set `--data-parallel-size` to the right value on each node.
 
 ::::
 :::::
