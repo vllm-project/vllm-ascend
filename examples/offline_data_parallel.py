@@ -247,7 +247,7 @@ if __name__ == "__main__":
         proc.join(timeout=900)
         if proc.exitcode is None:
             print(
-                f"Killing process {proc.pid} that didn't stop within 5 minutes."
+                f"Killing process {proc.pid} that didn't stop within 15 minutes."
             )
             proc.kill()
             exit_code = 1
