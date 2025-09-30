@@ -94,6 +94,25 @@ class AscendConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
+        self.flashcomm2_oproj_tensor_parallel_size = additional_config.get(
+            "flashcomm2_oproj_tensor_parallel_size", None)
+        if self.flashcomm2_oproj_tensor_parallel_size is not None:
+            global_tp_size = vllm_config.parallel_config.tensor_parallel_size
+            logger.info(
+                f"Enable Flashcomm2 with flashcomm2_oproj_tensor_parallel_size={self.flashcomm2_oproj_tensor_parallel_size} and global_tp_size={global_tp_size}"
+            )
+            if self.oproj_tensor_parallel_size is not None:
+                raise AssertionError(
+                    f"flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
+                )
+            if global_tp_size <= self.flashcomm2_oproj_tensor_parallel_size:
+                raise AssertionError(
+                    f"flashcomm2_oproj_tensor_parallel_size ({self.flashcomm2_oproj_tensor_parallel_size}) cannot exceed global tensor parallel size ({global_tp_size})"
+                )
+            if global_tp_size % self.flashcomm2_oproj_tensor_parallel_size != 0:
+                raise AssertionError(
+                    f"Global tensor parallel size ({global_tp_size}) must be divisible by flashcomm2_oproj_tensor_parallel_size ({self.flashcomm2_oproj_tensor_parallel_size})"
+                )
 
 
 class TorchairGraphConfig:
