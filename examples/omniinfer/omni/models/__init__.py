@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+from transformers import AutoConfig
 from omni.adaptors.vllm.patches import model_patch 
 from vllm import ModelRegistry
 import os
@@ -9,6 +10,10 @@ import os
 if os.getenv("PROFILING_NAMELIST", None):
     print("<<<Profiler patch environmental variable is enabled, applying profiler patches.")
     from omni.adaptors.vllm.patches.profiler_patches import apply_profiler_patches
+
+from omni.models.deepseek.deepseek_v32 import DeepseekV32Config
+
+AutoConfig.register("deepseek_v32", DeepseekV32Config)
 
 
 def register_model():
@@ -27,6 +32,9 @@ def register_model():
         ModelRegistry.register_model(
             "DeepseekV3ForCausalLM",
             "omni.models.deepseek.deepseek_v3:DeepseekV3ForCausalLM")
+        ModelRegistry.register_model(
+            "DeepseekV32ForCausalLM",
+            "omni.models.deepseek.deepseek_v32:DeepseekV32ForCausalLM")
         ModelRegistry.register_model(
             "PanguUltraMoEForCausalLM",
             "omni.models.pangu.pangu_ultra_moe:PanguUltraMoEForCausalLM")
