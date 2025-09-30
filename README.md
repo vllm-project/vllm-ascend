@@ -42,7 +42,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 - Software:
   * Python >= 3.9, < 3.12
   * CANN >= 8.2.RC1
-  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.post1
+  * PyTorch >= 2.5.1, torch-npu == 2.5.1.post1
   * vLLM (the same version as vllm-ascend)
 
 ## Getting Started
