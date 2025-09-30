@@ -11,6 +11,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.utils import enable_sp
 
 
 class FusedMoEState(Enum):
@@ -20,6 +21,13 @@ class FusedMoEState(Enum):
     AllGatherEP = 3
     NaiveMulticast = 4
     All2AllSeq = 5
+
+
+class MoECommType(Enum):
+    ALLGATHER = 0
+    MC2 = 1
+    ALLTOALL = 2
+    NAIVE_MULTICAST = 3
 
 
 # TODO(zzzzwwjj): add soc_version to choose branch
@@ -52,7 +60,7 @@ def set_ascend_forward_context(
         with_prefill: bool = True,
         in_profile_run: bool = False,
         reserved_mc2_mask: Optional[torch.Tensor] = None,
-        moe_comm_method: str = "",
+        moe_comm_type: Optional[MoECommType] = None,
         num_actual_tokens: Optional[int] = None,
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
@@ -72,7 +80,11 @@ def set_ascend_forward_context(
             batch_descriptor=batch_descriptor,
     ):
         forward_context = get_forward_context()
-        forward_context.moe_comm_method_name = moe_comm_method + "commimpl"
+
+        from vllm_ascend.ops.moe.moe_comm_method import get_moe_comm_method
+        forward_context.moe_comm_type = moe_comm_type
+        forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
+
         forward_context.with_prefill = with_prefill
         tp_world_size = get_tensor_model_parallel_world_size()
         ep_size = (get_ep_group().world_size if
@@ -90,21 +102,19 @@ def set_ascend_forward_context(
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
 
-        # set for flashcomm_v1, 1000 is the batchsize concurrency threshold for enabling the flashcomm_v1 feature.
+        # set for sequence parallelism, 1000 is the batch size concurrency threshold for enabling the flashcomm_v1 or sequence_parallelism feature.
         # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
-        flashcomm_v1_enabled = envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE and \
-            envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM and \
+        sp_enabled = enable_sp(vllm_config) and \
             tp_world_size > 1 and \
             num_tokens is not None and num_tokens > 1000
 
-        if flashcomm_v1_enabled:
+        if sp_enabled:
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
-
-        forward_context.flashcomm_v1_enabled = flashcomm_v1_enabled
+        forward_context.sp_enabled = sp_enabled
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True

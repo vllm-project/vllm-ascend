@@ -554,7 +554,11 @@ class TestAscendMLAImpl(TestBase):
         self.impl.num_kv_heads = self.impl.num_heads
 
         decode_res, prefill_res = self.impl._mla_preprocess(
-            hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False)
+            "mock_layer",
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            need_gather_q_kv=False)
 
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)

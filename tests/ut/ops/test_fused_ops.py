@@ -23,11 +23,12 @@ from pytest_mock import MockerFixture
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 from tests.ut.base import TestBase
+from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod)
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_mlp import cumsum_group_list, unified_apply_mlp
-from vllm_ascend.utils import AscendSocVersion, adapt_patch
+from vllm_ascend.utils import AscendSocVersion, adapt_patch, vllm_version_is
 
 adapt_patch(True)
 
@@ -55,6 +56,26 @@ def mock_npu_format_cast(weight_data, format):
     return weight_data
 
 
+@pytest.fixture(autouse=True)
+def setup_vllm_config_mock(mocker: MockerFixture):
+    mock_hf_config = MagicMock()
+    mock_hf_config.model_type = "llama"
+
+    mock_model_config = MagicMock()
+    mock_model_config.hf_config = mock_hf_config
+
+    mock_vllm_config = MagicMock()
+    mock_vllm_config.model_config = mock_model_config
+    mock_vllm_config.parallel_config = MagicMock(tensor_parallel_size=2)
+    mock_vllm_config.scheduler_config = MagicMock(max_num_seqs=4)
+    mock_vllm_config.model_config.max_model_len = 2048
+
+    mocker.patch('vllm_ascend.ops.fused_moe.get_current_vllm_config',
+                 return_value=mock_vllm_config)
+    mocker.patch('vllm_ascend.ops.moe.moe_comm_method.get_current_vllm_config',
+                 return_value=mock_vllm_config)
+
+
 @pytest.fixture
 def mock_dist_env(mocker: MockerFixture):
     mock_moe_comm_method = MagicMock()
@@ -72,14 +93,18 @@ def mock_dist_env(mocker: MockerFixture):
 
     mock_moe_comm_method.finalize.side_effect = mock_finalize
 
-    mock_forward_context_obj = MagicMock(
-        moe_comm_method=mock_moe_comm_method,
-        moe_comm_method_name="mc2commimpl",
-        max_tokens_across_dp=10,
-        dp_metadata=MagicMock(cu_tokens_across_dp_cpu=[5, 10]),
-        mc2_mask=torch.zeros(16, dtype=torch.bool),
-        padded_num_tokens=16,
-        with_quant=False)
+    if vllm_version_is("0.10.2"):
+        dp_metadata = MagicMock(cu_tokens_across_dp_cpu=[5, 10])
+    else:
+        dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
+    mock_forward_context_obj = MagicMock(moe_comm_method=mock_moe_comm_method,
+                                         moe_comm_type=MoECommType.MC2,
+                                         max_tokens_across_dp=10,
+                                         dp_metadata=dp_metadata,
+                                         mc2_mask=torch.zeros(
+                                             16, dtype=torch.bool),
+                                         padded_num_tokens=16,
+                                         with_quant=False)
 
     with patch('torch.distributed.get_rank', return_value=0), \
         patch('torch.distributed.get_world_size', return_value=4), \
@@ -104,12 +129,6 @@ def mock_dist_env(mocker: MockerFixture):
             return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_forward_context',
             return_value=mock_forward_context_obj), \
-        patch('vllm_ascend.ops.fused_moe.get_current_vllm_config',
-                return_value=MagicMock(
-                    parallel_config=MagicMock(tensor_parallel_size=2),
-                    scheduler_config=MagicMock(max_num_seqs=4),
-                    model_config=MagicMock(max_model_len=2048)
-                )), \
         patch("vllm_ascend.utils.get_ascend_soc_version", return_value=AscendSocVersion.A3), \
         patch('vllm_ascend.ops.moe.moe_mlp.get_forward_context',
                 return_value=mock_forward_context_obj), \
@@ -186,6 +205,8 @@ def default_moe_config():
 def moe_method(mock_dist_env):
     moe = MagicMock()
     moe.moe_parallel_config.return_value = MagicMock(ep_size=4)
+    moe.moe_parallel_config.use_ep = False
+    moe.moe_parallel_config.dp_size = 1
     return AscendUnquantizedFusedMoEMethod(moe)
 
 
@@ -501,7 +522,7 @@ class TestUnifiedApplyMLP(TestBase):
                                                      mock_get_forward_context):
 
         mock_forward_context = MagicMock()
-        mock_forward_context.moe_comm_method_name = "mc2commimpl"
+        mock_forward_context.moe_comm_type = MoECommType.MC2
         mock_get_forward_context.return_value = mock_forward_context
 
         mock_is_310p.return_value = False

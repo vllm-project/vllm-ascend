@@ -26,6 +26,8 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class FusedMoEPrepareAndFinalize(ABC):
     """
@@ -133,11 +135,15 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
         """
         self.replace_allreduce = replace_allreduce
         self.enable_shared_expert_dp = enable_shared_expert_dp
+        forward_context = get_forward_context()
+        mc2_mask = forward_context.mc2_mask
+        if self.tp_size > 1:
+            # Also slice mc2_mask
+            split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)
+            mc2_mask = split_mc2_mask[self.tp_rank]
 
         if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
-            forward_context = get_forward_context()
-            mc2_mask = forward_context.mc2_mask
             target_pad_length = forward_context.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
 
@@ -149,23 +155,16 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
                                                   (0, 0, 0, pad_size))
 
             # Slice across TP ranks
-            if self.tp_size > 1:
-                if not self.enable_shared_expert_dp:
-                    split_hidden_states = torch.tensor_split(hidden_states,
-                                                             self.tp_size,
-                                                             dim=0)
-                    split_router_logits = torch.tensor_split(router_logits,
-                                                             self.tp_size,
-                                                             dim=0)
-                    hidden_states = split_hidden_states[self.tp_rank]
-                    router_logits = split_router_logits[self.tp_rank]
-                    self.split_hidden_states = split_hidden_states  # Save for finalize
-
-                # Also slice mc2_mask
-                split_mc2_mask = torch.tensor_split(mc2_mask,
-                                                    self.tp_size,
-                                                    dim=0)
-                mc2_mask = split_mc2_mask[self.tp_rank]
+            if self.tp_size > 1 and not self.enable_shared_expert_dp:
+                split_hidden_states = torch.tensor_split(hidden_states,
+                                                         self.tp_size,
+                                                         dim=0)
+                split_router_logits = torch.tensor_split(router_logits,
+                                                         self.tp_size,
+                                                         dim=0)
+                hidden_states = split_hidden_states[self.tp_rank]
+                router_logits = split_router_logits[self.tp_rank]
+                self.split_hidden_states = split_hidden_states  # Save for finalize
 
         return hidden_states, router_logits, mc2_mask
 
@@ -185,6 +184,11 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
                 dist.all_gather(list(self.split_hidden_states), hidden_states,
                                 self.moe_config.tp_group.device_group)
                 hidden_states = torch.cat(self.split_hidden_states, dim=0)
+
+                # TODO: It is a quick bugfix for the memory explosion issue in eager mode.
+                # If the cache is not cleared after `self.split_hidden_states` is created,
+                # it can lead to the memory explosion in eager mode.
+                del self.split_hidden_states
 
             # Unpad if necessary
             if self.num_tokens < hidden_states.shape[0]:
@@ -269,6 +273,11 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
                 dist.all_gather(list(self.split_hidden_states), hidden_states,
                                 self.moe_config.tp_group.device_group)
                 hidden_states = torch.cat(self.split_hidden_states, dim=0)
+
+                # TODO: It is a quick bugfix for the memory explosion issue in eager mode.
+                # If the cache is not cleared after `self.split_hidden_states` is created,
+                # it can lead to the memory explosion in eager mode.
+                del self.split_hidden_states
 
             if self.num_tokens < hidden_states.shape[0]:
                 hidden_states = hidden_states[:self.num_tokens]
@@ -407,8 +416,12 @@ class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
         self.enable_shared_expert_dp = enable_shared_expert_dp
 
         if self.moe_config.dp_size > 1:
-            self.cu_tokens_across_dp_cpu = get_forward_context(
-            ).dp_metadata.cu_tokens_across_dp_cpu
+            if vllm_version_is("0.10.2"):
+                self.cu_tokens_across_dp_cpu = get_forward_context(
+                ).dp_metadata.cu_tokens_across_dp_cpu
+            else:
+                self.cu_tokens_across_dp_cpu = get_forward_context(
+                ).dp_metadata.cu_tokens_across_sp(1)
             hidden_states = self._naive_multicast(hidden_states,
                                                   self.cu_tokens_across_dp_cpu)
             if rm_router_logits:
