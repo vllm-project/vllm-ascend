@@ -269,6 +269,7 @@ class TestTokenDispatcherWithAllGather(TestBase):
     def test_token_combine_with_expert_map(self):
         self.dispatcher.expert_map = torch.tensor([0, 1, 2, 3])
         self.dispatcher.sorted_token_indices = torch.tensor([0, 1, 1, 1, 1, 1])
+        self.dispatcher.expanded_row_idx = torch.tensor([0, 1, 1, 1, 1, 1])
         self.dispatcher.sorted_weights = torch.tensor(
             [0.5, 0.5, 0.5, 0.5, 0.5, 0.5])
         self.dispatcher.original_shape = (3, 128)
