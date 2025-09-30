@@ -48,10 +48,10 @@ hccn_tool -i 0 -ping -g address 10.20.0.20
 
 Currently, we provide a all-in-one image (include CANN 8.2RC1 + [SparseFlashAttention/LightningIndexer](https://gitcode.com/cann/cann-recipes-infer/tree/master/ops/ascendc) + [MLAPO](https://github.com/vllm-project/vllm-ascend/pull/3226)). You can also build your own image refer to [link](https://github.com/vllm-project/vllm-ascend/issues/3278).
 
-- `DeepSeek-V3.2-Exp`: requreid 2 Atlas 800 A3(64G*16) nodes
-- `DeepSeek-V3.2-Exp-w8a8`: requreid 1 Atlas 800 A3(64G*16) node
+- `DeepSeek-V3.2-Exp`: requreid 2 Atlas 800 A3(64G*16) nodes. [Model weight link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
+- `DeepSeek-V3.2-Exp-w8a8`: requreid 1 Atlas 800 A3(64G*16) node. [Model weight link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
 
-Run the following command to start the container in each node:
+Run the following command to start the container in each node(This guide suppose you have download the weight to /root/.cache already):
 
 ```{code-block} bash
    :substitutions:
@@ -96,7 +96,7 @@ docker run --rm \
 ```
 
 :::{note}
-we also provide openEuler based image, just need to replace `IMAGE` to `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-openeuler-deepseek-v3.2-exp`
+We also provide openEuler based image, just need to replace `IMAGE` to `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-openeuler-deepseek-v3.2-exp`
 :::
 
 :::::{tab-set}
@@ -127,7 +127,7 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export HCCL_BUFFSIZE=1024
 
-vllm serve deepseek-ai/DeepSeek-V3.2-Exp \
+vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --host 0.0.0.0 \
 --port 8000 \
 --data-parallel-size 2 \
@@ -164,7 +164,7 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export HCCL_BUFFSIZE=1024
 
-vllm serve deepseek-ai/DeepSeek-V3.2-Exp \
+vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --host 0.0.0.0 \
 --port 8000 \
 --headless \
@@ -193,7 +193,7 @@ vllm serve deepseek-ai/DeepSeek-V3.2-Exp \
 ```shell
 #!/bin/sh
 
-vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
+vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp-W8A8 \
 --host 0.0.0.0 \
 --port 8000 \
 --tensor-parallel-size 16 \
