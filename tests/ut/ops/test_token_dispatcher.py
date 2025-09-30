@@ -340,11 +340,11 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_moe_token_permute.return_value = (torch.randn(16, 16),
                                                         torch.arange(16))
 
-        # Mock torch_npu.npu_moe_token_unpermute
-        patcher5 = patch('torch_npu.npu_moe_token_unpermute')
-        self.mock_npu_moe_token_unpermute = patcher5.start()
+        # Mock torch_npu.npu_moe_finalize_routing
+        patcher5 = patch('torch_npu.npu_moe_finalize_routing')
+        self.mock_npu_moe_finalize_routing = patcher5.start()
         self.addCleanup(patcher5.stop)
-        self.mock_npu_moe_token_unpermute.return_value = torch.randn(8, 16)
+        self.mock_npu_moe_finalize_routing.return_value = torch.randn(8, 16)
 
         # Mock async_all_to_all
         patcher6 = patch('vllm_ascend.ops.moe.comm_utils.async_all_to_all')
