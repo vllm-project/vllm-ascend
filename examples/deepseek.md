@@ -27,7 +27,7 @@
 
 ## 模型准备
 
-权重下载，https://gitee.com/omniai/omniinfer/releases/tag/v0.4.2 下载BF16类型的权重，本地权重路径与下文中 omni_infer_server_template_a3_ds.yml的配置模型文件路径保持一致，默认/data/models/origin/bf16
+请访问https://gitee.com/omniai/omniinfer/releases/tag/v0.4.2 的权重下载章节，下载BF16类型的权重，本地权重路径与下文中 omni_infer_server_template_a3_ds.yml的配置模型文件路径保持一致，默认/data/models/origin/bf16
 
 ## 部署
 
