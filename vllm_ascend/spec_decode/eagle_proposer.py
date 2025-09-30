@@ -186,7 +186,6 @@ class EagleProposer(Proposer):
                 dtype=torch.int32,
                 device=self.device,
             )
-            num_tokens = num_scheduled_tokens - sum(num_rejected_tokens)
             cu_num_tokens, token_indices =\
                     self._prepare_inputs(eagle_attn_metadata, num_rejected_tokens)
             target_token_ids = self.runner.input_ids[token_indices]
@@ -635,7 +634,6 @@ class EagleProposer(Proposer):
         cu_target_query_lens = eagle_attn_metadata.query_start_loc
         device = eagle_attn_metadata.query_start_loc.device
         
-        num_reqs = self.runner.input_batch.num_reqs
         query_start_loc_cpu = cu_target_query_lens.to("cpu")
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
