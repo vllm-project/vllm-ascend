@@ -20,7 +20,7 @@ from typing import Optional, Tuple, Union
 import torch
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
 def _addrmsnorm_forward_oot(
@@ -137,3 +137,30 @@ class AscendRMSNorm(RMSNorm):
             not isinstance(next_linear.quant_method.quant_method, AscendW8A8LinearMethod):
             next_linear = None
         return next_linear
+
+
+class AscendGemmaRMSNorm(GemmaRMSNorm):
+
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        import torch_npu
+
+        from vllm_ascend.utils import is_310p
+        if residual is not None:
+            if is_310p():
+                orig_dtype = residual.dtype
+                x = x + residual.to(x.dtype)
+                residual = x.to(orig_dtype)
+                x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
+                                              self.variance_epsilon)
+            else:
+                x, _, residual = torch_npu.npu_add_rms_norm(
+                    x, residual, 1.0 + self.weight, self.variance_epsilon)
+            return x, residual
+
+        x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
+                                      self.variance_epsilon)
+        return x

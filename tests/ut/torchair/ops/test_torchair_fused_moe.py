@@ -26,7 +26,8 @@ from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
     TorchairAscendFusedMoE, TorchairAscendUnquantizedFusedMoEMethod)
-from vllm_ascend.utils import AscendSocVersion, adapt_patch  # noqa E402
+from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import AscendSocVersion, vllm_version_is
 
 adapt_patch(True)
 
@@ -53,6 +54,10 @@ def mock_dp_and_tp_group(mocker):
 @pytest.fixture
 def mock_dist_env(mocker: MockerFixture):
     # init dist env patch
+    if vllm_version_is("0.10.2"):
+        dp_metadata = MagicMock(cu_tokens_across_dp_cpu=[5, 10])
+    else:
+        dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
 
     with patch('torch.distributed.get_rank', return_value=0), \
          patch('torch.distributed.get_world_size', return_value=4), \
@@ -80,7 +85,7 @@ def mock_dist_env(mocker: MockerFixture):
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context',
                return_value=MagicMock(
                    max_tokens_across_dp=10,
-                   dp_metadata=MagicMock(cu_tokens_across_dp_cpu=[5, 10])
+                   dp_metadata=dp_metadata,
                )), \
         patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_current_vllm_config',
                return_value=MagicMock(

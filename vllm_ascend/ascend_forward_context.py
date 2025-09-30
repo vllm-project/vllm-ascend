@@ -106,7 +106,7 @@ def set_ascend_forward_context(
         # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
-        sp_enabled = enable_sp() and \
+        sp_enabled = enable_sp(vllm_config) and \
             tp_world_size > 1 and \
             num_tokens is not None and num_tokens > 1000
 

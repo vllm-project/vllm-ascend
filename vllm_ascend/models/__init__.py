@@ -38,6 +38,10 @@ def register_model():
         "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
 
     ModelRegistry.register_model(
+        "DeepseekV32ForCausalLM",
+        "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
+
+    ModelRegistry.register_model(
         "DeepSeekMTPModel",
         "vllm_ascend.models.deepseek_mtp:CustomDeepSeekMTP")
 
@@ -53,4 +57,4 @@ def register_model():
     )
     ModelRegistry.register_model(
         "Qwen3NextForCausalLM",
-        "vllm_ascend.models.qwen3_next:Qwen3NextForCausalLM")
+        "vllm_ascend.models.qwen3_next:CustomQwen3NextForCausalLM")
