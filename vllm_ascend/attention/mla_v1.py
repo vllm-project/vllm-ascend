@@ -216,12 +216,17 @@ class AscendMLAMetadataBuilder:
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
-        self.prefill_attn_mask = torch.triu(
+        prefill_mask = torch.triu(
             torch.ones(512,
                        512,
                        device=self.device,
-                       dtype=self.model_config.dtype),
-            1)  # 512: mask only support 512
+                       dtype=self.model_config.dtype), 1)
+        if self.model_config.dtype == torch.float16:
+            mask_value = torch.finfo(torch.float32).min
+        else:
+            mask_value = 1
+        self.prefill_mask = torch.where(prefill_mask == 1, mask_value,
+                                        0).to(self.model_config.dtype)
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -489,7 +494,7 @@ class AscendMLAMetadataBuilder:
                 prefill_input_positions].unsqueeze(  # type: ignore
                     1).unsqueeze(2)
             prefill_metadata = AscendMLAPrefillMetadata(
-                attn_mask=self.prefill_attn_mask,
+                attn_mask=self.prefill_mask,
                 query_lens=query_seq_lens_cpu[tokens_start:],
                 seq_lens=seq_lens[reqs_start:],
                 context_lens=seq_lens[tokens_start:],
