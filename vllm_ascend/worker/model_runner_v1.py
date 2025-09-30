@@ -292,7 +292,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             self.chunked_prefill_enabled = True
         self.weight_prefetch_method = WeightPrefetchMethod(
-            ascend_config.weight_prefetch_config)
+            self.ascend_config.weight_prefetch_config)
 
         if self.cache_config.cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
