@@ -92,9 +92,12 @@ docker run --rm \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
--p 8000:8000 \
 -it $IMAGE bash
 ```
+
+:::{note}
+we also provide openEuler based image, just need to replace `IMAGE` to `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-openeuler-deepseek-v3.2-exp`
+:::
 
 :::::{tab-set}
 ::::{tab-item} DeepSeek-V3.2-Exp
@@ -141,7 +144,7 @@ vllm serve deepseek-ai/DeepSeek-V3.2-Exp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
---additional-config '{"torchair_graph_config":{"enabled":true}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 **node1**
@@ -180,7 +183,7 @@ vllm serve deepseek-ai/DeepSeek-V3.2-Exp \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"torchair_graph_config":{"enabled":true}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 ::::
@@ -204,7 +207,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"torchair_graph_config":{"enabled":true}}'
+--additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 ::::
