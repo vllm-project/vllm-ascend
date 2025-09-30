@@ -66,21 +66,21 @@ def select_experts(hidden_states: torch.Tensor,
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
 
-    topk_weights, topk_ids, row_idx = _select_experts_with_fusion_ops(
-        hidden_states=hidden_states,
-        router_logits=router_logits,
-        top_k=top_k,
-        use_grouped_topk=use_grouped_topk,
-        topk_group=topk_group,
-        renormalize=renormalize,
-        e_score_correction_bias=e_score_correction_bias,
-        num_expert_group=num_expert_group,
-        custom_routing_function=custom_routing_function,
-        scoring_func=scoring_func,
-        routed_scaling_factor=routed_scaling_factor,
-        global_num_experts=global_num_experts)
-
-    if topk_weights is None:
+    topk_weights, topk_ids, row_idx = None, None, None
+    if custom_routing_function is None:
+        topk_weights, topk_ids = _select_experts_with_fusion_ops(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=top_k,
+            use_grouped_topk=use_grouped_topk,
+            topk_group=topk_group,
+            renormalize=renormalize,
+            e_score_correction_bias=e_score_correction_bias,
+            num_expert_group=num_expert_group,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            global_num_experts=global_num_experts)
+    else:
         topk_weights, topk_ids = _native_select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -94,8 +94,8 @@ def select_experts(hidden_states: torch.Tensor,
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
         )
-    if row_idx is None:
-        row_idx = return_row_idx(hidden_states, top_k)
+        if row_idx is None:
+            row_idx = return_row_idx(hidden_states, top_k)
     return topk_weights, topk_ids, row_idx
 
 
@@ -177,37 +177,36 @@ def _select_experts_with_fusion_ops(
         e_score_correction_bias: Optional[torch.Tensor],
         topk_group: Optional[int],
         num_expert_group: Optional[int],
-        custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         routed_scaling_factor=1.0,
         global_num_experts: int = -1):
 
-    topk_weights, topk_ids, row_idx = None, None, None
-    # NOTE: now npu_moe_gating_top_k can only support 'group_count=256' pattern
-    is_deepseek_v3_r1 = global_num_experts == 256
-    if is_deepseek_v3_r1:
-        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
-            router_logits,
-            k=top_k,  # topk currently 8
-            bias=e_score_correction_bias,
-            k_group=topk_group,  # fix: 4
-            group_count=num_expert_group,  # fix 8
-            group_select_mode=
-            1,  # 0: the maximum in the group; 1: topk2.sum(fix)
-            renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
-            norm_type=1,  # 0: softmax; 1: sigmoid(fix)
-            # out_flag=False, # todo new api; should the third output be output
-            # y2_flag=False, # old api; should the third output be output
-            routed_scaling_factor=1,
-            eps=float(1e-20))
-        row_idx = return_row_idx(hidden_states, top_k)
-    if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax":
-        topk_weights, topk_ids, row_idx = torch_npu.npu_moe_gating_top_k_softmax(
-            x=router_logits, finished=None, k=top_k)
-        topk_ids = topk_ids.to(torch.int32)
+    if scoring_func == "softmax":
+        norm_type = 0
+        topk_group = 1
+        num_expert_group = 1
+    else:
+        norm_type = 1
+    if e_score_correction_bias is not None and \
+        e_score_correction_bias.dtype != router_logits.dtype:
+        e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
+    topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
+        router_logits,
+        k=top_k,
+        bias=e_score_correction_bias,
+        k_group=topk_group,
+        group_count=num_expert_group,
+        group_select_mode=1,  # 0: the maximum in the group; 1: topk2.sum(fix)
+        renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
+        norm_type=norm_type,  # 0: softmax; 1: sigmoid
+        # out_flag=False, # todo new api; should the third output be output
+        # y2_flag=False, # old api; should the third output be output
+        routed_scaling_factor=1,
+        eps=float(1e-20))
+    if scoring_func == "softmax":
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
-    return topk_weights, topk_ids, row_idx
+    return topk_weights, topk_ids
 
 
 def _native_select_experts(
@@ -281,3 +280,4 @@ def _native_select_experts(
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
+
