@@ -4,7 +4,7 @@
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide take one-by-one steps to verify these features with constrained resources.
 
-Take the `DeepSeek-V3.2-Exp-W8A8` model as an example, use vllm-ascend v0.11.0rc0 (with vLLM v0.11.0) on 2 Atlas 800T A3 servers to deploy the "1P1D" architecture. Assume the ip of the prefiller server is 172.22.0.218, and the decoder servers are 172.22.0.155 (decoder 1). On each server, use 16 NPUs to deploy one service instance.
+Take the `DeepSeek-V3.2-Exp-W8A8` model as an example, use vllm-ascend v0.11.0rc0 (with vLLM v0.11.0) on 2 Atlas 800T A3 servers to deploy the "1P1D" architecture. Assume the ip of the prefiller server is 172.22.0.218, and the decoder servers are 172.22.0.155. On each server, use 16 NPUs to deploy one service instance.
 
 ## Verify Multi-Node Communication Environment
 
