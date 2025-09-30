@@ -181,15 +181,15 @@ class TestTokenDispatcherWithAllGather(TestBase):
             torch.tensor([0, 1, 0, 1, 0, 1]),  # expanded_expert_idx
             torch.tensor([0, 1, 0, 1, 0, 1]))
         self.row_idx = torch.arange(10, dtype=torch.int32)
-        self.patcher_npu_moe_token_unpermute = patch(
-            'torch_npu.npu_moe_token_unpermute')
-        self.mock_npu_moe_token_unpermute = self.patcher_npu_moe_token_unpermute.start(
+        self.patcher_npu_moe_finalize_routing = patch(
+            'torch_npu.npu_moe_finalize_routing')
+        self.mock_npu_moe_finalize_routing = self.patcher_npu_moe_finalize_routing.start(
         )
-        self.mock_npu_moe_token_unpermute.return_value = torch.randn(6, 128)
+        self.mock_npu_moe_finalize_routing.return_value = torch.randn(6, 128)
 
     def tearDown(self):
         self.patcher_npu_moe_init_routing_v2.stop()
-        self.patcher_npu_moe_token_unpermute.stop()
+        self.patcher_npu_moe_finalize_routing.stop()
 
     def test_token_dispatch_without_expert_map(self):
         hidden_states = torch.randn(3, 128)
@@ -292,8 +292,8 @@ class TestTokenDispatcherWithAllGather(TestBase):
         final_hidden_states = self.dispatcher.token_combine(hidden_states)
 
         # Verify npu_moe_finalize_routing is called
-        self.mock_npu_moe_token_unpermute.assert_called_once()
-        args, kwargs = self.mock_npu_moe_token_unpermute.call_args
+        self.mock_npu_moe_finalize_routing.assert_called_once()
+        args, kwargs = self.mock_npu_moe_finalize_routing.call_args
 
         self.assertEqual(final_hidden_states.shape, (6, 128))
 
@@ -340,11 +340,11 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_moe_token_permute.return_value = (torch.randn(16, 16),
                                                         torch.arange(16))
 
-        # Mock torch_npu.npu_moe_token_unpermute
-        patcher5 = patch('torch_npu.npu_moe_token_unpermute')
-        self.mock_npu_moe_token_unpermute = patcher5.start()
+        # Mock torch_npu.npu_moe_finalize_routing
+        patcher5 = patch('torch_npu.npu_moe_finalize_routing')
+        self.mock_npu_moe_finalize_routing = patcher5.start()
         self.addCleanup(patcher5.stop)
-        self.mock_npu_moe_token_unpermute.return_value = torch.randn(8, 16)
+        self.mock_npu_moe_finalize_routing.return_value = torch.randn(8, 16)
 
         # Mock async_all_to_all
         patcher6 = patch('vllm_ascend.ops.moe.comm_utils.async_all_to_all')
