@@ -19,5 +19,6 @@ multi_node
 multi_node_kimi
 multi_node_qwen3vl
 multi_node_pd_disaggregation
+multi_node_pd_disaggregation_deepseek
 multi_node_ray
 :::
