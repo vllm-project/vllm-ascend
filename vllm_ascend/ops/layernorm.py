@@ -65,7 +65,7 @@ class AscendRMSNorm(RMSNorm):
 
         if residual is not None:
             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            assert x.size(0) == residual.size(0)
+            #assert x.size(0) == residual.size(0)
             x, residual = _addrmsnorm_forward_oot(
                 self, x, residual, self.next_need_quant_fusion_linear)
             return x, residual

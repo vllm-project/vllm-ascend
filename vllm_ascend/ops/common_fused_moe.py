@@ -351,7 +351,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             forward_context = get_forward_context()
             moe_comm_type = forward_context.moe_comm_type
             if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
-                shared_out = tensor_model_parallel_all_reduce(shared_out)
+                if not get_forward_context().sp_enabled:
+                    shared_out = tensor_model_parallel_all_reduce(shared_out)
+    
         fused_output = AscendFusedMoE.forward_impl(
             self,
             hidden_states=hidden_states,

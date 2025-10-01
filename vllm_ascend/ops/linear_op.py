@@ -46,6 +46,7 @@ from torch.nn.parameter import Parameter
 from vllm.distributed import split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.utils import (dense_optim_enable, enable_sp,
@@ -420,11 +421,13 @@ def get_column_parallel_op(
         SequenceMergedColumnParallelOp,
         SequenceQKVParallelOp,
     ]] = None
-    if "gate_up_proj" in prefix and mlp_tp_enable():
+    if "shared_experts.gate_up_proj" in prefix and enable_sp():
+        return None, 0, 1
+    elif "gate_up_proj" in prefix and mlp_tp_enable():
         custom_op = MLPColumnParallelOp(layer)
     elif "gate_up_proj" in prefix and enable_sp():
         custom_op = SequenceMergedColumnParallelOp(layer)
-    elif enable_sp():
+    elif "qkv_proj" in prefix and enable_sp():
         custom_op = SequenceQKVParallelOp(layer, prefix)
 
     if custom_op is not None:
@@ -444,7 +447,9 @@ def get_row_parallel_op(
     custom_op: Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                               MatmulAllreduceRowParallelOp,
                               SequenceRowParallelOp]] = None
-    if "down_proj" in prefix and mlp_tp_enable():
+    if "shared_experts.down_proj" in prefix and enable_sp():
+        return None, 0, 1
+    elif "down_proj" in prefix and mlp_tp_enable():
         custom_op = MLPRowParallelOp(layer)
     elif "o_proj" in prefix and oproj_tp_enable():
         custom_op = OProjRowParallelOp(layer)

@@ -44,7 +44,8 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.distributed import (tensor_model_parallel_all_gather,
+                              get_tensor_model_parallel_world_size)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -3498,6 +3499,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.aclgraph_dispatcher.initialize_cudagraph_keys(
             self.compilation_config.cudagraph_mode,
             self.uniform_decode_query_len)
+        
+    def update_sizes_for_sequence_parallelism(self,
+                                              possible_sizes: list) -> list:
+        # remove the sizes that not multiple of tp_size when
+        # enable sequence parallelism
+        tp_size = get_tensor_model_parallel_world_size
+        removed_sizes = [
+            size for size in possible_sizes
+            if size % tp_size != 0
+        ]
+        if removed_sizes:
+            logger.warning(
+                "Batch sizes %s are removed because they are not "
+                "multiple of tp_size %d when "
+                "sequence parallelism is enabled", removed_sizes,
+                tp_size)
+
+        return [
+            size for size in possible_sizes
+            if size % tp_size == 0
+        ]
 
     def _capture_aclgraphs(self, compilation_cases: list[int],
                            aclgraph_runtime_mode: CUDAGraphMode,
@@ -3505,7 +3527,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert aclgraph_runtime_mode != CUDAGraphMode.NONE and \
             aclgraph_runtime_mode in [CUDAGraphMode.FULL,
                                       CUDAGraphMode.PIECEWISE]
-
+        
+        compilation_cases = self.update_sizes_for_sequence_parallelism(compilation_cases)
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
             logger.info(
