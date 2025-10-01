@@ -258,7 +258,9 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
 
 class TestAscendFusedMoe:
 
-    def test_init_no_quant(self, mock_dist_env, default_moe_config):
+    @patch('torch.npu.is_available')
+    @patch("torch.npu.current_device", return_value=MagicMock())
+    def test_init_no_quant(self, mock_dist_env, default_moe_config, mocker):
         layer = AscendFusedMoE(**default_moe_config)
 
         layer.w13_weight = nn.Parameter(
