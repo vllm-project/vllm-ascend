@@ -68,7 +68,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LazyLoader, cdiv, get_dtype_size,
-                        is_pin_memory_available)
+                        is_pin_memory_available,
+                        length_from_prompt_token_ids_or_embeds)
 from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -302,11 +303,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.is_pooling_model = self.model_config.pooler_config is not None
-        if self.is_multimodal_model:
-            self.inputs_embeds = torch.zeros(
-                (self.max_num_tokens, self.model_config.get_hidden_size()),
+        self.enable_prompt_embeds = self.model_config.enable_prompt_embeds
+        if self.is_multimodal_model or self.enable_prompt_embeds:
+            self.inputs_embeds = self._make_buffer(
+                self.max_num_tokens,
+                self.model_config.get_hidden_size(),
                 dtype=self.dtype,
-                device=self.device)
+                numpy=False)
+        self.is_token_ids = self._make_buffer(self.max_num_tokens,
+                                              dtype=torch.bool)
+
         # Set up Attention
         if vllm_version_is("0.10.2"):
             self.attn_backend = get_attn_backend(
@@ -612,6 +618,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
+                prompt_embeds=new_req_data.prompt_embeds,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
                 generator=generator,
@@ -921,7 +928,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.input_batch.num_computed_tokens_cpu[index]
             num_scheduled_tokens = \
                 scheduler_output.num_scheduled_tokens[req_id]
-            num_prompt_tokens = len(req.prompt_token_ids)
+            num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
+                req.prompt_token_ids, req.prompt_embeds)
 
             if num_computed_tokens + num_scheduled_tokens > num_prompt_tokens:
                 prompt_part_len = max(0,
@@ -1153,6 +1161,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_ids[:total_num_scheduled_tokens].copy_(
                 self.input_ids_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
+            self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+            self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
 
         # Async scheduling case, where some decode requests from the previous
@@ -1180,6 +1190,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_ids[:total_num_scheduled_tokens].copy_(
                 self.input_ids_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
+            self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+            self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_commmon_tokens == 0:
             # No requests in common with the previous iteration
             # So input_ids_cpu will have all the input ids.
@@ -1193,6 +1205,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.input_batch.prev_sampled_token_ids[:num_commmon_tokens,
                                                         0],
                 non_blocking=True)
+            self.is_token_ids.gpu[:num_commmon_tokens] = True
             return
         # Upload the index tensors asynchronously
         # so the scatter can be non-blocking.
@@ -1332,15 +1345,60 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # where M is the max_model_len.
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
-
+        token_indices_tensor = torch.from_numpy(token_indices)
         # Prepare input_ids.
         # NOTE(woosuk): We use torch.index_select instead of np.take here
         # because torch.index_select is much faster than np.take for large
         # tensors.
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
                            0,
-                           torch.from_numpy(token_indices),
+                           token_indices_tensor,
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
+        is_token_ids = self.input_batch.is_token_ids.flatten()
+        torch.index_select(
+            is_token_ids,
+            0,
+            token_indices_tensor,
+            out=self.is_token_ids.cpu[:total_num_scheduled_tokens])
+
+        # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
+        # the InputBatch, we need to fill in the prompt embeds into the expected
+        # spots in the GpuModelRunner's pre-allocated prompt_embeds tensor.
+        if self.input_batch.req_prompt_embeds:
+            output_idx = 0
+            for req_idx in range(num_reqs):
+                num_sched = num_scheduled_tokens[req_idx]
+
+                # Skip if this request doesn't have embeddings
+                if req_idx not in self.input_batch.req_prompt_embeds:
+                    output_idx += num_sched
+                    continue
+
+                # Skip if no tokens scheduled
+                if num_sched <= 0:
+                    output_idx += num_sched
+                    continue
+
+                req_embeds = self.input_batch.req_prompt_embeds[req_idx]
+                start_pos = self.input_batch.num_computed_tokens_cpu[req_idx]
+
+                # Skip if trying to read beyond available embeddings
+                if start_pos >= req_embeds.shape[0]:
+                    output_idx += num_sched
+                    continue
+
+                # Copy available embeddings
+                end_pos = start_pos + num_sched
+                actual_end = min(end_pos, req_embeds.shape[0])
+                actual_num_sched = actual_end - start_pos
+
+                if actual_num_sched > 0:
+                    self.inputs_embeds.cpu[output_idx:output_idx +
+                                           actual_num_sched].copy_(
+                                               req_embeds[start_pos:actual_end]
+                                           )
+
+                output_idx += num_sched
 
         # Prepare some information for building Attention-Metadata
         # Compute and commit slot mapping
@@ -2155,6 +2213,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 self.input_batch.token_ids_cpu[req_idx,
                                                start_idx:end_idx] = sampled_ids
+                self.input_batch.is_token_ids[req_idx,
+                                              start_idx:end_idx] = True
                 self.input_batch.num_tokens_no_spec[req_idx] = end_idx
                 self.input_batch.num_tokens[req_idx] = end_idx
                 req_id = self.input_batch.req_ids[req_idx]
@@ -2416,6 +2476,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
+            elif self.enable_prompt_embeds:
+                input_ids = None
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
             else:
                 input_ids = self.input_ids[:num_tokens]
                 inputs_embeds = None
@@ -3633,6 +3696,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             # Get metadata for this request.
             request = self.requests[req_id]
+            if request.prompt_token_ids is None:
+                # Prompt logprobs is incompatible with prompt embeddings
+                continue
             num_prompt_tokens = len(request.prompt_token_ids)
             prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
                 self.device, non_blocking=True)
@@ -3716,3 +3782,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _build_drafter_prepare_inputs_torchair_param(self):
         return False
+
+    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+        # This is a short term mitigation for issue mentioned in
+        # https://github.com/vllm-project/vllm/issues/22754.
+        # `tolist` would trigger a npu wise stream sync, which
+        # would block other copy ops from other npu streams.
+        # A npu event sync would avoid such a situation. Since
+        # this is in the critical path of every single model
+        # forward loop, this has caused perf issue for a disagg
+        # setup.
+        pinned = self.sampled_token_ids_pinned_cpu[:sampled_token_ids.shape[0]]
+        pinned.copy_(sampled_token_ids, non_blocking=True)
+        self.transfer_event.record()
+        self.transfer_event.synchronize()
+        return pinned.tolist()
