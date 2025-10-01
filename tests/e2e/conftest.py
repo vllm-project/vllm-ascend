@@ -20,6 +20,7 @@
 import contextlib
 import gc
 import os
+import tempfile
 from typing import Any, List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
@@ -56,7 +57,8 @@ adapt_patch(True)
 adapt_patch(False)
 
 from vllm.distributed.parallel_state import (  # noqa E402
-    destroy_distributed_environment, destroy_model_parallel)
+    destroy_distributed_environment, destroy_model_parallel,
+    init_distributed_environment, initialize_model_parallel)
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _M = TypeVar("_M")
@@ -81,6 +83,21 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.fixture
+def dist_init():
+    temp_file = tempfile.mkstemp()[1]
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"file://{temp_file}",
+        local_rank=0,
+        backend="hccl",
+    )
+    initialize_model_parallel(1, 1)
+    yield
+    cleanup_dist_env_and_memory()
 
 
 class VllmRunner:
