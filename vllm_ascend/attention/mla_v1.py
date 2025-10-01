@@ -169,7 +169,7 @@ M = TypeVar("M", bound=AscendMLAMetadata)
 class AscendMLAMetadataBuilder:
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.NEVER
+        AttentionCGSupport.UNIFORM_BATCH
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -389,6 +389,8 @@ class AscendMLAMetadataBuilder:
 
         decode_metadata = None
         if num_decodes > 0:
+            cos = common_attn_metadata.cos
+            sin = common_attn_metadata.sin
             # Notice that num_decodes != num_decode_tokens in SpecDecoding Scenario
             actual_seq_lengths_q = query_start_loc[1:num_decodes + 1].tolist()
             max_seq_lens = seq_lens[:num_decodes].max().item()
@@ -397,21 +399,45 @@ class AscendMLAMetadataBuilder:
             block_table = block_table[:num_decodes, ...]
             seq_lens_list = seq_lens.tolist()
 
-            cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
-                1).unsqueeze(2)
-            sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
-                1).unsqueeze(2)
+            # TODO: After the fullgraph supports MTP, the if branch needs to deleted
+            assert self.cos_cache is not None
+            assert self.sin_cache is not None
+            if cos is None and sin is None:
+                cos = self.cos_cache[
+                    input_positions].unsqueeze(  # type: ignore
+                        1).unsqueeze(2)
+                sin = self.sin_cache[
+                    input_positions].unsqueeze(  # type: ignore
+                        1).unsqueeze(2)
 
-            decode_metadata = AscendMLADecodeMetadata(
-                input_positions=input_positions,
-                block_table=block_table,
-                seq_lens=seq_lens,
-                seq_lens_list=seq_lens_list,
-                max_seq_lens=max_seq_lens,
-                attn_mask=common_attn_metadata.spec_attn_mask,
-                actual_seq_lengths_q=actual_seq_lengths_q,
-                sin=sin,
-                cos=cos)
+                decode_metadata = AscendMLADecodeMetadata(
+                    input_positions=input_positions,
+                    block_table=block_table,
+                    seq_lens=seq_lens,
+                    seq_lens_list=seq_lens_list,
+                    max_seq_lens=max_seq_lens,
+                    attn_mask=common_attn_metadata.spec_attn_mask,
+                    actual_seq_lengths_q=actual_seq_lengths_q,
+                    sin=sin,
+                    cos=cos)
+            else:
+                cos[:num_decode_tokens,
+                    ...] = self.cos_cache[input_positions].unsqueeze(
+                        1).unsqueeze(2)
+                sin[:num_decode_tokens,
+                    ...] = self.sin_cache[input_positions].unsqueeze(
+                        1).unsqueeze(2)
+
+                decode_metadata = AscendMLADecodeMetadata(
+                    input_positions=input_positions,
+                    block_table=block_table,
+                    seq_lens=seq_lens,
+                    seq_lens_list=seq_lens_list,
+                    max_seq_lens=max_seq_lens,
+                    attn_mask=common_attn_metadata.spec_attn_mask,
+                    actual_seq_lengths_q=actual_seq_lengths_q,
+                    sin=sin[:num_decode_tokens, ...],
+                    cos=cos[:num_decode_tokens, ...])
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
@@ -430,6 +456,29 @@ class AscendMLAMetadataBuilder:
             seq_lens=seq_lens,
             enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
         )
+
+    def build_for_graph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
+        model: Optional[nn.Module] = None,
+    ):
+        if attn_state in {
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        }:
+            attn_metadata = self.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+                model=model,
+            )
+        else:
+            raise NotImplementedError(
+                "Currently we only support building dummy metadata for DecodeOnly and SpecDecoding state"
+            )
+
+        attn_metadata.attn_state = attn_state
+        return attn_metadata
 
 
 class DecodeMLAPreprocessResult(NamedTuple):
@@ -814,7 +863,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if attn_metadata.attn_state in [
                 AscendAttentionState.SpecDecoding,
-                AscendAttentionState.ChunkedPrefill
+                AscendAttentionState.ChunkedPrefill,
+                AscendAttentionState.DecodeOnly,
         ] and self.speculative_config is not None:
             # Use TND layout for pure SpecDecoding and SpecDecoding in ChunkedPrefill
             input_layout = "TND"
