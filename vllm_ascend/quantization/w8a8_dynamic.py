@@ -204,7 +204,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         assert router_logits.shape[
             1] == global_num_experts, "Number of global experts mismatch"
 
-        topk_weights, topk_ids, row_idx = select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=top_k,
@@ -225,7 +225,6 @@ class AscendW8A8DynamicFusedMoEMethod:
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                row_idx=row_idx,
                 use_int8_w8a8=True,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
@@ -249,7 +248,6 @@ class AscendW8A8DynamicFusedMoEMethod:
             w2_scale=layer.w2_weight_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            row_idx=row_idx,
             use_int8_w8a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
