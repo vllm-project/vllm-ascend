@@ -1,4 +1,5 @@
 import torch
+from vllm.config import CUDAGraphMode
 from vllm.v1.spec_decode.ngram_proposer import \
     NgramProposer as VllmNgramProposer
 
@@ -23,7 +24,9 @@ class NgramProposer(VllmNgramProposer, Proposer):
                   with_prefill=None,
                   skip_attn=None,
                   num_reqs=None,
-                  num_tokens_across_dp=None):
+                  num_tokens_across_dp=None,
+                  aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+                  batch_descriptor=None):
         pass
 
     def generate_token_ids(self,
