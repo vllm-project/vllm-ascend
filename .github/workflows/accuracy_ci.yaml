@@ -14,27 +14,11 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
-# This test will be triggered:
-# 1. PR labeled with: '*accuracy-test' (ONLY 1 label valid) & 'ready-for-test'
-# 2. workflow_dispatch with models input
-# See detail rule in strategy.matrix note
-name: ascend test / accuracy-report
+name: Benchmarks / accuracy-ci
 
 on:
-  pull_request:
-    types: [ labeled ]
-  workflow_dispatch:
-    inputs:
-      vllm-ascend-version:
-        description: 'vllm-ascend:'
-        required: true
-        type: choice
-        # Current supported vLLM versions
-        options:
-          - latest
-          - main
-        default: main
+  schedule:
+    - cron: '0 */6 * * *'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -50,38 +34,35 @@ concurrency:
 
 jobs:
   accuracy_tests:
-    # test will be triggered when tag '*-accuracy-test' & 'ready-for-test' or workflow_dispatch job
-    if:  >-
-      ${{
-      contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
-      contains(github.event.pull_request.labels.*.name, 'ready-for-test') ||
-      github.event_name == 'workflow_dispatch'
-      }}
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
         include:
-          - model_name: Qwen3-8B
-            runner: linux-aarch64-a2-1
           - model_name: Qwen2.5-VL-7B-Instruct
             runner: linux-aarch64-a2-1
           - model_name: Qwen3-30B-A3B
             runner: linux-aarch64-a2-2
           - model_name: DeepSeek-V2-Lite
             runner: linux-aarch64-a2-2
+          - model_name: Qwen3-8B
+            runner: linux-aarch64-a2-1
+          - model_name: Qwen2-VL-7B-Instruct
+            runner: linux-aarch64-a2-1
+          - model_name: Qwen2-7B
+            runner: linux-aarch64-a2-1
+          - model_name: Qwen2-Audio-7B-Instruct
+            runner: linux-aarch64-a2-1
       fail-fast: false
-
     name: ${{ matrix.model_name }} accuracy
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      image: >-
+        ${{
+          contains(matrix.runner, '310p')
+          && 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-310p-ubuntu22.04-py3.11'
+          ||  'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11'
+        }}
       env:
         VLLM_USE_MODELSCOPE: True
-        # 1. If version specified (work_dispatch), do specified branch accuracy test
-        # 2. If no version (labeled PR), do accuracy test by default ref:
-        # The branch, tag or SHA to checkout. When checking out the repository that
-        # triggered a workflow, this defaults to the reference or SHA for that event.
-        # Otherwise, uses the default branch.
-        GHA_VLLM_ASCEND_VERSION: ${{ github.event.inputs.vllm-ascend-version }}
 
     steps:
       - name: Checkout repository
@@ -109,7 +90,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
-          ref: v0.11.0rc3
+          ref: v0.10.2
           path: ./vllm-empty
 
       - name: Install vllm-project/vllm from source
@@ -117,35 +98,22 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
 
-      - name: Resolve vllm-ascend version
-        run: |
-          VERSION_INPUT="${{ github.event.inputs.vllm-ascend-version }}"
-          
-          if [[ "$VERSION_INPUT" == "latest" ]]; then
-            TAGS=$(git ls-remote --tags --sort=-v:refname https://github.com/vllm-project/vllm-ascend "v*" | cut -f2 | sed 's|refs/tags/||')
-            LATEST_TAG=$(echo "$TAGS" | head -n1)
-            if [[ -z "$LATEST_TAG" ]]; then
-              RESOLVED_VERSION="main"
-            else
-              RESOLVED_VERSION="$LATEST_TAG"
-            fi
-          else
-            RESOLVED_VERSION="$VERSION_INPUT"
-          fi
-          echo "GHA_VLLM_ASCEND_VERSION=$RESOLVED_VERSION" >> $GITHUB_ENV
-
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm-ascend
           path: ./vllm-ascend
-          ref: ${{ env.GHA_VLLM_ASCEND_VERSION }}
 
       - name: Install vllm-project/vllm-ascend
         working-directory: ./vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
+          runner="${{ matrix.runner }}"
+          # If runner indicates 310p, set SOC_VERSION and LD_LIBRARY_PATH before install
+          if [[ "$runner" == *310p* ]]; then
+            export SOC_VERSION=ASCEND310P3
+          fi
           pip install -r requirements-dev.txt
           pip install -v -e .
 
@@ -220,100 +188,3 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
           overwrite: true
-
-    outputs:
-      model_name: ${{ steps.set_output.outputs.model_name }}
-      vllm_ascend_version: ${{ env.GHA_VLLM_ASCEND_VERSION }} 
-
-  create_pr:
-    runs-on: ubuntu-latest
-    needs: accuracy_tests
-    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.vllm-ascend-version == 'latest' }}
-    env:
-      UPSTREAM_REPO: vllm-project/vllm-ascend
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-ascend-ci/vllm-ascend
-          token: ${{ secrets.PAT_TOKEN }}
-          ref: main
-      
-      - name: Add upstream remote
-        run: |
-          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
-          git fetch upstream
-          git remote -v
-
-      - name: Set Git user info dynamically
-        run: |
-          git config user.name "${{ github.actor }}"
-          git config user.email "${{ github.actor }}@users.noreply.github.com"
-
-      - name: Create or switch to branch
-        run: |
-          TIMESTAMP=$(date +%Y%m%d%H%M%S)
-          BRANCH_NAME="auto-pr/accuracy-report-${TIMESTAMP}"
-          echo "BRANCH_NAME=${BRANCH_NAME}" >> $GITHUB_ENV
-          git checkout -B "${BRANCH_NAME}" upstream/main
-
-      - name: Download only current run reports
-        uses: actions/download-artifact@v5
-        with:
-          path: ./docs/source/developer_guide/evaluation/accuracy_report
-          pattern: report-*
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.run_id }}
-
-      - name: Delete old report
-        run: |
-          find ./docs/source/developer_guide/evaluation/accuracy_report -maxdepth 1 -type f -name '*.md' ! -name 'index.md' -delete
-          find ./docs/source/developer_guide/evaluation/accuracy_report -mindepth 2 -type f -name '*.md' -exec mv -f {} ./docs/source/developer_guide/evaluation/accuracy_report \;
-          find ./docs/source/developer_guide/evaluation/accuracy_report -mindepth 1 -type d -empty -delete
-      
-      - name: Update accuracy_report/index.md
-        run: |
-          REPORT_DIR="./docs/source/developer_guide/evaluation/accuracy_report"
-          INDEX_MD="$REPORT_DIR/index.md"
-          {
-            echo "# Accuracy Report"
-            echo ""
-            echo ":::{toctree}"
-            echo ":caption: Accuracy Report"
-            echo ":maxdepth: 1"
-            
-            for report in "$REPORT_DIR"/*.md; do
-              filename="$(basename "$report" .md)"
-              if [ "$filename" != "index" ]; then
-                echo "$filename"
-              fi
-            done
-            echo ":::"
-          } > "$INDEX_MD"
-
-      - name: push accuracy report
-        env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
-        run: |
-          git add ./docs/source/developer_guide/evaluation/accuracy_report/*.md
-          git commit -s -m "[Doc] Update accuracy reports for ${{ needs.accuracy_tests.outputs.vllm_ascend_version }}"
-          git push -f origin "${{ env.BRANCH_NAME }}"
-
-      - name: Create PR in upstream via API
-        uses: actions/github-script@v8
-        with:
-          github-token: ${{ secrets.PAT_TOKEN }}
-          script: |
-            const pr = await github.rest.pulls.create({
-              owner: 'vllm-project',
-              repo: 'vllm-ascend',
-              head: `vllm-ascend-ci:${{ env.BRANCH_NAME }}`,
-              base: 'main',
-              title: `[Doc] Update accuracy reports for ${{ needs.accuracy_tests.outputs.vllm_ascend_version }}`,
-              body: `The accuracy results running on NPU Altlas A2 have changed, updating reports for: All models (Qwen3-30B-A3B, Qwen2.5-VL-7B-Instruct, Qwen3-8B-Base, DeepSeek-V2-Lite)
-            
-              - [Workflow run][1]
-              
-              [1]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
-            });
-            core.info(`Created PR #${pr.data.number}`);
