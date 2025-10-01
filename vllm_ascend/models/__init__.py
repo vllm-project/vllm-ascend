@@ -58,3 +58,7 @@ def register_model():
     ModelRegistry.register_model(
         "Qwen3NextForCausalLM",
         "vllm_ascend.models.qwen3_next:CustomQwen3NextForCausalLM")
+
+    ModelRegistry.register_model(
+        "LongcatFlashForCausalLM", 
+        "vllm_ascend.models.longcat_flash:CustomLongcatFlashForCausalLM")

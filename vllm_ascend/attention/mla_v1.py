@@ -12,6 +12,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm_ascend.ops.rotary_embedding import AscendDeepseekScalingRotaryEmbedding
 from vllm.utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 
@@ -305,17 +306,32 @@ class AscendMLAMetadataBuilder:
         input_positions = common_attn_metadata.positions[:
                                                          num_actual_tokens].long(
                                                          )
-
-        if self.cos_cache is None:
-            self.cos_cache = model.model.layers[
-                0].self_attn.rotary_emb.cos_cached
-            self.sin_cache = model.model.layers[
-                0].self_attn.rotary_emb.sin_cached
-        if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
-            self.cos_cache = self.cos_cache.to(  # type: ignore
-                self.model_config.dtype)  # type: ignore
-            self.sin_cache = self.sin_cache.to(  # type: ignore
-                self.model_config.dtype)  # type: ignore
+        # 需要针对longcat flash模型进行特殊处理，longcat flash模型使用Deepseek MLA，
+        # 但不支持DeepseekScalingRotaryEmbedding
+        is_deepseek_scaling_rotary_embedding = hasattr(
+            model.model.layers[0].self_attn,"rotary_emb") and isinstance(
+            model.model.layers[0].self_attn.rotary_emb,
+            AscendDeepseekScalingRotaryEmbedding)
+        print("+++++++++++++++++is_deepseek_scaling_rotary_embedding++++++++++++++++++++", is_deepseek_scaling_rotary_embedding)
+        if is_deepseek_scaling_rotary_embedding:
+            if self.cos_cache is None:
+                self.cos_cache = model.model.layers[0].self_attn.rotary_emb.cos_cached
+                self.sin_cache = model.model.layers[0].self_attn.rotary_emb.sin_cached
+            if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
+                self.cos_cache = self.cos_cache.to(  # type: ignore
+                    self.model_config.dtype)  # type: ignore
+                self.sin_cache = self.sin_cache.to(  # type: ignore
+                    self.model_config.dtype)  # type: ignore
+        else:
+            # 对于longcat flash模型，每层有两个attention module，需要特殊处理
+            if isinstance(model.model.layers[0].self_attn, nn.ModuleList):
+                self.cos_sin_cache = model.model.layers[0].self_attn[0].rotary_emb.cos_sin_cache
+            else:
+                self.cos_sin_cache = model.model.layers[0].self_attn.rotary_emb.cos_sin_cache
+            if self.cos_sin_cache.dtype != self.model_config.dtype:  # type: ignore
+                self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
+                    self.model_config.dtype)  # type: ignore
+            print("+++++++++++cos_sin_cache.shape++++++++++++", self.cos_sin_cache.shape)
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         query_lens = query_seq_lens_cpu[:num_reqs]
@@ -366,12 +382,26 @@ class AscendMLAMetadataBuilder:
                     workspace=self.chunked_prefill_workspace,
                 )
             prefill_input_positions = input_positions[tokens_start:]
-            cos = self.cos_cache[
-                prefill_input_positions].unsqueeze(  # type: ignore
-                    1).unsqueeze(2)
-            sin = self.sin_cache[
-                prefill_input_positions].unsqueeze(  # type: ignore
-                    1).unsqueeze(2)
+            if is_deepseek_scaling_rotary_embedding:
+                cos = self.cos_cache[
+                    prefill_input_positions].unsqueeze(  # type: ignore
+                        1).unsqueeze(2)
+                sin = self.sin_cache[
+                    prefill_input_positions].unsqueeze(  # type: ignore
+                        1).unsqueeze(2)
+            else:
+                print("+++++++++++input_positions.shape++++++++++++", input_positions.shape)
+                print("+++++++++++input_positions.flatten().shape++++++++++++", input_positions.flatten().shape)
+                print("+++++++++++prefill_input_positions.shape++++++++++++", prefill_input_positions.shape)
+                cos_sin = self.cos_sin_cache.index_select(0, prefill_input_positions.flatten())
+                #cos, sin = cos_sin.chunk(2, dim=-1)
+                #cos = cos.unsqueeze(1).unsqueeze(2)
+                #sin = sin.unsqueeze(1).unsqueeze(2)
+                #B, N, S, D = cos.shape
+                #cos = cos.view(B, N, S, 64)
+                #sin = sin.view(B, N, S, 64)
+                cos = cos_sin.unsqueeze(1).unsqueeze(2)
+                sin = cos_sin.unsqueeze(1).unsqueeze(2)
             prefill_metadata = AscendMLAPrefillMetadata(
                 attn_mask=common_attn_metadata.attn_mask,
                 query_lens=query_lens[reqs_start:],
@@ -397,10 +427,23 @@ class AscendMLAMetadataBuilder:
             block_table = block_table[:num_decodes, ...]
             seq_lens_list = seq_lens.tolist()
 
-            cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
-                1).unsqueeze(2)
-            sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
-                1).unsqueeze(2)
+            cos = None
+            sin = None
+            if is_deepseek_scaling_rotary_embedding:
+                cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
+                    1).unsqueeze(2)
+                sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
+                    1).unsqueeze(2)
+            else:
+                cos_sin = self.cos_sin_cache.index_select(0, input_positions.flatten())
+                #cos, sin = cos_sin.chunk(2, dim=-1)
+                #cos = cos.unsqueeze(1).unsqueeze(2)
+                #sin = sin.unsqueeze(1).unsqueeze(2)
+                #B, N, S, D = cos.shape
+                #cos = cos.view(B, N, S, 64)
+                #sin = sin.view(B, N, S, 64)
+                cos = cos_sin.unsqueeze(1).unsqueeze(2)
+                sin = cos_sin.unsqueeze(1).unsqueeze(2)
 
             decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions,
@@ -781,6 +824,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
+        print("+++++++++++++x.shape+++++++++++++", x.shape)
+        print("+++++++++++++cos.shape+++++++++++++", cos.shape)
+        print("+++++++++++++sin.shape+++++++++++++", sin.shape)
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
