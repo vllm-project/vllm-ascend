@@ -95,8 +95,8 @@ Run the following command to start the container in each node(This guide suppose
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-# export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
-export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
+# export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp
+export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -132,6 +132,9 @@ docker run --rm \
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
+# openEuler:
+# export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-openeuler-deepseek-v3.2-exp
+# Ubuntu:
 # export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
 export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
 export NAME=vllm-ascend
@@ -173,10 +176,6 @@ docker run --rm \
 
 ::::
 :::::
-
-:::{note}
-We also provide openEuler based image, just need to replace `IMAGE` to `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-openeuler-deepseek-v3.2-exp`
-:::
 
 :::::{tab-set}
 ::::{tab-item} DeepSeek-V3.2-Exp A3 series
