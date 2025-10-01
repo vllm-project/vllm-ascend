@@ -10,6 +10,7 @@ from vllm_ascend.ops.moe.experts_selector import (_native_grouped_topk,
 from vllm_ascend.quantization.w8a8 import (AscendC8KVCacheMethod,
                                            AscendW8A8FusedMoEMethod,
                                            AscendW8A8LinearMethod,
+                                           _maybe_prefetch_with_quant_impl,
                                            fused_experts, fused_experts_310p,
                                            quant_per_tensor)
 
@@ -68,10 +69,10 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.assertEqual(params['weight_scale'].shape, (10, 1))
         self.assertEqual(params['weight_offset'].shape, (10, 1))
 
-    @patch("vllm_ascend.quantization.w8a8.quant_per_tensor")
+    @patch("torch.ops.vllm.maybe_prefetch_with_quant")
     @patch("torch_npu.npu_quant_matmul")
     def test_apply_with_x_not_int8(self, mock_npu_quant_matmul,
-                                   mock_quant_per_tensor):
+                                   mock_maybe_prefetch_with_quant):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
         layer.aclnn_input_offset = 0.2
@@ -80,10 +81,8 @@ class TestAscendW8A8LinearMethod(TestBase):
 
         x = torch.randn(32, 128)
         bias = torch.randn(256)
-        mock_quant_per_tensor.return_value = torch.randint(-128,
-                                                           127,
-                                                           x.shape,
-                                                           dtype=torch.int8)
+        mock_maybe_prefetch_with_quant.return_value = torch.randint(
+            -128, 127, x.shape, dtype=torch.int8)
 
         expected_y_output = torch.randn(32, 256)
         mock_npu_quant_matmul.return_value = expected_y_output
@@ -93,8 +92,10 @@ class TestAscendW8A8LinearMethod(TestBase):
         expected_y_output += bias
         self.assertTrue(torch.equal(output, expected_y_output))
 
+    @patch("torch.ops.vllm.maybe_prefetch_with_quant")
     @patch("torch_npu.npu_quant_matmul")
-    def test_apply_with_x_is_int8(self, mock_npu_quant_matmul):
+    def test_apply_with_x_is_int8(self, mock_npu_quant_matmul,
+                                  mock_maybe_prefetch_with_quant):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
         layer.aclnn_input_offset = 0.2
@@ -103,6 +104,8 @@ class TestAscendW8A8LinearMethod(TestBase):
 
         x = torch.randint(-128, 127, (32, 128), dtype=torch.int8)
         bias = torch.randn(256)
+        mock_maybe_prefetch_with_quant.return_value = torch.randint(
+            -128, 127, x.shape, dtype=torch.int8)
 
         expected_y_output = torch.randn(32, 256)
         mock_npu_quant_matmul.return_value = expected_y_output
@@ -112,8 +115,11 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.assertTrue(torch.equal(output, expected_y_output))
 
     @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=True)
+    @patch("torch.ops.vllm.maybe_prefetch_with_quant")
     @patch("torch_npu.npu_quant_matmul")
-    def test_apply_with_x_is_310p(self, mock_npu_quant_matmul, mock_is_310p):
+    def test_apply_with_x_is_310p(self, mock_npu_quant_matmul,
+                                  mock_maybe_prefetch_with_quant,
+                                  mock_is_310p):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
         layer.aclnn_input_offset = 0.2
@@ -122,6 +128,8 @@ class TestAscendW8A8LinearMethod(TestBase):
 
         x = torch.randint(-128, 127, (32, 128), dtype=torch.int8)
         bias = torch.randn(256)
+        mock_maybe_prefetch_with_quant.return_value = torch.randint(
+            -128, 127, x.shape, dtype=torch.int8)
 
         expected_y_output = torch.randn(32, 256)
         mock_npu_quant_matmul.return_value = expected_y_output
@@ -928,3 +936,54 @@ class TestNativeGroupedTopkPartialMock(TestBase):
                                           num_expert_group=1,
                                           topk_group=1)
             self.assertTrue(result.numel() > 0)
+
+
+class TestMaybePrefetchWithQuantImpl(TestBase):
+
+    def setUp(self) -> None:
+        self.weight = torch.randint(-128, 127, (128, 128), dtype=torch.int8)
+        self.scale = torch.tensor(0.1)
+        self.offset = torch.tensor(0)
+
+    @patch("vllm_ascend.quantization.w8a8.quant_per_tensor")
+    @patch("vllm_ascend.quantization.w8a8.get_forward_context")
+    def test_maybe_prefetch_with_quant_impl_with_not_int8(
+        self,
+        mock_get_forward_context,
+        mock_quant_per_tensor,
+    ) -> None:
+        mock_forward_context = MagicMock()
+        mock_get_forward_context.return_value = mock_forward_context
+        mock_weight_prefetch_method = MagicMock()
+        mock_forward_context.weight_prefetch_method = mock_weight_prefetch_method
+
+        hidden_states = torch.randn(32, 128, dtype=torch.bfloat16)
+        expected_output = torch.randint(-128, 127, (32, 128), dtype=torch.int8)
+        mock_quant_per_tensor.return_value = expected_output
+
+        output = _maybe_prefetch_with_quant_impl(
+            layer_cls_name="AscendQKVParallelLinear",
+            hidden_states=hidden_states,
+            weight=self.weight,
+            scale=self.scale,
+            offset=self.offset,
+        )
+
+        self.assertTrue(torch.equal(output, expected_output))
+        mock_weight_prefetch_method.maybe_prefetch_attn_weight_preprocess.assert_called_once(
+        )
+        mock_weight_prefetch_method.maybe_prefetch_attn_weight_postprocess.assert_called_once(
+        )
+
+    def test_maybe_prefetch_with_quant_impl_with_int8(self) -> None:
+        hidden_states = torch.randint(-128, 127, (32, 128), dtype=torch.int8)
+
+        output = _maybe_prefetch_with_quant_impl(
+            layer_cls_name="FakeLinear",
+            hidden_states=hidden_states,
+            weight=self.weight,
+            scale=self.scale,
+            offset=self.offset,
+        )
+
+        self.assertTrue(torch.equal(output, hidden_states))
