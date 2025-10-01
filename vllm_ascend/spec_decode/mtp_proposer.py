@@ -70,6 +70,7 @@ class MtpProposer(Proposer):
                                    dtype=torch.int32)
 
     def load_model(self, model) -> None:
+        main_model = model
         loader = get_model_loader(self.vllm_config.load_config)
 
         target_attn_layer_names = set(
@@ -103,6 +104,11 @@ class MtpProposer(Proposer):
                 self.model))
         process_weights_after_loading(self.model, draft_model_config,
                                       target_device)
+
+        # use main model's embedding and LMhead
+        self.model.model.embed_tokens = main_model.model.embed_tokens
+        for layer_module in self.model.model.layers.values():
+            layer_module.shared_head.head = main_model.lm_head
 
     @torch.inference_mode()
     def dummy_run(self,
