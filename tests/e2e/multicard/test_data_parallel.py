@@ -32,7 +32,10 @@ MODELS = ["Qwen/Qwen3-0.6B", "Qwen/Qwen3-30B-A3B"]
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
+@patch.dict(os.environ, {
+    "ASCEND_RT_VISIBLE_DEVICES": "0,1",
+    "HCCL_BUFFSIZE": "500"
+})
 def test_data_parallel_inference(model, max_tokens):
     script = "examples/offline_data_parallel.py"
 
