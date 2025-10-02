@@ -32,6 +32,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -240,6 +241,10 @@ class KVCacheRecvingThread(threading.Thread):
             defaultdict(dict)
         self.block_len = block_len
 
+        # TODO(jianzs): find a better way to detect MLA.
+        self.use_mla = len(block_len) == 2
+        self.use_sfa = len(block_len) == 3
+
         self.request_queue: queue.Queue[Any] = queue.Queue()
         max_workers = getattr(envs_ascend, 'MAX_TRANSFER_WORKERS', 32)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -366,7 +371,13 @@ class KVCacheRecvingThread(threading.Thread):
         src_list, dst_list, length_list = [], [], []
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
                 zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)):
-            block_len = self.block_len[k % 2]
+
+            if self.use_mla:
+                block_len = (self.block_len[k % 2])
+            elif self.use_sfa:
+                block_len = (self.block_len[k % 3])
+            else:
+                block_len = (self.block_len[0])
             inner_block_len = block_len // self.num_need_pulls
             for remote_block_id, local_block_id in zip(grouped_remote_block_ids, grouped_local_block_ids):
                 src = src_layer_base_addr + local_block_id[0] * block_len + offset * inner_block_len
@@ -665,6 +676,7 @@ class MooncakeConnectorScheduler:
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
+        self.ascend_config = get_ascend_config()
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
         self.local_ip = get_ip()
@@ -826,7 +838,7 @@ class MooncakeConnectorScheduler:
         assert "tp_size" in decode_parallel_config.keys()
         self._decode_tp_size = decode_parallel_config["tp_size"]
         num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
-        if self.vllm_config.model_config.is_deepseek_mla:
+        if self.vllm_config.model_config.use_mla or self.ascend_config.use_sfa:
             num_need_pulls = 1
         else:
             num_p_block_heads = max(1, num_key_value_heads // self._prefill_tp_size)
@@ -963,22 +975,51 @@ class MooncakeConnectorWorker:
         first_kv_cache = first_kv_cache_tuple[0]
 
         # TODO(tms): Find a more robust way to detect and handle MLA
-        self.num_blocks = first_kv_cache.shape[0]
-        block_rank = len(first_kv_cache_tuple[0].shape) - 1
-        kv_elem_size = first_kv_cache.element_size()
-        # MLA case.[num_block, block_size, 1, hidden_dims],
-        # block_shape_1 -> nope, block_shape_2 -> rope
-        # non-MLA case.[num_block, block_size, num_heads, head_dims]
-        # block_shape_1 -> k, block_shape_1 -> v
-        block_shape_1 = first_kv_cache_tuple[0].shape[-block_rank:]
-        block_shape_2 = first_kv_cache_tuple[1].shape[-block_rank:]
-        self.block_len = [
-            kv_elem_size * math.prod(block_shape_1),
-            kv_elem_size * math.prod(block_shape_2)
-        ]
-        logger.debug(
-            "num_blocks: %s, block_shape_1: %s, block_shape_2: %s",
-            self.num_blocks, block_shape_1, block_shape_1)
+        self.use_mla = first_kv_cache_tuple[0].size(
+            -1) != first_kv_cache_tuple[1].size(-1) and len(
+                first_kv_cache_tuple) == 2
+        self.use_sfa = len(first_kv_cache_tuple) == 3
+        if self.use_mla:
+            # MLA case.[num_block, block_size, 1, hidden_dim]
+            self.num_blocks = first_kv_cache.shape[0]
+            block_rank = 3  # [block_size, latent_dim]
+            block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
+            block_shape_pe = first_kv_cache_tuple[1].shape[-block_rank:]
+            self.block_len = [
+                first_kv_cache[0].element_size() * math.prod(block_shape_norm),
+                first_kv_cache[1].element_size() * math.prod(block_shape_pe)
+            ]
+            logger.info(
+                "num_blocks: %s, block_shape_norm: %s, block_shape_pe: %s",
+                self.num_blocks, block_shape_norm, block_shape_pe)
+        elif self.use_sfa:
+            self.num_blocks = first_kv_cache.shape[0]
+            block_rank = 3  # [block_size, latent_dim]
+            block_shape_norm = first_kv_cache_tuple[0].shape[-block_rank:]
+            block_shape_pe = first_kv_cache_tuple[1].shape[-block_rank:]
+            block_shape_k = first_kv_cache_tuple[2].shape[-block_rank:]
+            self.block_len = [
+                first_kv_cache[0].element_size() * math.prod(block_shape_norm),
+                first_kv_cache[1].element_size() * math.prod(block_shape_pe),
+                first_kv_cache[2].element_size() * math.prod(block_shape_k)
+            ]
+            logger.info(
+                "num_blocks: %s, block_shape_norm: %s, block_shape_pe: %s, block_shape_k: %s",
+                self.num_blocks, block_shape_norm, block_shape_pe,
+                block_shape_k)
+        else:
+            # [num_block, block_size, num_head, hidden_dim]
+            self.num_blocks = first_kv_cache.shape[0]
+            kv_elem_size = first_kv_cache.element_size()
+            block_rank = 3  # [block_size, kv_heads, head_dim]
+            block_shape = first_kv_cache.shape[-block_rank:]
+            self.block_len = [kv_elem_size * math.prod(block_shape)]
+            logger.info("num_blocks: %s, block_shape: %s", self.num_blocks,
+                        block_shape)
+
+        logger.info(
+            "Registering KV_Caches. use_mla: %s, use_sfa: %s, shape %s",
+            self.use_mla, self.use_sfa, first_kv_cache.shape)
 
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
@@ -986,13 +1027,28 @@ class MooncakeConnectorWorker:
         region_len_2 = self.num_blocks * self.block_len[1]
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
-            assert len(cache_or_caches) == 2, "per-layer kv_caches must equal to 2"
-            base_addr_1 = cache_or_caches[0].data_ptr()
-            base_addr_2 = cache_or_caches[1].data_ptr()
-            kv_caches_base_addr.append(base_addr_1)
-            self._register(base_addr_1, region_len_1)
-            kv_caches_base_addr.append(base_addr_2)
-            self._register(base_addr_2, region_len_2)
+
+            if self.use_mla:
+                for i, cache in enumerate(cache_or_caches, 0):
+                    base_addr = cache.data_ptr()
+                    region_len = self.num_blocks * self.block_len[i % 2]
+                    kv_caches_base_addr.append(base_addr)
+                    self._register(base_addr, region_len)
+            elif self.use_sfa:
+                for i, cache in enumerate(cache_or_caches, 0):
+                    base_addr = cache.data_ptr()
+                    region_len = self.num_blocks * self.block_len[i % 3]
+                    kv_caches_base_addr.append(base_addr)
+                    self._register(base_addr, region_len)
+            else:
+                cache_list = [
+                    cache_or_caches
+                ] if self.use_mla or self.use_sfa else cache_or_caches
+                for cache in cache_list:
+                    base_addr = cache.data_ptr()
+                    region_len = self.num_blocks * self.block_len[0]
+                    kv_caches_base_addr.append(base_addr)
+                    self._register(base_addr, region_len)
 
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(

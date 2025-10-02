@@ -16,6 +16,7 @@
 #
 
 import gc
+import os
 from datetime import timedelta
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -211,7 +212,7 @@ class NPUPlatform(Platform):
         vllm_config._set_cudagraph_sizes()
 
         # TODO: Full graph is fully supported later, and the default value will be set to full graph.
-        if not vllm_version_is("v0.10.2"):
+        if not vllm_version_is("0.10.2"):
             if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
@@ -260,6 +261,8 @@ class NPUPlatform(Platform):
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
         if parallel_config and parallel_config.worker_cls == "auto":
+            # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
+            os.environ["VLLM_ALL2ALL_BACKEND"] = "flashinfer_all2allv"
             if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
@@ -297,6 +300,7 @@ class NPUPlatform(Platform):
                              block_size,
                              use_v1,
                              use_mla,
+                             use_sfa,
                              has_sink=False):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
@@ -304,21 +308,28 @@ class NPUPlatform(Platform):
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:
-            return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
+            if use_mla and not use_sfa:
+                return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
+            if use_mla and use_sfa:
+                return "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend"
 
         use_torchair = ascend_config.torchair_graph_config.enabled
         # choose attention backend based on use_mla and use_torchair
         backend_map = {
-            (True, True):
+            (True, False, True):
             "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend",
-            (True, False):
+            (True, False, False):
             "vllm_ascend.attention.mla_v1.AscendMLABackend",
-            (False, True):
+            (False, False, True):
             "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend",
-            (False, False):
-            "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+            (False, False, False):
+            "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+            (True, True, False):
+            "vllm_ascend.attention.sfa_v1.AscendSFABackend",
+            (True, True, True):
+            "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend",
         }
-        return backend_map[(use_mla, use_torchair)]
+        return backend_map[(use_mla, use_sfa, use_torchair)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

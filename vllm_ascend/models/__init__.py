@@ -38,6 +38,10 @@ def register_model():
         "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
 
     ModelRegistry.register_model(
+        "DeepseekV32ForCausalLM",
+        "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
+
+    ModelRegistry.register_model(
         "DeepSeekMTPModel",
         "vllm_ascend.models.deepseek_mtp:CustomDeepSeekMTP")
 

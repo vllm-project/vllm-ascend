@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import os
 import random
 from typing import Any
 
@@ -9,8 +8,6 @@ import pytest
 from vllm import LLM, SamplingParams
 
 from tests.e2e.conftest import VllmRunner
-
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 @pytest.fixture
