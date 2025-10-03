@@ -254,9 +254,22 @@ class AscendLinearMethod(LinearMethodBase):
         weight_dict = self.quant_method.get_weight(input_size_per_partition,
                                                    output_size_per_partition,
                                                    params_dtype)
+
+        # Extract packing information (if present)
+        packed_dim = weight_dict.pop("_packed_dim", None)
+        packed_factor = weight_dict.pop("_packed_factor", None)
+
         for weight_name, weight_param in weight_dict.items():
             param = torch.nn.Parameter(weight_param, requires_grad=False)
             set_weight_attrs(param, {"input_dim": 1, "output_dim": 0})
+
+            # Set packing attributes if the weight is packed
+            if packed_dim is not None and packed_factor is not None:
+                set_weight_attrs(param, {
+                    "packed_dim": packed_dim,
+                    "packed_factor": packed_factor
+                })
+
             layer.register_parameter(weight_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
