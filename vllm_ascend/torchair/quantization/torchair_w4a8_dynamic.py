@@ -98,11 +98,7 @@ class TorchairAscendW4A8DynamicLinearMethod:
                                                           dtype=params_dtype)
 
         if self.new_quant_version:
-            if layer_type == "row":
-                scale_bias_dim = 16 // self.tp_size
-            else:
-                scale_bias_dim = 1
-            
+            scale_bias_dim = 16 if layer_type == "row" else 1
             params_dict["scale_bias"] = torch.empty(output_size,
                                                     scale_bias_dim,
                                                     dtype=torch.float32)

@@ -93,7 +93,9 @@ class AscendW4A8DynamicLinearMethod:
             input_size: input dimension size
             output_size: output dimension size
             params_dtype: parameter data type
-            layer_type: layer type hint, can be "row" (down_proj/o_proj) or "column" (gate_up_proj/qkv_proj)
+            layer_type: "row" or "others" (default)
+                - "row": RowParallelLinear (down_proj, o_proj)
+                - "others": Others (ColumnParallel, ReplicatedLinear, etc.)
         """
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(output_size,
@@ -111,19 +113,11 @@ class AscendW4A8DynamicLinearMethod:
                                                           self.group_size,
                                                           dtype=params_dtype)
 
-        # ✅ New quantization version includes scale_bias parameters
-        # Shape depends on layer type:
-        # - ColumnParallel (gate_up_proj, qkv_proj): [output_size, 1]
-        # - RowParallel (down_proj, o_proj): [output_size, 16 // tp_size]
+        # NOTE: In w4a8 quantization implementation, 
+        # for down_proj and o_proj scale_bias shape is [output_size, 16], 
+        # others are [output_size, 1]
         if self.new_quant_version:
-            if layer_type == "row":
-                # RowParallel: down_proj, o_proj
-                # scale_bias shape: [output_size, 16 // tp_size]
-                scale_bias_dim = 16 // self.tp_size
-            else:
-                # ColumnParallel (default): gate_up_proj, qkv_proj
-                # scale_bias shape: [output_size, 1]
-                scale_bias_dim = 1
+            scale_bias_dim = 16 if layer_type == "row" else 1
             
             params_dict["scale_bias"] = torch.empty(output_size,
                                                     scale_bias_dim,

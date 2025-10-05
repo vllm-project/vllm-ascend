@@ -288,13 +288,10 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(perchannel_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
-        layer_type = None
-        if isinstance(layer, RowParallelLinear):
-            # down_proj, o_proj
-            layer_type = "row"
-        else:
-            # gate_up_proj, qkv_proj (ColumnParallel or MergedColumnParallel)
-            layer_type = "column"
+        # NOTE: In w4a8 quantization implementation, 
+        # for down_proj and o_proj scale_bias shape is [output_size, 16], 
+        # others are [output_size, 1]
+        layer_type = "row" if isinstance(layer, RowParallelLinear) else "others"
         
         pergroup_dict = self.quant_method.get_pergroup_param(
             input_size_per_partition, output_size_per_partition, params_dtype,
