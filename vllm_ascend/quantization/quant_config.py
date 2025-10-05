@@ -288,13 +288,16 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(perchannel_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
-        # NOTE: In w4a8 quantization implementation, 
-        # for down_proj and o_proj scale_bias shape is [output_size, 16], 
+        # NOTE: In w4a8 quantization implementation,
+        # for down_proj and o_proj scale_bias shape is [output_size, 16],
         # others are [output_size, 1]
-        layer_type = "row" if isinstance(layer, RowParallelLinear) else "others"
-        
+        layer_type = "row" if isinstance(layer,
+                                         RowParallelLinear) else "others"
+
         pergroup_dict = self.quant_method.get_pergroup_param(
-            input_size_per_partition, output_size_per_partition, params_dtype,
+            input_size_per_partition,
+            output_size_per_partition,
+            params_dtype,
             layer_type=layer_type)
         for pergroup_name, pergroup_param in pergroup_dict.items():
             param = torch.nn.Parameter(pergroup_param, requires_grad=False)

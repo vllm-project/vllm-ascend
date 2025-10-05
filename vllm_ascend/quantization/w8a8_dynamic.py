@@ -62,7 +62,9 @@ class AscendW8A8DynamicLinearMethod:
                                                    dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
                            params_dtype: torch.dtype,
                            layer_type: Optional[str] = None) -> Dict[str, Any]:
         return {}

@@ -36,14 +36,14 @@ class AscendW4A8DynamicLinearMethod:
 
     def __init__(self):
         self.transpose_weight = True
-        
+
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get(
             "group_size", 256)
         quant_version = vllm_config.quant_config.quant_description.get(
             "version", "0")
         self.new_quant_version = quant_version == "1.0.0"
-        
+
         from vllm.distributed import get_tensor_model_parallel_world_size
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -83,8 +83,10 @@ class AscendW4A8DynamicLinearMethod:
                              params_dtype: torch.dtype) -> Dict[str, Any]:
         return {}
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype, 
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
+                           params_dtype: torch.dtype,
                            layer_type: Optional[str] = None) -> Dict[str, Any]:
         """
         Create per-group quantization parameters.
@@ -105,12 +107,12 @@ class AscendW4A8DynamicLinearMethod:
                                                           self.group_size,
                                                           dtype=params_dtype)
 
-        # NOTE: In w4a8 quantization implementation, 
-        #       for down_proj and o_proj(layer_type == "row") scale_bias shape is [output_size, 16], 
+        # NOTE: In w4a8 quantization implementation,
+        #       for down_proj and o_proj(layer_type == "row") scale_bias shape is [output_size, 16],
         #       others are [output_size, 1]
         if self.new_quant_version:
             scale_bias_dim = 16 if layer_type == "row" else 1
-            
+
             params_dict["scale_bias"] = torch.empty(output_size,
                                                     scale_bias_dim,
                                                     dtype=torch.float32)
@@ -147,7 +149,7 @@ class AscendW4A8DynamicLinearMethod:
             weight_high = weight_high.reshape(k, n)
             bias = 8 * (weight_high.to(torch.float32) * scale).sum(dim=0)
         # NOTE: scale_bias is not used currently
-        #       because in msmodelslim w4a8 uses symmetric quantization 
+        #       because in msmodelslim w4a8 uses symmetric quantization
 
         # TODO: support potential future asymmetric quantization
         antiquant_scale = (scale * per_group_scale).reshape(group_num, n)

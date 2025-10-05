@@ -39,14 +39,14 @@ class TorchairAscendW4A8DynamicLinearMethod:
 
     def __init__(self):
         self.transpose_weight = True
-        
+
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get(
             "group_size", 256)
         quant_version = vllm_config.quant_config.quant_description.get(
             "version", "0")
         self.new_quant_version = quant_version == "1.0.0"
-        
+
         from vllm.distributed import get_tensor_model_parallel_world_size
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -78,8 +78,10 @@ class TorchairAscendW4A8DynamicLinearMethod:
                              params_dtype: torch.dtype) -> Dict[str, Any]:
         return {}
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype, 
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
+                           params_dtype: torch.dtype,
                            layer_type: Optional[str] = None) -> Dict[str, Any]:
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(output_size,
@@ -166,7 +168,8 @@ class TorchairAscendW4A8DynamicLinearMethod:
         if self.new_quant_version:
             assert layer.weight.data.shape[-1] % 4 == 0, \
                 f"the last dim of weight needs to be divided by 4, got shape {layer.weight.data.shape}"
-            layer.weight.data = layer.weight.data.view(torch.int32).contiguous()
+            layer.weight.data = layer.weight.data.view(
+                torch.int32).contiguous()
         else:
             layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(
                 layer.weight.data.to(torch.int32))
