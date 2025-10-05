@@ -30,9 +30,18 @@ from vllm import SamplingParams
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 QWEN_DENSE_MODELS = [
     "vllm-ascend/Qwen3-8B-W8A8", "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8"
+]
+
+QWEN_W4A8_OLD_VERSION_MODELS = [
+    "vllm-ascend/Qwen3-8B-W4A8",
+]
+
+QWEN_W4A8_NEW_VERSION_MODELS = [
+    "Anionex/Qwen3-1.7B-W4A8-V1",
 ]
 
 DEEPSEEK_W4A8_MODELS = [
@@ -98,20 +107,36 @@ def test_models_distributed_Qwen3_W8A8():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_models_distributed_Qwen3_W4A8DYNAMIC():
-    example_prompts = [
+@pytest.mark.parametrize("model", QWEN_W4A8_OLD_VERSION_MODELS)
+def test_models_distributed_W4A8DYNAMIC_old_version(model):
+    prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
-
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-8B-W4A8"),
+            snapshot_download(model),
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
     ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+        vllm_model.generate_greedy(prompts, max_tokens)
+
+
+@pytest.mark.parametrize("model", QWEN_W4A8_NEW_VERSION_MODELS)
+def test_models_distributed_W4A8DYNAMIC_new_version(model):
+    prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+            snapshot_download(model),
+            max_model_len=8192,
+            dtype="auto",
+            tensor_parallel_size=2,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(prompts, max_tokens)
 
 
 @pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
