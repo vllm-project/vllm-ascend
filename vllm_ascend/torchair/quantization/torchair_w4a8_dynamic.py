@@ -39,18 +39,34 @@ class TorchairAscendW4A8DynamicLinearMethod:
 
     def __init__(self):
         self.transpose_weight = True
-        try:
-            self.group_size = get_current_vllm_config(
-            ).quant_config.quant_description.get("group_size", 256)
-        except AttributeError:
-            self.group_size = 256
+        
+        vllm_config = get_current_vllm_config()
+        self.group_size = vllm_config.quant_config.quant_description.get(
+            "group_size", 256)
+        quant_version = vllm_config.quant_config.quant_description.get(
+            "version", "0")
+        self.new_quant_version = quant_version == "1.0.0"
+        
+        from vllm.distributed import get_tensor_model_parallel_world_size
+        self.tp_size = get_tensor_model_parallel_world_size()
 
-    @staticmethod
-    def get_weight(input_size: int, output_size: int,
+    def get_weight(self, input_size: int, output_size: int,
                    params_dtype: torch.dtype) -> Dict[str, Any]:
-        params_dict = {
-            "weight": torch.empty(output_size, input_size, dtype=torch.int8)
-        }
+        params_dict = {}
+
+        if self.new_quant_version:
+            pack_factor = 2
+            actual_output_size = output_size // pack_factor
+            params_dict["weight"] = torch.empty(actual_output_size,
+                                                input_size,
+                                                dtype=torch.int8)
+            params_dict["_packed_dim"] = 0
+            params_dict["_packed_factor"] = pack_factor
+        else:
+            params_dict["weight"] = torch.empty(output_size,
+                                                input_size,
+                                                dtype=torch.int8)
+
         return params_dict
 
     @staticmethod
@@ -63,7 +79,8 @@ class TorchairAscendW4A8DynamicLinearMethod:
         return {}
 
     def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype) -> Dict[str, Any]:
+                           params_dtype: torch.dtype, 
+                           layer_type: Optional[str] = None) -> Dict[str, Any]:
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(output_size,
                                                   1,
@@ -79,17 +96,36 @@ class TorchairAscendW4A8DynamicLinearMethod:
                                                           input_size //
                                                           self.group_size,
                                                           dtype=params_dtype)
+
+        if self.new_quant_version:
+            if layer_type == "row":
+                scale_bias_dim = 16 // self.tp_size
+            else:
+                scale_bias_dim = 1
+            
+            params_dict["scale_bias"] = torch.empty(output_size,
+                                                    scale_bias_dim,
+                                                    dtype=torch.float32)
         return params_dict
 
     @staticmethod
-    def process_scale_second(weight: torch.Tensor, scale: torch.Tensor,
-                             per_group_scale: torch.Tensor):
+    def process_scale_second(weight: torch.Tensor,
+                             scale: torch.Tensor,
+                             per_group_scale: torch.Tensor,
+                             is_new_quant: bool = False):
         k, n = weight.shape
-        group_num, n = per_group_scale.shape
-        weight_high = weight.to(torch.float32).reshape(
-            group_num, -1, n) * per_group_scale.reshape(group_num, 1, n)
-        weight_high = weight_high.reshape(k, n)
-        bias = 8 * (weight_high.to(torch.float32) * scale).sum(dim=0)
+        group_num, n_scale = per_group_scale.shape
+
+        if is_new_quant:
+            n = n * 2
+
+        bias = None
+        if not is_new_quant:
+            weight_high = weight.to(torch.float32).reshape(
+                group_num, -1, n) * per_group_scale.reshape(group_num, 1, n)
+            weight_high = weight_high.reshape(k, n)
+            bias = 8 * (weight_high.to(torch.float32) * scale).sum(dim=0)
+
         antiquant_scale = (scale * per_group_scale).reshape(group_num, n)
         return antiquant_scale.npu(), bias
 
@@ -117,11 +153,27 @@ class TorchairAscendW4A8DynamicLinearMethod:
             layer.weight.data,
             layer.weight_scale.data,
             layer.weight_scale_second.data.transpose(0, 1).contiguous(),
+            is_new_quant=self.new_quant_version,
         )
-        param = torch.nn.Parameter(scale_bias, requires_grad=False)
-        layer.register_parameter("weight_scale_bias", param)
-        layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(
-            layer.weight.data.to(torch.int32))
+
+        if self.new_quant_version:
+            if hasattr(layer, "scale_bias"):
+                if layer.scale_bias.data.shape[1] == 1:
+                    layer.scale_bias.data = layer.scale_bias.data.flatten()
+                else:
+                    layer.scale_bias.data = layer.scale_bias.data.contiguous()
+        else:
+            if scale_bias is not None:
+                param = torch.nn.Parameter(scale_bias, requires_grad=False)
+                layer.register_parameter("weight_scale_bias", param)
+
+        if self.new_quant_version:
+            assert layer.weight.data.shape[-1] % 4 == 0, \
+                f"the last dim of weight needs to be divided by 4, got shape {layer.weight.data.shape}"
+            layer.weight.data = layer.weight.data.view(torch.int32).contiguous()
+        else:
+            layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(
+                layer.weight.data.to(torch.int32))
 
 
 class TorchairAscendW4A8DynamicFusedMoEMethod:

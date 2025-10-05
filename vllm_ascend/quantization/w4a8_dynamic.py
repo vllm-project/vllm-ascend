@@ -36,18 +36,42 @@ class AscendW4A8DynamicLinearMethod:
 
     def __init__(self):
         self.transpose_weight = True
-        try:
-            self.group_size = get_current_vllm_config(
-            ).quant_config.quant_description.get("group_size", 256)
-        except AttributeError:
-            self.group_size = 256
+        
+        vllm_config = get_current_vllm_config()
+        self.group_size = vllm_config.quant_config.quant_description.get(
+            "group_size", 256)
+        quant_version = vllm_config.quant_config.quant_description.get(
+            "version", "0")
+        self.new_quant_version = quant_version == "1.0.0"
+        
+        from vllm.distributed import get_tensor_model_parallel_world_size
+        self.tp_size = get_tensor_model_parallel_world_size()
 
-    @staticmethod
-    def get_weight(input_size: int, output_size: int,
+    def get_weight(self, input_size: int, output_size: int,
                    params_dtype: torch.dtype) -> Dict[str, Any]:
-        params_dict = {
-            "weight": torch.empty(output_size, input_size, dtype=torch.int8)
-        }
+        """Create weight parameters.
+        
+        For new quantization version (double int4 pack into int8), the output dimension
+        is compressed by factor 2 (e.g., [2048, 3072] -> [1024, 3072]). The returned
+        dict includes "_packed_dim" and "_packed_factor" for vLLM's weight loader.
+        """
+        params_dict = {}
+
+        if self.new_quant_version:
+            # double int4 pack into int8: output dimension is compressed
+            pack_factor = 2
+            actual_output_size = output_size // pack_factor
+            params_dict["weight"] = torch.empty(actual_output_size,
+                                                input_size,
+                                                dtype=torch.int8)
+            # Add packing information for vLLM's weight_loader
+            params_dict["_packed_dim"] = 0
+            params_dict["_packed_factor"] = pack_factor
+        else:
+            params_dict["weight"] = torch.empty(output_size,
+                                                input_size,
+                                                dtype=torch.int8)
+
         return params_dict
 
     @staticmethod
@@ -60,7 +84,17 @@ class AscendW4A8DynamicLinearMethod:
         return {}
 
     def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype) -> Dict[str, Any]:
+                           params_dtype: torch.dtype, 
+                           layer_type: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Create per-group quantization parameters.
+        
+        Args:
+            input_size: input dimension size
+            output_size: output dimension size
+            params_dtype: parameter data type
+            layer_type: layer type hint, can be "row" (down_proj/o_proj) or "column" (gate_up_proj/qkv_proj)
+        """
         params_dict = {}
         params_dict["weight_scale"] = torch.empty(output_size,
                                                   1,
@@ -76,17 +110,60 @@ class AscendW4A8DynamicLinearMethod:
                                                           input_size //
                                                           self.group_size,
                                                           dtype=params_dtype)
+
+        # ✅ New quantization version includes scale_bias parameters
+        # Shape depends on layer type:
+        # - ColumnParallel (gate_up_proj, qkv_proj): [output_size, 1]
+        # - RowParallel (down_proj, o_proj): [output_size, 16 // tp_size]
+        if self.new_quant_version:
+            if layer_type == "row":
+                # RowParallel: down_proj, o_proj
+                # scale_bias shape: [output_size, 16 // tp_size]
+                scale_bias_dim = 16 // self.tp_size
+            else:
+                # ColumnParallel (default): gate_up_proj, qkv_proj
+                # scale_bias shape: [output_size, 1]
+                scale_bias_dim = 1
+            
+            params_dict["scale_bias"] = torch.empty(output_size,
+                                                    scale_bias_dim,
+                                                    dtype=torch.float32)
         return params_dict
 
     @staticmethod
-    def process_scale_second(weight: torch.Tensor, scale: torch.Tensor,
-                             per_group_scale: torch.Tensor):
+    def process_scale_second(weight: torch.Tensor,
+                             scale: torch.Tensor,
+                             per_group_scale: torch.Tensor,
+                             is_new_quant: bool = False):
+        """
+        Process the scale for second-level quantization.
+        
+        Args:
+            weight: weight tensor [k, n] (in new version, n is already compressed to n/2)
+            scale: first-level quantization scale [output_size]
+            per_group_scale: second-level per-group quantization scale [group_num, n_scale]
+            is_new_quant: whether it's the new quantization version (weight already compressed)
+        
+        Returns:
+            (antiquant_scale, bias): dequantization scale and bias (bias=None for new version)
+        """
         k, n = weight.shape
-        group_num, n = per_group_scale.shape
-        weight_high = weight.to(torch.float32).reshape(
-            group_num, -1, n) * per_group_scale.reshape(group_num, 1, n)
-        weight_high = weight_high.reshape(k, n)
-        bias = 8 * (weight_high.to(torch.float32) * scale).sum(dim=0)
+        group_num, n_scale = per_group_scale.shape
+
+        # For new quantization version, the second dimension of weight is already compressed (double int4 pack into int8)
+        # Need to restore the logical dimension to correctly compute the scale
+        if is_new_quant:
+            n = n * 2
+
+        bias = None
+        if not is_new_quant:
+            weight_high = weight.to(torch.float32).reshape(
+                group_num, -1, n) * per_group_scale.reshape(group_num, 1, n)
+            weight_high = weight_high.reshape(k, n)
+            bias = 8 * (weight_high.to(torch.float32) * scale).sum(dim=0)
+        # New version: scale_bias is not used currently
+        # because symmetric activation quantization is adopted in msIT for w4a8
+
         antiquant_scale = (scale * per_group_scale).reshape(group_num, n)
         return antiquant_scale.npu(), bias
 
@@ -114,11 +191,41 @@ class AscendW4A8DynamicLinearMethod:
             layer.weight.data,
             layer.weight_scale.data,
             layer.weight_scale_second.data.transpose(0, 1).contiguous(),
+            is_new_quant=self.new_quant_version,
         )
-        param = torch.nn.Parameter(scale_bias, requires_grad=False)
-        layer.register_parameter("weight_scale_bias", param)
-        layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(
-            layer.weight.data.to(torch.int32))
+
+        # ✅ Handle scale_bias based on quantization version
+        if self.new_quant_version:
+            # New version: scale_bias is loaded from checkpoint
+            # Process the loaded data based on layer type
+            if hasattr(layer, "scale_bias"):
+                # Detect layer type from shape
+                if layer.scale_bias.data.shape[1] == 1:
+                    # ColumnParallel (gate_up_proj, qkv_proj): [output_size, 1] -> flatten
+                    layer.scale_bias.data = layer.scale_bias.data.flatten()
+                else:
+                    # RowParallel (down_proj, o_proj): [output_size, 16//tp_size]
+                    # Keep 2D shape but make contiguous
+                    layer.scale_bias.data = layer.scale_bias.data.contiguous()
+        else:
+            # Old version: scale_bias is computed, register as parameter
+            if scale_bias is not None:
+                param = torch.nn.Parameter(scale_bias, requires_grad=False)
+                layer.register_parameter("weight_scale_bias", param)
+
+        # Convert to NPU-specific int4pack format
+        if self.new_quant_version:
+            # New version: weights on disk are already in double int4 pack into int8 format
+            # Refer to MoE's pack_to_int32 method: use view(torch.int32) instead of npu_convert_weight_to_int4pack
+            # pack 4 int8(int4*2) to int32
+            assert layer.weight.data.shape[-1] % 4 == 0, \
+                f"the last dim of weight needs to be divided by 4, got shape {layer.weight.data.shape}"
+            layer.weight.data = layer.weight.data.view(
+                torch.int32).contiguous()
+        else:
+            # Old version: weights are not compressed, need to be packed via npu_convert_weight_to_int4pack
+            layer.weight.data = torch_npu.npu_convert_weight_to_int4pack(
+                layer.weight.data.to(torch.int32))
 
 
 class AscendW4A8DynamicFusedMoEMethod:
