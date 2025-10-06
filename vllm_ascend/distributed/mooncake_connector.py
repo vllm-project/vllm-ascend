@@ -925,7 +925,7 @@ class MooncakeConnectorWorker:
         # kv_transfer variables
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        if self.vllm_config.model_config.is_deepseek_mla:
+        if self.vllm_config.model_config.is_deepseek_mla or self.ascend_config.use_sfa:
             self.num_need_pulls = 1
         else:
             num_d_block_heads = max(1, self.num_key_value_heads // self.tp_size)
@@ -1137,9 +1137,9 @@ class MooncakeConnectorWorker:
         sampled_nums = []
         ori_data = np.arange(self._prefill_tp_size)
         # random split prefill tp list
-        if self._prefill_tp_size > self.num_key_value_heads or self.vllm_config.model_config.is_deepseek_mla:
-            # ues deepseek mla, num_key_value_heads == 128, but consider as 1
-            if self.vllm_config.model_config.is_deepseek_mla:
+        if self._prefill_tp_size > self.num_key_value_heads or self.vllm_config.model_config.is_deepseek_mla or self.ascend_config.use_sfa:
+            # use deepseek mla, num_key_value_heads == 128, but consider as 1
+            if self.vllm_config.model_config.is_deepseek_mla or self.ascend_config.use_sfa:
                 num_kv_head = 1
             else:
                 num_kv_head = self.num_key_value_heads
