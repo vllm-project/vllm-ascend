@@ -869,6 +869,7 @@ class MooncakeConnectorWorker:
 
         # Metadata.
         self.vllm_config = vllm_config
+        self.ascend_config = get_ascend_config()
         self.engine_id = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
