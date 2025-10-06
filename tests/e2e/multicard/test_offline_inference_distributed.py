@@ -108,7 +108,7 @@ def test_models_distributed_Qwen3_W8A8():
 
 
 @pytest.mark.parametrize("model", QWEN_W4A8_OLD_VERSION_MODELS)
-def test_models_distributed_W4A8DYNAMIC_old_version(model):
+def test_models_distributed_Qwen3_W4A8DYNAMIC_old_version(model):
     prompts = [
         "Hello, my name is",
     ]
@@ -124,7 +124,7 @@ def test_models_distributed_W4A8DYNAMIC_old_version(model):
 
 
 @pytest.mark.parametrize("model", QWEN_W4A8_NEW_VERSION_MODELS)
-def test_models_distributed_W4A8DYNAMIC_new_version(model):
+def test_models_distributed_Qwen3_W4A8DYNAMIC_new_version(model):
     prompts = [
         "Hello, my name is",
     ]
