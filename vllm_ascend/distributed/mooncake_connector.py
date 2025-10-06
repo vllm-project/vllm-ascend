@@ -1108,6 +1108,7 @@ class MooncakeConnectorWorker:
             choosen_rank_list = self._get_remote_tp_rank(req_id)
             remote_handshake_port_list = [x + meta.remote_port for x in choosen_rank_list]
             for i in range(self.num_need_pulls):
+                assert self.kv_recv_thread is not None
                 self.kv_recv_thread.add_request(
                     request_id=req_id,
                     local_block_ids=meta.local_block_ids,
