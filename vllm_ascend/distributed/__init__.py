@@ -36,3 +36,6 @@ KVConnectorFactory.register_connector(
     "P2pHcclConnector",
     "vllm_ascend.distributed.kv_transfer.kv_connector.p2p_hccl_connector",
     "P2pHcclConnector")
+    "MooncakeLayerwiseConnector",
+    "vllm_ascend.distributed.mooncake_layerwise_connector",
+    "MooncakeLayerwiseConnector")
