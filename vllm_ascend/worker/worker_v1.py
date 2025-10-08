@@ -18,6 +18,7 @@
 #
 
 import copy
+import math
 from typing import Optional, Union
 
 import torch
@@ -95,6 +96,13 @@ class NPUWorker(WorkerBase):
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
 
+        if vllm_config.kv_transfer_config is not None:
+            self.kv_rank = vllm_config.kv_transfer_config.kv_rank
+            self.kv_parallel_size = vllm_config.kv_transfer_config.kv_parallel_size
+        else:
+            self.kv_rank = 0
+            self.kv_parallel_size = 0
+
         # Try to import mindie_turbo to accelerate vLLM inference.
         try_register_lib(
             "mindie_turbo",
@@ -121,6 +129,12 @@ class NPUWorker(WorkerBase):
             WEIGHT_LOADER_V2_SUPPORTED
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
+
+        self.kv_rank = 0
+        self.kv_parallel_size = 1
+        if vllm_config.kv_transfer_config is not None:
+            self.kv_rank = vllm_config.kv_transfer_config.kv_rank
+            self.kv_parallel_size = vllm_config.kv_transfer_config.kv_parallel_size
 
     def sleep(self, level: int = 1) -> None:
         if not sleep_mode_enabled():
@@ -168,7 +182,8 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _init_device(self):
-        device = torch.device(f"npu:{self.local_rank}")
+        device = torch.device(
+            f"npu:{self.local_rank * self.kv_parallel_size+self.kv_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
@@ -216,9 +231,23 @@ class NPUWorker(WorkerBase):
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
+
+        # TODO: check if we don't need this
+        # In disaggregate prefill scenario, when memory not aligned in prefill
+        # and decode instance, the send/recv buffer shape is not identical.
+        # That will cause error in kvcache recv.
+        # Temporary solution: rounding peak memory for p/d memory alignment
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is not None and \
+            kv_transfer_config.kv_connector == 'P2pHcclConnector':
+            gb = 1024**3
+            peak_memory = math.ceil(peak_memory / gb) * gb
+
         available_kv_cache_memory = int(
             total_npu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
+        if self.vllm_config.kv_transfer_config is not None:
+            available_kv_cache_memory -= self.vllm_config.kv_transfer_config.kv_buffer_size
         available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
         logger.info(
             f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
