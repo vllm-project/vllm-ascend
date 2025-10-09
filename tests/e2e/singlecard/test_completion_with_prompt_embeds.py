@@ -3,14 +3,26 @@
 
 import base64
 import io
+import json
+import os
+import subprocess
+import sys
+import time
+from typing import Any, Optional
 
+import httpx
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import requests
 import torch
 # downloading lora to test lora requests
 from openai import BadRequestError
 from transformers import AutoConfig
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.utils import (FlexibleArgumentParser, get_open_port)
 
 from ..utils import RemoteOpenAIServer
 
@@ -18,6 +30,7 @@ from ..utils import RemoteOpenAIServer
 MODEL_NAME = "facebook/opt-125m"
 
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
+
 
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
