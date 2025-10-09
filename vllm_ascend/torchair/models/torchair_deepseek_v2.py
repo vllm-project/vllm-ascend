@@ -161,12 +161,13 @@ class TorchairDeepseekV2RowParallelLinearReplaceAllreduce(RowParallelLinear):
         output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
                                                   bias=bias_)
+        forward_context = get_forward_context()
         if self.reduce_results and self.tp_size > 1:
             num_tokens = output_parallel.shape[0]
             if is_force_scatter and num_tokens % self.tp_size:
                 output_parallel = nn.functional.pad(
                     output_parallel, (0, 0, 0, -num_tokens % self.tp_size))
-            if is_force_scatter or (not is_prefill
+            if is_force_scatter or (not forward_context.with_prefill
                                     and output_parallel.shape[0] % self.tp_size
                                     == 0):
                 output = tensor_model_parallel_reduce_scatter(output_parallel,
@@ -945,15 +946,15 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         replace_allreduce: bool = False,
     ) -> torch.Tensor:
         # Self Attention
+        forward_context = get_forward_context()
         if attn_metadata is not None:
             decoding_condition_met = (
                 not attn_metadata.is_prefill if self.use_sfa else
-                attn_metadata.num_decodes > 0 if self.use_mla else False)
+                not forward_context.with_prefill if self.use_mla else False)
             mla_moe_communication = decoding_condition_met and self.mla_moe_communication and replace_allreduce
         else:
             mla_moe_communication = False
 
-        forward_context = get_forward_context()
         if (envs.VLLM_ASCEND_ENABLE_MLAPO
                 and isinstance(self.self_attn, TorchairDeepseekV2SFAAttention)
                 and attn_metadata is not None
