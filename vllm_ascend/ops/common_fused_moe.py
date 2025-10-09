@@ -273,6 +273,10 @@ class AscendFusedMoE(FusedMoE):
             replace_allreduce=forward_context.sp_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp)
 
+
+        # Load balancing for token distribution among experts in dummy_run
+        enable_force_load_balance = forward_context.in_profile_run
+
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
@@ -295,7 +299,9 @@ class AscendFusedMoE(FusedMoE):
             shared_experts=None,
             enable_force_load_balance=enable_force_load_balance,
             log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num)
+            global_redundant_expert_num=self.global_redundant_expert_num,
+            enable_force_load_balance=enable_force_load_balance,
+            )
 
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
