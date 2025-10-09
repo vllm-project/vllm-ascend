@@ -364,7 +364,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --data-parallel-start-rank 1 \
 --data-parallel-address <node0_ip> \
 --data-parallel-rpc-port 13389 \
---tensor-parallel-size 16 \
+--tensor-parallel-size 8 \
 --seed 1024 \
 --served-model-name deepseek_v3.2 \
 --max-num-seqs 16 \
