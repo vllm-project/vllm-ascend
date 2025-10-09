@@ -444,6 +444,8 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker.compilation_config = MagicMock()
+            worker.compilation_config.cudagraph_mode = MagicMock()
             mock_model_runner = MagicMock()
             worker.model_runner = mock_model_runner
 
@@ -451,7 +453,8 @@ class TestNPUWorker(TestBase):
             worker.execute_dummy_batch()
 
             # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(1)
+            mock_model_runner._dummy_run.assert_called_once_with(
+                num_tokens=1, uniform_decode=True, force_attention=False)
 
     @patch("vllm_ascend.worker.worker_v1.envs_vllm")
     @patch("vllm_ascend.worker.worker_v1.logger")

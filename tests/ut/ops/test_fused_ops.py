@@ -24,11 +24,10 @@ from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
-                                       AscendUnquantizedFusedMoEMethod)
+from vllm_ascend.ops.common_fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_mlp import cumsum_group_list, unified_apply_mlp
-from vllm_ascend.utils import AscendSocVersion, adapt_patch, vllm_version_is
+from vllm_ascend.utils import AscendSocVersion, adapt_patch
 
 adapt_patch(True)
 
@@ -70,7 +69,7 @@ def setup_vllm_config_mock(mocker: MockerFixture):
     mock_vllm_config.scheduler_config = MagicMock(max_num_seqs=4)
     mock_vllm_config.model_config.max_model_len = 2048
 
-    mocker.patch('vllm_ascend.ops.fused_moe.get_current_vllm_config',
+    mocker.patch('vllm_ascend.ops.common_fused_moe.get_current_vllm_config',
                  return_value=mock_vllm_config)
     mocker.patch('vllm_ascend.ops.moe.moe_comm_method.get_current_vllm_config',
                  return_value=mock_vllm_config)
@@ -92,11 +91,7 @@ def mock_dist_env(mocker: MockerFixture):
         return hidden_states
 
     mock_moe_comm_method.finalize.side_effect = mock_finalize
-
-    if vllm_version_is("0.10.2"):
-        dp_metadata = MagicMock(cu_tokens_across_dp_cpu=[5, 10])
-    else:
-        dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
+    dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
     mock_forward_context_obj = MagicMock(moe_comm_method=mock_moe_comm_method,
                                          moe_comm_type=MoECommType.MC2,
                                          max_tokens_across_dp=10,
@@ -108,24 +103,24 @@ def mock_dist_env(mocker: MockerFixture):
 
     with patch('torch.distributed.get_rank', return_value=0), \
         patch('torch.distributed.get_world_size', return_value=4), \
-        patch('vllm_ascend.ops.fused_moe.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
+        patch('vllm_ascend.ops.common_fused_moe.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
         patch('vllm_ascend.ops.moe.token_dispatcher.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
-        patch('vllm_ascend.ops.fused_moe.get_mc2_group', return_value=mock_ep_and_mc2_group(mocker)), \
-        patch('vllm_ascend.ops.fused_moe.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
+        patch('vllm_ascend.ops.common_fused_moe.get_mc2_group', return_value=mock_ep_and_mc2_group(mocker)), \
+        patch('vllm_ascend.ops.common_fused_moe.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm.distributed.parallel_state.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
-        patch('vllm_ascend.ops.fused_moe.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
+        patch('vllm_ascend.ops.common_fused_moe.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm.model_executor.layers.fused_moe.layer.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm.model_executor.layers.fused_moe.config.get_dp_group',
             return_value=mock_dp_and_tp_group(mocker)), \
-        patch('vllm_ascend.ops.fused_moe.get_ascend_config',
+        patch('vllm_ascend.ops.common_fused_moe.get_ascend_config',
             return_value=MagicMock(
                 torchair_graph_config=MagicMock(enabled=False),
                 enable_multistream_moe=False,
                 expert_map_path=None
             )), \
-        patch('vllm_ascend.ops.fused_moe.determine_expert_map',
+        patch('vllm_ascend.ops.common_fused_moe.determine_expert_map',
             return_value=(3, torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]))), \
-        patch('vllm_ascend.ops.fused_moe.get_forward_context',
+        patch('vllm_ascend.ops.common_fused_moe.get_forward_context',
             return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_forward_context',
             return_value=mock_forward_context_obj), \
@@ -254,198 +249,6 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module):
         pass
-
-
-class TestAscendFusedMoe:
-
-    @patch('torch.npu.is_available')
-    @patch("torch.npu.current_device", return_value=MagicMock())
-    def test_init_no_quant(self, mock_dist_env, default_moe_config, mocker):
-        layer = AscendFusedMoE(**default_moe_config)
-
-        layer.w13_weight = nn.Parameter(
-            torch.randn(default_moe_config['num_experts'],
-                        default_moe_config['intermediate_size'] * 2,
-                        default_moe_config['hidden_size']))
-        layer.w2_weight = nn.Parameter(
-            torch.randn(default_moe_config['num_experts'],
-                        default_moe_config['hidden_size'],
-                        default_moe_config['intermediate_size']))
-
-        assert layer.num_experts == default_moe_config['num_experts']
-        assert layer.top_k == default_moe_config['top_k']
-        assert hasattr(layer, 'w13_weight')
-        assert hasattr(layer, 'w2_weight')
-
-        with pytest.raises(AssertionError):
-            error_config = default_moe_config.copy()
-            error_config['use_grouped_topk'] = True
-            layer = AscendFusedMoE(**error_config)
-
-        with pytest.raises(ValueError):
-            error_config = default_moe_config.copy()
-            error_config['scoring_func'] = "random"
-            layer = AscendFusedMoE(**error_config)
-
-    def test_init_with_quant(self, mock_dist_env, default_moe_config):
-        mock_quant_config = MagicMock()
-        mock_quant_method = MockFusedMoEMethod()
-        mock_quant_config.get_quant_method.return_value = mock_quant_method
-
-        moe = AscendFusedMoE(**default_moe_config,
-                             quant_config=mock_quant_config)
-
-        assert moe.quant_method is not None
-        assert moe.quant_method == mock_quant_method
-
-    @pytest.mark.parametrize(
-        "others_param",
-        [[None,
-          MagicMock(return_value=torch.randn(5, 32)), False, 5, None],
-         [2, None, False, 5, None], [None, None, True, 5, None],
-         [None, None, False, 1, None], [None, None, True, 5, 1],
-         [None, None, False, 5, 1]])
-    def test_forward(self, mock_dist_env, default_moe_config, others_param):
-
-        top_k, shared_experts, is_prefill, num_tokens, ep_size = others_param
-        inputs = torch.randn(num_tokens, 32)
-        router_logits = torch.randn(num_tokens, 8)
-        moe = AscendFusedMoE(**default_moe_config)
-
-        if ep_size == 1:
-            moe.moe_parallel_config.ep_size = 1
-
-        moe.quant_method = MockQuantMethod(shared_experts, num_tokens)
-        forward_context = mock_dist_env['mock_forward_context_obj']
-        with patch("vllm_ascend.ops.fused_moe.get_forward_context",
-                   return_value=forward_context):
-            output = moe.forward(inputs,
-                                 router_logits,
-                                 is_prefill=is_prefill,
-                                 top_k=top_k,
-                                 shared_experts=shared_experts)
-
-        moe.quant_method.apply.assert_called_once()
-
-        if shared_experts:
-            assert output[0].shape == (num_tokens, 32)
-            assert output[1].shape == (num_tokens, 10)
-        else:
-            assert output.shape == (num_tokens, 32)
-
-    def test_forward_ms_fused_moe_comp(self, mock_dist_env,
-                                       default_moe_config):
-        inputs = torch.randn(5, 32)
-        router_logits = torch.randn(5, 8)
-        moe = AscendFusedMoE(**default_moe_config)
-
-        moe.quant_method = MockQuantMethod(None, 5)
-        output = moe._forward_ms_fused_moe_comp(inputs,
-                                                router_logits,
-                                                is_prefill=False,
-                                                real_top_k=1)
-
-        moe.quant_method.apply.assert_called_once()
-
-        assert output.shape == (5, 32)
-
-
-class TestAscendUnquantizedFusedMoEMethod:
-
-    def test_process_weights_after_loading(self, moe_method, mock_dist_env):
-        layer = MagicMock()
-        layer.w13_weight.data = torch.randn(16, 32)
-        layer.w2_weight.data = torch.randn(16, 32)
-
-        with patch('torch_npu.npu_format_cast', mock_npu_format_cast), \
-                patch('vllm_ascend.utils.is_310p', return_value=False):
-            moe_method.process_weights_after_loading(layer)
-
-            assert isinstance(layer.w13_weight, torch.nn.Parameter)
-            assert isinstance(layer.w2_weight, torch.nn.Parameter)
-            assert not layer.w13_weight.requires_grad
-            assert not layer.w2_weight.requires_grad
-
-    @pytest.mark.parametrize("others_param",
-                             [[256, 4], [128, 1], [128, 1], [128, 4]])
-    def test_apply_without_expert_map(self, moe_method, mock_dist_env,
-                                      mock_moe_env, others_param):
-        global_num_experts, ep_size = others_param
-        is_prefill = False
-
-        forward_context = mock_dist_env['mock_forward_context_obj']
-
-        with patch("vllm_ascend.ops.fused_moe.get_forward_context",
-                   return_value=forward_context):
-            moe_method.ep_size = ep_size
-            x = torch.randn(8, 2, 2)
-            router_logits = torch.randn(8, 8)
-            layer = MagicMock()
-            local_num_experts = 2
-            hidden_size = 2
-            intermediate_size_per_partition = 4
-
-            layer.w13_weight = torch.randn(local_num_experts,
-                                           intermediate_size_per_partition * 2,
-                                           hidden_size)
-            layer.w2_weight = torch.randn(local_num_experts, hidden_size,
-                                          intermediate_size_per_partition)
-
-            result = moe_method.apply(layer=layer,
-                                      x=x,
-                                      router_logits=router_logits,
-                                      top_k=2,
-                                      renormalize=True,
-                                      global_num_experts=global_num_experts,
-                                      is_prefill=is_prefill)
-
-            mock_moe_comm_method = mock_dist_env['mock_moe_comm_method']
-            mock_moe_comm_method.fused_experts.assert_called_once()
-
-            expected_shape = (16, 2)
-            assert result.shape == expected_shape
-
-    @pytest.mark.parametrize("others_param", [16, 1, 4])
-    def test_apply_with_expert_map(self, moe_method, mock_dist_env,
-                                   mock_moe_env, others_param):
-        ep_size = others_param
-        is_prefill = False
-
-        forward_context = mock_dist_env['mock_forward_context_obj']
-
-        with patch("vllm_ascend.ops.fused_moe.get_forward_context", return_value=forward_context), \
-             patch("vllm_ascend.utils.get_ascend_soc_version", return_value=AscendSocVersion.A3):
-            expert_map = torch.tensor([0, 1, 2, -1, -1, -1, -1, -1])
-            moe_method.ep_size = ep_size
-            x = torch.randn(8, 2, 2)
-            if ep_size == 1:
-                x = x.view(-1, 2)
-            router_logits = torch.randn(8, 8)
-            layer = MagicMock()
-
-            local_num_experts = 2
-            hidden_size = 2
-            intermediate_size_per_partition = 4
-            layer.w13_weight = torch.randn(local_num_experts,
-                                           intermediate_size_per_partition * 2,
-                                           hidden_size)
-            layer.w2_weight = torch.randn(local_num_experts, hidden_size,
-                                          intermediate_size_per_partition)
-
-            result = moe_method.apply(layer=layer,
-                                      x=x,
-                                      router_logits=router_logits,
-                                      top_k=2,
-                                      renormalize=True,
-                                      global_num_experts=128,
-                                      expert_map=expert_map,
-                                      is_prefill=is_prefill)
-
-            mock_moe_comm_method = mock_dist_env['mock_moe_comm_method']
-            mock_moe_comm_method.fused_experts.assert_called_once()
-
-            expected_shape = (16, 2)
-            assert result.shape == expected_shape
 
 
 class TestExpertsSelector:
