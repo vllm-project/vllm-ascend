@@ -69,7 +69,7 @@ def setup_vllm_config_mock(mocker: MockerFixture):
     mock_vllm_config.scheduler_config = MagicMock(max_num_seqs=4)
     mock_vllm_config.model_config.max_model_len = 2048
 
-    mocker.patch('vllm_ascend.ops.common_fused_moe.get_current_vllm_config',
+    mocker.patch('vllm_ascend.ops.moe.fused_moe.get_current_vllm_config',
                  return_value=mock_vllm_config)
     mocker.patch('vllm_ascend.ops.moe.moe_comm_method.get_current_vllm_config',
                  return_value=mock_vllm_config)
@@ -103,24 +103,24 @@ def mock_dist_env(mocker: MockerFixture):
 
     with patch('torch.distributed.get_rank', return_value=0), \
         patch('torch.distributed.get_world_size', return_value=4), \
-        patch('vllm_ascend.ops.common_fused_moe.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
+        patch('vllm_ascend.ops.moe.fused_moe.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
         patch('vllm_ascend.ops.moe.token_dispatcher.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
-        patch('vllm_ascend.ops.common_fused_moe.get_mc2_group', return_value=mock_ep_and_mc2_group(mocker)), \
-        patch('vllm_ascend.ops.common_fused_moe.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
+        patch('vllm_ascend.ops.moe.fused_moe.get_mc2_group', return_value=mock_ep_and_mc2_group(mocker)), \
+        patch('vllm_ascend.ops.moe.fused_moe.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm.distributed.parallel_state.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
-        patch('vllm_ascend.ops.common_fused_moe.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
+        patch('vllm_ascend.ops.moe.fused_moe.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm.model_executor.layers.fused_moe.layer.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm.model_executor.layers.fused_moe.config.get_dp_group',
             return_value=mock_dp_and_tp_group(mocker)), \
-        patch('vllm_ascend.ops.common_fused_moe.get_ascend_config',
+        patch('vllm_ascend.ops.moe.fused_moe.get_ascend_config',
             return_value=MagicMock(
                 torchair_graph_config=MagicMock(enabled=False),
                 enable_multistream_moe=False,
                 expert_map_path=None
             )), \
-        patch('vllm_ascend.ops.common_fused_moe.determine_expert_map',
+        patch('vllm_ascend.ops.moe.fused_moe.determine_expert_map',
             return_value=(3, torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]))), \
-        patch('vllm_ascend.ops.common_fused_moe.get_forward_context',
+        patch('vllm_ascend.ops.moe.fused_moe.get_forward_context',
             return_value=mock_forward_context_obj), \
         patch('vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_forward_context',
             return_value=mock_forward_context_obj), \
