@@ -142,11 +142,26 @@ class KVCacheStoreSendingThread(KVTransferThread):
         block_ids = req_meta["block_ids"]
         req_id = req_meta["req_id"]
         is_last_chunk = req_meta["is_last_chunk"]
-        torch.npu.current_stream().synchronize()
-        for start, end, key in self.token_database.process_tokens(
-                tokens, mask):
-            addr, size, _ = self.prepare_value(start, end, block_ids)
-            self.m_store.put(key, addr, size)
+        if self.m_store.config.use_ascend_direct:
+            addr_list = []
+            size_list = []
+            key_list = []
+            blockIds = []
+            for start, end, key in self.token_database.process_tokens(
+                    tokens, mask):
+                addr, size, block_id = self.prepare_value(start, end, block_ids)
+                key_list.append(key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+                blockIds.append(block_id)
+            torch.npu.current_stream().synchronize()
+            self.m_store.put_batch(key_list, addr_list, size_list, blockIds)
+        else:
+            torch.npu.current_stream().synchronize()
+            for start, end, key in self.token_database.process_tokens(
+                    tokens, mask):
+                addr, size, _ = self.prepare_value(start, end, block_ids)
+                self.m_store.put(key, addr, size)
         if is_last_chunk:
             self.set_finished_request(req_id)
         self.request_queue.task_done()
@@ -173,10 +188,24 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         mask = req_meta["mask"]
         block_ids = req_meta["block_ids"]
         req_id = req_meta["req_id"]
-        for start, end, key in self.token_database.process_tokens(
-                tokens, mask):
-            addr, size, _ = self.prepare_value(start, end, block_ids)
-            self.m_store.get(key, addr, size)
+        if self.m_store.config.use_ascend_direct:
+            addr_list = []
+            size_list = []
+            key_list = []
+            blockIds = []
+            for start, end, key in self.token_database.process_tokens(
+                    tokens, mask):
+                addr, size, block_id = self.prepare_value(start, end, block_ids)
+                key_list.append(key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+                blockIds.append(block_id)
+            self.m_store.get_batch(key_list, addr_list, size_list, blockIds)
+        else:
+            for start, end, key in self.token_database.process_tokens(
+                    tokens, mask):
+                addr, size, _ = self.prepare_value(start, end, block_ids)
+                self.m_store.get(key, addr, size)
         self.set_finished_request(req_id)
         self.request_queue.task_done()
 
