@@ -2252,7 +2252,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                    inputs_embeds=inputs_embeds)
         forward_context = get_forward_context()
         assert forward_context is not None
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
+            not forward_context.capturing:
             if self.vllm_config.model_config.use_mla:
                 # FIXME: Try using `auto_dispatch_capture=True`
                 update_mla_attn_params(self.update_stream, forward_context,
