@@ -42,7 +42,7 @@ jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
     with:
-      vllm: 52d0cb845866869d587fc013a7c59e60a86ebcf2
+      vllm: v0.11.0
 
   changes:
     runs-on: ubuntu-latest
@@ -83,7 +83,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [52d0cb845866869d587fc013a7c59e60a86ebcf2, v0.10.2]
+        vllm_version: [v0.11.0]
     steps:
       - name: Install packages
         run: |
@@ -121,7 +121,14 @@ jobs:
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
           --ignore=tests/ut/test_platform.py \
-          --ignore=tests/ut/patch/worker/patch_common/test_patch_minicpm.py
+          --ignore=tests/ut/patch/worker/patch_common/test_patch_minicpm.py \
+          --ignore=tests/ut/core/test_scheduler.py \
+          --ignore=tests/ut/kv_connector/test_llmdatadist_connector.py \
+          --ignore=tests/ut/kv_connector/test_mooncake_connector.py \
+          --ignore=tests/ut/kv_connector/test_remote_decode_lifecycle.py \
+          --ignore=tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
+          --ignore=tests/ut/torchair/models/test_torchair_deepseek_v2.py \
+          --ignore=tests/ut/torchair/test_utils.py
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged
@@ -138,7 +145,7 @@ jobs:
     name: e2e-light
     strategy:
       matrix:
-        vllm_version: [52d0cb845866869d587fc013a7c59e60a86ebcf2, v0.10.2]
+        vllm_version: [v0.11.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.

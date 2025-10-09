@@ -60,7 +60,9 @@ from vllm.model_executor.models.utils import (PPMissingLayer,
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.mla import AscendMLAModules
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.models.layers.sfa import (AscendSFAModules,
+                                           AscendSparseFlashAttention, Indexer)
+from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
 
 
 class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
@@ -244,15 +246,193 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         return self.mla_attn(positions, hidden_states, kv_cache, attn_metadata)
 
 
+class CustomDeepseekV2SFAAttention(DeepseekV2MLAAttention):
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        hidden_size: int,
+        num_heads: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        q_lora_rank: Optional[int],
+        kv_lora_rank: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        nn.Module.__init__(self)
+        self.hidden_size = hidden_size
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+
+        self.num_heads = num_heads
+        self.tp_size = get_tensor_model_parallel_world_size()
+        assert num_heads % self.tp_size == 0
+        self.num_local_heads = num_heads // self.tp_size
+        self.layers = config.num_hidden_layers
+        self.first_k_dense_replace = config.first_k_dense_replace
+
+        self.scaling = self.qk_head_dim**-0.5
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
+
+        self.prefix = prefix
+        self.debug_layer_idx = int(self.prefix.split(".")[-2])
+
+        ascend_config = get_ascend_config()
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+
+        if self.q_lora_rank is not None:
+            self.q_a_proj = ReplicatedLinear(
+                self.hidden_size,
+                self.q_lora_rank,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_a_proj",
+                return_bias=False,
+            )
+            self.q_a_layernorm = RMSNorm(self.q_lora_rank,
+                                         eps=config.rms_norm_eps)
+            self.q_b_proj = ColumnParallelLinear(
+                q_lora_rank,
+                self.num_heads * self.qk_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_b_proj",
+                return_bias=False,
+            )
+        else:
+            self.q_proj = ColumnParallelLinear(
+                self.hidden_size,
+                self.num_heads * self.qk_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_proj",
+                return_bias=False,
+            )
+
+        self.kv_a_proj_with_mqa = ReplicatedLinear(
+            self.hidden_size,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_a_proj_with_mqa",
+            return_bias=False,
+        )
+        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
+                                      eps=config.rms_norm_eps)
+        self.kv_b_proj = ColumnParallelLinear(
+            self.kv_lora_rank,
+            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_b_proj",
+            return_bias=False,
+        )
+        self.o_proj = CustomDeepseekV2RowParallelLinear(
+            self.num_heads * self.v_head_dim,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+            return_bias=False,
+        )
+
+        if rope_scaling:
+            rope_scaling["rope_type"] = 'deepseek_yarn'
+        self.rotary_emb = get_rope(qk_rope_head_dim,
+                                   rotary_dim=qk_rope_head_dim,
+                                   max_position=max_position_embeddings,
+                                   base=rope_theta,
+                                   rope_scaling=rope_scaling,
+                                   is_neox_style=False)
+        if rope_scaling:
+            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
+            scaling_factor = rope_scaling["factor"]
+            mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
+            self.scaling = self.scaling * mscale * mscale
+
+        self.dim: int = config.hidden_size  # 7168
+        # TODO(zzzzwwjj): wait transformers add these params
+        self.n_heads: int = 64  # 64
+        self.head_dim: int = 128  # 128
+        self.index_topk: int = 2048  # 2048
+        self.indexer = Indexer(
+            config,
+            quant_config=quant_config,
+            dim=self.dim,
+            n_heads=self.n_heads,
+            head_dim=self.head_dim,
+            index_topk=self.index_topk,
+            prefix=f"{prefix}.indexer",
+        )
+
+        sfa_modules = AscendSFAModules(
+            q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
+            q_a_layernorm=self.q_a_layernorm
+            if self.q_lora_rank is not None else None,
+            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
+            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
+            kv_a_layernorm=self.kv_a_layernorm,
+            kv_b_proj=self.kv_b_proj,
+            o_proj=self.o_proj,
+            rotary_emb=self.rotary_emb,
+            indexer=self.indexer)
+
+        self.sfa_attn = AscendSparseFlashAttention(
+            self.hidden_size,
+            self.enable_shared_expert_dp,
+            self.debug_layer_idx,
+            self.first_k_dense_replace,
+            self.tp_size,
+            sfa_modules,
+            self.num_local_heads,
+            self.scaling,
+            self.layers,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+            self.q_lora_rank,
+            self.qk_nope_head_dim,
+            self.qk_head_dim,
+            self.v_head_dim,
+            cache_config,
+            quant_config,
+            prefix,
+        )
+        self.prefix = prefix
+
+    def forward(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            kv_cache: Optional[torch.Tensor] = None,
+            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+        return self.sfa_attn(positions, hidden_states, kv_cache, attn_metadata)
+
+
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str,
+                 topk_indices_buffer=None) -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
+        ascend_config = get_ascend_config()
 
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -268,7 +448,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_rank = get_tp_group().rank_in_group
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
-            attn_cls = CustomDeepseekV2MLAAttention
+            if ascend_config.use_sfa:
+                attn_cls = CustomDeepseekV2SFAAttention
+            else:
+                attn_cls = CustomDeepseekV2MLAAttention
         else:
             attn_cls = DeepseekV2Attention
         self.self_attn = attn_cls(

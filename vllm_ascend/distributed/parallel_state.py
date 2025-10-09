@@ -14,6 +14,7 @@ _MLP_TP: Optional[GroupCoordinator] = None
 _OTP: Optional[GroupCoordinator] = None
 _LMTP: Optional[GroupCoordinator] = None
 _EMBED_TP: Optional[GroupCoordinator] = None
+_P_TP: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
@@ -41,6 +42,10 @@ def get_mlp_tp_group() -> GroupCoordinator:
 def get_embed_tp_group() -> GroupCoordinator:
     assert _EMBED_TP is not None, ("emtp group is not initialized")
     return _EMBED_TP
+def get_p_tp_group() -> GroupCoordinator:
+    assert _P_TP is not None, (
+        "distributed prefill tensor parallel group is not initialized")
+    return _P_TP
 
 
 def model_parallel_initialized():
@@ -60,6 +65,22 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     all_ranks = torch.arange(world_size).reshape(
         -1, parallel_config.data_parallel_size *
         parallel_config.tensor_parallel_size)
+
+    pd_tp_ratio = get_ascend_config().pd_tp_ratio
+    global _P_TP
+    assert _P_TP is None, (
+        "distributed prefill tensor parallel group is already initialized")
+    prefill_tensor_model_parallel_size = pd_tp_ratio if \
+        pd_tp_ratio > 0 and pd_tp_ratio < parallel_config.tensor_parallel_size else parallel_config.tensor_parallel_size
+    group_ranks = all_ranks.view(-1,
+                                 prefill_tensor_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    num = get_world_group().local_rank // pd_tp_ratio
+    _P_TP = init_model_parallel_group(group_ranks,
+                                      get_world_group().local_rank,
+                                      backend,
+                                      group_name=f"p_tp_{num}")
+
     global _MC2
     group_ranks = all_ranks.unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
@@ -170,3 +191,7 @@ def destroy_ascend_model_parallel():
     if _EMBED_TP:
         _EMBED_TP.destroy()
     _EMBED_TP = None
+    global _P_TP
+    if _P_TP:
+        _P_TP.destroy()
+    _P_TP = None
