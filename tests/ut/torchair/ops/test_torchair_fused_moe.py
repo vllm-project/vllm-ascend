@@ -208,6 +208,7 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
 
 class TestTorchairAscendFusedMoe:
 
+    @patch('torch.npu.is_available')
     def test_init_no_quant(self, mock_dist_env, default_moe_config):
         layer = TorchairAscendFusedMoE(**default_moe_config)
 
