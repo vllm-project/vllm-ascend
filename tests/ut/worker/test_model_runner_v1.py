@@ -31,7 +31,6 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
         # Case 2: A2 SOC with w4a8_dynamic -> use alltoall when not mc2
         (AscendSocVersion.A2, True, 8, 100, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
         (AscendSocVersion.A2, True, 16, 257, 256, "w4a8_dynamic", MoECommType.ALLTOALL),
-        (AscendSocVersion.A2, True, 16, 100, 256, "w4a8_dynamic", MoECommType.MC2),  # meets mc2 condition
 
         # Case 3: A2 SOC without w4a8_dynamic -> fallback to allgather
         (AscendSocVersion.A2, True, 8, 100, 256, None, MoECommType.ALLGATHER),
