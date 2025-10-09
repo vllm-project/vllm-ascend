@@ -1427,7 +1427,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
             blk_table = self.input_batch.block_table[kv_cache_group_id]
-            blk_table_tensor = blk_table.get_device_tensor()
+            blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
 
             if not with_prefill and maybe_padded_num_tokens > total_num_scheduled_tokens:
                 extra_padding_tokens = maybe_padded_num_tokens - total_num_scheduled_tokens
@@ -1455,7 +1455,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_actual_tokens=total_num_scheduled_tokens,
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
                 # TODO: change this to the right block table for linear attn
-                block_table_tensor=blk_table_tensor[:num_reqs],
+                block_table_tensor=blk_table_tensor,
                 slot_mapping=self.slot_mapping,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 positions=self.positions,
