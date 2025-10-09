@@ -75,7 +75,7 @@ ascend_scheduler_config also support the options from [vllm scheduler config](ht
 
 | Name             | Type | Default                            | Description                        |
 |------------------|------|------------------------------------|------------------------------------|
-| `enabled`        | bool | `True`                             | Whether to enable weight prefetch. |
+| `enabled`        | bool | `False`                            | Whether to enable weight prefetch. |
 | `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}}` | Prefetch ratio of each weights.    |
 
 ### Example
