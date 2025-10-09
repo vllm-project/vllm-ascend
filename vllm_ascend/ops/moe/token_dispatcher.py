@@ -133,6 +133,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "shared_expert_rank_num": 0,
             "moe_expert_num": moe_expert_num,
             "global_bs": 0,
+            "expert_token_nums_type": 0,
         }
 
         stage1_kwargs = {
@@ -204,7 +205,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             if shared_experts is not None:
                 shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)
                 self.shared_act = shared_experts.act_fn(shared_gate_up)
-        group_list_type = 1
+        group_list_type = 0
         return {
             "group_list_type": group_list_type,
             "hidden_states": expand_x,
@@ -271,6 +272,16 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             **kwargs_mc2
         ) if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
             **kwargs_mc2)
+
+        # these values are no longer used, so they need to be set to None for memory release.
+        self.output = None
+        self.assist_info_for_combine = None
+        self.ep_recv_counts = None
+        self.topk_ids = None
+        self.topk_weights = None
+        self.mc2_mask = None
+        self.expert_map = None
+
         if self.shared_experts is None:
             return hidden_states
         else:
@@ -280,6 +291,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             else:
                 shared_hidden_states, _ = self.shared_experts.down_proj(
                     self.shared_act)
+            self.shared_act = None
+            self.shared_experts = None
+            self.swiglu_out_scale = None
             return hidden_states, shared_hidden_states
 
 
@@ -369,10 +383,16 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
         assert self.original_shape is not None
         final_hidden_states = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
-            sorted_indices=self.expanded_row_idx,
+            sorted_indices=torch.abs(self.expanded_row_idx),
             probs=self.topk_weights)
         if len(self.original_shape) == 3:
             final_hidden_states = final_hidden_states.view(self.original_shape)
+
+        # these values are no longer used, so they need to be set to None for memory release.
+        self.expert_map = None
+        self.topk_weights = None
+        self.topk_ids = None
+        self.expanded_row_idx = None
         return final_hidden_states
 
 
@@ -563,9 +583,14 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
 
         output = self._combine_postprocess(permutated_local_input_tokens)
 
+        # these values are no longer used, so they need to be set to None for memory release.
         self.input_splits = None
         self.output_splits = None
         self.num_global_tokens_per_local_expert = None
+        self.topk_weights = None
+        self.reversed_local_input_permutation_mapping = None
+        self.reversed_global_input_permutation_mapping = None
+        self.global_input_tokens_local_experts_indices = None
 
         return output
 

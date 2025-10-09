@@ -33,7 +33,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod, VocabParallelEmbedding)
-from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
@@ -210,7 +209,20 @@ packed_modules_model_mapping = {
             "gate_proj",
             "up_proj",
         ],
-    }
+    },
+    "glm4_moe": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+    },
 }
 
 
@@ -238,7 +250,6 @@ class AscendLinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> None:
         output_size_per_partition = sum(output_partition_sizes)
-        weight_loader = extra_weight_attrs.get("weight_loader")
 
         weight_dict = self.quant_method.get_weight(input_size_per_partition,
                                                    output_size_per_partition,
@@ -251,8 +262,7 @@ class AscendLinearMethod(LinearMethodBase):
 
         pertensor_dict = self.quant_method.get_pertensor_param(params_dtype)
         for pertensor_name, pertensor_param in pertensor_dict.items():
-            param = PerTensorScaleParameter(data=pertensor_param,
-                                            weight_loader=weight_loader)
+            param = torch.nn.Parameter(pertensor_param, requires_grad=False)
             # disable warning
             param.ignore_warning = True
             layer.register_parameter(pertensor_name, param)

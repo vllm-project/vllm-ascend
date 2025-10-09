@@ -272,6 +272,7 @@ class OProjRowParallelOp(CustomRowParallelOp):
 
         # otp-specific: Combine partial results across devices
         output = self.comm_group.reduce_scatter(output_parallel, dim=0)
+        output = output.view(input_.shape[0], self.layer.output_size)
 
         # Handle bias return based on configuration
         output_bias = self.bias if self.skip_bias_add else None
@@ -358,7 +359,9 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
 
         if self.tp_size == 1 or not self.reduce_results:
-            output = self.quant_method.apply(self, input_parallel, bias=bias_)
+            output = self.quant_method.apply(self.layer,
+                                             input_parallel,
+                                             bias=bias_)
         else:
             output_parallel = self.quant_method.apply(self.layer,
                                                       input_parallel,

@@ -311,8 +311,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                                                 quant_config=quant_config,
                                                 prefix=f"{prefix}.mlp")
             else:
-                self.mlp = Qwen3MoeSparseMoeBlock(config=config,
-                                                  quant_config=quant_config,
+                self.mlp = Qwen3MoeSparseMoeBlock(vllm_config=vllm_config,
                                                   prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,

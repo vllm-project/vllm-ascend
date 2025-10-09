@@ -19,7 +19,7 @@ from typing import Optional, Tuple, Union, cast
 
 import torch
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.layernorm import RMSNorm, GemmaRMSNorm
+from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
 def _addrmsnorm_forward_oot(
@@ -133,47 +133,28 @@ class AscendQuantRMSNorm(AscendRMSNorm):
 
 
 class AscendGemmaRMSNorm(GemmaRMSNorm):
-    """RMS normalization for Gemma.
 
-    Two differences from the above RMSNorm:
-        1. x * (1 + w) instead of x * w.
-        2. (x * w).to(orig_dtype) instead of x.to(orig_dtype) * w.
-    """
-
-    @staticmethod
-    def forward_static(
-            weight: torch.Tensor,
-            variance_epsilon: float,
-            x: torch.Tensor,
-            residual: Optional[torch.Tensor],
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        """PyTorch-native implementation equivalent to forward()."""
-        orig_dtype = x.dtype
-        if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-            if orig_dtype == torch.float16:
-                x = x + residual.float()
-            else:
-                x = x + residual
-            residual = x
-
-        x = x.float()
-        variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + variance_epsilon)
-        # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
-        # See https://github.com/huggingface/transformers/pull/29402
-        x = x * (1.0 + weight.float())
-        x = x.to(orig_dtype)
-        return x if residual is None else (x, residual)
-
-    @staticmethod
     def forward_oot(
         self,
-        variance_epsilon: float,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        """PyTorch-native implementation equivalent to forward()."""
-        return self.forward_static(self.weight.data, self.variance_epsilon, x,
-                                   residual)
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        import torch_npu
 
+        from vllm_ascend.utils import is_310p
+        if residual is not None:
+            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
+            if is_310p():
+                orig_dtype = residual.dtype
+                x = x + residual.to(x.dtype)
+                residual = x.to(orig_dtype)
+                x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
+                                              self.variance_epsilon)
+            else:
+                x, _, residual = torch_npu.npu_add_rms_norm(
+                    x, residual, 1.0 + self.weight, self.variance_epsilon)
+            return x, residual
+
+        x, _ = torch_npu.npu_rms_norm(x, 1.0 + self.weight,
+                                      self.variance_epsilon)
+        return x
