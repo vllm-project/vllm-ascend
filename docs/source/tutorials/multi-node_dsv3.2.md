@@ -314,7 +314,6 @@ export OMP_NUM_THREADS=100
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export VLLM_USE_MODELSCOPE=true
 
 vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --host 0.0.0.0 \
@@ -354,7 +353,6 @@ export OMP_NUM_THREADS=100
 export HCCL_BUFFSIZE=1024
 export HCCL_OP_EXPANSION_MODE="AIV"
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export VLLM_USE_MODELSCOPE=true
 
 vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --host 0.0.0.0 \
