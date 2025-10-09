@@ -21,6 +21,7 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         self.moe_config.tp_size = 1
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
+        self.moe_config.original_num_experts = 8
 
     @patch(
         "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_tensor_model_parallel_world_size",
@@ -196,7 +197,6 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
 
         h_out, r_out, _ = layer.prepare(hidden_states,
                                         router_logits,
-                                        rm_router_logits=False,
                                         gate=mock_gate)
 
         # After all-gather with DP=2, should double the batch size
@@ -265,7 +265,6 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         # Run prepare
         h_out, r_out, _ = layer.prepare(hidden_states,
                                         router_logits,
-                                        rm_router_logits=False,
                                         gate=mock_gate)
 
         # Should be global tensor: [7, 8] and [7, 2]
