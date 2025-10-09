@@ -19,6 +19,7 @@ requires = [
     "msgpack",
     "quart",
     "numba",
+    "pandas",
 ]
 build-backend = "setuptools.build_meta"
 
