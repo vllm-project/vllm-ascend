@@ -1,7 +1,7 @@
 import math
 from contextlib import contextmanager
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -11,8 +11,12 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
 from vllm_ascend.utils import enable_sp
+
+if TYPE_CHECKING:
+    from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
+else:
+    WeightPrefetchMethod = None
 
 
 class FusedMoEState(Enum):
@@ -108,7 +112,7 @@ def set_ascend_forward_context(
         # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
-        sp_enabled = enable_sp() and \
+        sp_enabled = enable_sp(vllm_config) and \
             tp_world_size > 1 and \
             num_tokens is not None and num_tokens > 1000
 
@@ -141,10 +145,10 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
-        # TODO(yuzhup): add moe weight prefetch method
         forward_context.model_instance = model_instance
         forward_context.weight_prefetch_method = weight_prefetch_method
-        weight_prefetch_method.update_forward_param(num_tokens)
+        if  weight_prefetch_method is not None and num_tokens is not None:
+            weight_prefetch_method.update_forward_param(num_tokens)
         # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
         # It will be improved later by implementing operator fusion through the FX graph.
         #
@@ -153,12 +157,14 @@ def set_ascend_forward_context(
         # Once the necessary conditions are met, support for MOE models will also be added.
         from vllm_ascend.quantization.quant_config import AscendQuantConfig
         addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
-            vllm_config.model_config.hf_config.model_type in ["llama", "qwen2", "qwen3"] and \
+            vllm_config.model_config.hf_config.model_type in ["llama", "qwen2", "qwen3", "qwen3_moe"] and \
             forward_context.layer_idx is not None
         if addrmsnorm_quant_fusion_enabled:
             forward_context.model_instance = model_instance
             forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
             forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
+            if vllm_config.model_config.hf_config.model_type == "qwen3_moe":
+                forward_context.fusion_linear = "gate_moe" if forward_context.layer_idx == 0 else "qkv_moe"
         forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
 
         if num_tokens is None and attn_metadata is not None:
@@ -191,3 +197,4 @@ def set_ascend_forward_context(
             yield
         finally:
             pass
+

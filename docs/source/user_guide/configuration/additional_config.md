@@ -73,10 +73,10 @@ ascend_scheduler_config also support the options from [vllm scheduler config](ht
 
 **weight_prefetch_config**
 
-| Name             | Type | Default                            | Description                        |
-|------------------|------|------------------------------------|------------------------------------|
-| `enabled`        | bool | `False`                            | Whether to enable weight prefetch. |
-| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}}` | Prefetch ratio of each weights.    |
+| Name             | Type | Default                                                     | Description                        |
+|------------------|------|-------------------------------------------------------------|------------------------------------|
+| `enabled`        | bool | `False`                                                     | Whether to enable weight prefetch. |
+| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}}` | Prefetch ratio of each weights.    |
 
 ### Example
 
@@ -104,9 +104,13 @@ An example of additional configuration is as follows:
                 "qkv": 1.0,
                 "o": 1.0,
             },
+            "moe": {
+                "gate_up": 0.8
+            }
         },
     },
     "multistream_overlap_shared_expert": True,
     "refresh": False,
 }
 ```
+
