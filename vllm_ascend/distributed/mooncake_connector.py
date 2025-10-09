@@ -80,6 +80,10 @@ class KVCacheTaskTracker:
         self.record_finished_requests: set[str] = set()
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
 
+    def add_not_transfer_request(self, request_id: str):
+        with self.done_task_lock:
+            self.finished_requests.add(request_id)
+
     def update_done_task_count(self, request_id: str):
         with self.done_task_lock:
             self.finished_requests.add(request_id)
@@ -156,6 +160,9 @@ class KVCacheSendingThread(threading.Thread):
             A set of request IDs that have been completed.
         """
         return self.task_tracker.get_and_clear_finished_requests()
+
+    def add_not_transfer_request(self, request_id: str):
+        self.task_tracker.add_not_transfer_request(request_id)
 
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         return self.task_tracker.add_delayed_request(request_id,
@@ -1150,6 +1157,8 @@ class MooncakeConnectorWorker:
                 if self.tp_rank in self._prefill_get_remote_tp_rank(req_id):
                     self.kv_send_thread.add_delayed_request(
                         req_id, delay_start_time)
+                else:
+                    self.kv_send_thread.add_not_transfer_request(req_id)
 
     def _prefill_get_remote_tp_rank(self, req_id: str) -> List[int]:
         return sum(self._get_remote_tp_ranks_for_req(req_id), [])
