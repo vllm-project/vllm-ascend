@@ -422,7 +422,10 @@ class CustomDeepseekV2SFAAttention(DeepseekV2MLAAttention):
 
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str,
+                 topk_indices_buffer=None) -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config

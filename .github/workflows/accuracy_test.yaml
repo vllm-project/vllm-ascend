@@ -112,7 +112,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
-          ref: v0.11.0rc3
+          ref: v0.11.0
           path: ./vllm-empty
 
       - name: Install vllm-project/vllm from source
