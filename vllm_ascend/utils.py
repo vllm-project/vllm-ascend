@@ -503,19 +503,19 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
-                                                  AscendSharedFusedMoE)
     from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
                                            AscendQuantRMSNorm, AscendRMSNorm)
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
                                         AscendRowParallelLinear)
+    from vllm_ascend.ops.logits_processor import AscendLogitsProcessor
+    from vllm_ascend.ops.moe.fused_moe import (AscendFusedMoE,
+                                               AscendSharedFusedMoE)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
-        AscendLogitsProcessor, AscendParallelLMHead,
-        AscendVocabParallelEmbedding)
+        AscendParallelLMHead, AscendVocabParallelEmbedding)
 
     global REGISTERED_ASCEND_OPS
     REGISTERED_ASCEND_OPS = {

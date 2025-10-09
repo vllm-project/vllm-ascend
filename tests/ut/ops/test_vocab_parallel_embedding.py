@@ -19,8 +19,9 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ops.logits_processor import AscendLogitsProcessor
 from vllm_ascend.ops.vocab_parallel_embedding import (
-    AscendLogitsProcessor, AscendParallelLMHead, AscendVocabParallelEmbedding)
+    AscendParallelLMHead, AscendVocabParallelEmbedding)
 
 VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
 
