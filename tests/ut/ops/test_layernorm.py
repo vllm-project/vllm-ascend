@@ -24,7 +24,7 @@ def mock_add_rms_norm(x, residual, weight, eps):
 
 
 def mock_add_rms_norm_quant(x, residual, weight, quant_scale, quant_offset,
-                            epsilon):
+                            beta, epsilon):
     x_out = 2 * x
     residual_out = 2 * residual
     x_out_quant = x_out.to(torch.int8)
@@ -94,7 +94,7 @@ class TestAscendRMSNorm(PytestBase):
         mock_model_instance = mocker.MagicMock()
         mock_forward_context.model_instance = mock_model_instance
         mock_model_instance.model.layers = [
-            mocker.MagicMock() for _ in range(2)
+            mocker.MagicMock() for _ in range(3)
         ]
 
         mock_layer_0 = mock_model_instance.model.layers[0]
@@ -124,7 +124,7 @@ class TestAscendRMSNorm(PytestBase):
         mock_forward_context.addrmsnorm_quant_fusion_enabled = True
         mock_forward_context.prefetch_mlp_enabled = False
         mock_forward_context.layer_idx = 0
-        mock_forward_context.num_hidden_layers = 2
+        mock_forward_context.num_hidden_layers = 3
         mock_forward_context.fusion_linear = "gate_up_dense"
 
         # Ensure fusion and layer_idx increment are handled correctly
@@ -144,17 +144,31 @@ class TestAscendRMSNorm(PytestBase):
         assert mock_forward_context.fusion_linear == "gate_up_dense"
         assert mock_forward_context.layer_idx == 1
 
+        mock_forward_context.fusion_linear = "gate_moe"
         x_out, residual_out = layer.forward_oot(x, residual)
 
         assert mock_get_forward_context.call_count == 3
-        assert mock_forward_context.fusion_linear == "qkv_dense"
+        assert mock_forward_context.fusion_linear == "qkv_moe"
         assert mock_forward_context.layer_idx == 2
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
         assert mock_get_forward_context.call_count == 4
-        assert mock_forward_context.fusion_linear == "qkv_dense"
+        assert mock_forward_context.fusion_linear == "gate_moe"
         assert mock_forward_context.layer_idx == 2
+
+        # last layer returned directly
+        x_out, residual_out = layer.forward_oot(x, residual)
+
+        assert mock_get_forward_context.call_count == 5
+        assert mock_forward_context.fusion_linear == "qkv_moe"
+        assert mock_forward_context.layer_idx == 3
+
+        x_out, residual_out = layer.forward_oot(x, residual)
+
+        assert mock_get_forward_context.call_count == 6
+        assert mock_forward_context.fusion_linear == "qkv_moe"
+        assert mock_forward_context.layer_idx == 3
 
 
 if __name__ == '__main__':

@@ -505,8 +505,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
                                                   AscendSharedFusedMoE)
-    from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
-                                           AscendQuantRMSNorm, AscendRMSNorm)
+    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
@@ -536,11 +535,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
-
-    if vllm_config is not None and \
-        vllm_config.quant_config is not None and \
-        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
-        REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
