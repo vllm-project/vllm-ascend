@@ -32,7 +32,7 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, is_310p,
-                               update_aclgraph_sizes, vllm_version_is)
+                               update_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -131,10 +131,7 @@ class NPUPlatform(Platform):
         cache_config = vllm_config.cache_config
         scheduler_config = vllm_config.scheduler_config
         ascend_scheduler_config = ascend_config.ascend_scheduler_config
-        if vllm_version_is("0.10.2"):
-            structured_outputs_config = vllm_config.decoding_config
-        else:
-            structured_outputs_config = vllm_config.structured_outputs_config
+        structured_outputs_config = vllm_config.structured_outputs_config
 
         if (model_config is not None and not model_config.use_mla
                 and not scheduler_config.async_scheduling):
@@ -212,9 +209,8 @@ class NPUPlatform(Platform):
         vllm_config._set_cudagraph_sizes()
 
         # TODO: Full graph is fully supported later, and the default value will be set to full graph.
-        if not vllm_version_is("0.10.2"):
-            if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+        if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.level = CompilationLevel.NO_COMPILATION
