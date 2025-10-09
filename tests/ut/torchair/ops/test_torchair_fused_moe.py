@@ -208,7 +208,7 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
 
 class TestTorchairAscendFusedMoe:
 
-    @patch('torch.npu.is_available')
+    @patch('torch.npu.is_available', return_value=True)
     def test_init_no_quant(self, mock_dist_env, default_moe_config):
         layer = TorchairAscendFusedMoE(**default_moe_config)
 
@@ -238,7 +238,7 @@ class TestTorchairAscendFusedMoe:
             error_config['scoring_func'] = "random"
             layer = TorchairAscendFusedMoE(**error_config)
 
-    @patch('torch.npu.is_available')
+    @patch('torch.npu.is_available', return_value=True)
     def test_init_with_quant(self, mock_dist_env, default_moe_config):
         mock_quant_config = MagicMock()
         mock_quant_method = MockFusedMoEMethod()
@@ -250,7 +250,7 @@ class TestTorchairAscendFusedMoe:
             assert moe.quant_method is not None
             assert isinstance(moe.quant_method, AscendFusedMoEMethod)
 
-    @patch('torch.npu.is_available')
+    @patch('torch.npu.is_available', return_value=True)
     def test_init_with_mixed_quant(self, mock_dist_env, default_moe_config):
         mock_quant_config = MagicMock()
         mock_quant_method = MockFusedMoEMethod()
@@ -264,6 +264,7 @@ class TestTorchairAscendFusedMoe:
         assert isinstance(moe.quant_method,
                           TorchairAscendUnquantizedFusedMoEMethod)
 
+    @patch('torch.npu.is_available', return_value=True)
     @pytest.mark.parametrize(
         "others_param",
         [[None,
