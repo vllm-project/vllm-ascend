@@ -20,4 +20,5 @@ multi_node_kimi
 multi_node_qwen3vl
 multi_node_pd_disaggregation
 multi_node_ray
+pd_disaggregation_with_p2p_hccl_connector
 :::
