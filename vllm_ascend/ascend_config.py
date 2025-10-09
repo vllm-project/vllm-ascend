@@ -47,6 +47,7 @@ class AscendConfig:
             ascend_scheduler_config)
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
         self.expert_map_path = additional_config.get("expert_map_path", None)
+        self.eplb_policy_type = additional_config.get("eplb_policy_type", 0)
         self.expert_map_record_path = additional_config.get(
             "expert_map_record_path",
             None)  # Provide path to export expert map
