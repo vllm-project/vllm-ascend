@@ -12,7 +12,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
@@ -41,11 +41,16 @@ def test_row_parallel_linear(cls, mock_distributed):
     assert output[0].shape == (2, 4, 64)
 
 
+@patch("vllm_ascend.models.layers.mla.get_forward_context")
 @patch("torch.ops.vllm.mla_forward")
 @patch("torch_npu.npu_rms_norm")
 def test_custom_deepseek_v2_mla_attention(mock_rms_norm, mock_mla_forward,
+                                          mock_forward_context,
                                           mock_distributed, base_config):
     mock_rms_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128))
+    dummy_forward_context = MagicMock()
+    dummy_forward_context.sp_enabled = False
+    mock_forward_context.return_value = dummy_forward_context
 
     attn = CustomDeepseekV2MLAAttention(config=base_config,
                                         hidden_size=128,
