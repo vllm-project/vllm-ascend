@@ -41,7 +41,7 @@ QWEN_W4A8_OLD_VERSION_MODELS = [
 ]
 
 QWEN_W4A8_NEW_VERSION_MODELS = [
-    "Anionex/Qwen3-1.7B-W4A8-V1",  # TODO: move it into vllm-ascend ci modelscope repo
+    "vllm-ascend/Qwen3-1.7B-W4A8-V1",
 ]
 
 DEEPSEEK_W4A8_MODELS = [
