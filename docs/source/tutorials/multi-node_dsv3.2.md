@@ -330,6 +330,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --max-model-len 17450 \
 --max-num-batched-tokens 17450 \
 --trust-remote-code \
+--quantization ascend \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
 --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
@@ -371,6 +372,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --max-num-batched-tokens 17450 \
 --enable-expert-parallel \
 --trust-remote-code \
+--quantization ascend \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
 --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
