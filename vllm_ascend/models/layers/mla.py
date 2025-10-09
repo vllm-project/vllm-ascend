@@ -120,7 +120,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
             hidden_states: torch.Tensor,
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        num_tokens = hidden_states.shape[0]
         need_gather_q_kv = get_forward_context(
         ).sp_enabled and self.debug_layer_idx > 0
         if not get_forward_context().sp_enabled or self.debug_layer_idx > 0:
