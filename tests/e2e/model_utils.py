@@ -19,12 +19,7 @@
 
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.10.2"):
-    from vllm.sequence import PromptLogprobs, SampleLogprobs
-else:
-    from vllm.logprobs import PromptLogprobs, SampleLogprobs
+from vllm.logprobs import PromptLogprobs, SampleLogprobs
 
 TokensText = Tuple[List[int], str]
 
