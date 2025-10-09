@@ -551,3 +551,4 @@ class MooncakeEngine:
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
         self.m_store.close()
+
