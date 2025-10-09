@@ -147,12 +147,14 @@ def set_ascend_forward_context(
         # Once the necessary conditions are met, support for MOE models will also be added.
         from vllm_ascend.quantization.quant_config import AscendQuantConfig
         addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
-            vllm_config.model_config.hf_config.model_type in ["llama", "qwen2", "qwen3"] and \
+            vllm_config.model_config.hf_config.model_type in ["llama", "qwen2", "qwen3", "qwen3_moe"] and \
             forward_context.layer_idx is not None
         if addrmsnorm_quant_fusion_enabled:
             forward_context.model_instance = model_instance
             forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
             forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
+            if vllm_config.model_config.hf_config.model_type == "qwen3_moe":
+                forward_context.fusion_linear = "gate_moe" if forward_context.layer_idx == 0 else "qkv_moe"
         forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
 
         if num_tokens is None and attn_metadata is not None:
