@@ -46,8 +46,8 @@ def _maybe_all_gather_and_maybe_unpad_impl(
     except AssertionError:
         return x
 
-    flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
-    if flashcomm_v1_enabled and label:
+    sp_enabled = forward_context.sp_enabled
+    if sp_enabled and label:
         dp_metadata = forward_context.dp_metadata
         if dp_metadata is None or not is_ep_comm:
             x = tensor_model_parallel_all_gather(x, 0)
@@ -80,7 +80,7 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor,
     except AssertionError:
         return tensor_model_parallel_all_reduce(x)
 
-    if not forward_context.flashcomm_v1_enabled:
+    if not forward_context.sp_enabled:
         return tensor_model_parallel_all_reduce(x)
 
     dp_metadata = forward_context.dp_metadata

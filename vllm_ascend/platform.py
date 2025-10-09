@@ -164,8 +164,8 @@ class NPUPlatform(Platform):
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
         if model_config is None:
-            logger.warning("Model config is missing. This may indicate "
-                           "that we are running a test case")
+            # logger.warning("Model config is missing. This may indicate "
+            #                "that we are running a test case")
             enforce_eager = False
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)

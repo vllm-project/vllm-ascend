@@ -612,12 +612,13 @@ def shared_expert_dp_enabled() -> bool:
 
 
 def is_moe_model(vllm_config: VllmConfig):
-    global _IS_MOE_MODEL
-    if _IS_MOE_MODEL is None:
-        config = vllm_config.model_config.hf_config
-        _IS_MOE_MODEL = any('experts' in key.lower()
-                            for key in config.to_dict())
-    return _IS_MOE_MODEL
+    # global _IS_MOE_MODEL
+    # if _IS_MOE_MODEL is None:
+    #     config = vllm_config.model_config.hf_config
+    #     _IS_MOE_MODEL = any('experts' in key.lower()
+    #                         for key in config.to_dict())
+    # return _IS_MOE_MODEL
+    return True
 
 
 def weak_ref_tensor(tensor: Any) -> Any:

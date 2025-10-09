@@ -427,7 +427,7 @@ def get_column_parallel_op(
         custom_op = MLPColumnParallelOp(layer)
     elif "gate_up_proj" in prefix and enable_sp():
         custom_op = SequenceMergedColumnParallelOp(layer)
-    elif enable_sp():
+    elif "qkv_proj" in prefix and enable_sp():
         custom_op = SequenceQKVParallelOp(layer, prefix)
 
     if custom_op is not None:
