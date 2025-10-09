@@ -53,11 +53,10 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
 from vllm_ascend.torchair.ops.sequence_parallel import (MetadataForPadding,
                                                         init_metadata_for_sp)
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
 
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
@@ -313,14 +312,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                                                 quant_config=quant_config,
                                                 prefix=f"{prefix}.mlp")
             else:
-                if vllm_version_is("0.10.2"):
-                    self.mlp = Qwen3MoeSparseMoeBlock(
-                        config=config,
-                        quant_config=quant_config,
-                        prefix=f"{prefix}.mlp")
-                else:
-                    self.mlp = Qwen3MoeSparseMoeBlock(vllm_config=vllm_config,
-                                                      prefix=f"{prefix}.mlp")
+                self.mlp = Qwen3MoeSparseMoeBlock(vllm_config=vllm_config,
+                                                  prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,
                                    intermediate_size=config.intermediate_size,
