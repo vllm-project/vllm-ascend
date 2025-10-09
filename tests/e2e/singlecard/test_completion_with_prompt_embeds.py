@@ -22,9 +22,7 @@ from transformers import AutoConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.utils import (FlexibleArgumentParser, get_open_port)
-
-from ..utils import RemoteOpenAIServer
+from vllm.utils import FlexibleArgumentParser, get_open_port
 
 # any model with a chat template should work here
 MODEL_NAME = "facebook/opt-125m"
