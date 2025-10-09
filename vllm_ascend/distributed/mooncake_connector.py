@@ -245,8 +245,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.use_sfa = len(block_len) == 3
 
         self.request_queue: queue.Queue[Any] = queue.Queue()
-        max_workers = getattr(envs_ascend, 'MAX_TRANSFER_WORKERS', 32)
-        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self.executor = ThreadPoolExecutor(max_workers=32)
 
         self.task_tracker = KVCacheTaskTracker()
 
