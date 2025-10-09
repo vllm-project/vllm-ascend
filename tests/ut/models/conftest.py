@@ -96,7 +96,7 @@ def mock_distributed():
             patch("vllm_ascend.models.deepseek_v2.get_pp_group", return_value=pp_group), \
             patch("vllm_ascend.models.deepseek_v2.get_pp_group",
                   return_value=Mock(is_first_rank=False, is_last_rank=False)), \
-            patch("vllm_ascend.ops.fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
+            patch("vllm_ascend.ops.common_fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
             patch("vllm_ascend.ops.moe.token_dispatcher.torch.distributed.get_rank", return_value=0), \
             patch("vllm_ascend.ops.moe.token_dispatcher.get_ascend_soc_version", return_value=None), \
             patch.dict("vllm.distributed.parallel_state.__dict__", _TP=tp_group, _EP=ep_group, _DP=dp_group,

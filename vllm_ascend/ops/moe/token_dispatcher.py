@@ -468,9 +468,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         super().__init__(**kwargs)
         self.with_quant = False
         self.num_local_experts = kwargs.get("num_local_experts", 0)
-        self.num_global_redundant_experts = kwargs.get(
-            "num_global_redundant_experts", 0)
-        self.num_experts = self.num_experts + self.num_global_redundant_experts
 
         self.hidden_shape = None
         self.topk_weights = None
