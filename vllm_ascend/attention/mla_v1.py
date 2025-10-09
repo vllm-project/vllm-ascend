@@ -9,7 +9,7 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
@@ -32,6 +32,7 @@ from vllm_ascend.worker.npu_input_batch import InputBatch
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.forward_context import get_forward_context
+
 
 class AscendMLABackend(AttentionBackend):
 
@@ -1087,7 +1088,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                     o_proj_input[num_decode_tokens:] = output_prefill
                     current_ms_metadata.after_comm_event.record()
             else:
-                o_proj_input[num_decode_tokens:] = output_prefill
+                o_proj_input[
+                    num_decode_tokens:num_actual_tokens] = output_prefill
         # O proj
         current_ms_metadata = get_multistream_comm_context()
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
@@ -1097,8 +1099,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                max_size=MAX_O_PROJ_PREFETCH_SIZE,
                                enabled=self.enable_prefetch)
 
-            output[...] = self.o_proj(
-                o_proj_input)[0]
+            output[...] = self.o_proj(o_proj_input)[0]
         else:
             with torch.npu.stream(current_ms_metadata.comm_stream):
                 maybe_npu_prefetch(inputs=self.o_proj.weight,

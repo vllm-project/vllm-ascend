@@ -121,14 +121,13 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
-        need_gather_q_kv = get_forward_context().sp_enabled and self.debug_layer_idx > 0
+        need_gather_q_kv = get_forward_context(
+        ).sp_enabled and self.debug_layer_idx > 0
         if not get_forward_context().sp_enabled or self.debug_layer_idx > 0:
             output_shape = hidden_states.shape
         else:
-            rows = num_tokens // self.tp_size
-            if num_tokens % self.tp_size:
-                rows += 1
-            output_shape = (rows, hidden_states.shape[1])
+            output_shape = torch.chunk(hidden_states, self.tp_size,
+                                       dim=0)[0].shape
         # FIXME: This does not seem right, should make sure the buffer is fixed
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,

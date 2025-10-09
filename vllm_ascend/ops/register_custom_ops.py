@@ -134,6 +134,33 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
     return
 
 
+def _maybe_all_gather_and_maybe_unpad_fake(
+        x: torch.Tensor,
+        label: bool,
+        is_ep_comm: bool = False) -> torch.Tensor:
+
+    if get_forward_context().sp_enabled and label:
+        return torch.empty(
+            (x.shape[0] * get_tensor_model_parallel_world_size(),
+             *x.shape[1:]),
+            device=x.device,
+            dtype=x.dtype)
+
+    return x
+
+
+def _maybe_pad_and_reduce_fake(x: torch.Tensor,
+                               is_ep_comm: bool = False) -> torch.Tensor:
+    if get_forward_context().sp_enabled:
+        return torch.empty(
+            (x.shape[0] // get_tensor_model_parallel_world_size(),
+             *x.shape[1:]),
+            device=x.device,
+            dtype=x.dtype)
+
+    return x
+
+
 def _maybe_prefetch_mlp_gate_up_proj_impl_fake(x_dependency: torch.Tensor,
                                                prefix: str) -> None:
     return
@@ -231,19 +258,19 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
 
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
-                          fake_impl=lambda x, residual: residual,
+                          fake_impl=lambda x, residual: x,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,
-                          fake_impl=lambda x, label=True, is_ep_comm=False: x,
+                          fake_impl=_maybe_all_gather_and_maybe_unpad_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
 direct_register_custom_op(op_name="maybe_pad_and_reduce",
                           op_func=_maybe_pad_and_reduce_impl,
-                          fake_impl=lambda x, is_ep_comm=False: x,
+                          fake_impl=_maybe_pad_and_reduce_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
