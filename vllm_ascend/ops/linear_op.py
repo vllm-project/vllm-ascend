@@ -38,6 +38,7 @@ Row parallel op follows a similar approach - inherit from RowColumnParallelOp an
 
 from typing import Optional, Tuple, Union
 
+from torch import nn
 import torch
 import torch.distributed as dist
 import torch_npu
@@ -52,6 +53,7 @@ from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group, ge
 from vllm_ascend.utils import (dense_optim_enable, enable_sp, flashcomm2_enable, get_flashcomm2_reorgnized_batch_ids,
                                matmul_allreduce_enable, mlp_tp_enable,
                                oproj_tp_enable)
+from vllm_ascend.ascend_config import get_ascend_config
 
 
 class CustomTensorParallelOp:
@@ -171,6 +173,69 @@ class SequenceMergedColumnParallelOp(CustomColumnParallelOp):
         assert self.quant_method is not None
 
         input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = self.comm_group.all_gather(output_parallel)
+        else:
+            output = output_parallel
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+
+class Flashcomm2MergedColumnParallelOp(CustomColumnParallelOp):
+
+    def apply_impl(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        """Linear layer with column parallelism.
+
+        Implemented multiple optimization projects for dense models, such as FlashComm and
+        communication-computation fusion.
+        """
+
+        bias = self.bias if not self.skip_bias_add else None
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+
+        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        output_parallel = self.quant_method.apply(self.layer, input_, bias)
+
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = self.comm_group.all_gather(output_parallel)
+        else:
+            output = output_parallel
+        output_bias = self.bias if self.skip_bias_add else None
+        return output, output_bias
+
+
+class Flashcomm2QKVParallelOp(CustomColumnParallelOp):
+
+    def __init__(self, layer, prefix):
+        super().__init__(layer)
+        self.prefix = prefix
+
+    def apply_impl(
+        self, input_: torch.Tensor
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        """Linear layer with column parallelism.
+
+        Implemented multiple optimization projects for dense models, such as FlashComm and
+        communication-computation fusion.
+        """
+
+        bias = self.bias if not self.skip_bias_add else None
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+
+        layer_num = self.prefix.split('.')[2]
+
+        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            input_, layer_num != '0')
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
@@ -316,7 +381,6 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
 
     def __init__(self, layer):
         super().__init__(layer)
-        self.forward_type = "flashcomm2_oproj_tp"
         self.odp_group = get_flashcomm2_odp_group()
         self.odp_size = self.odp_group.world_size
         self.reorgnized_batch_ids = get_flashcomm2_reorgnized_batch_ids(get_tp_group().world_size)
@@ -325,11 +389,27 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
     @property
     def comm_group(self):
         return get_flashcomm2_otp_group()
+    
+    @property
+    def tp_rank(self):
+        if get_ascend_config().flashcomm2_oproj_tensor_parallel_size == 1:
+            return 0
+        return self.comm_group.rank_in_group
+
+    @property
+    def tp_size(self):
+        if get_ascend_config().flashcomm2_oproj_tensor_parallel_size == 1:
+            return 1
+        return self.comm_group.world_size
 
     def apply_impl(
         self,
         input_: torch.Tensor,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        """Linear layer for Flashcomm2.
+            Input.ahspe = [batchsize*seqlength, headnum*headdim/TP]
+            Output.shape = [(batchsize*seqlength+padsize)/TP, hiddensize]
+        """
         # Handle input parallelism - split or use as-is
         if self.input_is_parallel:
             input_parallel = input_
@@ -383,7 +463,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self,
+        output_parallel = self.quant_method.apply(self.layer,
                                                 input_parallel,
                                                 bias=bias_)
         # output_parallel shape: [bs/(TP/flashcomm2_otp_size), hiddenstate]
@@ -392,11 +472,6 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             output = self.comm_group.reduce_scatter(output_parallel, dim=0)
         else:
             output = output_parallel
-        if not forward_context.flashcomm1_ds_prefill:
-            # flashcomm1 not enabled
-            output = get_tp_group().all_gather(output, 0)
-            if num_padding_tokens > 0:
-                output = output[:-num_padding_tokens]
 
         output_bias = self.bias if self.skip_bias_add else None
 
@@ -510,7 +585,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 def get_column_parallel_op(
     disable_tp, prefix, layer
 ) -> Tuple[Optional[Union[MLPColumnParallelOp, SequenceMergedColumnParallelOp,
-                          SequenceQKVParallelOp]], int, int]:
+                          SequenceQKVParallelOp, Flashcomm2MergedColumnParallelOp, Flashcomm2QKVParallelOp]], int, int]:
     if disable_tp:
         return None, 0, 1
 
@@ -518,11 +593,17 @@ def get_column_parallel_op(
         MLPColumnParallelOp,
         SequenceMergedColumnParallelOp,
         SequenceQKVParallelOp,
+        Flashcomm2MergedColumnParallelOp,
+        Flashcomm2QKVParallelOp
     ]] = None
     if "gate_up_proj" in prefix and mlp_tp_enable():
         custom_op = MLPColumnParallelOp(layer)
+    elif "gate_up_proj" in prefix and flashcomm2_enable():
+        custom_op = Flashcomm2MergedColumnParallelOp(layer)
     elif "gate_up_proj" in prefix and enable_sp():
         custom_op = SequenceMergedColumnParallelOp(layer)
+    elif flashcomm2_enable():
+        custom_op = Flashcomm2QKVParallelOp(layer, prefix)
     elif enable_sp():
         custom_op = SequenceQKVParallelOp(layer, prefix)
 

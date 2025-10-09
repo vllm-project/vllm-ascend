@@ -4,9 +4,7 @@ import torch
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group, get_tp_group, 
                                              init_model_parallel_group)
-import vllm_ascend.envs as envs_ascend
-from vllm.logger import logger
-from vllm_ascend.utils import flashcomm2_enable, oproj_tp_enable
+from vllm_ascend.utils import flashcomm2_enable
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config

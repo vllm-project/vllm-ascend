@@ -103,15 +103,15 @@ class AscendConfig:
             )
             if self.oproj_tensor_parallel_size is not None:
                 raise AssertionError(
-                    "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
+                    f"flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
                 )
             if global_tp_size <= self.flashcomm2_oproj_tensor_parallel_size:
                 raise AssertionError(
-                    "flashcomm2_oproj_tensor_parallel_size ({self.flashcomm2_oproj_tensor_parallel_size}) cannot exceed global tensor parallel size ({global_tp_size})"
+                    f"flashcomm2_oproj_tensor_parallel_size ({self.flashcomm2_oproj_tensor_parallel_size}) cannot exceed global tensor parallel size ({global_tp_size})"
                 )
             if global_tp_size % self.flashcomm2_oproj_tensor_parallel_size != 0:
                 raise AssertionError(
-                    "Global tensor parallel size ({global_tp_size}) must be divisible by flashcomm2_oproj_tensor_parallel_size ({self.flashcomm2_oproj_tensor_parallel_size})"
+                    f"Global tensor parallel size ({global_tp_size}) must be divisible by flashcomm2_oproj_tensor_parallel_size ({self.flashcomm2_oproj_tensor_parallel_size})"
                 )
 
 

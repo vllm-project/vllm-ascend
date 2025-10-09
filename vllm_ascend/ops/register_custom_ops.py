@@ -22,8 +22,9 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
 
     if x.size(0) != residual.size(0):
         sp_enabled = forward_context.sp_enabled
-        assert sp_enabled is True, ("Currently, this situation only occurs "
-                                    "when sp is enabled")
+        flashcomm_v2_enabled = forward_context.flashcomm_v2_enabled
+        assert sp_enabled or flashcomm_v2_enabled is True, ("Currently, this situation only occurs "
+                                    "when sp or flashcomm_v2 is enabled")
         pad_size = forward_context.pad_size
         if pad_size > 0:
             residual = F.pad(residual, (0, 0, 0, pad_size))
@@ -42,7 +43,8 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
         return x
 
     sp_enabled = forward_context.sp_enabled
-    if sp_enabled and label:
+    flashcomm_v2_enabled = forward_context.flashcomm_v2_enabled
+    if (sp_enabled or flashcomm_v2_enabled) and label:
         x = tensor_model_parallel_all_gather(x, 0)
         pad_size = forward_context.pad_size
         if pad_size > 0:
@@ -57,7 +59,8 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
         return tensor_model_parallel_all_reduce(x)
 
     sp_enabled = forward_context.sp_enabled
-    if sp_enabled:
+    flashcomm_v2_enabled = forward_context.flashcomm_v2_enabled
+    if sp_enabled or flashcomm_v2_enabled:
         pad_size = forward_context.pad_size
         if pad_size > 0:
             x = F.pad(x, (0, 0, 0, pad_size))
