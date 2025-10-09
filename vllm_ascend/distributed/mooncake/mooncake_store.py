@@ -62,31 +62,29 @@ class Mooncakestore():
     def batch_exists(self, keys: list[str]) -> list[bool]:
         return self.store.batch_is_exist(keys)
 
-    def get_batch(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], block_ids: list[int]):
+    def get_batch(self, keys: list[str], addrs: list[list[int]],
+                  sizes: list[list[int]], block_ids: list[int]):
         try:
             res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
             for value in res:
                 if value < 0:
-                    logger.error(
-                        f"Failed to get key {keys},res:{res}"
-                    )
+                    logger.error(f"Failed to get key {keys},res:{res}")
         except Exception as e:
             logger.error(f"Failed to get key {keys}. {e}")
 
-    def put_batch(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], block_ids: list[int]):
+    def put_batch(self, keys: list[str], addrs: list[list[int]],
+                  sizes: list[list[int]], block_ids: list[int]):
         try:
             config = ReplicateConfig()
             config.preferred_segment = self.config.local_hostname
-            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
+            res = self.store.batch_put_from_multi_buffers(
+                keys, addrs, sizes, config)
             for value in res:
                 if value < 0:
-                    logger.error(
-                        f"Failed to put key {keys},res:{res}"
-                    )
+                    logger.error(f"Failed to put key {keys},res:{res}")
         except Exception as e:
-            logger.error(
-                f"Failed to put key {keys},error:{e}"
-            )
+            logger.error(f"Failed to put key {keys},error:{e}")
+
     def get(self, key: MooncakeEngineKey, addr: list[int], size: list[int]):
         expect_res = sum(size)
         key_str = key.to_string()
