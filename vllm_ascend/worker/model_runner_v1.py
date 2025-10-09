@@ -1852,7 +1852,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         number of tokens. This is based on the observation that all-gather is more
         efficient than all-to-all when running on A2.
 
-            a. For A2, we choose from MC2 and all-gather.
+            a. For A2, we only choose all-gather.
 
             b. For A3, we choose from MC2 and all-to-all.
 
@@ -1876,15 +1876,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if not self.parallel_config.enable_expert_parallel:
             moe_comm_type = MoECommType.ALLGATHER
         elif soc_version in {AscendSocVersion.A2}:
-            if (num_tokens <= self.mc2_tokens_capacity
-                    and self.parallel_config.world_size_across_dp >= 16):
-                moe_comm_type = MoECommType.MC2
+            # TODO: For A2, `MoECommType.MC2` may generate an error.
+            
+            # Currently, w4a8_dynamic does not support allgatherep
+            if quant_type == "w4a8_dynamic":
+                moe_comm_type = MoECommType.ALLTOALL
             else:
-                # Currently, w4a8_dynamic does not support allgatherep
-                if quant_type == "w4a8_dynamic":
-                    moe_comm_type = MoECommType.ALLTOALL
-                else:
-                    moe_comm_type = MoECommType.ALLGATHER
+                moe_comm_type = MoECommType.ALLGATHER
 
         elif soc_version in {AscendSocVersion.A3}:
             moe_comm_type = (MoECommType.MC2
