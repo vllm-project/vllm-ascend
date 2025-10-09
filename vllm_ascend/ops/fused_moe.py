@@ -16,7 +16,7 @@
 # Adapted from vllm/tests/kernels/test_moe.py
 
 import os
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 import torch
 import torch_npu
@@ -45,6 +45,155 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
                                get_all_reduce_merge_state,
                                get_rm_router_logits_state, is_310p)
 
+def compute_identity_kernel_npu(top_k, hidden_states, expert_scales, output, hidden_dim, scales_stride):
+    """
+    使用PyTorch操作实现compute_identity_kernel的功能，适用于Ascend NPU。
+    """
+    try:
+        num_tokens = hidden_states.size(0)
+        # 将expert_scales扩展为与hidden_states相同的形状
+        expert_scales_expanded = expert_scales.view(num_tokens, top_k, 1).expand(-1, -1, hidden_dim)
+        # 将hidden_states扩展为与expert_scales相同的形状
+        hidden_states_expanded = hidden_states.unsqueeze(1).expand(-1, top_k, -1)
+        # 计算每个expert的贡献
+        expert_contributions = hidden_states_expanded * expert_scales_expanded
+        # 求和所有expert的贡献
+        output = expert_contributions.sum(dim=1)
+        return output
+    except Exception as e:
+        # 如果出现异常，返回一个零张量作为降级处理
+        print(f"Error in compute_identity_kernel_npu: {e}")
+        return torch.zeros_like(hidden_states)
+
+def zero_experts_compute_npu(expert_indices, expert_scales, num_experts, zero_expert_type, hidden_states):
+    """
+    使用PyTorch操作实现zero_experts_compute_triton的功能，适用于Ascend NPU。
+    """
+    try:
+        # 确保所有张量都在同一设备上
+        device = hidden_states.device
+        expert_indices = expert_indices.to(device)
+        expert_scales = expert_scales.to(device)
+        
+        N = expert_indices.numel()
+        top_k = expert_indices.size(-1)
+        
+        # 创建副本以避免修改原始张量
+        expert_indices = expert_indices.clone()
+        expert_scales = expert_scales.clone()
+        
+        if zero_expert_type == "identity":
+            # 创建一个掩码，标记哪些专家索引小于num_experts（即需要置零的专家）
+            zero_expert_mask = expert_indices < num_experts
+            # 将需要置零的专家对应的scale置为0，其他保持不变
+            zero_expert_scales = torch.where(zero_expert_mask, 
+                                            torch.zeros_like(expert_scales), 
+                                            expert_scales)
+        else:
+            zero_expert_scales = expert_scales
+
+        # 对于normal_expert_mask，我们将不在有效范围内的专家索引和scale都置为0
+        normal_expert_mask = expert_indices >= num_experts
+        expert_indices = torch.where(normal_expert_mask, 
+                                    torch.zeros_like(expert_indices), 
+                                    expert_indices)
+        expert_scales = torch.where(normal_expert_mask, 
+                                   torch.zeros_like(expert_scales), 
+                                   expert_scales)
+        
+        # 初始化输出张量
+        output = torch.zeros_like(hidden_states)
+        hidden_dim = hidden_states.size(-1)
+        num_tokens = hidden_states.size(0)
+        
+        # 调用NPU优化的实现
+        output = compute_identity_kernel_npu(
+            top_k,
+            hidden_states,
+            zero_expert_scales,
+            output,
+            hidden_dim,
+            zero_expert_scales.stride(0)
+        )
+        
+        return output
+    except Exception as e:
+        # 如果出现异常，返回一个零张量作为降级处理
+        print(f"Error in zero_experts_compute_npu: {e}")
+        return torch.zeros_like(hidden_states)
+
+def fused_topk_bias(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    e_score_correction_bias: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+):
+    """Ascend NPU兼容的带偏置topk选择函数"""
+    n_routed_experts = gating_output.shape[-1]
+    scores = gating_output.softmax(dim=-1)
+    scores_for_choice = scores.view(
+        -1, n_routed_experts) + e_score_correction_bias.unsqueeze(0)
+    topk_indices = torch.topk(scores_for_choice, k=topk, dim=-1,
+                              sorted=False)[1]
+    topk_weights = scores.gather(1, topk_indices)
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    return topk_weights.to(torch.float32), topk_indices.to(torch.int32)
+
+
+# 有区别，这里没有像jsb一样改造
+def unified_fused_experts_eager(hidden_states: torch.Tensor,
+                                w1: torch.Tensor,
+                                w2: torch.Tensor,
+                                topk_weights: torch.Tensor,
+                                topk_ids: torch.Tensor,
+                                row_idx: torch.Tensor,
+                                expert_map: Optional[torch.Tensor] = None,
+                                log2phy: Optional[torch.Tensor] = None,
+                                global_redundant_expert_num: int = 0,
+                                w1_scale: Optional[torch.Tensor] = None,
+                                w1_scale_bias: Optional[torch.Tensor] = None,
+                                w2_scale: Optional[torch.Tensor] = None,
+                                w2_scale_bias: Optional[torch.Tensor] = None,
+                                shared_experts: Optional[torch.Tensor] = None,
+                                shared_gate_up: Optional[Any] = None,
+                                shared_dequant_scale: Optional[Any] = None,
+                                mc2_mask: Optional[torch.Tensor] = None,
+                                apply_router_weight_on_input: bool = False,
+                                with_quant: bool = False):
+    token_dispatcher = get_forward_context().token_dispatcher
+
+    results = token_dispatcher.token_dispatch(
+        hidden_states=hidden_states,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        row_idx=row_idx,
+        expert_map=expert_map,
+        log2phy=log2phy,
+        global_redundant_expert_num=global_redundant_expert_num,
+        shared_experts=shared_experts,
+        shared_gate_up=shared_gate_up,
+        shared_dequant_scale=shared_dequant_scale,
+        mc2_mask=mc2_mask,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        with_quant=with_quant)
+
+    expert_output = unified_apply_mlp(
+        hidden_states=results["hidden_states"],
+        w1=w1,
+        w1_scale=w1_scale,
+        w2=w2,
+        w2_scale=w2_scale,
+        group_list=results["group_list"],
+        dynamic_scale=results.get("dynamic_scale"),
+        group_list_type=results.get("group_list_type"),
+        w1_scale_bias=w1_scale_bias,
+        w2_scale_bias=w2_scale_bias,
+        topk_scales=results.get("topk_scales"),
+        with_quant=with_quant)
+    final_hidden_states = token_dispatcher.token_combine(expert_output)
+    return final_hidden_states
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
@@ -93,16 +242,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         use_grouped_topk: bool = False,
         global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
         is_prefill: bool = False,
         enable_force_load_balance: bool = False,
         shared_experts: Optional[Any] = None,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        # 初始化零专家输出
+        zero_expert_result = None
 
         topk_weights, topk_ids, row_idx = select_experts(
             hidden_states=x,
@@ -117,6 +270,16 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts)
 
+        # 处理LongCat Flash的零专家逻辑
+        if zero_expert_num != 0 and zero_expert_type is not None:
+            zero_expert_result = zero_experts_compute_npu(
+                expert_indices=topk_ids,
+                expert_scales=topk_weights,
+                num_experts=global_num_experts,
+                zero_expert_type=zero_expert_type,
+                hidden_states=x,
+            )
+
         topk_weights = topk_weights.to(x.dtype)
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
@@ -125,7 +288,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         moe_comm_method = get_forward_context().moe_comm_method
-        return moe_comm_method.fused_experts(
+        expert_output = moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -137,6 +300,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             shared_experts=shared_experts,
             need_trans=True,
             dynamic_eplb=self.dynamic_eplb)
+        
+        # 如果有零专家输出，返回元组；否则返回单个结果
+        if zero_expert_result is not None:
+            return expert_output, zero_expert_result
+        else:
+            return expert_output
 
 
 class AscendFusedMoE(FusedMoE):
@@ -167,6 +336,10 @@ class AscendFusedMoE(FusedMoE):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
+        routed_scaling_factor: float = 1.0,
+        enable_eplb: bool = False,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
     ):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
@@ -191,6 +364,10 @@ class AscendFusedMoE(FusedMoE):
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            routed_scaling_factor=routed_scaling_factor,
+            enable_eplb=enable_eplb,
+            zero_expert_num=zero_expert_num,
+            zero_expert_type=zero_expert_type,
         )
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
@@ -377,7 +554,7 @@ class AscendFusedMoE(FusedMoE):
             gate=gate)
 
         # Matrix multiply.
-        e_hidden_states = self.quant_method.apply(
+        moe_result = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -399,7 +576,19 @@ class AscendFusedMoE(FusedMoE):
             mc2_mask=mc2_mask,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
+            zero_expert_num=self.zero_expert_num,
+            zero_expert_type=self.zero_expert_type,
         )
+        
+        # 处理零专家结果
+        zero_expert_result = None
+        if isinstance(moe_result, tuple) and len(moe_result) == 2:
+            e_hidden_states, zero_expert_result = moe_result
+            if zero_expert_result is not None:
+                e_hidden_states += (
+                    zero_expert_result[:e_hidden_states.size(0)])
+        else:
+            e_hidden_states = moe_result
 
         group_list_type = None
 
