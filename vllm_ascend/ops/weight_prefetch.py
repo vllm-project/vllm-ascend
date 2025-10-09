@@ -4,8 +4,6 @@ import torch
 import torch_npu
 
 from vllm_ascend.ascend_config import WeightPrefetchConfig
-from vllm_ascend.utils import (current_stream, npu_stream_switch,
-                               prefetch_stream)
 
 SUPPORTED_MODULES = ["attn", "mlp", "moe"]
 
@@ -36,9 +34,6 @@ class WeightPrefetchMethod:
     """
 
     def __init__(self, weight_prefetch_config: WeightPrefetchConfig) -> None:
-        self.calculation_stream = current_stream()
-        self.prefetch_stream = prefetch_stream()
-
         self.attn = ModuleWeightPrefetchConfig(
             module_name="attn",
             enable=weight_prefetch_config.enabled,
@@ -54,20 +49,27 @@ class WeightPrefetchMethod:
         weight_size = weight.data.element_size() * weight.data.numel(
         ) * self.attn.prefetch_ratio.get(prefix, 0)
 
-        self.calculation_stream = torch_npu.npu.current_stream()
-        self.weight_prefetch_impl(weight=weight,
-                                  start_flag=start_flag,
-                                  max_weight_size=int(weight_size))
+        torch.ops.vllm.prefetch_preprocess(weight=weight,
+                                           start_flag=start_flag,
+                                           max_weight_size=int(weight_size))
 
-    def maybe_prefetch_attn_weight_postprocess(self) -> None:
-        if self.attn.enable and self.prefetch_stream is not None:
-            self.calculation_stream.wait_stream(self.prefetch_stream)
+    def maybe_prefetch_attn_weight_postprocess(
+            self, stop_flag: torch.Tensor) -> None:
+        if not self.attn.enable:
+            return
 
-    def weight_prefetch_impl(self, weight: torch.Tensor,
-                             start_flag: torch.Tensor,
-                             max_weight_size: int) -> None:
-        self.prefetch_stream.wait_stream(self.calculation_stream)
-        with npu_stream_switch(self.prefetch_stream):
-            torch.ops.vllm.maybe_npu_prefetch(inputs=weight,
-                                              dependency=start_flag,
-                                              max_size=max_weight_size)
+        torch.ops.vllm.prefetch_postprocess(stop_flag)
+
+
+def maybe_npu_prefetch(inputs: torch.Tensor,
+                       dependency: torch.Tensor,
+                       max_size: int = 0,
+                       offset: int = 0,
+                       *,
+                       enabled: bool = True) -> None:
+    if not enabled:
+        return
+    input_size = inputs.element_size() * inputs.numel()
+    if max_size <= 0 or max_size > input_size:
+        max_size = input_size
+    torch_npu.npu_prefetch(inputs, dependency, max_size, offset)

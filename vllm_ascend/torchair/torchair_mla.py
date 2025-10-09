@@ -23,7 +23,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
-from vllm_ascend.ops.register_custom_ops import _maybe_npu_prefetch_impl
+from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata,
                                         npu_stream_switch, npu_wait_tensor)
 from vllm_ascend.worker.npu_input_batch import InputBatch
@@ -684,10 +684,10 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         if hasattr(self, "running_in_graph") and not self.running_in_graph:
             return x
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024  # 16MB
-        _maybe_npu_prefetch_impl(self.o_proj.weight,
-                                 x,
-                                 max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                                 enabled=enable_multistream_mla)
+        maybe_npu_prefetch(self.o_proj.weight,
+                           x,
+                           max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                           enabled=enable_multistream_mla)
         return self.o_proj(x, is_prefill=False)[0]
 
     # Return `ql_nope`, `q_pe`
@@ -1281,10 +1281,10 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         current_ms_metadata = get_multistream_comm_context()
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024  # 16MB
         if current_ms_metadata is None:
-            _maybe_npu_prefetch_impl(self.o_proj.weight,
-                                     o_proj_input,
-                                     max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                                     enabled=enable_multistream_mla)
+            maybe_npu_prefetch(self.o_proj.weight,
+                               o_proj_input,
+                               max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                               enabled=enable_multistream_mla)
 
             output[...] = self.o_proj(
                 o_proj_input,
@@ -1292,10 +1292,10 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                 is_force_scatter=self.enable_shared_expert_dp)[0]
         else:
             with torch.npu.stream(current_ms_metadata.comm_stream):
-                _maybe_npu_prefetch_impl(self.o_proj.weight,
-                                         o_proj_input,
-                                         max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                                         enabled=enable_multistream_mla)
+                maybe_npu_prefetch(self.o_proj.weight,
+                                   o_proj_input,
+                                   max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                                   enabled=enable_multistream_mla)
                 output[...] = self.o_proj(
                     o_proj_input,
                     is_prefill=True,

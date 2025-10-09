@@ -11,6 +11,8 @@ from vllm.utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
+from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor,
@@ -148,26 +150,30 @@ def _maybe_wait_prefetch_done_impl_fake(x: torch.Tensor) -> None:
     return
 
 
-def _maybe_npu_prefetch_impl(inputs: torch.Tensor,
-                             dependency: torch.Tensor,
-                             max_size: int = 0,
-                             offset: int = 0,
-                             *,
-                             enabled: bool = True) -> None:
-    if not enabled:
-        return
-    input_size = inputs.element_size() * inputs.numel()
-    if max_size <= 0 or max_size > input_size:
-        max_size = input_size
-    torch_npu.npu_prefetch(inputs, dependency, max_size, offset)
+def _prefetch_preprocess_impl(weight: torch.Tensor, start_flag: torch.Tensor,
+                              max_weight_size: int) -> None:
+    calculation_stream = torch_npu.npu.current_stream()
+    weight_prefetch_stream = prefetch_stream()
+    weight_prefetch_stream.wait_stream(calculation_stream)
+    with npu_stream_switch(weight_prefetch_stream):
+        maybe_npu_prefetch(inputs=weight,
+                           dependency=start_flag,
+                           max_size=max_weight_size)
 
 
-def _maybe_npu_prefetch_impl_fake(inputs: torch.Tensor,
-                                  dependency: torch.Tensor,
-                                  max_size: int = 0,
-                                  offset: int = 0,
-                                  *,
-                                  enabled: bool = True) -> None:
+def _prefetch_preprocess_impl_fake(weight: torch.Tensor,
+                                   start_flag: torch.Tensor,
+                                   max_weight_size: int) -> None:
+    return
+
+
+def _prefetch_postprocess_impl(stop_flag: torch.Tensor) -> None:
+    calculation_stream = torch_npu.npu.current_stream()
+    weight_prefetch_stream = prefetch_stream()
+    calculation_stream.wait_stream(weight_prefetch_stream)
+
+
+def _prefetch_postprocess_impl_fake(stop_flag: torch.Tensor) -> None:
     return
 
 
@@ -217,9 +223,15 @@ direct_register_custom_op(op_name="maybe_wait_prefetch_done",
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
-direct_register_custom_op(op_name="maybe_npu_prefetch",
-                          op_func=_maybe_npu_prefetch_impl,
-                          fake_impl=_maybe_npu_prefetch_impl_fake,
+direct_register_custom_op(op_name="prefetch_preprocess",
+                          op_func=_prefetch_preprocess_impl,
+                          fake_impl=_prefetch_preprocess_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="prefetch_postprocess",
+                          op_func=_prefetch_postprocess_impl,
+                          fake_impl=_prefetch_postprocess_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 

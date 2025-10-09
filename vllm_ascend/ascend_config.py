@@ -192,7 +192,7 @@ class WeightPrefetchConfig:
     }
 
     def __init__(self, weight_prefetch_config: dict):
-        self.enabled = weight_prefetch_config.get("enabled", True)
+        self.enabled = weight_prefetch_config.get("enabled", False)
         self.prefetch_ratio = weight_prefetch_config.get(
             "prefetch_ratio", self.prefetch_ratio)
 

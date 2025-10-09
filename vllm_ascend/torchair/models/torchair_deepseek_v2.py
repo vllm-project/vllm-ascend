@@ -70,7 +70,7 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.sfa import Indexer
-from vllm_ascend.ops.register_custom_ops import _maybe_npu_prefetch_impl
+from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
 from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import \
@@ -589,9 +589,9 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                   and attn_metadata.num_decodes > 0)
         forward_kwargs = {"enable_multistream_mla": enable_multistream_mla}
         if self.q_lora_rank is not None:
-            _maybe_npu_prefetch_impl(self.q_a_proj.weight,
-                                     hidden_states,
-                                     enabled=enable_multistream_mla)
+            maybe_npu_prefetch(self.q_a_proj.weight,
+                               hidden_states,
+                               enabled=enable_multistream_mla)
             ckq = self.q_a_proj(hidden_states)[0]
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
             forward_kwargs['ckq'] = ckq

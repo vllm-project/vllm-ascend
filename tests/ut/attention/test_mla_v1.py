@@ -495,7 +495,7 @@ class TestAscendMLAImpl(TestBase):
         mock_up_proj.assert_called_once()
         mock_npu_fused_infer_attention_score.assert_called_once()
 
-    @patch("torch.ops.vllm.maybe_npu_prefetch")
+    @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
     def test_mla_preprocess(self, magic_npu_fetch):
         magic_npu_fetch.return_value = MagicMock()
         batch_size = 4
