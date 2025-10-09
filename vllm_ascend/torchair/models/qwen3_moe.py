@@ -53,7 +53,6 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
 from vllm_ascend.torchair.ops.sequence_parallel import (MetadataForPadding,
                                                         init_metadata_for_sp)
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
