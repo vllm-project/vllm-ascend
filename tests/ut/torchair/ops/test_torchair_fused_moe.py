@@ -56,7 +56,8 @@ def mock_dist_env(mocker: MockerFixture):
     # init dist env patch
     dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
 
-    with patch('torch.distributed.get_rank', return_value=0), \
+    with patch('torch.npu.is_available', return_value=True), \
+         patch('torch.distributed.get_rank', return_value=0), \
          patch('torch.distributed.get_world_size', return_value=4), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_mc2_group', return_value=mock_ep_and_mc2_group(mocker)), \
@@ -208,7 +209,6 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
 
 class TestTorchairAscendFusedMoe:
 
-    @patch('torch.npu.is_available', return_value=True)
     def test_init_no_quant(self, mock_dist_env, default_moe_config):
         layer = TorchairAscendFusedMoE(**default_moe_config)
 
@@ -238,7 +238,6 @@ class TestTorchairAscendFusedMoe:
             error_config['scoring_func'] = "random"
             layer = TorchairAscendFusedMoE(**error_config)
 
-    @patch('torch.npu.is_available', return_value=True)
     def test_init_with_quant(self, mock_dist_env, default_moe_config):
         mock_quant_config = MagicMock()
         mock_quant_method = MockFusedMoEMethod()
@@ -250,7 +249,6 @@ class TestTorchairAscendFusedMoe:
             assert moe.quant_method is not None
             assert isinstance(moe.quant_method, AscendFusedMoEMethod)
 
-    @patch('torch.npu.is_available', return_value=True)
     def test_init_with_mixed_quant(self, mock_dist_env, default_moe_config):
         mock_quant_config = MagicMock()
         mock_quant_method = MockFusedMoEMethod()
@@ -264,7 +262,6 @@ class TestTorchairAscendFusedMoe:
         assert isinstance(moe.quant_method,
                           TorchairAscendUnquantizedFusedMoEMethod)
 
-    @patch('torch.npu.is_available', return_value=True)
     @pytest.mark.parametrize(
         "others_param",
         [[None,
