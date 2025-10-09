@@ -72,6 +72,10 @@ class KVCacheTaskTracker:
         self.record_finished_requests: set[str] = set()
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
 
+    def add_not_transfer_request(self, request_id: str):
+        with self.done_task_lock:
+            self.finished_requests.add(request_id)
+
     def update_done_task_count(self, request_id: str):
         with self.done_task_lock:
             self.finished_requests.add(request_id)
@@ -147,6 +151,9 @@ class KVCacheSendingThread(threading.Thread):
             A set of request IDs that have been completed.
         """
         return self.task_tracker.get_and_clear_finished_requests()
+
+    def add_not_transfer_request(self, request_id: str):
+        self.task_tracker.add_not_transfer_request(request_id)
 
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         return self.task_tracker.add_delayed_request(request_id,
@@ -734,7 +741,7 @@ class MooncakeConnectorScheduler:
         self._decode_tp_size = decode_parallel_config["tp_size"]
 
         if self.vllm_config.model_config.use_mla or self.ascend_config.use_sfa:
-            return self._decode_tp_size
+            return self._prefill_tp_size
         else:
             # TODO support mha and gqa
             return None
@@ -998,6 +1005,8 @@ class MooncakeConnectorWorker:
                 if self.tp_rank in self._get_remote_tp_ranks_for_req(req_id):
                     self.kv_send_thread.add_delayed_request(
                         req_id, delay_start_time)
+                else:
+                    self.kv_send_thread.add_not_transfer_request(req_id)
 
     def _get_remote_tp_rank(self, req_id: str) -> int:
         return self._get_remote_tp_ranks_for_req(req_id)[self.tp_rank]
