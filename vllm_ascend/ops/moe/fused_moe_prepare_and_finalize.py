@@ -460,25 +460,20 @@ class FusedMoEPrepareAndFinalizeWithEPAllgather(FusedMoEPrepareAndFinalize):
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 enable_shared_expert_dp: bool = False,
-                rm_router_logits: bool = False,
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Preparation steps:
           1. Fetch cumulative token boundaries from forward context.
-          2. Multicast hidden_states and router_logits to form global tensors.
-          3. Optionally recompute router_logits globally if `rm_router_logits=True`.
+          2. allgather hidden_states and router_logits to form global tensors.
 
         Returns:
             Tuple of (global_hidden_states, global_router_logits, None)
         """
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             hidden_states, True, True)
-        if rm_router_logits:
-            router_logits, _ = gate(hidden_states)
-        else:
-            router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                router_logits, True, True)
+        router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            router_logits, True, True)
 
         return hidden_states, router_logits, None
 
