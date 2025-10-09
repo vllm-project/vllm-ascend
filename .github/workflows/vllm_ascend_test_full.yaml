@@ -42,8 +42,6 @@ jobs:
     strategy:
       matrix:
         vllm_version: [releases/v0.11.0, v0.11.0rc3]
-    needs: [changes]
-    if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
