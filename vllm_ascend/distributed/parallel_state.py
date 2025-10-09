@@ -38,7 +38,6 @@ def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, ("mlp group is not initialized")
     return _MLP_TP
 
-
 def get_p_tp_group() -> GroupCoordinator:
     assert _P_TP is not None, (
         "distributed prefill tensor parallel group is not initialized")
@@ -215,7 +214,7 @@ def destroy_ascend_model_parallel():
     if _P_TP:
         _P_TP.destroy()
     _P_TP = None
-    
+
     global _EMBED_TP
     if _EMBED_TP:
         _EMBED_TP.destroy()
