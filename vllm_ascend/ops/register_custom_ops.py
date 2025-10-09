@@ -7,10 +7,10 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
-from vllm.logger import logger
 from vllm.utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_forward_context import MoECommType
 
 
 def _maybe_chunk_residual_impl(x: torch.Tensor,
@@ -18,14 +18,12 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return residual
 
     if x.size(0) != residual.size(0):
-        flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
-        assert flashcomm_v1_enabled is True, (
-            "Currently, this situation only occurs "
-            "when flashcomm_v1 is enabled")
+        sp_enabled = forward_context.sp_enabled
+        assert sp_enabled is True, ("Currently, this situation only occurs "
+                                    "when sp is enabled")
         pad_size = forward_context.pad_size
         if pad_size > 0:
             residual = F.pad(residual, (0, 0, 0, pad_size))
@@ -41,11 +39,10 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return x
 
-    flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
-    if flashcomm_v1_enabled and label:
+    sp_enabled = forward_context.sp_enabled
+    if sp_enabled and label:
         x = tensor_model_parallel_all_gather(x, 0)
         pad_size = forward_context.pad_size
         if pad_size > 0:
@@ -57,11 +54,10 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return tensor_model_parallel_all_reduce(x)
 
-    flashcomm_v1_enabled = forward_context.flashcomm_v1_enabled
-    if flashcomm_v1_enabled:
+    sp_enabled = forward_context.sp_enabled
+    if sp_enabled:
         pad_size = forward_context.pad_size
         if pad_size > 0:
             x = F.pad(x, (0, 0, 0, pad_size))
@@ -75,7 +71,6 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return
 
     if not forward_context.prefetch_mlp_enabled:
@@ -106,7 +101,6 @@ def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return
 
     if not forward_context.prefetch_mlp_enabled:
@@ -136,7 +130,6 @@ def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
     try:
         forward_context = get_forward_context()
     except AssertionError:
-        logger.info("Forward context is None, skipping the operation.")
         return
 
     if not forward_context.prefetch_mlp_enabled:
@@ -153,6 +146,16 @@ def _maybe_wait_prefetch_done_impl(x: torch.Tensor) -> None:
 
 def _maybe_wait_prefetch_done_impl_fake(x: torch.Tensor) -> None:
     return
+
+
+def _maybe_all_reduce_tensor_model_parallel_impl(
+        final_hidden_states: torch.Tensor) -> torch.Tensor:
+    forward_context = get_forward_context()
+    moe_comm_type = forward_context.moe_comm_type
+    if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
+        return final_hidden_states
+    else:
+        return tensor_model_parallel_all_reduce(final_hidden_states)
 
 
 direct_register_custom_op(op_name="maybe_chunk_residual",
@@ -188,5 +191,11 @@ direct_register_custom_op(op_name="maybe_prefetch_mlp_down_proj",
 direct_register_custom_op(op_name="maybe_wait_prefetch_done",
                           op_func=_maybe_wait_prefetch_done_impl,
                           fake_impl=_maybe_wait_prefetch_done_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="maybe_all_reduce_tensor_model_parallel",
+                          op_func=_maybe_all_reduce_tensor_model_parallel_impl,
+                          fake_impl=lambda x: x,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")

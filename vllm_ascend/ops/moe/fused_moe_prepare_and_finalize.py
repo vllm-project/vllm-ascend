@@ -26,6 +26,8 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
+from vllm_ascend.utils import get_rm_router_logits_state
+
 
 class FusedMoEPrepareAndFinalize(ABC):
     """
@@ -41,13 +43,16 @@ class FusedMoEPrepareAndFinalize(ABC):
 
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
+        is_deepseek_v3_r1 = self.moe_config.original_num_experts == 256
+        self.rm_router_logits = get_rm_router_logits_state(
+            self.moe_config.ep_size, self.moe_config.dp_size,
+            is_deepseek_v3_r1)
 
     @abstractmethod
     def prepare(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 enable_shared_expert_dp: bool = False,
-                rm_router_logits: bool = False,
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -61,7 +66,6 @@ class FusedMoEPrepareAndFinalize(ABC):
             hidden_states (torch.Tensor): Input features, shape [num_tokens, hidden_size]
             router_logits (torch.Tensor): Router outputs, shape [num_tokens, num_experts]
             enable_shared_expert_dp (bool): Skip DP communication for shared experts
-            rm_router_logits (bool): Discard input router_logits and recompute via gate
             replace_allreduce (bool): Bypass default all-reduce behavior
             gate (nn.Module, optional): Gate network to recompute router_logits if needed
 
@@ -116,7 +120,6 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 enable_shared_expert_dp: bool = False,
-                rm_router_logits: bool = False,
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -133,11 +136,15 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
         """
         self.replace_allreduce = replace_allreduce
         self.enable_shared_expert_dp = enable_shared_expert_dp
+        forward_context = get_forward_context()
+        mc2_mask = forward_context.mc2_mask
+        if self.tp_size > 1:
+            # Also slice mc2_mask
+            split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)
+            mc2_mask = split_mc2_mask[self.tp_rank]
 
         if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
-            forward_context = get_forward_context()
-            mc2_mask = forward_context.mc2_mask
             target_pad_length = forward_context.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
 
@@ -149,23 +156,16 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
                                                   (0, 0, 0, pad_size))
 
             # Slice across TP ranks
-            if self.tp_size > 1:
-                if not self.enable_shared_expert_dp:
-                    split_hidden_states = torch.tensor_split(hidden_states,
-                                                             self.tp_size,
-                                                             dim=0)
-                    split_router_logits = torch.tensor_split(router_logits,
-                                                             self.tp_size,
-                                                             dim=0)
-                    hidden_states = split_hidden_states[self.tp_rank]
-                    router_logits = split_router_logits[self.tp_rank]
-                    self.split_hidden_states = split_hidden_states  # Save for finalize
-
-                # Also slice mc2_mask
-                split_mc2_mask = torch.tensor_split(mc2_mask,
-                                                    self.tp_size,
-                                                    dim=0)
-                mc2_mask = split_mc2_mask[self.tp_rank]
+            if self.tp_size > 1 and not self.enable_shared_expert_dp:
+                split_hidden_states = torch.tensor_split(hidden_states,
+                                                         self.tp_size,
+                                                         dim=0)
+                split_router_logits = torch.tensor_split(router_logits,
+                                                         self.tp_size,
+                                                         dim=0)
+                hidden_states = split_hidden_states[self.tp_rank]
+                router_logits = split_router_logits[self.tp_rank]
+                self.split_hidden_states = split_hidden_states  # Save for finalize
 
         return hidden_states, router_logits, mc2_mask
 
@@ -185,6 +185,11 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
                 dist.all_gather(list(self.split_hidden_states), hidden_states,
                                 self.moe_config.tp_group.device_group)
                 hidden_states = torch.cat(self.split_hidden_states, dim=0)
+
+                # TODO: It is a quick bugfix for the memory explosion issue in eager mode.
+                # If the cache is not cleared after `self.split_hidden_states` is created,
+                # it can lead to the memory explosion in eager mode.
+                del self.split_hidden_states
 
             # Unpad if necessary
             if self.num_tokens < hidden_states.shape[0]:
@@ -213,7 +218,6 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 enable_shared_expert_dp: bool = False,
-                rm_router_logits: bool = False,
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -270,6 +274,11 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
                                 self.moe_config.tp_group.device_group)
                 hidden_states = torch.cat(self.split_hidden_states, dim=0)
 
+                # TODO: It is a quick bugfix for the memory explosion issue in eager mode.
+                # If the cache is not cleared after `self.split_hidden_states` is created,
+                # it can lead to the memory explosion in eager mode.
+                del self.split_hidden_states
+
             if self.num_tokens < hidden_states.shape[0]:
                 hidden_states = hidden_states[:self.num_tokens]
 
@@ -287,7 +296,6 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 enable_shared_expert_dp: bool = False,
-                rm_router_logits: bool = False,
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -295,7 +303,6 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
           1. Fetch max token count across DP group from forward context.
           2. Pad local tensors to that size.
           3. All-gather across DP group to form global input tensor.
-          4. Optionally recompute router_logits using gate if `rm_router_logits=True`.
 
         Returns:
             Tuple of (global_hidden_states, global_router_logits, None)
@@ -311,14 +318,14 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states,
                                                   (0, 0, 0, pad_size))
-                if not rm_router_logits:
+                if not self.rm_router_logits:
                     router_logits = nn.functional.pad(router_logits,
                                                       (0, 0, 0, pad_size))
 
             # All-gather across DP group
             hidden_states = self.moe_config.dp_group.all_gather(
                 hidden_states, 0)
-            if rm_router_logits:
+            if self.rm_router_logits:
                 router_logits, _ = gate(hidden_states)  # Recompute globally
             else:
                 router_logits = self.moe_config.dp_group.all_gather(
@@ -392,14 +399,12 @@ class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 enable_shared_expert_dp: bool = False,
-                rm_router_logits: bool = False,
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Preparation steps:
           1. Fetch cumulative token boundaries from forward context.
           2. Multicast hidden_states and router_logits to form global tensors.
-          3. Optionally recompute router_logits globally if `rm_router_logits=True`.
 
         Returns:
             Tuple of (global_hidden_states, global_router_logits, None)
@@ -408,10 +413,10 @@ class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
 
         if self.moe_config.dp_size > 1:
             self.cu_tokens_across_dp_cpu = get_forward_context(
-            ).dp_metadata.cu_tokens_across_dp_cpu
+            ).dp_metadata.cu_tokens_across_sp(1)
             hidden_states = self._naive_multicast(hidden_states,
                                                   self.cu_tokens_across_dp_cpu)
-            if rm_router_logits:
+            if self.rm_router_logits:
                 router_logits, _ = gate(hidden_states)
             else:
                 router_logits = self._naive_multicast(

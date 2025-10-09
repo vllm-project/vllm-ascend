@@ -463,7 +463,7 @@ class TestAscendMLATorchairMetadataBuilder(TestBase):
                 max_query_len=1,
                 decode_token_per_req=torch.tensor([1, 1, 1]),
                 block_table_tensor=torch.zeros((10, 10)),
-                slot_mapping_cpu=torch.tensor(range(20)),
+                slot_mapping=torch.tensor(range(20)),
                 actual_seq_lengths_q=torch.tensor([0, 1, 2]),
                 positions=torch.tensor([1, 1]),
                 attn_mask=torch.ones((15, 15)),
