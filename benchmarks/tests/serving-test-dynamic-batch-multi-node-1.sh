@@ -13,16 +13,6 @@ wait_for_server() {
     done" && return 0 || return 1
 }
 
-kill_npu_processes() {
-  ps -aux
-  local port=$1
-  lsof -t -i:port | xargs -r kill -9
-  pgrep python3 | xargs -r kill -9
-  
-  sleep 4
-  rm -rf ~/.config/vllm
-
-}
 
 
 # this obtained through ifconfig
@@ -42,9 +32,9 @@ export HCCL_BUFFSIZE=1024
 
 
 
-MOEL_DIR= $1 
+MOEL_DIR=$1 
 DATASET_NAME=sharegpt  
-DATASET= $2 
+DATASET=$2 
 MODEL_LEN=9000
 CHUNK_SIZE=1024
 NUM_PROMPT=200

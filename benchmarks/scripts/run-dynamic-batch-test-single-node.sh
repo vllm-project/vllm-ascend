@@ -11,13 +11,11 @@ TP=8
 # 1: run benchmarks of different slo limits
 for slo in 0 35 50 75 100;do
     bash bench_dynamic_batch.sh $model $slo $dataset $num_prompts $TP
-
+done
 # 2: run metrci calculation to extact quantitative results:
 python benchmarks/scripts/metric_cal.py
 
 # 3: exit
-VLLM_PID=$(pgrep -f "vllm")
-kill -2 "$VLLM_PID"
 pkill -f timeout
 pkill -f python
 

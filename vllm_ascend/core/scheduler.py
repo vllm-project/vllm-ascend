@@ -41,8 +41,8 @@ class BudgetRefiner:
     in the chunked prefill scheduling startegy."""
     
     def __init__(self, default_budget, slo_limit=-1) -> None:
-        self.eabled = slo_limit!=-1
-        if not self.eabled:
+        self.enabled = slo_limit!=-1
+        if not self.enabled:
             return
         logger.info("Dynamic batch is enabled with SLO limit: {}, and chunked prefill is forced to be activated because dynamic batch relies on it".format(str(slo_limit)))
         self.lookup = {}
@@ -90,7 +90,7 @@ class BudgetRefiner:
 
     def refine_budget(self, running_request, budget):
         """Dynamiclly refine the token budget according to the running requset."""
-        if not self.eabled:
+        if not self.enabled:
             return budget
         # assume all running request will be scheduled.
         num_decode_token_lst = [ 
