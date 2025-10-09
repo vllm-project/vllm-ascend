@@ -326,16 +326,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 scale=self.scale,
                 sparse_mode=3)
         else:
-            torch_npu._npu_flash_attention(
-                query=query,
-                key=key,
-                value=value,
-                mask=mask,
-                seq_len=attn_metadata.seq_lens,
-                scale_value=self.scale,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                out=output)
+            torch_npu._npu_flash_attention(query=query,
+                                           key=key,
+                                           value=value,
+                                           mask=mask,
+                                           seq_len=attn_metadata.seq_lens,
+                                           scale_value=self.scale,
+                                           num_heads=self.num_heads,
+                                           num_kv_heads=self.num_kv_heads,
+                                           out=output)
         assert output is not None
         return output[:num_tokens, :, :]
 
