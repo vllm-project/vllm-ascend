@@ -26,7 +26,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
@@ -43,7 +43,7 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
 from vllm.v1.worker.worker_base import WorkerBase
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
@@ -88,6 +88,17 @@ class NPUWorker(WorkerBase):
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         init_ascend_soc_version()
+        if get_ascend_config().use_sfa:
+            # Direct import instead of using try_register_lib to ensure proper error handling when
+            # custom_ops is necessary but not available (e.g., in DeepSeek v3.2 deployments)
+            # yapf: disable
+            import custom_ops  # type: ignore # noqa
+
+            # yapf: enable
+            logger.info(
+                "custom_ops module loaded successfully. Custom operators like "
+                "torch.ops.custom.npu_sparse_flash_attention are now available."
+            )
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
@@ -115,6 +126,12 @@ class NPUWorker(WorkerBase):
         if sleep_mode_enabled():
             # Buffers saved before sleep
             self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
+
+        # FixMe: this is a patch to fix the issue cause by https://github.com/vllm-project/vllm/commit/de94289a98d7ec52a5ef02719e01a1db8b505170
+        from vllm.model_executor.layers.linear import \
+            WEIGHT_LOADER_V2_SUPPORTED
+        if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
+            WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
     def sleep(self, level: int = 1) -> None:
         if not sleep_mode_enabled():
@@ -339,7 +356,10 @@ class NPUWorker(WorkerBase):
         return self.model_runner.pin_lora(lora_id)
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        force_attention = self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        self.model_runner._dummy_run(num_tokens=1,
+                                     uniform_decode=True,
+                                     force_attention=force_attention)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
