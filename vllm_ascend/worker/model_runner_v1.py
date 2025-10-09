@@ -1877,7 +1877,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             moe_comm_type = MoECommType.ALLGATHER
         elif soc_version in {AscendSocVersion.A2}:
             # TODO: For A2, `MoECommType.MC2` may generate an error.
-            
+
             # Currently, w4a8_dynamic does not support allgatherep
             if quant_type == "w4a8_dynamic":
                 moe_comm_type = MoECommType.ALLTOALL
