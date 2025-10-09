@@ -424,6 +424,7 @@ class MooncakeStoreConfig:
     protocol: str
     device_name: str
     master_server_address: str
+    use_ascend_direct: bool = False
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":

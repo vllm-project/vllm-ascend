@@ -9,6 +9,7 @@ from vllm.utils import logger
 from vllm_ascend.distributed.mooncake.config_data import MooncakeEngineKey
 
 from .config_data import MooncakeStoreConfig
+from mooncake.store import ReplicateConfig
 
 METADATA_BYTES_LEN = 24
 BASE_PORT = int(os.getenv("VLLM_BASE_PORT", "8790"))
@@ -36,7 +37,7 @@ class Mooncakestore():
         assert len(device_ids_list) > tp_rank
         device_id = device_ids_list[tp_rank]
         self.config = MooncakeStoreConfig.load_from_env()
-        if self.config.protocol == "ascend":
+        if self.config.protocol == "ascend" and not self.config.use_ascend_direct:
             local_hostname = self.config.local_hostname + ":" + str(BASE_PORT + int(device_id)) + \
                 ":npu_" + str(device_id)
         else:
@@ -61,6 +62,31 @@ class Mooncakestore():
     def batch_exists(self, keys: list[str]) -> list[bool]:
         return self.store.batch_is_exist(keys)
 
+    def get_batch(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], block_ids: list[int]):
+        try:
+            res = self.store.batch_get_into_multi_buffers(keys, addrs, sizes)
+            for value in res:
+                if value < 0:
+                    logger.error(
+                        f"Failed to get key {keys},res:{res}"
+                    )
+        except Exception as e:
+            logger.error(f"Failed to get key {keys}. {e}")
+
+    def put_batch(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]], block_ids: list[int]):
+        try:
+            config = ReplicateConfig()
+            config.preferred_segment = self.config.local_hostname
+            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes, config)
+            for value in res:
+                if value < 0:
+                    logger.error(
+                        f"Failed to put key {keys},res:{res}"
+                    )
+        except Exception as e:
+            logger.error(
+                f"Failed to put key {keys},error:{e}"
+            )
     def get(self, key: MooncakeEngineKey, addr: list[int], size: list[int]):
         expect_res = sum(size)
         key_str = key.to_string()
