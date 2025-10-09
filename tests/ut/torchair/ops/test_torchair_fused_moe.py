@@ -238,6 +238,7 @@ class TestTorchairAscendFusedMoe:
             error_config['scoring_func'] = "random"
             layer = TorchairAscendFusedMoE(**error_config)
 
+    @patch('torch.npu.is_available')
     def test_init_with_quant(self, mock_dist_env, default_moe_config):
         mock_quant_config = MagicMock()
         mock_quant_method = MockFusedMoEMethod()
@@ -249,6 +250,7 @@ class TestTorchairAscendFusedMoe:
             assert moe.quant_method is not None
             assert isinstance(moe.quant_method, AscendFusedMoEMethod)
 
+    @patch('torch.npu.is_available')
     def test_init_with_mixed_quant(self, mock_dist_env, default_moe_config):
         mock_quant_config = MagicMock()
         mock_quant_method = MockFusedMoEMethod()
