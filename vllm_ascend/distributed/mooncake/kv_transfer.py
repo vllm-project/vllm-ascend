@@ -149,7 +149,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             blockIds = []
             for start, end, key in self.token_database.process_tokens(
                     tokens, mask):
-                addr, size, block_id = self.prepare_value(start, end, block_ids)
+                addr, size, block_id = self.prepare_value(
+                    start, end, block_ids)
                 key_list.append(key.to_string())
                 addr_list.append(addr)
                 size_list.append(size)
@@ -195,7 +196,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             blockIds = []
             for start, end, key in self.token_database.process_tokens(
                     tokens, mask):
-                addr, size, block_id = self.prepare_value(start, end, block_ids)
+                addr, size, block_id = self.prepare_value(
+                    start, end, block_ids)
                 key_list.append(key.to_string())
                 addr_list.append(addr)
                 size_list.append(size)
