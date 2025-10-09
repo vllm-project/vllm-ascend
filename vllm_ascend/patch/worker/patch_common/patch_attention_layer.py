@@ -16,8 +16,6 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class AscendAttention(Attention, nn.Module, AttentionLayerBase):
     """Attention layer.
@@ -69,12 +67,10 @@ class AscendAttention(Attention, nn.Module, AttentionLayerBase):
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
-            is_attention_free = cache_config.is_attention_free
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
             block_size = 16
-            is_attention_free = False
             calculate_kv_scales = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
@@ -135,23 +131,13 @@ class AscendAttention(Attention, nn.Module, AttentionLayerBase):
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
         if attn_backend is None:
-            if vllm_version_is("0.10.2"):
-                self.attn_backend = get_attn_backend(head_size,
-                                                     dtype,
-                                                     kv_cache_dtype,
-                                                     block_size,
-                                                     is_attention_free,
-                                                     use_mla=use_mla,
-                                                     use_sfa=use_sfa,
-                                                     has_sink=self.has_sink)
-            else:
-                self.attn_backend = get_attn_backend(head_size,
-                                                     dtype,
-                                                     kv_cache_dtype,
-                                                     block_size,
-                                                     use_mla=use_mla,
-                                                     use_sfa=use_sfa,
-                                                     has_sink=self.has_sink)
+            self.attn_backend = get_attn_backend(head_size,
+                                                 dtype,
+                                                 kv_cache_dtype,
+                                                 block_size,
+                                                 use_mla=use_mla,
+                                                 use_sfa=use_sfa,
+                                                 has_sink=self.has_sink)
         else:
             self.attn_backend = attn_backend
 

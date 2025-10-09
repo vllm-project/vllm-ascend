@@ -1,10 +1,9 @@
 import torch
 from torch.nn.parameter import Parameter
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils import GiB_bytes
-
-from vllm_ascend.utils import vllm_version_is
 
 logger = init_logger(__name__)
 
@@ -39,6 +38,4 @@ def create_weights(self, layer: torch.nn.Module, input_size_per_partition: int,
     set_weight_attrs(weight, extra_weight_attrs)
 
 
-if not vllm_version_is("0.10.2"):
-    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-    UnquantizedLinearMethod.create_weights = create_weights
+UnquantizedLinearMethod.create_weights = create_weights
