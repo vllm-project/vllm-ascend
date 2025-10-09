@@ -2410,11 +2410,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # MC2 will consume additional NPU memory.
             # Therefore, we need to run the MC2 path once here to complete its initialization,
             # allowing vLLM to correctly estimate the maximum memory required.
+            num_tokens = min(self.mc2_tokens_capacity,
+                             self.scheduler_config.max_num_batched_tokens)
             if self.max_num_tokens > self.mc2_tokens_capacity and \
                 self._select_moe_comm_method(
-                    self.mc2_tokens_capacity,
-                    with_prefill=True) == MoECommType.MC2:
-                self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
+                    num_tokens, with_prefill=True) == MoECommType.MC2:
+                self._dummy_run(num_tokens, with_prefill=True)
 
         output = None
         if get_pp_group().is_last_rank:
