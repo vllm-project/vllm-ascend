@@ -88,7 +88,7 @@ class MoECommMethod(ABC):
             w2: torch.Tensor,
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
-            row_idx: torch.Tensor,
+            row_idx: Optional[torch.Tensor] = None,
             activation: str = "silu",
             apply_router_weight_on_input: bool = False,
             use_int8_w8a8: bool = False,
