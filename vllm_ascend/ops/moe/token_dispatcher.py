@@ -20,7 +20,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -31,7 +30,8 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.moe.comm_utils import (
     async_all_to_all, gather_from_sequence_parallel_region)
-from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
+from vllm_ascend.utils import (AscendSocVersion, get_ascend_soc_version,
+                               is_hierarchical_communication_enabled)
 
 
 class MoETokenDispatcher(ABC):
@@ -102,9 +102,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
-        self.need_expert_scale = (
-            os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
-            and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
+        self.need_expert_scale = is_hierarchical_communication_enabled()
         self.output = None
         self.assist_info_for_combine = None
         self.ep_recv_counts = None

@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import os
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
@@ -29,7 +28,8 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.torchair.ops.torchair_fused_moe import torchair_select_experts
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
-                               dispose_tensor, get_ascend_soc_version)
+                               dispose_tensor, get_ascend_soc_version,
+                               is_hierarchical_communication_enabled)
 
 
 def torchair_apply_mlp_decode(hidden_states: torch.Tensor,
@@ -239,8 +239,7 @@ def torchair_fused_experts_with_mc2(
     # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
     # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
     # improve communication performance.
-    need_expert_scale = (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
-                         and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
+    need_expert_scale = is_hierarchical_communication_enabled()
 
     enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
 

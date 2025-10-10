@@ -51,7 +51,8 @@ from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
                                get_ascend_soc_version,
-                               get_rm_router_logits_state, is_310p)
+                               get_rm_router_logits_state, is_310p,
+                               is_hierarchical_communication_enabled)
 
 
 def torchair_fused_experts_with_mc2(
@@ -81,8 +82,7 @@ def torchair_fused_experts_with_mc2(
     # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
     # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
     # improve communication performance.
-    need_expert_scale = (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
-                         and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
+    need_expert_scale = is_hierarchical_communication_enabled()
 
     enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
 
