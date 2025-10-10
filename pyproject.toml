@@ -12,7 +12,7 @@ requires = [
     "scipy",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "torch-npu==2.7.1.dev20250919",
+    "torch-npu==2.7.1.dev20250724",
     "torch>=2.7.1",
     "torchvision",
     "wheel",
