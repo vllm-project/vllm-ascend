@@ -1106,8 +1106,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                    dependency=o_proj_input,
                                    max_size=MAX_O_PROJ_PREFETCH_SIZE,
                                    enabled=self.enable_prefetch)
-                output[...] = self.o_proj(
-                    o_proj_input)[0]
+                output[...] = self.o_proj(o_proj_input)[0]
                 current_ms_metadata.after_comm_event.record()
         del o_proj_input
 
