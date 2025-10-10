@@ -216,8 +216,9 @@ def example_prompt_embeds(hf_runner):
     return [_encode_embeds(item) for item in example_embeddings]
 
 
-@pytest.fixture(scope="module",
-                params=["", "--disable-frontend-multiprocessing --enable-prompt-embeds"])
+@pytest.fixture(
+    scope="module",
+    params=["", "--disable-frontend-multiprocessing --enable-prompt-embeds"])
 def server_with_prompt_embeds(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
