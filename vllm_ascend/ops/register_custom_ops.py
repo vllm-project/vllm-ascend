@@ -13,27 +13,6 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 
 
-def _maybe_chunk_residual_impl(x: torch.Tensor,
-                               residual: torch.Tensor) -> torch.Tensor:
-    try:
-        forward_context = get_forward_context()
-    except AssertionError:
-        return residual
-
-    if x.size(0) != residual.size(0):
-        sp_enabled = forward_context.sp_enabled
-        assert sp_enabled is True, ("Currently, this situation only occurs "
-                                    "when sp is enabled")
-        pad_size = forward_context.pad_size
-        if pad_size > 0:
-            residual = F.pad(residual, (0, 0, 0, pad_size))
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
-
-    return residual
-
-
 def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
                                            label: bool) -> torch.Tensor:
     try:
@@ -157,12 +136,6 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
     else:
         return tensor_model_parallel_all_reduce(final_hidden_states)
 
-
-direct_register_custom_op(op_name="maybe_chunk_residual",
-                          op_func=_maybe_chunk_residual_impl,
-                          fake_impl=lambda x, residual: residual,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
 
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,

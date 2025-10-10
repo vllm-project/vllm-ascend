@@ -496,67 +496,6 @@ class CustomQwen3NextDecoderLayer(Qwen3NextDecoderLayer):
                     dtype=config.torch_dtype,
                 ), )
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        positions: torch.Tensor = None,
-        **kwargs: object,
-    ):
-        self_attention_output = torch.empty_like(hidden_states)
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-            forward_context = get_forward_context()
-            if forward_context.sp_enabled:
-                tp_size = get_tensor_model_parallel_world_size()
-                chunk_size = (hidden_states.shape[0] + forward_context.pad_size) // tp_size
-                self_attention_output = self_attention_output[:chunk_size, :]
-        else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
-
-        if self.layer_type == "linear_attention":
-            self.linear_attn(
-                hidden_states=hidden_states,
-                output=self_attention_output,
-            )
-        elif self.layer_type == "full_attention":
-            self.self_attn(
-                hidden_states=hidden_states,
-                output=self_attention_output,
-                positions=positions,
-            )
-        else:
-            raise ValueError("Invalid layer_type")
-        hidden_states = self_attention_output
-
-        if self.layer_scale:
-            if len(hidden_states.shape) == 2:
-                hidden_states = hidden_states * (
-                    self.attn_layer_scale.to(hidden_states.dtype)[0] + 1)
-            else:
-                hidden_states = hidden_states * (
-                    self.attn_layer_scale.to(hidden_states.dtype) + 1)
-
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
-
-        if self.layer_scale:
-            if len(hidden_states.shape) == 2:
-                hidden_states = hidden_states * (
-                    self.ffn_layer_scale.to(hidden_states.dtype)[0] + 1)
-            else:
-                assert len(hidden_states.shape) == len(
-                    self.ffn_layer_scale.shape
-                ), f'shape must be the same {len(hidden_states.shape)}, {len(self.ffn_layer_scale.shape)}'  # noqa: E501
-                hidden_states = hidden_states * (
-                    self.ffn_layer_scale.to(hidden_states.dtype) + 1)
-
-        return hidden_states, residual
-
 
 @support_torch_compile
 class CustomQwen3NextModel(Qwen3NextModel):

@@ -9,12 +9,6 @@ from tests.ut.base import PytestBase
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 
 
-def mock_maybe_chunk_residual(x, residual):
-    if x.size(0) != residual.size(0):
-        return residual[:4]
-    return residual
-
-
 def mock_rms_norm(x, weight, eps):
     return x + 1, None
 
@@ -36,8 +30,6 @@ class TestAscendRMSNorm(PytestBase):
 
     @pytest.fixture(autouse=True)
     def context(self, mocker: MockerFixture):
-        mocker.patch("torch.ops.vllm.maybe_chunk_residual",
-                     side_effect=mock_maybe_chunk_residual)
         mocker.patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
         mocker.patch("torch_npu.npu_add_rms_norm",
                      side_effect=mock_add_rms_norm)

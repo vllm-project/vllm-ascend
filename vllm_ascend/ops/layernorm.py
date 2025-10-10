@@ -64,7 +64,6 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             assert x.size(0) == residual.size(0)
             x, residual = _addrmsnorm_forward_oot(
                 self, x, residual, self.next_need_quant_fusion_linear)
@@ -143,7 +142,6 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
 
         from vllm_ascend.utils import is_310p
         if residual is not None:
-            residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
             if is_310p():
                 orig_dtype = residual.dtype
                 x = x + residual.to(x.dtype)
