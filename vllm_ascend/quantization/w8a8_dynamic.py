@@ -230,7 +230,9 @@ class AscendW8A8DynamicFusedMoEMethod:
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
                 expert_map=expert_map,
-                dynamic_eplb=self.dynamic_eplb)
+                dynamic_eplb=self.dynamic_eplb,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num)
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
