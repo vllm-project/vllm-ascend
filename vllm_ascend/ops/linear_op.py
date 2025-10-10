@@ -170,13 +170,7 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
         # Matrix multiply.
         assert self.quant_method is not None
 
-        input_ = None
-        if self.skip_first_layer:
-            layer_num = self.prefix.split('.')[2]
-            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                input_, layer_num != '0')
-        else:
-            input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
+        input_ = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(input_, True)
         output_parallel = self.quant_method.apply(self.layer, input_, bias)
 
         if self.gather_output:
@@ -405,7 +399,7 @@ def _get_row_parallel_op(
     if matmul_allreduce_enable():
         return MatmulAllreduceRowParallelOp(layer)
     if enable_sp():
-        if "o_proj" in prefix or "out_proj" in prefix:
+        if "o_proj" in prefix or "out_proj" in prefix or "down_proj" in prefix:
             return SequenceRowParallelOp(layer)
 
     return None
