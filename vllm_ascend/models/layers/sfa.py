@@ -32,18 +32,18 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mla import MLAModules
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.utils import direct_register_custom_op
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.11.0"):
     from vllm.attention import Attention
     from vllm.model_executor.layers.mla import \
         MultiHeadLatentAttention as MultiHeadLatentAttentionWrapper
-    from vllm.utils import direct_register_custom_op
 else:
     from vllm.attention.layer import MLAAttention
     from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
-    from vllm.utils.torch_utils import direct_register_custom_op
 
 @dataclass
 class AscendSFAModules:

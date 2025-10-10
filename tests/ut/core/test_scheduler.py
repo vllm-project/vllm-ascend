@@ -198,6 +198,23 @@ class TestAscendScheduler(TestBase):
                 structured_output_manager=MagicMock(
                     spec=StructuredOutputManager),
             )
+        if vllm_version_is("0.11.0"):
+            scheduler = AscendScheduler(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                log_stats=True,
+                structured_output_manager=MagicMock(
+                    spec=StructuredOutputManager),
+            )
+        else:
+            scheduler = AscendScheduler(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                log_stats=True,
+                block_size=block_size,
+                structured_output_manager=MagicMock(
+                    spec=StructuredOutputManager),
+            )
 
         should_advance = MagicMock()
         should_advance.return_value = False

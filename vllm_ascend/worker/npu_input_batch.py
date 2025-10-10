@@ -44,7 +44,7 @@ from vllm_ascend.worker.block_table import MultiGroupBlockTable
 if vllm_version_is("0.11.0"):
     from vllm.utils import swap_dict_values
 else:
-    from vllm.utils.collection_utils import swap_dict_values
+    from vllm.utils.collections import swap_dict_values
 
 
 @dataclass
