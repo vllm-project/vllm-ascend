@@ -32,6 +32,7 @@ import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -69,7 +70,7 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.models.layers.sfa import Indexer
+from vllm_ascend.models.layers.sfa import AscendSFAModules, Indexer
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
@@ -653,11 +654,9 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                  dtype=hidden_states_or_q_c.dtype,
                                  device=hidden_states_or_q_c.device)
             forward_kwargs['output'] = output
-            output = self.mla_attn.impl.forward(self.mla_attn,
-                                                hidden_states_or_q_c,
-                                                hidden_states, None, kv_cache,
-                                                attn_metadata,
-                                                **forward_kwargs)
+            output = self.mla_attn.mla_attn.impl.forward(
+                self.mla_attn, hidden_states_or_q_c, hidden_states, None,
+                kv_cache, attn_metadata, **forward_kwargs)
             output = output.view(-1, output_shape[-1])
             return output
         else:
@@ -927,8 +926,9 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
-        self.sfa_attn.impl.forward(hidden_states, kv_cache, attn_metadata,
-                                   need_gather_q_kv, output)
+        self.sfa_attn.sfa_attn.impl.forward(hidden_states, kv_cache,
+                                            attn_metadata, need_gather_q_kv,
+                                            output)
         output = output.view(-1, output_shape[-1])
         return output
 
