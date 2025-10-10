@@ -1,6 +1,5 @@
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 
 from tests.ut.base import TestBase
@@ -17,10 +16,6 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
                                        self.hidden_size,
                                        dtype=torch.bfloat16)
 
-    @pytest.mark.skipif(
-        True,
-        reason="fix me",
-    )
     @patch("torch.distributed.all_to_all_single")
     @patch("torch_npu.npu_moe_re_routing")
     @patch("torch_npu.npu_grouped_matmul")
