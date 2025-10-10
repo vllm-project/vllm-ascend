@@ -22,12 +22,12 @@ checkout_src() {
 
     # vllm-ascend
     if [ ! -d "$SRC_DIR/vllm-ascend" ]; then
-        git clone --depth 1 https://github.com/vllm-project/vllm-ascend.git "$SRC_DIR/vllm-ascend"
+        git clone --depth 1 -b $VLLM_ASCEND_VERSION https://github.com/vllm-project/vllm-ascend.git "$SRC_DIR/vllm-ascend"
     fi
 
     # vllm
     if [ ! -d "$SRC_DIR/vllm" ]; then
-        git clone -b v0.11.0 https://github.com/vllm-project/vllm.git "$SRC_DIR/vllm"
+        git clone -b $VLLM_VERSION https://github.com/vllm-project/vllm.git "$SRC_DIR/vllm"
     fi
 
     #mooncake

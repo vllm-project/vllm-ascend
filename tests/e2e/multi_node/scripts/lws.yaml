@@ -25,6 +25,12 @@ spec:
                 value: "2"
               - name: NPU_PER_NODE
                 value: "16"
+              - name: VLLM_VERSION
+                value: "v0.11.0"
+              - name: VLLM_ASCEND_VERSION
+                value: "main"
+              - name: MOONCAKE_VERSION
+                value: "06cc217504a6f1b0cdaa26b096b985651b262748"
             command:
               - sh
               - -c
@@ -78,6 +84,12 @@ spec:
                 value: "2"
               - name: NPU_PER_NODE
                 value: "16"
+              - name: VLLM_VERSION
+                value: "v0.11.0"
+              - name: VLLM_ASCEND_VERSION
+                value: "main"
+              - name: MOONCAKE_VERSION
+                value: "06cc217504a6f1b0cdaa26b096b985651b262748"
             command:
               - sh
               - -c
