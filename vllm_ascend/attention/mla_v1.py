@@ -529,13 +529,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
 
         # MLA Args
-        self.q_lora_rank = kwargs['q_lora_rank']
         self.kv_lora_rank = kwargs['kv_lora_rank']
         self.qk_nope_head_dim = kwargs['qk_nope_head_dim']
         self.qk_rope_head_dim = kwargs['qk_rope_head_dim']
         self.qk_head_dim = kwargs['qk_head_dim']
         self.v_head_dim = kwargs['v_head_dim']
-        self.rotary_emb = kwargs['rotary_emb']
         self.q_proj = kwargs['q_proj']
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']

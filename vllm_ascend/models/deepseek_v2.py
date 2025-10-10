@@ -45,7 +45,6 @@ from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mla import MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -67,7 +66,12 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
 from vllm_ascend.ops.linear import AscendLinearBase
+from vllm_ascend.utils import vllm_version_is
 
+if vllm_version_is("0.11.0"):
+    from vllm.model_executor.layers.mla import MultiHeadLatentAttention
+else:
+    from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 
 @support_torch_compile
 class AscendDeepseekV2Model(DeepseekV2Model, nn.Module):
@@ -322,27 +326,50 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             indexer=None,
             is_sparse=False,
         )
-
-        self.mla_attn = MultiHeadLatentAttention(
-            self.hidden_size,
-            self.enable_shared_expert_dp,
-            self.debug_layer_idx,
-            self.first_k_dense_replace,
-            self.tp_size,
-            mla_modules,
-            self.num_local_heads,
-            self.scaling,
-            self.layers,
-            self.kv_lora_rank,
-            self.qk_rope_head_dim,
-            self.q_lora_rank,
-            self.qk_nope_head_dim,
-            self.qk_head_dim,
-            self.v_head_dim,
-            cache_config,
-            quant_config,
-            prefix,
-        )
+        if vllm_version_is("0.11.0"):
+            self.mla_attn = MultiHeadLatentAttention(
+                self.hidden_size,
+                self.num_local_heads,
+                self.enable_shared_expert_dp,
+                self.debug_layer_idx,
+                self.first_k_dense_replace,
+                self.tp_size,
+                mla_modules,
+                self.num_local_heads,
+                self.scaling,
+                self.layers,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                self.q_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_head_dim,
+                self.v_head_dim,
+                cache_config,
+                quant_config,
+                prefix,
+            )
+        else:
+            self.mla_attn = MultiHeadLatentAttentionWrapper(
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                self.num_local_heads,
+                self.enable_shared_expert_dp,
+                self.debug_layer_idx,
+                self.first_k_dense_replace,
+                self.tp_size,
+                mla_modules,
+                self.num_local_heads,
+                self.scaling,
+                self.layers,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                self.q_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_head_dim,
+                self.v_head_dim,
+                cache_config,
+                quant_config,
+                prefix,
+            )
 
     def forward(
             self,
