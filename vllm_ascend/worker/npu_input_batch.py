@@ -39,7 +39,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
 
 
@@ -81,12 +80,6 @@ class CachedRequestState:
     @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
                 "removed in v0.13. Please use `mm_kwargs` instead.")
     def mm_inputs(self) -> list[MultiModalKwargsItems]:
-        if vllm_version_is("0.10.2"):
-            assert self.mm_kwargs is not None
-            return [
-                MultiModalKwargsItems.from_seq([item])
-                for item in self.mm_kwargs
-            ]
         assert self.mm_features is not None
         return [
             MultiModalKwargsItems.from_seq([f.data]) for f in self.mm_features

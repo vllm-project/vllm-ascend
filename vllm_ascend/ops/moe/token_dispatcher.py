@@ -383,7 +383,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
         assert self.original_shape is not None
         final_hidden_states = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
-            sorted_indices=self.expanded_row_idx,
+            sorted_indices=torch.abs(self.expanded_row_idx),
             probs=self.topk_weights)
         if len(self.original_shape) == 3:
             final_hidden_states = final_hidden_states.view(self.original_shape)
@@ -468,9 +468,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         super().__init__(**kwargs)
         self.with_quant = False
         self.num_local_experts = kwargs.get("num_local_experts", 0)
-        self.num_global_redundant_experts = kwargs.get(
-            "num_global_redundant_experts", 0)
-        self.num_experts = self.num_experts + self.num_global_redundant_experts
 
         self.hidden_shape = None
         self.topk_weights = None

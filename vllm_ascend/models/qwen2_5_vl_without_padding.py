@@ -486,7 +486,7 @@ class AscendQwen2_5_VLForConditionalGeneration_Without_Padding(
         self.visual = AscendQwen2_5_VisionTransformer_Without_Padding(
             vision_config=config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
         )
 
@@ -557,7 +557,7 @@ class AscendQwen3VLForConditionalGeneration(Qwen3VLForConditionalGeneration):
         self.visual = AscendQwen3_VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
             use_data_parallel=self.use_data_parallel)
 
@@ -596,11 +596,10 @@ class AscendQwen3VLMoeForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-
         self.visual = AscendQwen3_VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(quant_config),
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "visual"),
             use_data_parallel=self.use_data_parallel,
         )

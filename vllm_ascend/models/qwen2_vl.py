@@ -346,7 +346,6 @@ class AscendQwen2VLForConditionalGeneration(Qwen2VLForConditionalGeneration):
         self.visual = AscendQwen2VisionTransformer(
             self.config.vision_config,
             norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(
-                vllm_config.quant_config),
+            quant_config=vllm_config.quant_config,
             prefix=maybe_prefix(prefix, "visual"),
         )

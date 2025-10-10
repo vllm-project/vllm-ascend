@@ -23,5 +23,12 @@ def register():
 
 
 def register_model():
+    import vllm_ascend.patch.worker.patch_common.patch_attention_selector  # noqa
+
     from .models import register_model
     register_model()
+
+
+def register_connector():
+    from vllm_ascend.distributed import register_connector
+    register_connector()
