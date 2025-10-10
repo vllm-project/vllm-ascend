@@ -54,7 +54,8 @@ from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
                                get_ascend_soc_version,
                                get_rm_router_logits_state, is_310p,
-                               is_hierarchical_communication_enabled)
+                               is_hierarchical_communication_enabled,
+                               vllm_version_is)
 
 
 def torchair_fused_experts_with_mc2(
@@ -1069,8 +1070,12 @@ class TorchairAscendFusedMoE(FusedMoE):
                     get_compressed_expert_map(self.expert_map))
         else:
             # init moe.
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size, self.ep_rank, self.global_num_experts)
+            if vllm_version_is("0.11.0"):
+                self.local_num_experts, self.expert_map = determine_expert_map(
+                    self.ep_size, self.ep_rank, self.global_num_experts)
+            else:
+                self.local_num_experts, self.expert_map, _ = determine_expert_map(
+                    self.ep_size, self.ep_rank, self.global_num_experts)
             # dynamic eplb initializing with not expert_map_path
             if self.dynamic_eplb:
                 self.global_redundant_expert_num = ascend_config.init_redundancy_expert
