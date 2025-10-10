@@ -2,7 +2,7 @@
 import os
 
 # Third Party
-from mooncake.store import ReplicateConfig
+from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.utils import logger
