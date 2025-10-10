@@ -15,4 +15,4 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import vllm_ascend.torchair.ops.register_custom_ops  # noqa
+import vllm_ascend.ops.register_custom_ops  # noqa
