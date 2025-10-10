@@ -20,13 +20,12 @@ Current class inheritance structure:
 CustomTensorParallelOp
 ├── CustomColumnParallelOp
 │   ├── MLPColumnParallelOp
-│   ├── DenseOptimMergedColumnParallelOp
-│   └── DenseOptimQKVParallelOp
+│   ├── SequenceColumnParallelOp
 └── CustomRowParallelOp
     ├── MLPRowParallelOp
     ├── OProjRowParallelOp
     ├── MatmulAllreduceRowParallelOp
-    └── DenseOptimRowParallelOp
+    └── SequenceRowParallelOp
 
 How to extend a new linear op? Taking column parallel op as an example:
 1. Inherit from CustomColumnParallelOp and create a new class MyColumnParallelOp
@@ -36,7 +35,7 @@ How to extend a new linear op? Taking column parallel op as an example:
 Row parallel op follows a similar approach - inherit from RowColumnParallelOp and register the new class in get_row_parallel_op.
 """
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -370,7 +369,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 
 
 def _get_column_parallel_op(
-    prefix, layer
+        prefix, layer
 ) -> Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp]]:
     if mlp_tp_enable() and "gate_up_proj" in prefix:
         return MLPColumnParallelOp(layer)
@@ -388,10 +387,9 @@ def _get_column_parallel_op(
 
 
 def _get_row_parallel_op(
-    prefix, layer
+        prefix, layer
 ) -> Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
-                          MatmulAllreduceRowParallelOp,
-                          SequenceRowParallelOp]]:
+                    MatmulAllreduceRowParallelOp, SequenceRowParallelOp]]:
     if "down_proj" in prefix and mlp_tp_enable():
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
@@ -410,14 +408,10 @@ def _get_row_parallel_op(
 def get_parallel_op(disable_tp, prefix, layer, direct):
     if disable_tp:
         return None, 0, 1
-    custom_op: Optional[Union[
-            MLPColumnParallelOp,
-            SequenceColumnParallelOp,
-            MLPRowParallelOp,
-            OProjRowParallelOp,
-            MatmulAllreduceRowParallelOp,
-            SequenceRowParallelOp
-        ]] = None
+    custom_op: Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp,
+                            MLPRowParallelOp, OProjRowParallelOp,
+                            MatmulAllreduceRowParallelOp,
+                            SequenceRowParallelOp]] = None
     if direct == "row":
         custom_op = _get_row_parallel_op(prefix, layer)
 
