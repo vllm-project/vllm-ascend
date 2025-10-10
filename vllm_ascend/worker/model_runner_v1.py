@@ -420,7 +420,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                     device=self.device)
 
         if self.vllm_config.model_config.use_mla and \
-            self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
             self.cos = torch.ones(self.max_num_reqs *
                                   self.decode_token_per_req,
@@ -951,35 +951,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
-        # Chunk Prefill situation.
-        elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
-            if self.dcp_size > 1:
-                max_seq_len = max(seq_lens.max().item(), 0)
-                return self.attn_mask_builder.get_attn_mask(
-                    max_seq_len, self.dtype, self.device)
-            elif torch.version.cann.startswith("8.3"):
-                return self.attn_mask_builder.get_splitfuse_attn_mask()
-            else:
-                return self.attn_mask_builder.get_splitfuse_attn_mask(
-                    seq_lens, position, self.dtype, self.device)
-
-        # Prefill without cache situation.
-        elif attn_state == AscendAttentionState.PrefillNoCache:
-            max_seq_len = max(seq_lens.max().item(), 0)
-            return self.attn_mask_builder.get_attn_mask(
-                max_seq_len, self.dtype, self.device)
-        # Prefill with cache hit.
-        elif attn_state == AscendAttentionState.PrefillCacheHit:
-            if torch.version.cann.startswith("8.3"):
-                return self.attn_mask_builder.get_attn_mask(
-                    2048, self.dtype, self.device)
-            else:
-                return self.attn_mask_builder.get_attn_mask(
-                    128, self.dtype, self.device)
-        # Decode-only situation.
         else:
-            return None
-
+            return self.attn_mask_builder.get_splitfuse_attn_mask()
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
         for index, req_id in enumerate(self.input_batch.req_ids):
@@ -2504,6 +2477,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         max_query_len: int,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
+        num_scheduled_tokens: np.ndarray = None,
     ) -> Optional[dict[str, Any]]:
         attn_metadata: Optional[dict[str, Any]] = None
 
@@ -2516,6 +2490,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             seq_lens = self.model_config.max_model_len
             self.seq_lens_np[:num_reqs] = seq_lens
             self.seq_lens_np[num_reqs:] = 0
+
+            cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
+
+            self.query_start_loc[1:num_reqs + 1] = torch.Tensor(cu_num_tokens)
+            self.query_start_loc_cpu[1:num_reqs + 1] = torch.Tensor(cu_num_tokens)
+            
+            assigned_mask_dim = 2048
+            self.attn_mask = torch.triu(
+                torch.ones(assigned_mask_dim, assigned_mask_dim),
+                diagonal=1).to(torch.int8).to(self.device)
 
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
@@ -2746,6 +2730,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max_query_len,
                 aclgraph_runtime_mode=aclgraph_runtime_mode,
                 force_attention=force_attention,
+                num_scheduled_tokens=num_scheduled_tokens,
             )
 
             need_dummy_logits = (not self.in_profile_run

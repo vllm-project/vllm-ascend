@@ -288,7 +288,8 @@ class NPUPlatform(Platform):
                     "vllm.mla_forward"
                 ])
                 update_aclgraph_sizes(vllm_config)
-            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
+                compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
                 logger.info(
                     "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
                     "using only ACL Graph mode")
@@ -326,7 +327,8 @@ class NPUPlatform(Platform):
                 compilation_config.use_inductor = False
                 compilation_config.splitting_ops.extend(["vllm::mla_forward"])
                 update_aclgraph_sizes(vllm_config)
-            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
+                compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
                 logger.info(
                     "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
                     "using only ACL Graph mode")
