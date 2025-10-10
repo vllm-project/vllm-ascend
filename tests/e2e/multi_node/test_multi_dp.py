@@ -39,6 +39,7 @@ def test_multi_dp(config: MultiNodeConfig) -> None:
             max_wait_seconds=1000,
     ) as remote_server:
         base_url = remote_server.url_root
+        assert perf_config is not None, "Perf config must be specified for perf tests"
         perf_cmd = get_benchmark_cmd(server_config.model, base_url,
                                      perf_config.to_list())
         if server_config.headless:

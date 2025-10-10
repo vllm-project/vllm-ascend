@@ -85,7 +85,10 @@ class ServerConfig(BaseConfig):
         world_size: int,
     ) -> None:
         """Initialize distributed parallel parameters."""
-        self.data_parallel_address = get_net_interface()[0]
+        iface = get_net_interface()
+        if iface is None:
+            raise RuntimeError("No available network interface found")
+        self.data_parallel_address = iface[0]
 
         if is_disaggregate_prefill:
             self.data_parallel_start_rank = 0
@@ -138,10 +141,10 @@ class MultiNodeConfig:
 
         role_key = "leader_config" if is_leader else "worker_config"
         server_cfg_dict = server_cfg_data.get(role_key, {})
-        server_cfg = ServerConfig.from_dict(server_cfg_dict)
+        server_cfg: ServerConfig = ServerConfig.from_dict(server_cfg_dict)
 
         if cfg.get("enable_multithread_load"):
-            server_cfg.model_loader_extra_config = {
+            server_cfg.model_loader_extra_config = { # type : ignore
                 "enable_multithread_load": True,
                 "num_threads": 8,
             }
@@ -154,11 +157,12 @@ class MultiNodeConfig:
             world_size=num_nodes,
         )
 
-        perf_cfg = (PerfConfig.from_dict(cfg.get("client_parameters", {}))
-                    if cfg.get("client_parameters") else None)
+        perf_cfg: PerfConfig = (PerfConfig.from_dict(
+            cfg.get("client_parameters", {}))
+                                if cfg.get("client_parameters") else None)
 
         # network info
-        leader_cfg = server_cfg_data.get("leader_config", {})
+        leader_cfg: ServerConfig = server_cfg_data.get("leader_config", {})
         server_host = get_leader_ip()
         server_port = (get_avaliable_port() if is_disaggregate_prefill else
                        leader_cfg.get("port", 8080))

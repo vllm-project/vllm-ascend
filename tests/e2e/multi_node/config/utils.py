@@ -8,6 +8,7 @@ import psutil
 
 def get_leader_ip():
     leader_dns = os.getenv("LWS_LEADER_ADDRESS")
+    assert leader_dns is not None, "cannot find leader address"
     return socket.gethostbyname(leader_dns)
 
 
