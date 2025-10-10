@@ -110,6 +110,8 @@ class AscendConfig:
             if self.pd_tp_ratio == 0:
                 raise AssertionError(
                     "Only support P node tp size lagger then D node tp size")
+        self.enable_mla_prefill_dp_rebalancing = additional_config.get(
+            "enable_mla_prefill_dp_rebalancing", False)
 
 
 class TorchairGraphConfig:

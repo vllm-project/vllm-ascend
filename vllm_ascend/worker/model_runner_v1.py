@@ -111,6 +111,8 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.utils import model_register
+from vllm_ascend.mla_dp_rebalancing import (post_forward_for_dp_rebalancing,
+                                            pre_forward_for_dp_rebalancing)
 from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
@@ -1479,12 +1481,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                              intermediate_tensors,
                                              inputs_embeds):
         assert self.model is not None
+        if get_ascend_config().enable_mla_prefill_dp_rebalancing:
+            input_ids = pre_forward_for_dp_rebalancing(input_ids)
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
+        if get_ascend_config().enable_mla_prefill_dp_rebalancing:
+            hidden_states = post_forward_for_dp_rebalancing(hidden_states)
 
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
@@ -2212,10 +2218,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                           is_torchair_compile, input_ids,
                                           positions, attn_metadata, num_tokens,
                                           intermediate_tensors, inputs_embeds):
+        if get_ascend_config().enable_mla_prefill_dp_rebalancing:
+            input_ids = pre_forward_for_dp_rebalancing(input_ids)
         hidden_states = self.model(input_ids=input_ids,
                                    positions=positions,
                                    intermediate_tensors=intermediate_tensors,
                                    inputs_embeds=inputs_embeds)
+        if get_ascend_config().enable_mla_prefill_dp_rebalancing:
+            hidden_states = post_forward_for_dp_rebalancing(hidden_states)
         forward_context = get_forward_context()
         assert forward_context is not None
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:

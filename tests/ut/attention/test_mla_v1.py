@@ -284,6 +284,10 @@ class TestAscendMLAImpl(TestBase):
         vllm_config.model_config = model_config
         get_current_vllm_config.return_value = vllm_config
 
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_mla_prefill_dp_rebalancing = False
+        ascend_config.return_value = mock_ascend_config
+
         num_heads = 256
         head_size = 1024
         scale = 0.1
@@ -389,7 +393,12 @@ class TestAscendMLAImpl(TestBase):
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
         apply.return_value = layer.weight.T
-        self.impl.process_weights_after_loading(torch.bfloat16)
+
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_mla_prefill_dp_rebalancing = False
+        with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
+                   return_value=mock_ascend_config):
+            self.impl.process_weights_after_loading(torch.bfloat16)
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UK_T.shape[1], self.impl.qk_nope_head_dim)

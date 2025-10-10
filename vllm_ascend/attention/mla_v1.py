@@ -3,14 +3,17 @@ from typing import (TYPE_CHECKING, ClassVar, NamedTuple, Optional, Tuple, Type,
                     TypeVar)
 
 import torch
+import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
-from vllm.model_executor.layers.linear import (LinearBase,
+from vllm.distributed import (get_dp_group,
+                              get_tensor_model_parallel_world_size,
+                              get_tp_group)
+from vllm.model_executor.layers.linear import (LinearBase, ReplicatedLinear,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import AttentionCGSupport
@@ -21,10 +24,18 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
                                          split_decodes_and_prefills,
                                          wait_for_kv_layer_from_connector)
+from vllm_ascend.distributed.parallel_state import (
+    get_mla_dp_rebalancing_o_shared_group, get_mla_dp_rebalancing_world_group)
+from vllm_ascend.mla_dp_rebalancing import get_mla_dp_rebalancing_context
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
+from vllm_ascend.torchair.ops.shared_weight_layer import (
+    post_process_after_loading_for_shared_weight_series,
+    reach_layer_for_shared_weight_series,
+    register_layer_to_shared_weight_series)
+from vllm_ascend.utils import dispose_tensor
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -502,6 +513,30 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         self.speculative_config = vllm_config.speculative_config
 
+        if ascend_config.enable_mla_prefill_dp_rebalancing:
+            # Dispose tensor from the original o_proj
+            for attr_name in dir(self.o_proj):
+                attr_value = getattr(self.o_proj, attr_name)
+                if isinstance(attr_value, torch.Tensor):
+                    dispose_tensor(attr_value)
+            # Construct the new o_proj using ReplicatedLinear
+            config = vllm_config.model_config.hf_config
+            new_o_proj = ReplicatedLinear(
+                config.num_attention_heads * config.v_head_dim,
+                config.hidden_size,
+                bias=False,
+                quant_config=vllm_config.quant_config,
+                prefix=self.o_proj.prefix)
+            # Replace the o_proj with the new one
+            self.o_proj.__class__ = new_o_proj.__class__
+            self.o_proj.__dict__ = new_o_proj.__dict__
+            # Register the o_proj into shared weight series to cut down memory usage
+            register_layer_to_shared_weight_series(
+                series_name="o_proj",
+                group=get_mla_dp_rebalancing_o_shared_group(),
+                layer=self.o_proj,
+                prefetch_step=1)
+
     def _v_up_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
@@ -578,6 +613,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Waiting for BMM NZ support
         # self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)
         # self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
+
+        # Complete the initialization of shared weight for o_proj
+        if get_ascend_config().enable_mla_prefill_dp_rebalancing:
+            post_process_after_loading_for_shared_weight_series(self.o_proj)
 
     def _compute_prefill_context(
         self,
@@ -938,6 +977,117 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_value)
         return decode_preprocess_res, prefill_preprocess_res
 
+    def _forward_prefill_with_dp_rebalancing(
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,
+        kv_cache: Tuple[torch.Tensor],
+        attn_metadata: M,
+    ) -> torch.Tensor:
+        context = get_mla_dp_rebalancing_context()
+        assert context is not None
+        # Split inputs from local DP to each device.
+        dp_sp_hidden_states = hidden_states
+        device_sp_hidden_states = dp_sp_hidden_states[
+            context.local_device_sp_start_token_within_dp:context.
+            local_device_sp_end_token_within_dp]
+        # MLA prefill:
+        # 1. Perform q_a_proj and q_a_layernorm to obtain q_c
+        # 2. Perform kv_a_proj_with_mqa to obtain kv_no_split
+        maybe_npu_prefetch(inputs=self.q_a_proj.weight,
+                           dependency=hidden_states,
+                           enabled=self.enable_prefetch)
+        sp_ckq = self.q_a_proj(device_sp_hidden_states)[0]
+        sp_hidden_states_or_q_c = self.q_a_layernorm(sp_ckq)
+        sp_kv_no_split = self.kv_a_proj_with_mqa(device_sp_hidden_states)[0]
+        # Rearrange down_proj outputs across DP.
+        sp_down_proj_output = torch.cat(
+            [sp_hidden_states_or_q_c, sp_kv_no_split], dim=1)
+        sp_world_group = get_mla_dp_rebalancing_world_group()
+        global_sp_down_proj_output = sp_world_group.all_gather(
+            sp_down_proj_output, 0)
+        local_dp = context.local_dp
+        dp_ori_down_proj_output = global_sp_down_proj_output[
+            context.start_token_of_dp[local_dp]:context.
+            end_token_of_dp[local_dp]]
+        prefill_q_c, prefill_kv_no_split = dp_ori_down_proj_output.split(
+            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+            dim=-1)
+
+        if attn_metadata is None:
+            # Dummy run, just construct the attention outputs.
+            output_prefill = torch.empty(
+                [prefill_q_c.shape[0], self.num_heads * self.v_head_dim],
+                dtype=hidden_states.dtype,
+                device=hidden_states.device)
+        else:
+            # Preprocess prefill tokens, write kv cache and get:
+            # prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value
+            wait_for_kv_layer_from_connector(layer_name)
+            prefill_q = self.q_proj(prefill_q_c)[0]\
+                .view(-1, self.num_heads, self.qk_head_dim)
+            prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
+            prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
+            assert attn_metadata.prefill is not None
+            cos = attn_metadata.prefill.cos
+            sin = attn_metadata.prefill.sin
+            prefill_slots = attn_metadata.slot_mapping
+            prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
+            prefill_k_pe, prefill_k_c_normed = self.exec_kv_prefill(
+                prefill_kv_no_split, cos, sin, kv_cache, prefill_slots)
+            prefill_k_pe = prefill_k_pe.view(prefill_q_c.shape[0],
+                                             self.num_kv_heads, -1)
+            prefill_k_nope, prefill_value = self.kv_b_proj(
+                prefill_k_c_normed)[0].view(
+                    -1, self.num_heads,
+                    self.qk_nope_head_dim + self.v_head_dim).split(
+                        [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            prefill_k_pe = prefill_k_pe.expand(
+                (*prefill_k_nope.shape[:-1], -1))
+            # Attention outputs.
+            output_prefill = self._forward_prefill(prefill_q_nope,
+                                                   prefill_q_pe,
+                                                   prefill_k_nope,
+                                                   prefill_k_pe, prefill_value,
+                                                   kv_cache, attn_metadata)
+
+        # Rearrange attention outputs across DP to run SP for o_proj.
+        tp_size = get_tp_group().world_size
+        total_receive_len = context.local_device_total_receive_len
+        sp_o_proj_input = torch.empty(
+            [total_receive_len * tp_size, self.num_heads * self.v_head_dim],
+            dtype=output_prefill.dtype,
+            device=output_prefill.device)
+        if get_dp_group().world_size == 1:
+            if output_prefill.shape[0] < context.num_padded_global_tokens:
+                output_prefill = nn.functional.pad(
+                    output_prefill,
+                    (0, 0, 0, context.num_padded_global_tokens -
+                     output_prefill.shape[0]))
+            dist.all_to_all_single(
+                output=sp_o_proj_input,
+                input=output_prefill,
+                group=sp_world_group.device_group,
+            )
+        else:
+            dist.all_to_all_single(
+                output=sp_o_proj_input,
+                input=output_prefill,
+                output_split_sizes=context.output_split_sizes,
+                input_split_sizes=context.input_split_sizes,
+                group=sp_world_group.device_group,
+            )
+        sp_o_proj_input = sp_o_proj_input.reshape(
+            total_receive_len, tp_size * self.num_heads * self.v_head_dim)
+        if total_receive_len < context.num_tokens_per_device:
+            sp_o_proj_input = nn.functional.pad(
+                sp_o_proj_input,
+                (0, 0, 0, context.num_tokens_per_device - total_receive_len))
+        # O proj
+        sp_o_proj_output = self.o_proj(sp_o_proj_input)[0]
+        del sp_o_proj_input
+        return get_tp_group().all_gather(sp_o_proj_output, 0)
+
     def forward(
         self,
         layer_name,
@@ -948,6 +1098,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
+        if get_ascend_config().enable_mla_prefill_dp_rebalancing:
+            reach_layer_for_shared_weight_series(self.o_proj)
+            if get_mla_dp_rebalancing_context() is not None:
+                output[...] = self._forward_prefill_with_dp_rebalancing(
+                    layer_name, hidden_states, kv_cache, attn_metadata)
+                return output
         if attn_metadata is None:
             # Profiling run.
             return output
@@ -1002,6 +1158,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 o_proj_input[num_decode_tokens:] = output_prefill
         # O proj
+        # When o_proj is ReplicatedLinear, make sure the second dimension is complete while decoding.
+        if get_ascend_config().enable_mla_prefill_dp_rebalancing:
+            o_proj_input = get_tp_group().all_gather(o_proj_input, dim=-1)
+            output[...] = self.o_proj(o_proj_input)[0]
+            del o_proj_input
+            return output_padded
         current_ms_metadata = get_multistream_comm_context()
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
         if current_ms_metadata is None:
