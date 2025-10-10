@@ -43,6 +43,14 @@ else:
     from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
     from vllm.utils.torch_utils import direct_register_custom_op
 
+if vllm_version_is("0.11.0"):
+    from vllm.attention import Attention
+    from vllm.model_executor.layers.mla import \
+        MultiHeadLatentAttention as MultiHeadLatentAttentionWrapper
+else:
+    from vllm.attention.layer import MLAAttention
+    from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+
 
 # TODO(whx): adapt v0.11.0 and DSA
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
@@ -108,22 +116,20 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             )
         else:
             self.mla_attn = MLAAttention(
-                num_heads=self.num_heads,
+                num_heads=num_heads,
                 scale=scale,
-                head_size=self.kv_lora_rank + self.qk_rope_head_dim,
                 qk_nope_head_dim=self.qk_nope_head_dim,
                 qk_rope_head_dim=self.qk_rope_head_dim,
                 v_head_dim=self.v_head_dim,
                 q_lora_rank=self.q_lora_rank,
                 kv_lora_rank=self.kv_lora_rank,
+                kv_b_proj=mla_modules.kv_b_proj,
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.attn",
-                kv_b_proj=mla_modules.kv_b_proj,
                 use_sparse=mla_modules.is_sparse,
                 indexer=mla_modules.indexer,
                 # extra args
-                qk_head_dim=self.qk_head_dim,
                 rotary_emb=mla_modules.rotary_emb,
                 fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,
                 q_b_proj=mla_modules.q_b_proj,
