@@ -273,4 +273,3 @@ def check_ascend_config(vllm_config, enforce_eager):
                         "ACL Graph is currently experimental. Please "
                         "raise an issue on https://github.com/vllm-project/vllm-ascend/issues"
                         " if you encourage any Error")
-

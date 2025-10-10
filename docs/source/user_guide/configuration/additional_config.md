@@ -113,4 +113,3 @@ An example of additional configuration is as follows:
     "refresh": False,
 }
 ```
-

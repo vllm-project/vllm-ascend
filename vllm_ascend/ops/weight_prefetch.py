@@ -2,8 +2,8 @@ from dataclasses import dataclass, field
 
 import torch
 import torch_npu
-
 from vllm.forward_context import get_forward_context
+
 from vllm_ascend.ascend_config import WeightPrefetchConfig
 
 SUPPORTED_MODULES = ["attn", "mlp", "moe"]
@@ -69,25 +69,28 @@ class WeightPrefetchMethod:
         torch.ops.vllm.prefetch_postprocess(stop_flag)
 
     def update_forward_param(self, num_tokens: int):
-        self.moe.is_active_this_forward =num_tokens >= MOE_PREFETCH_TOKEN_THRESHOLD if self.moe.enable else False
+        self.moe.is_active_this_forward = num_tokens >= MOE_PREFETCH_TOKEN_THRESHOLD if self.moe.enable else False
 
     def maybe_prefetch_moe_weight_preprocess(self, prefix):
         if not self.moe.is_active_this_forward:
             return
 
         forward_context = get_forward_context()
-        weight = forward_context.model_instance.model.layers[forward_context.layer_idx].mlp.experts.w13_weight
-        weight_size = weight.data.element_size() * weight.data.numel() * self.moe.prefetch_ratio.get(prefix, 0)
+        weight = forward_context.model_instance.model.layers[
+            forward_context.layer_idx].mlp.experts.w13_weight
+        weight_size = weight.data.element_size() * weight.data.numel(
+        ) * self.moe.prefetch_ratio.get(prefix, 0)
         torch.ops.vllm.prefetch_preprocess(weight=weight,
                                            start_flag=None,
                                            max_weight_size=int(weight_size))
         forward_context.layer_idx += 1
 
-    def maybe_prefetch_moe_weight_postprocess(self):
+    def maybe_prefetch_moe_weight_postprocess(self, stop_flag: torch.Tensor):
         if not self.moe.is_active_this_forward:
             return
 
-        torch.ops.vllm.prefetch_postprocess(stop_flag = None)
+        torch.ops.vllm.prefetch_postprocess(stop_flag)
+
 
 def maybe_npu_prefetch(inputs: torch.Tensor,
                        dependency: torch.Tensor,
@@ -101,4 +104,3 @@ def maybe_npu_prefetch(inputs: torch.Tensor,
     if max_size <= 0 or max_size > input_size:
         max_size = input_size
     torch_npu.npu_prefetch(inputs, dependency, max_size, offset)
-
