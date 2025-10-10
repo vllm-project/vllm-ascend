@@ -2172,6 +2172,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.seq_lens_np[:num_reqs] = seq_lens
             self.seq_lens_np[num_reqs:] = 0
 
+            self.query_start_loc[:num_reqs + 1] = num_tokens
+            self.query_start_loc_cpu[:num_reqs + 1] = num_tokens
+
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
 

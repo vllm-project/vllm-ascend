@@ -202,28 +202,39 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
         (
             query,
             key_cache,
-            value_cache,
+            value,
+            block_tables,
+            block_size,
+            seq_lens,
+            query_start_loc,
             num_kv_heads,
             num_heads,
             scale,
-            block_table,
-            seq_lens,
-            output,
+            attn_output,
+            softmax_lse
         ) = param
+
         # block_table = forward_context.attn_metadata[key].block_tables
         seq_lens = forward_context.attn_metadata[key].seq_lens
 
         with torch.npu.stream(update_stream):
             torch.npu.graph_task_update_begin(update_stream, handle)
-            torch_npu._npu_paged_attention(query=query,
-                                           key_cache=key_cache,
-                                           value_cache=value_cache,
-                                           num_kv_heads=num_kv_heads,
-                                           num_heads=num_heads,
-                                           scale_value=scale,
-                                           block_table=block_table,
-                                           context_lens=seq_lens,
-                                           out=output)
+            torch_npu.npu_fused_infer_attention_score.out(
+                query=query,
+                key=key_cache,
+                value=value,
+                block_table=block_tables,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=query_start_loc,
+                actual_seq_lengths_kv=seq_lens,
+                num_key_value_heads=num_kv_heads,
+                num_heads=num_heads,
+                scale=scale,
+                sparse_mode=0,
+                # workspace=graph_params.workspaces.get(runtime_shape),
+                out=[attn_output, softmax_lse],
+            )
             torch.npu.graph_task_update_end(update_stream)
 
             event.record(update_stream)

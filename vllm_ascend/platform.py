@@ -178,7 +178,11 @@ class NPUPlatform(Platform):
 
         compilation_config.cudagraph_num_of_warmups = 1
 
-        if compilation_config.level not in [
+        if compilation_config.level == CompilationLevel.PIECEWISE:
+            logger.warning(
+                "NEW  NPU does not support %s compilation level. Setting CUDAGraphMode to NONE",
+                compilation_config.level)
+        elif compilation_config.level not in [
                 CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE
         ]:
             logger.warning(
@@ -220,6 +224,18 @@ class NPUPlatform(Platform):
                 compilation_config.cudagraph_mode
                 == CUDAGraphMode.FULL_DECODE_ONLY and model_config is not None
                 and model_config.use_mla):
+            logger.info(
+                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
+                "using only ACL Graph mode")
+            assert compilation_config.level == CompilationLevel.PIECEWISE, \
+                "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
+            compilation_config.set_splitting_ops_for_v1()
+            compilation_config.use_inductor = False
+            compilation_config.splitting_ops.extend([
+                "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
+            ])
+            update_aclgraph_sizes(vllm_config)
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
