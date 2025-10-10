@@ -45,7 +45,7 @@ class D2DExpertWeightLoader:
                                           layer_id):
         # When current send/recv and weight.expert_map update tasks are not finished, cannot accept new d2d task
         if self.state != ExpertWeightUpdateState.WAITING:
-            logger.error(
+            logger.warning_once(
                 "current d2d weight update tasks are on-going, cannot accept new weight update task"
             )
             return
