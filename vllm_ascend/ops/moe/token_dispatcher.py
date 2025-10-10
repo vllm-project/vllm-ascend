@@ -294,6 +294,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.topk_weights = None
         self.mc2_mask = None
         self.expert_map = None
+        self.expand_scales = None
 
         if self.shared_experts is None:
             return hidden_states
