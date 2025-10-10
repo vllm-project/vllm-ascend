@@ -31,7 +31,6 @@ from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.forward_context import get_forward_context
 
 
 class AscendMLABackend(AttentionBackend):

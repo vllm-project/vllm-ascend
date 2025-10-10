@@ -33,7 +33,6 @@ class MoECommType(Enum):
     MC2 = 1
     ALLTOALL = 2
     NAIVE_MULTICAST = 3
-    EP_ALLGATHER = 4
 
 
 # TODO(zzzzwwjj): add soc_version to choose branch

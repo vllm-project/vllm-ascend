@@ -1822,7 +1822,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if moe_comm_type == MoECommType.ALLGATHER and with_prefill:
             if envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM:
-                moe_comm_type = MoECommType.EP_ALLGATHER
+                moe_comm_type = MoECommType.ALLGATHER
             else:
                 moe_comm_type = MoECommType.NAIVE_MULTICAST
 
