@@ -232,7 +232,7 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
                 num_heads=num_heads,
                 scale=scale,
                 sparse_mode=0,
-                # workspace=graph_params.workspaces.get(runtime_shape),
+                workspace=graph_params.workspaces.get(runtime_shape),
                 out=[attn_output, softmax_lse],
             )
             torch.npu.graph_task_update_end(update_stream)

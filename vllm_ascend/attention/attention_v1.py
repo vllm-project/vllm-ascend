@@ -389,16 +389,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             graph_params = get_graph_params()
             forward_context: ForwardContext = get_forward_context()
-            num_tokens2 = query.shape[0]
+            num_tokens_origin = query.shape[0]
             if forward_context.capturing:
-                
                 num_tokens = attn_metadata.query_start_loc[-1]
                 query = query[:num_tokens]
                 # Prepare tensors for attention output
                 # TODO: Refactor this to step-level instead of layer-level
 
                 # Get workspace from cache or calculate it if not present.
-                workspace = graph_params.workspaces.get(num_tokens2)
+                workspace = graph_params.workspaces.get(num_tokens_origin)
                 num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
                 key = self.key_cache.view(  # type: ignore
                     num_block, block_size, -1)
@@ -408,11 +407,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 softmax_lse = torch.empty(num_tokens,
                                         dtype=query.dtype,
                                         device=query.device)
-                # output = torch.empty(
-                #         (num_tokens, self.num_heads, self.head_size),
-                #         dtype=query.dtype,
-                #         device=query.device,
-                # )
                 query_start_loc = attn_metadata.query_start_loc[1:].cpu().int().tolist()
                 seq_lens = attn_metadata.seq_lens.cpu().int().tolist()
                 if workspace is None:
@@ -429,7 +423,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_heads=self.num_heads,
                         sparse_mode=0,
                         scale=self.scale,)
-                    graph_params.workspaces[num_tokens2] = workspace
+                    graph_params.workspaces[num_tokens_origin] = workspace
                   
                 # Handle graph capturing mode
                 stream = torch_npu.npu.current_stream()
@@ -437,8 +431,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 event = torch.npu.ExternalEvent()
                 event.wait(stream)
                 event.reset(stream)
-                graph_params.events[num_tokens2].append(event)
-                graph_params.attn_params[num_tokens2].append((
+                graph_params.events[num_tokens_origin].append(event)
+                graph_params.attn_params[num_tokens_origin].append((
                     query,
                     key,
                     value,
