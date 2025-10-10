@@ -454,10 +454,11 @@ class MooncakeEngine:
         :return: An int indicating how many prefix tokens are cached.
         """
         end = 0
-        keys=[]
+        keys = []
         try:
             if use_layerwise:
-                for start, end, key in self.token_database.process_tokens(tokens):
+                for start, end, key in self.token_database.process_tokens(
+                        tokens):
                     keys_multi_layer = key.split_layers(self.num_layers)
                     for item in keys_multi_layer:
                         keys.append(item.to_string())
@@ -473,11 +474,12 @@ class MooncakeEngine:
                     else:
                         return start
             else:
-                starts=[]
-                for start, end, key in self.token_database.process_tokens(tokens):
+                starts = []
+                for start, end, key in self.token_database.process_tokens(
+                        tokens):
                     keys.append(key.to_string())
                     starts.append(start)
-                res=self.m_store.batch_exists(keys)
+                res = self.m_store.batch_exists(keys)
                 for index, value in enumerate(res):
                     if value != 1:
                         return starts[index]
@@ -498,10 +500,11 @@ class MooncakeEngine:
         :return: An int indicating how many prefix tokens are cached.
         """
         end = 0
-        keys=[]
+        keys = []
         try:
             if use_layerwise:
-                for start, end, key in self.token_database.process_tokens(tokens):
+                for start, end, key in self.token_database.process_tokens(
+                        tokens):
                     keys_multi_layer = key.split_layers(self.num_layers)
                     for item in keys_multi_layer:
                         keys.append(item.to_string())
@@ -517,18 +520,22 @@ class MooncakeEngine:
                     else:
                         return start
             else:
-                starts=[]
-                for start, end, key in self.token_database.process_tokens(tokens):
+                starts = []
+                for start, end, key in self.token_database.process_tokens(
+                        tokens):
                     keys.append(key.to_string())
                     starts.append(start)
-                multi_tp_keys=keys[:]
+                multi_tp_keys = keys[:]
                 for i in range(1, self.tp_size):
                     for key in keys:
                         new_str = key.replace("@0", f"@{i}", 1)    
                         multi_tp_keys.append(new_str)
-                res=self.m_store.batch_exists(multi_tp_keys)
-                num_block=len(keys)
-                multi_tp_values = [res[i * num_block : (i + 1) * num_block] for i in range(self.tp_size)]
+                res = self.m_store.batch_exists(multi_tp_keys)
+                num_block = len(keys)
+                multi_tp_values = [
+                    res[i * num_block:(i + 1) * num_block]
+                    for i in range(self.tp_size)
+                ]
                 index = self.find_min_first_non_one_index(multi_tp_values)
                 if index != -1:
                     return starts[index]
@@ -540,11 +547,8 @@ class MooncakeEngine:
 
     def find_min_first_non_one_index(self, arr):
         try:
-            return min(
-                idx for row in arr 
-                for idx, val in enumerate(row) 
-                if val != 1
-            )
+            return min(idx for row in arr for idx, val in enumerate(row) 
+                       if val != 1)
         except ValueError:
             return -1
 
