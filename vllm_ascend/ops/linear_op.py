@@ -261,7 +261,7 @@ class OProjRowParallelOp(CustomRowParallelOp):
     @property
     def dp_rank(self):
         return get_dp_group().rank_in_group
-      
+
     def apply_impl(
         self,
         input_: torch.Tensor,

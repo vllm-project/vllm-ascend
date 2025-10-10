@@ -91,7 +91,7 @@ class AscendConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in the pure DP scenario"
                 )
-                
+
         self.pd_tp_ratio = 1
         if vllm_config.kv_transfer_config is not None and not vllm_config.model_config.is_deepseek_mla:
             prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config(
