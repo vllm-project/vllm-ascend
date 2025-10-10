@@ -190,7 +190,7 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         offsets: Optional[torch.Tensor] = None,
         is_neox_style_override: Optional[bool] = None,
     ):
-        AscendRotaryEmbedding(self, positions, query, key, offsets, is_neox_style_override)
+        AscendRotaryEmbedding.forward_oot(self, positions, query, key, offsets, is_neox_style_override)
 
 
 class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
