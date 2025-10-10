@@ -40,9 +40,12 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
 from vllm.config.model import TaskOption, _get_and_verify_dtype
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.inputs import TextPrompt
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import FlexibleArgumentParser, get_open_port
 
@@ -473,7 +476,6 @@ class VllmRunner:
 class HfRunner:
 
     def get_default_device(self):
-        from vllm.platforms import current_platform
 
         return ("cpu"
                 if current_platform.is_cpu() else current_platform.device_type)
