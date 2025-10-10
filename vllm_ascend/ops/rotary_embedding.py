@@ -22,7 +22,8 @@ import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
-    DeepseekScalingRotaryEmbedding, RotaryEmbedding)
+    DeepseekScalingRotaryEmbedding, RotaryEmbedding,
+    YaRNScalingRotaryEmbedding)
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import enable_custom_op, is_310p
@@ -123,6 +124,63 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         self.sin = None
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+        is_neox_style_override: Optional[bool] = None,
+    ):
+        is_neox_style = self.is_neox_style
+        if is_neox_style_override is not None:
+            is_neox_style = is_neox_style_override
+        forward_context = get_forward_context()
+        is_first_layer = forward_context.is_first_layer
+        # Generate cos and sin outside layers to avoid repeated calculation.
+        if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
+                -1] == 128:
+            if is_first_layer:
+                cos_sin = self.cos_sin_cache.index_select(0, positions)
+                last_dim = cos_sin.size()[-1]
+                cos, sin = cos_sin.reshape(-1, 2, last_dim // 2).repeat(
+                    1, 1, 2).chunk(2, dim=-2)
+                # BSNH
+                self.cos = cos.view(1, -1, 1, last_dim).contiguous()
+                self.sin = sin.view(1, -1, 1, last_dim).contiguous()
+                forward_context.is_first_layer = False
+        return _rope_forward_oot(self, positions, query, key, is_neox_style,
+                                 offsets)
+
+
+class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        scaling_factor: float,
+        dtype: torch.dtype,
+        *,
+        extrapolation_factor: float = 1,
+        attn_factor: float = 1,
+        beta_fast: int = 32,
+        beta_slow: int = 1,
+    ) -> None:
+        self.cos = None
+        self.sin = None
+        extra_kwargs = {
+            "extrapolation_factor": extrapolation_factor,
+            "attn_factor": attn_factor,
+            "beta_fast": beta_fast,
+            "beta_slow": beta_slow
+        }
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
+                         is_neox_style, scaling_factor, dtype, **extra_kwargs)
 
     def forward_oot(
         self,
