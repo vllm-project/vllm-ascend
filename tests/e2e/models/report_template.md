@@ -10,20 +10,21 @@
 
 ```bash
 export MODEL_ARGS={{ model_args }}
-lm_eval --model {{ model_type }} --model_args $MODEL_ARGS --tasks {{ datasets }} \
-{% if apply_chat_template is defined and (apply_chat_template|string|lower in ["true", "1"]) -%}
+lm_eval --model {{ model_type }} --model_args $MODEL_ARGS \
+  --tasks {{ datasets }} \
+{%- if apply_chat_template is defined and (apply_chat_template|string|lower in ["true", "1"]) %}
   --apply_chat_template \
 {%- endif %}
-{% if fewshot_as_multiturn is defined and (fewshot_as_multiturn|string|lower in ["true", "1"]) -%}
+{%- if fewshot_as_multiturn is defined and (fewshot_as_multiturn|string|lower in ["true", "1"]) %}
   --fewshot_as_multiturn \
 {%- endif %}
-{% if num_fewshot is defined and num_fewshot != "N/A" -%}
+{%- if num_fewshot is defined and num_fewshot != "N/A" %}
   --num_fewshot {{ num_fewshot }} \
 {%- endif %}
-{% if limit is defined and limit != "N/A" -%}
+{%- if limit is defined and limit != "N/A" %}
   --limit {{ limit }} \
 {%- endif %}
---batch_size {{ batch_size }}
+  --batch_size {{ batch_size }}
 ```
 
 | Task                  | Metric      | Value     | Stderr |
