@@ -3,7 +3,7 @@ import logging
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Type, TypeVar, Union
 
 from tests.e2e.multi_node.config.utils import (get_avaliable_port,
                                                get_leader_ip,
@@ -13,6 +13,8 @@ LOG = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 CONFIG_PATH = Path("tests/e2e/multi_node/config/config.json")
+
+T = TypeVar("T", bound="BaseConfig")
 
 
 # =========================
@@ -24,7 +26,7 @@ class BaseConfig:
     _extra_fields: Optional[Dict[str, Any]] = None
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "BaseConfig":
+    def from_dict(cls: Type[T], data: dict[str, Any]) -> T:
         """Create config instance from dict, keeping unknown fields."""
         field_names = {f.name for f in fields(cls)}
         valid_fields = {k: v for k, v in data.items() if k in field_names}
@@ -144,7 +146,7 @@ class MultiNodeConfig:
         server_cfg: ServerConfig = ServerConfig.from_dict(server_cfg_dict)
 
         if cfg.get("enable_multithread_load"):
-            server_cfg.model_loader_extra_config = { # type : ignore
+            server_cfg.model_loader_extra_config = { # type: ignore[attr-defined]
                 "enable_multithread_load": True,
                 "num_threads": 8,
             }
@@ -157,12 +159,12 @@ class MultiNodeConfig:
             world_size=num_nodes,
         )
 
-        perf_cfg: PerfConfig = (PerfConfig.from_dict(
-            cfg.get("client_parameters", {}))
-                                if cfg.get("client_parameters") else None)
+        perf_cfg: Optional[PerfConfig] = (PerfConfig.from_dict(
+            cfg.get("client_parameters", {})) if cfg.get("client_parameters")
+                                          else None)
 
         # network info
-        leader_cfg: ServerConfig = server_cfg_data.get("leader_config", {})
+        leader_cfg = server_cfg_data.get("leader_config", {})
         server_host = get_leader_ip()
         server_port = (get_avaliable_port() if is_disaggregate_prefill else
                        leader_cfg.get("port", 8080))
