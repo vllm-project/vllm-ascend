@@ -403,7 +403,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_block, block_size, -1)
                 value = self.value_cache.view(  # type: ignore
                     num_block, block_size, -1)
-                attn_output = torch.empty_like(query)
+                output = torch.empty_like(query)
                 softmax_lse = torch.empty(num_tokens,
                                         dtype=query.dtype,
                                         device=query.device)
@@ -469,7 +469,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                          self.head_size)
                 
                 handle = torch.npu.graph_task_group_end(stream)
-                graph_params.handles[num_tokens2].append(handle)
+                graph_params.handles[num_tokens_origin].append(handle)
             else:
                 num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
                 key = self.key_cache.view(  # type: ignore
