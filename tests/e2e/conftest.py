@@ -193,7 +193,7 @@ class RemoteOpenAIServer:
         """
         Wait until the server process terminates.
         This is for headless mode, where the api server
-        process only exits in the leader node.
+        process only exists in the leader node.
         """
         if self.uds:
             client = httpx.Client(transport=httpx.HTTPTransport(uds=self.uds))
