@@ -495,7 +495,7 @@ class TestAscendMLAImpl(TestBase):
         mock_up_proj.assert_called_once()
         mock_npu_fused_infer_attention_score.assert_called_once()
 
-    @patch("vllm_ascend.attention.mla_v1.npu_prefetch")
+    @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
     def test_mla_preprocess(self, magic_npu_fetch):
         magic_npu_fetch.return_value = MagicMock()
         batch_size = 4
@@ -554,7 +554,11 @@ class TestAscendMLAImpl(TestBase):
         self.impl.num_kv_heads = self.impl.num_heads
 
         decode_res, prefill_res = self.impl._mla_preprocess(
-            hidden_states, kv_cache, attn_metadata, need_gather_q_kv=False)
+            "mock_layer",
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            need_gather_q_kv=False)
 
         self.assertIsNotNone(decode_res)
         self.assertIsNotNone(prefill_res)

@@ -167,8 +167,7 @@ class BlockTable:
                 mask, slot_mapping, -1)
         else:
             assert self.kernel_sizes is not None
-            if self.block_size == self.kernel_sizes[0] or self.kernel_sizes[
-                    0] == 0:
+            if self.block_size == self.kernel_sizes[0]:
                 # IMPORTANT: In hybrid mode, positions are in logical block space,
                 # but we need to map them to the correct logical block table indices
                 logical_block_idx = positions // self.block_size
