@@ -195,4 +195,3 @@ def set_ascend_forward_context(
             yield
         finally:
             pass
-
