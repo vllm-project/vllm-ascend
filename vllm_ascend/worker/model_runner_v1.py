@@ -1090,7 +1090,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_ids[:total_num_scheduled_tokens].copy_(
                 self.input_ids_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
-            self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+            if self.is_multimodal_model or self.enable_prompt_embeds:
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
             self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
 
@@ -1119,7 +1120,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_ids[:total_num_scheduled_tokens].copy_(
                 self.input_ids_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
-            self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
+            if self.is_multimodal_model or self.enable_prompt_embeds:
+                self.inputs_embeds.copy_to_gpu(total_num_scheduled_tokens)
             self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
         if num_commmon_tokens == 0:
             # No requests in common with the previous iteration
@@ -1293,7 +1295,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Because we did not pre-allocate a massive prompt_embeds CPU tensor on
         # the InputBatch, we need to fill in the prompt embeds into the expected
         # spots in the GpuModelRunner's pre-allocated prompt_embeds tensor.
-        if self.input_batch.req_prompt_embeds:
+        if self.input_batch.req_prompt_embeds and (self.is_multimodal_model or
+                                                   self.enable_prompt_embeds):
             output_idx = 0
             for req_idx in range(num_reqs):
                 num_sched = num_scheduled_tokens[req_idx]
