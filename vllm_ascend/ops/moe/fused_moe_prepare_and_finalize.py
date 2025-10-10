@@ -453,7 +453,19 @@ class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
 
 class FusedMoEPrepareAndFinalizeWithEPAllgather(FusedMoEPrepareAndFinalize):
     """
-    TODO add comment
+    MoE communication strategy using All-Gather + Reduce-Scatter on EP group.
+    When sequence parallelism is enabled, the communication and calculation process of
+    FusedMoEPrepareAndFinalizeWithAllGather is as follows (AG and RS are abbreviations
+    for All-Gather and Reduce-Scatter, respectively):
+
+    TP AG → Attn → TP RS → TP AG → DP AG → MoE → DP RS → TP RS
+
+    Compared to FusedMoEPrepareAndFinalizeWithAllGather, this strategy combines
+    TP AG + DP AG into EP All-Gather and TP RS + DP RS into EP Reduce-Scatter
+    to improve communication performance.
+    The optimized communication calculation process is as follows:
+
+    TP AG → Attn → TP RS → EP AG → MoE → EP RS
     """
 
     def prepare(self,
@@ -464,8 +476,7 @@ class FusedMoEPrepareAndFinalizeWithEPAllgather(FusedMoEPrepareAndFinalize):
                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Preparation steps:
-          1. Fetch cumulative token boundaries from forward context.
-          2. allgather hidden_states and router_logits to form global tensors.
+          AllGather hidden_states and router_logits to form global tensors.
 
         Returns:
             Tuple of (global_hidden_states, global_router_logits, None)
@@ -481,10 +492,7 @@ class FusedMoEPrepareAndFinalizeWithEPAllgather(FusedMoEPrepareAndFinalize):
                  reduce_results: bool) -> torch.Tensor:
         """
         Finalization steps:
-          1. If DP > 1 and not shared expert:
-               - All-reduce across DP
-               - Slice to current rank's token range using cu_tokens_across_dp_cpu
-          2. If `reduce_results=True` and TP/EP > 1, apply tensor_model_parallel_all_reduce.
+          Reduce Scatter hidden states on EP group.
 
         Returns:
             Tensor with shape [local_num_tokens, hidden_size]
