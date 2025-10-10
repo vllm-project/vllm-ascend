@@ -387,7 +387,7 @@ def _get_column_parallel_op(
 
 
 def _get_row_parallel_op(
-        prefix, layer
+    prefix, layer
 ) -> Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                     MatmulAllreduceRowParallelOp, SequenceRowParallelOp]]:
     if "down_proj" in prefix and mlp_tp_enable():
@@ -409,9 +409,9 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
     if disable_tp:
         return None, 0, 1
     custom_op: Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp,
-                            MLPRowParallelOp, OProjRowParallelOp,
-                            MatmulAllreduceRowParallelOp,
-                            SequenceRowParallelOp]] = None
+                              MLPRowParallelOp, OProjRowParallelOp,
+                              MatmulAllreduceRowParallelOp,
+                              SequenceRowParallelOp]] = None
     if direct == "row":
         custom_op = _get_row_parallel_op(prefix, layer)
 
