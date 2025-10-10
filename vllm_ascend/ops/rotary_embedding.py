@@ -190,25 +190,7 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         offsets: Optional[torch.Tensor] = None,
         is_neox_style_override: Optional[bool] = None,
     ):
-        is_neox_style = self.is_neox_style
-        if is_neox_style_override is not None:
-            is_neox_style = is_neox_style_override
-        forward_context = get_forward_context()
-        is_first_layer = forward_context.is_first_layer
-        # Generate cos and sin outside layers to avoid repeated calculation.
-        if is_neox_style and self.head_size == 128 and self.cos_sin_cache.shape[
-                -1] == 128:
-            if is_first_layer:
-                cos_sin = self.cos_sin_cache.index_select(0, positions)
-                last_dim = cos_sin.size()[-1]
-                cos, sin = cos_sin.reshape(-1, 2, last_dim // 2).repeat(
-                    1, 1, 2).chunk(2, dim=-2)
-                # BSNH
-                self.cos = cos.view(1, -1, 1, last_dim).contiguous()
-                self.sin = sin.view(1, -1, 1, last_dim).contiguous()
-                forward_context.is_first_layer = False
-        return _rope_forward_oot(self, positions, query, key, is_neox_style,
-                                 offsets)
+        AscendRotaryEmbedding(self, positions, query, key, offsets, is_neox_style_override)
 
 
 class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
