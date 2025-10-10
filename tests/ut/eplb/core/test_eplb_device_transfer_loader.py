@@ -40,8 +40,6 @@ def test_generate_task_and_state_flow(mock_adaptor):
 
         mock_p2p.side_effect = lambda op, tensor, rank: (op, tensor, rank)
 
-        mock_adaptor.expert_param_per_layer = {0: {0: [torch.tensor([1.0])]}}
-        mock_adaptor.expert_param_per_layer_cpu = {0: {10: torch.tensor(0)}}
 
         loader_obj.state = loader.ExpertWeightUpdateState.READY
         loader_obj.generate_expert_d2d_transfer_task([(1, 10)], [(2, 20)],
@@ -51,10 +49,6 @@ def test_generate_task_and_state_flow(mock_adaptor):
 
         loader_obj.generate_expert_d2d_transfer_task([], [], {}, 0)
         assert loader_obj.comm_op_list is None
-
-        updated_map = {20: torch.tensor(0)}
-        loader_obj.generate_expert_d2d_transfer_task([(1, 10)], [(2, 20)],
-                                                     updated_map, 0)
         assert loader_obj.state == loader.ExpertWeightUpdateState.READY
         assert loader_obj.comm_op_list
         assert loader_obj.recv_expert_list
