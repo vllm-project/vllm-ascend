@@ -57,7 +57,6 @@ class MoECommMethod(ABC):
         self.model_type = get_current_vllm_config(
         ).model_config.hf_config.model_type
         self.moe_config = moe_config
-        self.mc2_mask = None
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.fused_moe_prepare_finalize = self._get_fused_moe_prepare_finalize(
@@ -69,16 +68,17 @@ class MoECommMethod(ABC):
                 enable_shared_expert_dp: bool = False,
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states, router_logits, mc2_mask = self.fused_moe_prepare_finalize.prepare(
+        hidden_states, router_logits, split_hidden_states, mc2_mask = self.fused_moe_prepare_finalize.prepare(
             hidden_states, router_logits, enable_shared_expert_dp,
             replace_allreduce, gate)
-        self.mc2_mask = mc2_mask
-        return hidden_states, router_logits
+        return hidden_states, router_logits, split_hidden_states, mc2_mask
 
-    def finalize(self, hidden_states: torch.Tensor,
-                 reduce_results: bool) -> torch.Tensor:
+    def finalize(self,
+                 hidden_states: torch.Tensor,
+                 reduce_results: bool,
+                 split_hidden_states: torch.Tensor = None) -> torch.Tensor:
         hidden_states = self.fused_moe_prepare_finalize.finalize(
-            hidden_states, reduce_results)
+            hidden_states, reduce_results, split_hidden_states)
         return hidden_states
 
     def fused_experts(
@@ -109,7 +109,8 @@ class MoECommMethod(ABC):
             log2phy: torch.Tensor = None,
             global_redundant_expert_num: int = 0,
             need_trans: bool = False,
-            dynamic_eplb: bool = False):
+            dynamic_eplb: bool = False,
+            mc2_mask: torch.Tensor = None):
         # Check constraints
         assert hidden_states.dtype in [
             torch.float32, torch.float16, torch.bfloat16
@@ -129,7 +130,7 @@ class MoECommMethod(ABC):
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
-            mc2_mask=self.mc2_mask,
+            mc2_mask=mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
             with_quant=use_int8_w8a8 or use_int4_w4a8)
 
