@@ -26,7 +26,7 @@ class BaseConfig:
     _extra_fields: Optional[Dict[str, Any]] = None
 
     @classmethod
-    def from_dict(cls: Type[T], data: dict[str, Any]) -> T:
+    def from_config(cls: Type[T], data: dict[str, Any]) -> T:
         """Create config instance from dict, keeping unknown fields."""
         field_names = {f.name for f in fields(cls)}
         valid_fields = {k: v for k, v in data.items() if k in field_names}
@@ -71,8 +71,8 @@ class ServerConfig(BaseConfig):
     tensor_parallel_size: int = 8
     max_model_len: int = 8192
     max_num_batched_token: int = 8192
-    data_parallel_size: int = 2
-    data_parallel_size_local: int = 1
+    data_parallel_size: int = 4
+    data_parallel_size_local: int = 2
     data_parallel_start_rank: int = 0
     data_parallel_rpc_port: int = 13389
     data_parallel_address: Optional[str] = None
@@ -129,7 +129,7 @@ class MultiNodeConfig:
     accuracy_config: Optional[AccuracyConfig] = None
 
     @classmethod
-    def from_dict(cls, cfg: Dict[str, Any]) -> "MultiNodeConfig":
+    def from_config(cls, cfg: Dict[str, Any]) -> "MultiNodeConfig":
         """Create a MultiNodeConfig from raw dict."""
         num_nodes = cfg.get("num_nodes", 2)
         is_disaggregate_prefill = cfg.get("disaggregate_prefill", False)
@@ -143,7 +143,7 @@ class MultiNodeConfig:
 
         role_key = "leader_config" if is_leader else "worker_config"
         server_cfg_dict = server_cfg_data.get(role_key, {})
-        server_cfg: ServerConfig = ServerConfig.from_dict(server_cfg_dict)
+        server_cfg: ServerConfig = ServerConfig.from_config(server_cfg_dict)
 
         if cfg.get("enable_multithread_load"):
             server_cfg.model_loader_extra_config = { # type: ignore[attr-defined]
@@ -159,7 +159,7 @@ class MultiNodeConfig:
             world_size=num_nodes,
         )
 
-        perf_cfg: Optional[PerfConfig] = (PerfConfig.from_dict(
+        perf_cfg: Optional[PerfConfig] = (PerfConfig.from_config(
             cfg.get("client_parameters", {})) if cfg.get("client_parameters")
                                           else None)
 
@@ -197,7 +197,7 @@ def load_configs(
     configs = []
     for idx, item in enumerate(configs_data):
         try:
-            configs.append(MultiNodeConfig.from_dict(item))
+            configs.append(MultiNodeConfig.from_config(item))
         except Exception as e:
             LOG.exception(f"Failed to parse config #{idx}: {e}")
             raise

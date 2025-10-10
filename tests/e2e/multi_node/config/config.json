@@ -7,12 +7,6 @@
         "server_parameters": {
             "leader_config": {
                 "model": "vllm-ascend/DeepSeek-V3-W8A8",
-                "enable_expert_parallel": true,
-                "data_parallel_size": 4,
-                "data_parallel_size_local": 2,
-                "quantization": "ascend",
-                "tensor_parallel_size": 8,
-                "kv_transfer_config": {},
                 "additional_config": {
                     "ascend_scheduler_config": {
                         "enabled": true
@@ -24,12 +18,6 @@
             },
             "worker_config": {
                 "model": "vllm-ascend/DeepSeek-V3-W8A8",
-                "enable_expert_parallel": true,
-                "data_parallel_size": 4,
-                "data_parallel_size_local": 2,
-                "quantization": "ascend",
-                "tensor_parallel_size": 8,
-                "kv_transfer_config": {},
                 "additional_config": {
                     "ascend_scheduler_config": {
                         "enabled": true
