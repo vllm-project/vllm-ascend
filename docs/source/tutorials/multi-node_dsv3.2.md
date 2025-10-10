@@ -217,12 +217,12 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --served-model-name deepseek_v3.2 \
 --enable-expert-parallel \
 --max-num-seqs 16 \
---max-model-len 32768 \
---max-num-batched-tokens 32768 \
+--max-model-len 17450 \
+--max-num-batched-tokens 17450 \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.9 \
---additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 **node1**
@@ -255,13 +255,13 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --seed 1024 \
 --served-model-name deepseek_v3.2 \
 --max-num-seqs 16 \
---max-model-len 32768 \
---max-num-batched-tokens 32768 \
+--max-model-len 17450 \
+--max-num-batched-tokens 17450 \
 --enable-expert-parallel \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 ::::
@@ -270,8 +270,9 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 
 ```shell
 #!/bin/sh
+export VLLM_USE_MODELSCOPE=true
 
-vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp-W8A8 \
+vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --host 0.0.0.0 \
 --port 8000 \
 --tensor-parallel-size 16 \
@@ -279,18 +280,103 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp-W8A8 \
 --quantization ascend \
 --served-model-name deepseek_v3.2 \
 --max-num-seqs 16 \
---max-model-len 32768 \
---max-num-batched-tokens 32768 \
+--max-model-len 17450 \
+--max-num-batched-tokens 17450 \
 --enable-expert-parallel \
 --trust-remote-code \
 --no-enable-prefix-caching \
 --gpu-memory-utilization 0.92 \
---additional-config '{"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+--additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
 ::::
-::::{tab-item} A2 series
-Just like A3 series, the only difference is to set `--data-parallel-size` to the right value on each node.
+::::{tab-item} DeepSeek-V3.2-Exp-W8A8 A2 series
+
+Run the following scripts on two nodes respectively
+
+**node0**
+
+```shell
+#!/bin/sh
+
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip
+nic_name="xxxx"
+local_ip="xxxx"
+
+export VLLM_USE_MODELSCOPE=True
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=100
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+
+vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
+--host 0.0.0.0 \
+--port 8000 \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-address $local_ip \
+--data-parallel-rpc-port 13389 \
+--tensor-parallel-size 8 \
+--seed 1024 \
+--served-model-name deepseek_v3.2 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 17450 \
+--max-num-batched-tokens 17450 \
+--trust-remote-code \
+--quantization ascend \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.9 \
+--additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+```
+
+**node1**
+
+```shell
+#!/bin/sh
+
+nic_name="xxx"
+local_ip="xxx"
+
+export VLLM_USE_MODELSCOPE=True
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=100
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+
+vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
+--host 0.0.0.0 \
+--port 8000 \
+--headless \
+--data-parallel-size 2 \
+--data-parallel-size-local 1 \
+--data-parallel-start-rank 1 \
+--data-parallel-address <node0_ip> \
+--data-parallel-rpc-port 13389 \
+--tensor-parallel-size 8 \
+--seed 1024 \
+--served-model-name deepseek_v3.2 \
+--max-num-seqs 16 \
+--max-model-len 17450 \
+--max-num-batched-tokens 17450 \
+--enable-expert-parallel \
+--trust-remote-code \
+--quantization ascend \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.92 \
+--additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+```
 
 ::::
 :::::
