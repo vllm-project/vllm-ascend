@@ -55,7 +55,6 @@ _PREFETCH_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
-_MIN_MC2_BUFFER_SIZE = 1024
 
 
 def is_310p():
@@ -660,12 +659,23 @@ def create_hccl_pg_options(group_name: str):
 
 
 def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
+    """
+    Get HCCL process group options for the given communication group name.
+
+    Args:
+        group_name: Name of the communication group
+ 
+    Returns:
+        HCCL pg_options or None for mc2 group
+    """
+    # FIXME: Current mc2 operators only perform communication space partitioning
+    # based on HCCL_BUFFSIZE configuration. Using pg_options with mc2 group would
+    # result in memory misalignment problems.
+    if group_name and "mc2" in group_name:
+        return None
     hccl_config_map = {
         "dp": {
             "hccl_buffer_size": calculate_dp_buffer_size()
-        },
-        "mc2": {
-            "hccl_buffer_size": calculate_mc2_buffer_size()
         },
     }
     return hccl_config_map.get(group_name, get_default_buffer_config())
@@ -686,51 +696,3 @@ def calculate_dp_buffer_size() -> int:
     int32_size = torch.iinfo(torch.int32).bits // 8
     dp_buffer_size = math.ceil((dp_size + 2) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
-
-
-def calculate_mc2_buffer_size() -> int:
-    """
-    formula of mc2 buffer size: 
-    2 * (local_routed_expert_num * max_bs_per_rank * ep_world_size * align512(align32(2 * H) + 64) + 
-         (K + shared_expert_num) * max_bs_per_rank * align512(2 * H))
-    """
-    from vllm.config import get_current_vllm_config
-    vllm_config = get_current_vllm_config()
-    dp_size = vllm_config.parallel_config.data_parallel_size
-    tp_size = vllm_config.parallel_config.tensor_parallel_size
-    # since mc2 process group is only used with enable_expert_parallel,
-    # it is unnecessary to consider non-ep case.
-    ep_world_size = dp_size * tp_size
-    # FIXME: try to get local_routed_expert_num and redundant_expert_num (default: 2) elegantly
-    global_routed_expert_num = getattr(vllm_config.model_config.hf_config,
-                                       'n_routed_experts', 1)
-    local_routed_expert_num = math.ceil(
-        global_routed_expert_num / ep_world_size) + 2
-    # tokens are passed to shread experts without mc2 ops.
-    shared_expert_num = 0
-
-    max_bs_per_rank = math.ceil(vllm_config.scheduler_config.max_num_seqs /
-                                tp_size)
-    # take MTP into consideration and it is better to align vllm speculative method later.
-    mtp_spec_token_num = (
-        vllm_config.speculative_config.num_speculative_tokens + 1 if
-        (vllm_config.speculative_config is not None
-         and vllm_config.speculative_config.method == 'deepseek_mtp') else 1)
-    max_bs_per_rank *= mtp_spec_token_num
-    H = vllm_config.model_config.hf_config.hidden_size
-    K = getattr(vllm_config.model_config.hf_config, 'num_experts_per_tok', 1)
-
-    aligned_2H_32 = _round_up(2 * H, 32)
-    aligned_2H_512 = _round_up(2 * H, 512)
-
-    # local_routed_expert_num * max_bs_per_rank * ep_world_size * Align512(Align32(2 * H) + 64)
-    part1_base = aligned_2H_32 + 64
-    aligned_part1 = _round_up(part1_base, 512)
-    local_expert_component = local_routed_expert_num * max_bs_per_rank * ep_world_size * aligned_part1
-
-    # (K + shared_expert_num) * max_bs_per_rank * Align512(2 * H)
-    shared_expert_component = (
-        K + shared_expert_num) * max_bs_per_rank * aligned_2H_512
-    mc2_buffer_size = math.ceil(
-        2 * (local_expert_component + shared_expert_component) / (1024 * 1024))
-    return max(mc2_buffer_size, _MIN_MC2_BUFFER_SIZE)
