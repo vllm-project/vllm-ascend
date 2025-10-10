@@ -250,7 +250,6 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalizeWithAll2All):
                                                          dim=0)
                 hidden_states = split_hidden_states[self.tp_rank]
                 router_logits = split_router_logits[self.tp_rank]
-                self.split_hidden_states = split_hidden_states  # Save for finalize
 
         return hidden_states, router_logits, split_hidden_states, mc2_mask
 
