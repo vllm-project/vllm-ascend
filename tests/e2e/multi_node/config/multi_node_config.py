@@ -196,9 +196,3 @@ def load_configs(
             LOG.exception(f"Failed to parse config #{idx}: {e}")
             raise
     return configs
-
-
-if __name__ == '__main__':
-    configs = load_configs(CONFIG_PATH)
-    for config in configs:
-        print(config.server_config)
