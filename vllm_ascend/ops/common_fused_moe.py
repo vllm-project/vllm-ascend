@@ -23,11 +23,11 @@ from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
                               tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
-from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -195,7 +195,8 @@ class AscendFusedMoE(FusedMoE):
                 self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
                     self.moe_instance_id, self.ep_rank).npu()
             except Exception as e:
-                logger.warning(f"Init expert map of mtp/eagle when using sample.{e}")
+                logger.warning(
+                    f"Init expert map of mtp/eagle when using sample.{e}")
                 self.local_num_experts, self.expert_map = determine_default_expert_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num)
