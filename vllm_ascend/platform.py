@@ -233,10 +233,11 @@ class NPUPlatform(Platform):
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.level = CompilationLevel.NO_COMPILATION
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE or compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             logger.info(
-                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
-                "using only ACL Graph mode")
+                f"{compilation_config.cudagraph_mode} compilation enabled on NPU. use_inductor not supported - "
+                f"using only ACL Graph mode"
+                f"{compilation_config.cudagraph_mode}")
             assert compilation_config.level == CompilationLevel.PIECEWISE, \
                 "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
             compilation_config.set_splitting_ops_for_v1()
@@ -245,10 +246,11 @@ class NPUPlatform(Platform):
                 "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
             ])
             update_aclgraph_sizes(vllm_config)
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
             logger.info(
-                "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
-                "using only ACL Graph mode")
+                f"{compilation_config.cudagraph_mode} compilation enabled on NPU. use_inductor not supported - "
+                f"using only ACL Graph mode"
+                f"{compilation_config.cudagraph_mode}")
             compilation_config.use_inductor = False
             warning_message = """\033[91m
             **********************************************************************************
