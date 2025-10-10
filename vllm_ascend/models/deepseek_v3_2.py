@@ -64,10 +64,16 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.models.layers.sfa import (AscendSFAModules,
-                                           AscendSparseFlashAttention, Indexer)
+from vllm_ascend.models.layers.sfa import AscendSFAModules, Indexer
 from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
 from vllm_ascend.ops.linear import AscendLinearBase
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.model_executor.layers.mla import MultiHeadLatentAttention
+else:
+    from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 
 
 @support_torch_compile
@@ -354,28 +360,97 @@ class CustomDeepseekV2SFAAttention(DeepseekV2MLAAttention):
             kv_b_proj=self.kv_b_proj,
             o_proj=self.o_proj,
             rotary_emb=self.rotary_emb,
-            indexer=self.indexer)
+            indexer=self.indexer,
+            is_sparse=hasattr(config, "index_topk"))
 
-        self.sfa_attn = AscendSparseFlashAttention(
-            self.hidden_size,
-            self.enable_shared_expert_dp,
-            self.debug_layer_idx,
-            self.first_k_dense_replace,
-            self.tp_size,
-            sfa_modules,
-            self.num_local_heads,
-            self.scaling,
-            self.layers,
-            self.kv_lora_rank,
-            self.qk_rope_head_dim,
-            self.q_lora_rank,
-            self.qk_nope_head_dim,
-            self.qk_head_dim,
-            self.v_head_dim,
-            cache_config,
-            quant_config,
-            prefix,
-        )
+
+    # def __init__(
+    #     self,
+    #     hidden_size: int,
+    #     num_heads: int,
+    #     enable_shared_expert_dp: bool,
+    #     debug_layer_idx: int,
+    #     first_k_dense_replace: int,
+    #     tp_size: int,
+    #     mla_modules: AscendMLAModules,
+    #     num_local_heads: int,
+    #     scaling: float,
+    #     layers: int,
+    #     kv_lora_rank: int,
+    #     qk_rope_head_dim: int,
+    #     q_lora_rank: Optional[int],
+    #     qk_nope_head_dim: int,
+    #     qk_head_dim: int,
+    #     v_head_dim: int,
+    #     cache_config: Optional[CacheConfig] = None,
+    #     quant_config: Optional[QuantizationConfig] = None,
+    #     prefix: str = "",
+    # ) -> None:
+
+        if vllm_version_is("0.11.0"):
+            # self.mla_attn = MultiHeadLatentAttention(
+            #     hidden_size = self.hidden_size,
+            #     num_heads=self.num_local_heads,
+            #     enable_shared_expert_dp=self.enable_shared_expert_dp,
+            #     debug_layer_idx=self.debug_layer_idx,
+            #     first_k_dense_replace=self.first_k_dense_replace,
+            #     tp_size=self.tp_size,
+            #     mla_modules=sfa_modules,
+            #     num_local_heads=self.num_local_heads,
+            #     scaling=self.scaling,
+            #     layers=self.layers,
+            #     kv_lora_rank=self.kv_lora_rank,
+            #     qk_rope_head_dim=self.qk_rope_head_dim,
+            #     q_lora_rank=self.q_lora_rank,
+            #     qk_nope_head_dim=self.qk_nope_head_dim,
+            #     qk_head_dim=self.qk_head_dim,
+            #     v_head_dim=self.v_head_dim,
+            #     cache_config=cache_config,
+            #     quant_config=quant_config,
+            #     prefix=prefix,
+            # )
+            self.mla_attn = MultiHeadLatentAttention(
+                self.hidden_size,
+                self.num_local_heads,
+                self.enable_shared_expert_dp,
+                self.debug_layer_idx,
+                self.first_k_dense_replace,
+                self.tp_size,
+                sfa_modules,
+                self.num_local_heads,
+                self.scaling,
+                self.layers,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                self.q_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_head_dim,
+                self.v_head_dim,
+                cache_config,
+                quant_config,
+                prefix,
+            )
+        else:
+            self.sfa_attn = MultiHeadLatentAttentionWrapper(
+                self.hidden_size,
+                self.enable_shared_expert_dp,
+                self.debug_layer_idx,
+                self.first_k_dense_replace,
+                self.tp_size,
+                sfa_modules,
+                self.num_local_heads,
+                self.scaling,
+                self.layers,
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                self.q_lora_rank,
+                self.qk_nope_head_dim,
+                self.qk_head_dim,
+                self.v_head_dim,
+                cache_config,
+                quant_config,
+                prefix,
+            )
         self.prefix = prefix
 
     def forward(
