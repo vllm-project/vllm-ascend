@@ -24,8 +24,7 @@ from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
-from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
-                               vllm_version_is)
+from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 PADDING_SLOT_ID = -1
 
@@ -400,10 +399,7 @@ class MtpProposer(Proposer):
             seq_lens=None)
 
         if not self.torchair_graph_enabled:
-            if vllm_version_is("0.10.2"):
-                builder = self.runner.attn_groups[0][0].metadata_builder
-            else:
-                builder = self.runner.attn_groups[0][0].get_metadata_builder()
+            builder = self.runner.attn_groups[0][0].get_metadata_builder()
             attn_metadata_mtp = builder.build(0, common_attn_metadata,
                                               self.runner.get_model())
 
@@ -527,6 +523,14 @@ class MtpProposer(Proposer):
             input_ids = draft_token_ids_list[-1].int()
             positions += 1
 
+            if not self.torchair_graph_enabled:
+                attn_metadata_i.decode.actual_seq_lengths_q = attn_metadata_i.query_start_loc[
+                    1:batch_size + 1].tolist()
+                attn_metadata_i.decode.cos = builder.cos_cache[
+                    positions].unsqueeze(1).unsqueeze(2)
+                attn_metadata_i.decode.sin = builder.sin_cache[
+                    positions].unsqueeze(1).unsqueeze(2)
+
             # NOTE(woosuk): We should handle the case where the draft model
             # generates tokens beyond the max model length. Since it is complex
             # to remove such requests from the batch, we keep them in the batch
@@ -560,6 +564,8 @@ class MtpProposer(Proposer):
 
             if attn_metadata_i.prefill is not None:
                 attn_metadata_i.prefill.seq_lens = attn_metadata_i.seq_lens
+                attn_metadata_i.prefill.seq_lens_list = attn_metadata_i.prefill.seq_lens.tolist(
+                )
                 attn_metadata_i.prefill.context_lens = attn_metadata_i.seq_lens
                 attn_metadata_i.prefill.input_positions = self.positions[:
                                                                          num_input_tokens]
@@ -569,6 +575,8 @@ class MtpProposer(Proposer):
                     self.runner.model_config.max_model_len)
             if attn_metadata_i.decode is not None:
                 attn_metadata_i.decode.seq_lens = attn_metadata_i.seq_lens
+                attn_metadata_i.decode.seq_lens_list = attn_metadata_i.decode.seq_lens.tolist(
+                )
                 attn_metadata_i.decode.input_positions = self.positions[:
                                                                         num_input_tokens]
                 attn_metadata_i.decode.max_seq_lens += 1
@@ -603,10 +611,11 @@ class MtpProposer(Proposer):
         torch.npu.set_compile_mode(jit_compile=False)
         if not self.runner.use_cached_npu_graph:
             npu_backend = torchair.get_npu_backend(compiler_config=config)
-            self.torchair_compiled_model = torch.compile(self.model,
-                                                         dynamic=True,
-                                                         fullgraph=True,
-                                                         backend=npu_backend)
+            self.torchair_compiled_model = torch.compile(
+                self.model,
+                dynamic=not get_ascend_config().use_sfa,
+                fullgraph=True,
+                backend=npu_backend)
             return self.torchair_compiled_model
         else:
             # Generate a new forward proxy code object to prevent the invalidation of
@@ -627,7 +636,7 @@ class MtpProposer(Proposer):
             self.torchair_compiled_models[
                 batch_size] = torchair.inference.cache_compile(
                     self.model.__dict__[forward_proxy_name],
-                    dynamic=True,
+                    dynamic=not get_ascend_config().use_sfa,
                     fullgraph=True,
                     cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,

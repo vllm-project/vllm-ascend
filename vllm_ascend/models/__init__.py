@@ -38,12 +38,12 @@ def register_model():
         "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
 
     ModelRegistry.register_model(
-        "DeepSeekMTPModel",
-        "vllm_ascend.models.deepseek_mtp:CustomDeepSeekMTP")
+        "DeepseekV32ForCausalLM",
+        "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
 
     ModelRegistry.register_model(
-        "Qwen3MoeForCausalLM",
-        "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+        "DeepSeekMTPModel",
+        "vllm_ascend.models.deepseek_mtp:CustomDeepSeekMTP")
 
     # There is no PanguProMoEForCausalLM in vLLM, so we should register it before vLLM config initialization
     # to make sure the model can be loaded correctly. This register step can be removed once vLLM support PanguProMoEForCausalLM.
@@ -53,4 +53,4 @@ def register_model():
     )
     ModelRegistry.register_model(
         "Qwen3NextForCausalLM",
-        "vllm_ascend.models.qwen3_next:Qwen3NextForCausalLM")
+        "vllm_ascend.models.qwen3_next:CustomQwen3NextForCausalLM")

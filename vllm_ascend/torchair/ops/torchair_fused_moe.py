@@ -50,8 +50,7 @@ from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
                                get_ascend_soc_version,
-                               get_rm_router_logits_state, is_310p,
-                               vllm_version_is)
+                               get_rm_router_logits_state, is_310p)
 
 
 def torchair_fused_experts_with_mc2(
@@ -881,7 +880,7 @@ class TorchairAscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
-        if enable_force_load_balance and not self.use_aclgraph:
+        if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         fused_moe_state = get_forward_context().fused_moe_state
@@ -1046,7 +1045,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                     self.global_redundant_expert_num)
                 self.log2phy = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
+                    self.global_redundant_expert_num).npu()
         local_num_experts = (torch.sum(self.expert_map != -1)
                              if self.expert_map is not None else num_experts)
         if self.dynamic_eplb:
@@ -1061,26 +1060,14 @@ class TorchairAscendFusedMoE(FusedMoE):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
-
-        if vllm_version_is("0.10.2"):
-            self.moe = FusedMoEConfig.make(
-                num_experts=self.global_num_experts,
-                experts_per_token=top_k,
-                hidden_dim=hidden_size,
-                num_local_experts=self.local_num_experts,
-                moe_parallel_config=self.moe_parallel_config,
-                # TODO (bnell): this needs to be fixed for quantized types.
-                in_dtype=params_dtype,
-                quant_config=quant_config)
-        else:
-            self.moe = FusedMoEConfig(
-                num_experts=self.global_num_experts,
-                experts_per_token=top_k,
-                hidden_dim=hidden_size,
-                num_local_experts=self.local_num_experts,
-                moe_parallel_config=self.moe_parallel_config,
-                in_dtype=params_dtype,
-            )
+        self.moe = FusedMoEConfig(
+            num_experts=self.global_num_experts,
+            experts_per_token=top_k,
+            hidden_dim=hidden_size,
+            num_local_experts=self.local_num_experts,
+            moe_parallel_config=self.moe_parallel_config,
+            in_dtype=params_dtype,
+        )
         if quant_config is None:
             self.quant_method = TorchairAscendUnquantizedFusedMoEMethod(
                 self.moe)
@@ -1243,7 +1230,7 @@ class TorchairAscendFusedMoE(FusedMoE):
 
             elif fused_moe_state == FusedMoEState.NaiveMulticast:
                 cu_tokens_across_dp_cpu = get_forward_context(
-                ).dp_metadata.cu_tokens_across_dp_cpu
+                ).dp_metadata.cu_tokens_across_sp(1)
                 hidden_states = self.naive_multicast(hidden_states,
                                                      cu_tokens_across_dp_cpu)
                 if self.rm_router_logits:
