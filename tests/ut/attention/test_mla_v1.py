@@ -461,11 +461,13 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(out.shape, prefix_out.shape)
         self.assertEqual(lse.shape, prefix_lse.shape)
 
+    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
     @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._v_up_proj")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode_without_graph(self,
                                           mock_npu_fused_infer_attention_score,
-                                          mock_up_proj):
+                                          mock_up_proj,
+                                          mock_get_forward_context):
         num_tokens = 100
         block_size = 4
         q_nope = torch.randn(num_tokens, self.impl.num_heads,
@@ -487,6 +489,7 @@ class TestAscendMLAImpl(TestBase):
         mock_up_proj.return_value = torch.randn(num_tokens,
                                                 self.impl.num_heads,
                                                 self.impl.v_head_dim)
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe,
                                            block_size, metadata)
         self.assertEqual(result.shape[0], num_tokens)
@@ -614,12 +617,13 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
+    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
     @patch("torch.npu.stream")
     @patch("vllm_ascend.attention.mla_v1.get_multistream_comm_context")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode(self, mock_npu_fused_infer_attention_score,
-                            mock_get_multistream_comm_context,
-                            mock_npu_stream):
+                            mock_get_multistream_comm_context, mock_npu_stream,
+                            mock_get_forward_context):
         B = 2
         N = self.impl.num_kv_heads
         BS = 100
@@ -644,6 +648,7 @@ class TestAscendMLAImpl(TestBase):
         ]
         mock_get_multistream_comm_context.return_value = None
 
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
                                            attn_metadata)
 
