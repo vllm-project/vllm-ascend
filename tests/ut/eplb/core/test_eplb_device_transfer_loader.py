@@ -40,7 +40,6 @@ def test_generate_task_and_state_flow(mock_adaptor):
 
         mock_p2p.side_effect = lambda op, tensor, rank: (op, tensor, rank)
 
-
         loader_obj.state = loader.ExpertWeightUpdateState.READY
         loader_obj.generate_expert_d2d_transfer_task([(1, 10)], [(2, 20)],
                                                      {20: torch.tensor(0)}, 0)
