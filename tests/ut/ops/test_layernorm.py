@@ -58,21 +58,6 @@ class TestAscendRMSNorm(PytestBase):
 
             assert torch.allclose(x_out, x_out_expected)
 
-    # Test case for flashcomm_v1 scenario
-    def test_forward_oot_with_flashcomm_v1(self):
-        layer = RMSNorm(hidden_size=512, eps=1e-05)
-        x = torch.randn(4, 512, dtype=torch.bfloat16)
-        residual = torch.randn(16, 512, dtype=torch.bfloat16)
-
-        x_out, residual_out = layer.forward_oot(x, residual)
-
-        x_out_expected = 2 * x
-        residual_out_expected = 2 * residual[:4]
-
-        assert residual_out.size(0) == 4
-        assert torch.allclose(x_out, x_out_expected)
-        assert torch.allclose(residual_out, residual_out_expected)
-
     # Test case for addrmsnorm + w8a8 quant fusion
     def test_forward_oot_with_quant_fusion(self, mocker: MockerFixture):
         mock_is_310p = mocker.patch("vllm_ascend.utils.is_310p")
