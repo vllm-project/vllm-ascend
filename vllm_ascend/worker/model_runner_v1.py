@@ -20,6 +20,7 @@
 import copy
 import gc
 import itertools
+import re
 import time
 from collections import defaultdict
 from collections.abc import Iterator
@@ -3393,15 +3394,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         aclgraph_runtime_mode=aclgraph_runtime_mode,
                         uniform_decode=False)
                 except Exception as e:
-                    logger.error(
-                        f"ACLgraph sizes capture fail: {type(e).__name__}:\n"
-                        "ACLgraph has insufficient available streams to capture the configured number of sizes. "
-                        "Please verify both the availability of adequate streams and the appropriateness of the configured size count.\n\n"
-                        "Recommended solutions:\n"
-                        "1. Manually configure the compilation_config parameter "
-                        "with a reduced set of sizes: '{\"cudagraph_capture_sizes\":[size1, size2, size3, ...]}'.\n"
-                        "2. Utilize ACLgraph's full graph mode as an alternative to the piece-wise approach.\n\n"
-                        f"{str(e)}")
+                    error_msg = str(e)
+                    error_code = '0x7020023'
+                    pattern = r'retCode=([^,\s\.]+)'
+                    match = re.search(pattern, error_msg)
+                    if match:
+                        retCode = match.group(1)
+                    # Determine whether the error message is caused by stream capture failure.
+                    if match and retCode == error_code:
+                        logger.error(
+                            f"ACLgraph sizes capture fail: {type(e).__name__}:\n"
+                            "ACLgraph has insufficient available streams to capture the configured number of sizes. "
+                            "Please verify both the availability of adequate streams and the appropriateness of the configured size count.\n\n"
+                            "Recommended solutions:\n"
+                            "1. Manually configure the compilation_config parameter "
+                            "with a reduced set of sizes: '{\"cudagraph_capture_sizes\":[size1, size2, size3, ...]}'.\n"
+                            "2. Utilize ACLgraph's full graph mode as an alternative to the piece-wise approach.\n\n"
+                            f"{str(e)}")
                     raise
 
             if aclgraph_mode.decode_mode() == CUDAGraphMode.FULL and \
