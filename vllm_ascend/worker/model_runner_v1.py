@@ -20,6 +20,7 @@
 import copy
 import gc
 import itertools
+import os
 import time
 from collections import defaultdict
 from collections.abc import Iterator
@@ -448,6 +449,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )
         self.dynamic_eplb = self.ascend_config.dynamic_eplb
         if self.dynamic_eplb:
+            os.environ["PYTHONOPTIMIZE"]="1"
             self.is_eplb_warmuped = False
             self.eplb_loader = D2DExpertWeightLoader()
             self.manager = Manager()
@@ -463,6 +465,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             ascend_config = get_ascend_config()
             self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader,
                                             self.eplb_process, self.process)
+            os.environ["PYTHONOPTIMIZE"]="0"
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.async_output_copy_stream = torch.npu.Stream() if \
