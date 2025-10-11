@@ -1266,7 +1266,7 @@ class TorchairAscendFusedMoE(FusedMoE):
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
         )
-        
+
         if shared_experts:
             if isinstance(e_hidden_states,
                           tuple) and len(e_hidden_states) == 2:
