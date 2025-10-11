@@ -1277,7 +1277,7 @@ class TorchairAscendFusedMoE(FusedMoE):
             e_hidden_states, group_list_type, expert_tokens = e_hidden_states
             self.moe_load += expert_tokens if group_list_type else \
                 torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-            
+
         if (fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
