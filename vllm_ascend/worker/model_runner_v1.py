@@ -125,7 +125,7 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
-                               get_ascend_soc_version, is_310p,
+                               enable_sp, get_ascend_soc_version, is_310p,
                                lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
@@ -1821,7 +1821,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
         if moe_comm_type == MoECommType.ALLGATHER and with_prefill:
-            if envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM:
+            if enable_sp():
                 moe_comm_type = MoECommType.ALLGATHER
             else:
                 moe_comm_type = MoECommType.NAIVE_MULTICAST

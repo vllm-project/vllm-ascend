@@ -76,7 +76,7 @@ def set_ascend_forward_context(
     can be attention metadata, etc.
     We add some additional param into forward_context.
     """
-    with (set_forward_context(
+    with set_forward_context(
             attn_metadata,
             vllm_config,
             virtual_engine=virtual_engine,
@@ -84,7 +84,7 @@ def set_ascend_forward_context(
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=aclgraph_runtime_mode,
             batch_descriptor=batch_descriptor,
-    )):
+    ):
         forward_context = get_forward_context()
 
         from vllm_ascend.ops.moe.moe_comm_method import get_moe_comm_method
