@@ -26,6 +26,9 @@ on:
       branches:
         - 'main'
         - '*-dev'
+      paths:
+        - 'tests/e2e/nightly/**'
+        - '.github/workflows/vllm_ascend_test_nightly.yml'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -50,7 +53,6 @@ jobs:
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
       env:
-        VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
