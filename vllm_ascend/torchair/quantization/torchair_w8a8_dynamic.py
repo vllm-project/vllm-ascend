@@ -220,6 +220,7 @@ def torchair_fused_experts_with_mc2(
     shared_dequant_scale: Optional[Any] = None,
     w1_scale_bias: torch.Tensor = None,
     w2_scale_bias: torch.Tensor = None,
+    dynamic_eplb: bool = False,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     assert mc2_mask is not None
     if log2phy is not None:
@@ -353,6 +354,9 @@ def torchair_fused_experts_with_mc2(
         **kwargs_mc2
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
         **kwargs_mc2)
+
+    if dynamic_eplb:
+        return (hidden_states, 1, expert_token_nums)
 
     if shared_experts is None:
         return hidden_states
@@ -832,6 +836,7 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
         self.ep_group = get_ep_group()
 
         ascend_config = get_ascend_config()
+        self.dynamic_eplb = ascend_config.dynamic_eplb
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
@@ -994,7 +999,8 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
                 is_torchair=self.torchair_graph_enabled,
                 mc2_mask=kwargs.get("mc2_mask", None),
                 shared_gate_up=shared_gate_up,
-                shared_dequant_scale=shared_dequant_scale)
+                shared_dequant_scale=shared_dequant_scale,
+                dynamic_eplb = self.dynamic_eplb)
         elif fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
         ]:
