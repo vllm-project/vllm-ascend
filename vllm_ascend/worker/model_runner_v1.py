@@ -21,6 +21,7 @@ import copy
 import gc
 import itertools
 import os
+import re
 import time
 from collections import defaultdict
 from collections.abc import Iterator
@@ -105,7 +106,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                set_graph_params,
-                                               update_attn_params)
+                                               update_attn_params,
+                                               update_mla_attn_params)
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
     D2DExpertWeightLoader
@@ -359,6 +361,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=torch.int32,
                                         device=self.device)
 
+        if self.vllm_config.model_config.use_mla and \
+            self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
+            self.cos = torch.ones(self.max_num_reqs,
+                                  1,
+                                  1,
+                                  rope_dim,
+                                  dtype=self.dtype,
+                                  device=self.device)
+            self.sin = torch.zeros(self.max_num_reqs,
+                                   1,
+                                   1,
+                                   rope_dim,
+                                   dtype=self.dtype,
+                                   device=self.device)
+        else:
+            self.cos = None
+            self.sin = None
+
         self.uses_mrope = self.model_config.uses_mrope
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -451,6 +472,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.dynamic_eplb:
             os.environ["PYTHONOPTIMIZE"]="1"
             self.is_eplb_warmuped = False
+            self.policy_type = self.ascend_config.eplb_policy_type
             self.eplb_loader = D2DExpertWeightLoader()
             self.manager = Manager()
             self.shared_dict = self.manager.dict({
@@ -459,7 +481,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 "expert_maps": None
             })
             self.eplb_process = EplbProcess(shared_dict=self.shared_dict,
-                                            policy_type=1,
+                                            policy_type=self.policy_type,
                                             enable_d2d=True)
             self.process = self.eplb_process._launch_process()
             ascend_config = get_ascend_config()
@@ -1430,6 +1452,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max_num_scheduled_tokens,
                 graph_pad_size=self.graph_pad_size,
                 decode_token_per_req=self.decode_token_per_req,
+                cos=self.cos,
+                sin=self.sin,
             )
 
             if self.speculative_config and \
@@ -1456,7 +1480,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
                         common_attn_metadata=common_attn_metadata,
-                        model=self.model,
+                        model=self.get_model(),
                         **extra_attn_metadata_args)
 
                 if self.vllm_config.model_config.use_mla or self.ascend_config.use_sfa:
@@ -1491,8 +1515,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            update_attn_params(self.update_stream, forward_context,
-                               positions.shape[0])
+            if self.vllm_config.model_config.use_mla:
+                # FIXME: Try using `auto_dispatch_capture=True`
+                update_mla_attn_params(self.update_stream, forward_context,
+                                       positions.shape[0])
+            else:
+                update_attn_params(self.update_stream, forward_context,
+                                   positions.shape[0])
 
         if get_forward_context().sp_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
@@ -2198,14 +2227,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     block_table_tensor=block_table_tensor[:num_reqs],
                     slot_mapping=self.slot_mapping,
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
+                    positions=self.positions,
+                    attn_mask=self.attn_mask,
+                    spec_attn_mask=self.spec_attn_mask,
+                    attn_state=self.attn_state,
                     max_query_len=max_query_len,
                     decode_token_per_req=self.decode_token_per_req,
+                    cos=self.cos,
+                    sin=self.sin,
                 )
 
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     builder = attn_group.get_metadata_builder()
                     attn_metadata_i = builder.build_for_graph_capture(
-                        common_attn_metadata)
+                        common_attn_metadata, AscendAttentionState.DecodeOnly,
+                        self.get_model())
                     for layer_name in kv_cache_group_spec.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 
@@ -2221,9 +2257,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                    inputs_embeds=inputs_embeds)
         forward_context = get_forward_context()
         assert forward_context is not None
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            update_attn_params(self.update_stream, forward_context,
-                               positions.shape[0])
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
+            not forward_context.capturing:
+            if self.vllm_config.model_config.use_mla:
+                # FIXME: Try using `auto_dispatch_capture=True`
+                update_mla_attn_params(self.update_stream, forward_context,
+                                       positions.shape[0])
+            else:
+                update_attn_params(self.update_stream, forward_context,
+                                   positions.shape[0])
 
         if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
             hidden_states, _ = hidden_states
@@ -3356,15 +3398,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         aclgraph_runtime_mode=aclgraph_runtime_mode,
                         uniform_decode=False)
                 except Exception as e:
-                    logger.error(
-                        f"ACLgraph sizes capture fail: {type(e).__name__}:\n"
-                        "ACLgraph has insufficient available streams to capture the configured number of sizes. "
-                        "Please verify both the availability of adequate streams and the appropriateness of the configured size count.\n\n"
-                        "Recommended solutions:\n"
-                        "1. Manually configure the compilation_config parameter "
-                        "with a reduced set of sizes: '{\"cudagraph_capture_sizes\":[size1, size2, size3, ...]}'.\n"
-                        "2. Utilize ACLgraph's full graph mode as an alternative to the piece-wise approach.\n\n"
-                        f"{str(e)}")
+                    error_msg = str(e)
+                    error_code = '0x7020023'
+                    pattern = r'retCode=([^,\s\.]+)'
+                    match = re.search(pattern, error_msg)
+                    if match:
+                        retCode = match.group(1)
+                    # Determine whether the error message is caused by stream capture failure.
+                    if match and retCode == error_code:
+                        logger.error(
+                            f"ACLgraph sizes capture fail: {type(e).__name__}:\n"
+                            "ACLgraph has insufficient available streams to capture the configured number of sizes. "
+                            "Please verify both the availability of adequate streams and the appropriateness of the configured size count.\n\n"
+                            "Recommended solutions:\n"
+                            "1. Manually configure the compilation_config parameter "
+                            "with a reduced set of sizes: '{\"cudagraph_capture_sizes\":[size1, size2, size3, ...]}'.\n"
+                            "2. Utilize ACLgraph's full graph mode as an alternative to the piece-wise approach.\n\n"
+                            f"{str(e)}")
                     raise
 
             if aclgraph_mode.decode_mode() == CUDAGraphMode.FULL and \

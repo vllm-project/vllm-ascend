@@ -214,12 +214,7 @@ class NPUPlatform(Platform):
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.level = CompilationLevel.NO_COMPILATION
-        # TODO: Currently MLA does not support FULL_DECODE_ONLY, remove the second condition
-        # after MLA being supported
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE or (
-                compilation_config.cudagraph_mode
-                == CUDAGraphMode.FULL_DECODE_ONLY and model_config is not None
-                and model_config.use_mla):
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")

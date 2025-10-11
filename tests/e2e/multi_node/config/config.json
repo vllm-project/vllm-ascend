@@ -1,0 +1,41 @@
+[
+    {
+        "test_name": "test_deepseek_v3",
+        "disaggregate_prefill": false,
+        "enable_multithread_load": false,
+        "num_nodes": 2,
+        "server_parameters": {
+            "leader_config": {
+                "model": "vllm-ascend/DeepSeek-V3-W8A8",
+                "additional_config": {
+                    "ascend_scheduler_config": {
+                        "enabled": true
+                    },
+                    "torchair_graph_config": {
+                        "enabled": true
+                    }
+                }
+            },
+            "worker_config": {
+                "model": "vllm-ascend/DeepSeek-V3-W8A8",
+                "additional_config": {
+                    "ascend_scheduler_config": {
+                        "enabled": true
+                    },
+                    "torchair_graph_config": {
+                        "enabled": true
+                    }
+                }
+            }
+        },
+        "client_parameters": {
+            "model": "vllm-ascend/DeepSeek-V3-W8A8",
+            "backend": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "/root/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200,
+            "request_rate": 1
+        },
+        "accuracy_parameters": {}
+    }
+]
