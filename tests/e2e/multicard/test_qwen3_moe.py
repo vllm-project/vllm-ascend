@@ -31,6 +31,7 @@ from tests.e2e.conftest import VllmRunner
 def test_models_distributed_Qwen3_MOE_TP2():
     example_prompts = [
         "Hello, my name is",
+        "Hello, what is your name?",
     ]
     max_tokens = 5
     with VllmRunner(
