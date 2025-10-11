@@ -43,12 +43,13 @@ def test_models(
         temperature=0.0,
     )
 
-    with VllmRunner(model, long_prefill_token_threshold=20,
-                    enforce_eager=True) as vllm_model:
+    with VllmRunner(model,
+                    long_prefill_token_threshold=20,
+                    enforce_eager=False) as vllm_model:
         output1 = vllm_model.generate(prompts, sampling_params)
 
     with VllmRunner(model,
-                    enforce_eager=True,
+                    enforce_eager=False,
                     additional_config={
                         'ascend_scheduler_config': {
                             'enabled': True
