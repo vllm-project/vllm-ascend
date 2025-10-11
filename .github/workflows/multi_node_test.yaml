@@ -1,0 +1,109 @@
+name: 'e2e test / multi-dp'
+
+on:
+    schedule:
+      - cron: "0 */4 * * *"
+    workflow_dispatch:
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+# and ignore the lint / 8 cards test type
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    # This is a runner with no NPU for k8s controller
+    runs-on: linux-aarch64-a3-0
+    container:
+      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      env:
+        KUBECONFIG: /tmp/kubeconfig
+        KUBECTL: /root/.cache/.kube/kubectl
+        NAMESPACE: vllm-project
+        LEADER_POD: vllm-0
+    steps:
+        - name: Install system denpendencies
+          run: |
+           # configure apt and pip source
+           sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+           apt-get update -y && apt-get install -y git curl
+
+           TOKEN=`echo -n "x-access-token:${{ secrets.ADMIN_PTA }}" | base64`
+           git config --global http.https://gh-proxy.test.osinfra.cn/.extraheader "AUTHORIZATION: basic $TOKEN"
+
+        - name: Install kubectl
+          run: |
+            install -o root -g root -m 0755 $KUBECTL /usr/local/bin/kubectl
+
+            # get kubeconfig from secret
+            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
+
+        - name: Checkout code
+          uses: actions/checkout@v4
+
+        - name: Prepare scripts
+          run: |
+            # prepare for lws entrypoint scripts
+            install -D tests/e2e/multi_node/scripts/run.sh /root/.cache/tests/run.sh
+
+        - name: Launch cluster
+          run: |
+            kubectl apply -f tests/e2e/multi_node/scripts/lws.yaml
+          
+        - name: Waiting for pod ready
+          run: |
+            echo "waiting for Pod [$LEADER_POD] in namespace [$NAMESPACE] to Ready..."
+
+            while true; do
+              # get pod status
+              READY_STATUS=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}')
+
+              if [[ "$READY_STATUS" == "true" ]]; then
+                echo "✅ Pod [$LEADER_POD] is Ready!"
+                break
+              else
+                echo "Pod [$LEADER_POD] not ready, waiting..."
+                sleep 3
+              fi
+            done
+
+        - name: Stream logs and monitor pod health
+          run: |
+            set -euo pipefail
+
+            echo "🚀 Start streaming logs for Pod [$LEADER_POD] ..."
+            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" &
+            LOG_PID=$!
+
+            echo "Start monitoring Pod [$LEADER_POD] status ..."
+            while true; do
+              STATUS=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}')
+              if [[ "$STATUS" != "Running" && "$STATUS" != "Succeeded" ]]; then
+                echo "❌ Pod [$LEADER_POD] exited abnormally with status: $STATUS"
+                kubectl describe pod "$LEADER_POD" -n "$NAMESPACE" || true
+                kubectl logs "$LEADER_POD" -n "$NAMESPACE" --previous --all-containers || true
+                kill $LOG_PID || true
+                exit 1
+              fi
+              sleep 5
+            done &
+
+            MONITOR_PID=$!
+            wait $LOG_PID || true
+            kill $MONITOR_PID || true
+
+        - name: Post process
+          if: always()
+          run: |
+            kubectl get pods -n $NAMESPACE
+            kubectl delete -f tests/e2e/multi_node/scripts/lws.yaml
