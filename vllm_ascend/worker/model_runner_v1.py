@@ -470,6 +470,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dynamic_eplb = self.ascend_config.dynamic_eplb
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False
+            self.policy_type = self.ascend_config.eplb_policy_type
             self.eplb_loader = D2DExpertWeightLoader()
             self.manager = Manager()
             self.shared_dict = self.manager.dict({
@@ -478,7 +479,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 "expert_maps": None
             })
             self.eplb_process = EplbProcess(shared_dict=self.shared_dict,
-                                            policy_type=1,
+                                            policy_type=self.policy_type,
                                             enable_d2d=True)
             self.process = self.eplb_process._launch_process()
             ascend_config = get_ascend_config()
