@@ -28,7 +28,8 @@ from vllm.assets.image import ImageAsset
 from tests.e2e.conftest import VllmRunner
 
 
-def test_multimodal_vl(prompt_template):
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_multimodal_vl(prompt_template, enforce_eager):
     image = ImageAsset("cherry_blossom") \
         .pil_image.convert("RGB")
     img_questions = [
@@ -46,7 +47,7 @@ def test_multimodal_vl(prompt_template):
                         "max_pixels": 1280 * 28 * 28,
                         "fps": 1,
                     },
-                    enforce_eager=True) as vllm_model:
+                    enforce_eager=enforce_eager) as vllm_model:
         outputs = vllm_model.generate_greedy(prompts=prompts,
                                              images=images,
                                              max_tokens=64)
