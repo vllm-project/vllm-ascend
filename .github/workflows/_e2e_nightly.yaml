@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: 'ascend nightly test'
+name: 'e2e nightly test'
 
 on:
     workflow_call:
