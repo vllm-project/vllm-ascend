@@ -1000,7 +1000,7 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
                 mc2_mask=kwargs.get("mc2_mask", None),
                 shared_gate_up=shared_gate_up,
                 shared_dequant_scale=shared_dequant_scale,
-                dynamic_eplb = self.dynamic_eplb)
+                dynamic_eplb=self.dynamic_eplb)
         elif fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
         ]:
