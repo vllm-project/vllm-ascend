@@ -42,7 +42,6 @@ api_keyword_args = {
 async def test_models(model: str, tp_size: int) -> None:
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
-        "VLLM_USE_V1": "1",
         "OMP_PROC_BIND": "false",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "PAGED_ATTENTION_MASK_LEN": "5500"
