@@ -26,7 +26,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
+    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map, get_compressed_expert_map)
 from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -203,6 +203,12 @@ class AscendFusedMoE(FusedMoE):
                 self.log2phy = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num).npu()
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                " number of experts: %s/%s. Experts local to global index map:"
+                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self.expert_map))
         else:
             # init moe.
             self.local_num_experts, self.expert_map = determine_expert_map(
@@ -216,6 +222,12 @@ class AscendFusedMoE(FusedMoE):
                 self.log2phy = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
                     self.global_redundant_expert_num).npu()
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                " number of experts: %s/%s. Experts local to global index map:"
+                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self.expert_map))
         local_num_experts = (torch.sum(
             self.expert_map != -1) if self.expert_map is not None else
                              self.global_num_experts)
