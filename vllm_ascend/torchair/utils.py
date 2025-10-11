@@ -208,7 +208,8 @@ def torchair_ops_patch():
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
-    from vllm_ascend.ops.vocab_parallel_embedding import AscendVocabParallelEmbedding
+    from vllm_ascend.ops.vocab_parallel_embedding import \
+        AscendVocabParallelEmbedding
     from vllm_ascend.torchair.ops import (torchair_activation,
                                           torchair_layernorm)
     from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
