@@ -69,7 +69,8 @@ def select_experts(hidden_states: torch.Tensor,
     # prefetch w1_w3_proj.weight preprocess
     weight_prefetch_method = get_forward_context().weight_prefetch_method
     if weight_prefetch_method:
-        weight_prefetch_method.maybe_prefetch_moe_weight_preprocess("gate_up")
+        weight_prefetch_method.maybe_prefetch_moe_weight_preprocess(
+            hidden_states, "gate_up")
     topk_weights, topk_ids, row_idx = _select_experts_with_fusion_ops(
         hidden_states=hidden_states,
         router_logits=router_logits,

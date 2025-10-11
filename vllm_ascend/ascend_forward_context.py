@@ -147,8 +147,7 @@ def set_ascend_forward_context(
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
         forward_context.model_instance = model_instance
         forward_context.weight_prefetch_method = weight_prefetch_method
-        if weight_prefetch_method is not None and num_tokens is not None:
-            weight_prefetch_method.update_forward_param(num_tokens)
+
         # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
         # It will be improved later by implementing operator fusion through the FX graph.
         #

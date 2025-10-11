@@ -76,13 +76,11 @@ class WeightPrefetchMethod:
 
         torch.ops.vllm.prefetch_postprocess(stop_flag)
 
-    def update_forward_param(self, num_tokens: int):
-        self.moe.is_active_this_forward = num_tokens >= MOE_PREFETCH_TOKEN_THRESHOLD if self.moe.enable else False
-
-    def maybe_prefetch_moe_weight_preprocess(self, prefix):
+    def maybe_prefetch_moe_weight_preprocess(self, hidden_states, prefix):
+        self.moe.is_active_this_forward = hidden_states.shape[
+            0] >= MOE_PREFETCH_TOKEN_THRESHOLD if self.moe.enable else False
         if not self.moe.is_active_this_forward:
             return
-
         forward_context = get_forward_context()
         weight = forward_context.model_instance.model.layers[
             forward_context.layer_idx].mlp.experts.w13_weight
