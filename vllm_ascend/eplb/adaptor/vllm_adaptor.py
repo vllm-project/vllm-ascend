@@ -80,15 +80,15 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.all_topk_ids = []
 
     def init_buffer_tensor(self, num_buffer_tensor):
-        for name in self.expert_weight_names:
-            complete_name = "model.layers." + str(
-                self.num_dense_layers) + ".mlp.experts." + name
-            expert_tensor = self.param_dict[complete_name].data[
-                0:num_buffer_tensor]
-            buffer_tensors = torch.empty_like(expert_tensor)
-            for buffer_id in range(num_buffer_tensor):
-                self.buffer_tensor_list[buffer_id].append(
-                    buffer_tensors[buffer_id])
+        for buffer_id in range(num_buffer_tensor):
+            for name in self.expert_weight_names:
+                complete_name = "model.layers." + str(
+                    self.num_dense_layers) + ".mlp.experts." + name
+                expert_tensor = self.param_dict[complete_name].data[0]
+                if name in ["w13_weight", "w2_weight"]:
+                    expert_tensor = expert_tensor.clone()
+                buffer_tensor = torch.empty_like(expert_tensor)
+                self.buffer_tensor_list[buffer_id].append(buffer_tensor)
 
     def init_expert_param_per_layer(self):
         num_local_expert = self.param_dict["model.layers." + str(self.num_dense_layers) + \
