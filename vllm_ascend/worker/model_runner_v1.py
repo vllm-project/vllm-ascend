@@ -1390,7 +1390,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # _prepare_inputs may reorder the batch, so we must gather
         # multi-modal outputs after that to ensure the correct order
-        if self.is_multimodal_model:
+        if self.is_multimodal_model or self.enable_prompt_embeds:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
@@ -2411,7 +2411,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
-            if self.is_multimodal_model:
+            if self.is_multimodal_model or self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
             elif self.enable_prompt_embeds:
