@@ -1266,18 +1266,18 @@ class TorchairAscendFusedMoE(FusedMoE):
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
         )
-
+        
         if shared_experts:
             if isinstance(e_hidden_states,
                           tuple) and len(e_hidden_states) == 2:
                 e_hidden_states, shared_hidden_states = e_hidden_states
-                
+
         if self.dynamic_eplb and isinstance(
                 e_hidden_states, tuple) and len(e_hidden_states) == 3:
             e_hidden_states, group_list_type, expert_tokens = e_hidden_states
             self.moe_load += expert_tokens if group_list_type else \
                 torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
-
+            
         if (fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
