@@ -202,7 +202,7 @@ class AscendAttentionMetadataBuilder:
                                                                        + 1]
         block_table = common_attn_metadata.block_table_tensor
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        seq_lens = common_attn_metadata.seq_lens_cpu
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
         attn_state = common_attn_metadata.attn_state

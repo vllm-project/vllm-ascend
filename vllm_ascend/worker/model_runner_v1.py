@@ -1308,7 +1308,40 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Make Attention metadata
         positions_cpu = self.positions_cpu[:num_input_tokens]
         positions = self.positions[:num_input_tokens]
+
+        # Pad for seq_lens_cpu and query_start_loc.
+        # NOTE(Angazenn):
+        # 1. blk_table_tensor is padded later when building attn_metadata.
+        # 2. We only pad these tensors in full decode scenario at this moment.
+        # TODO(Angazenn): query_start_loc && query_start_loc_cpu seems to be
+        # redundant. Can we unify these two tensors ?
         seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
+        query_start_loc = self.query_start_loc[:num_reqs + 1]
+        query_start_loc_cpu = self.query_start_loc_cpu[:num_reqs + 1]
+        if not with_prefill and maybe_padded_num_tokens > total_num_scheduled_tokens:
+            extra_padding_tokens = maybe_padded_num_tokens - total_num_scheduled_tokens
+            seq_lens_cpu = torch.cat([
+                seq_lens_cpu,
+                torch.ones(extra_padding_tokens,
+                           dtype=seq_lens_cpu.dtype,
+                           device=seq_lens_cpu.device)
+            ])
+            query_start_loc = torch.cat([
+                query_start_loc,
+                torch.arange(query_start_loc[-1] + 1,
+                             query_start_loc[-1] + extra_padding_tokens + 1,
+                             dtype=query_start_loc.dtype,
+                             device=query_start_loc.device)
+            ])
+            query_start_loc_cpu = torch.cat([
+                query_start_loc_cpu,
+                torch.arange(query_start_loc_cpu[-1] + 1,
+                             query_start_loc_cpu[-1] + extra_padding_tokens +
+                             1,
+                             dtype=query_start_loc_cpu.dtype,
+                             device=query_start_loc_cpu.device)
+            ])
+
         self.attn_mask = self._make_attention_mask(seq_lens=seq_lens_cpu,
                                                    position=positions_cpu,
                                                    attn_state=attn_state)
@@ -1419,7 +1452,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
             blk_table = self.input_batch.block_table[kv_cache_group_id]
-            blk_table_tensor = blk_table.get_device_tensor()
+            blk_table_tensor = blk_table.get_device_tensor()[:num_reqs]
+
+            if not with_prefill and maybe_padded_num_tokens > total_num_scheduled_tokens:
+                extra_padding_tokens = maybe_padded_num_tokens - total_num_scheduled_tokens
+                block_table_padding = torch.zeros(
+                    (extra_padding_tokens, ) + blk_table_tensor.shape[1:],
+                    dtype=blk_table_tensor.dtype,
+                    device=blk_table_tensor.device)
+                blk_table_tensor = torch.cat(
+                    [blk_table_tensor, block_table_padding], dim=0)
+
             slot_mapping = blk_table.slot_mapping_cpu[:
                                                       total_num_scheduled_tokens]
             self.slot_mapping[:total_num_scheduled_tokens].copy_(
@@ -1429,15 +1472,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
-                query_start_loc=self.query_start_loc[:num_reqs + 1],
-                query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
-                seq_lens_cpu=self.seq_lens_cpu,
-                seq_lens=self.seq_lens_cpu[:num_reqs],
+                query_start_loc=query_start_loc,
+                query_start_loc_cpu=query_start_loc_cpu,
+                seq_lens_cpu=seq_lens_cpu,
+                seq_lens=seq_lens_cpu,
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
                 # TODO: change this to the right block table for linear attn
-                block_table_tensor=blk_table_tensor[:num_reqs],
+                block_table_tensor=blk_table_tensor,
                 slot_mapping=self.slot_mapping,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 positions=self.positions,
@@ -1554,7 +1597,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return attn_state
 
     def _update_graph_pad_size(self, with_prefill, graph_pad_size):
-        self.graph_pad_size = -1
+        if not with_prefill:
+            self.graph_pad_size = graph_pad_size
+        else:
+            self.graph_pad_size = -1
 
     def _update_input_ids_and_positions(self, input_ids, positions,
                                         num_input_tokens, with_prefill,
