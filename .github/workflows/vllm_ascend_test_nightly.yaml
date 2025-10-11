@@ -28,7 +28,7 @@ on:
         - '*-dev'
       paths:
         - 'tests/e2e/nightly/**'
-        - '.github/workflows/vllm_ascend_test_nightly.yml'
+        - '.github/workflows/vllm_ascend_test_nightly.yaml'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
