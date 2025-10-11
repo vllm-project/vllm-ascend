@@ -25,6 +25,7 @@ spec:
                 value: "2"
               - name: NPU_PER_NODE
                 value: "16"
+              # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
               - name: VLLM_VERSION
                 value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
@@ -84,6 +85,7 @@ spec:
                 value: "2"
               - name: NPU_PER_NODE
                 value: "16"
+              # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
               - name: VLLM_VERSION
                 value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
