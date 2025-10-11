@@ -9,12 +9,6 @@ from tests.ut.base import PytestBase
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 
 
-def mock_maybe_chunk_residual(x, residual):
-    if x.size(0) != residual.size(0):
-        return residual[:4]
-    return residual
-
-
 def mock_rms_norm(x, weight, eps):
     return x + 1, None
 
@@ -36,8 +30,6 @@ class TestAscendRMSNorm(PytestBase):
 
     @pytest.fixture(autouse=True)
     def context(self, mocker: MockerFixture):
-        mocker.patch("torch.ops.vllm.maybe_chunk_residual",
-                     side_effect=mock_maybe_chunk_residual)
         mocker.patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
         mocker.patch("torch_npu.npu_add_rms_norm",
                      side_effect=mock_add_rms_norm)
@@ -65,21 +57,6 @@ class TestAscendRMSNorm(PytestBase):
             x_out_expected = x + 1
 
             assert torch.allclose(x_out, x_out_expected)
-
-    # Test case for flashcomm_v1 scenario
-    def test_forward_oot_with_flashcomm_v1(self):
-        layer = RMSNorm(hidden_size=512, eps=1e-05)
-        x = torch.randn(4, 512, dtype=torch.bfloat16)
-        residual = torch.randn(16, 512, dtype=torch.bfloat16)
-
-        x_out, residual_out = layer.forward_oot(x, residual)
-
-        x_out_expected = 2 * x
-        residual_out_expected = 2 * residual[:4]
-
-        assert residual_out.size(0) == 4
-        assert torch.allclose(x_out, x_out_expected)
-        assert torch.allclose(residual_out, residual_out_expected)
 
     # Test case for addrmsnorm + w8a8 quant fusion
     def test_forward_oot_with_quant_fusion(self, mocker: MockerFixture):
