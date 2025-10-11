@@ -47,7 +47,8 @@ async def test_models(model: str, tp_size: int) -> None:
         "PAGED_ATTENTION_MASK_LEN": "5500"
     }
     server_args = [
-        "--no-enable-prefix-caching", "--tensor-parallel-size",
+        "--no-enable-prefix-caching", "--tensor-parallel-size", "--port",
+        "20002",
         str(tp_size), "--max-model-len", "36864", "--max-num-batched-tokens",
         "36864", "--block-size", "128", "--trust-remote-code",
         "--gpu-memory-utilization", "0.9", "--additional-config",
