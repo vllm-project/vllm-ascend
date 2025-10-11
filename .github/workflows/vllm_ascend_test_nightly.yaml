@@ -19,7 +19,7 @@ name: 'ascend nightly test'
 
 on:
     schedule:
-        # Run benchmarks at 24:00 Beijing time (UTC+8)
+        # Run test at 24:00 Beijing time (UTC+8)
         - cron: "0 16 * * *"
     workflow_dispatch:
 
