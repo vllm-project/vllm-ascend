@@ -141,6 +141,9 @@ class AscendMetadata:
     seq_lens: torch.Tensor = None
 
     query_start_loc: torch.Tensor = None
+    seq_lens_list: List[int] = None
+
+    query_start_loc_list: List[int] = None
     query_lens: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
     max_query_len: Optional[int] = None
@@ -223,7 +226,9 @@ class AscendAttentionMetadataBuilder:
             num_actual_tokens=num_actual_tokens,
             block_tables=block_table,
             query_start_loc=query_start_loc_cpu,
+            query_start_loc_list=query_start_loc_cpu[1:].cpu().int().tolist(),
             query_lens=query_lens,
+            seq_lens_list=seq_lens.cpu().int().tolist(),
             seq_lens=seq_lens,
             max_query_len=common_attn_metadata.max_query_len,
             slot_mapping=slot_mapping,
@@ -391,8 +396,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             graph_params = get_graph_params()
             forward_context: ForwardContext = get_forward_context()
             if forward_context.capturing:
-                query_start_loc = attn_metadata.query_start_loc[1:].cpu().int().tolist()
-                seq_lens = attn_metadata.seq_lens.cpu().int().tolist()
+                query_start_loc = attn_metadata.query_start_loc[1:]
+                seq_lens = attn_metadata.seq_lens
                 num_tokens = query_start_loc[-1]
                 query = query[:num_tokens]
                 # Prepare tensors for attention output
