@@ -28,6 +28,7 @@ class AscendSchedulerConfig(SchedulerConfig):
     enable_chunked_prefill: bool = False
     max_long_partial_prefills: int = MAX_INT
     long_prefill_token_threshold: int = MAX_INT
+    SLO_limits_for_dynamic_batch: int = -1
     policy: str = "fcfs"
     scheduler_cls: Union[str, Type[object]] = (
         "vllm_ascend.core.scheduler.AscendScheduler")
@@ -46,6 +47,7 @@ class AscendSchedulerConfig(SchedulerConfig):
         }
         # Override default values into original SchedulerConfig
         scheduler_config["enable_chunked_prefill"] = False
+        scheduler_config["SLO_limits_for_dynamic_batch"] = -1
         scheduler_config["max_long_partial_prefills"] = None
         scheduler_config["long_prefill_token_threshold"] = None
         scheduler_config["policy"] = "fcfs"
@@ -63,6 +65,7 @@ class AscendSchedulerConfig(SchedulerConfig):
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
         self.chunked_prefill_enabled = self.enable_chunked_prefill
+        self.dynamic_batch=self.SLO_limits_for_dynamic_batch!=-1
         if (self.max_num_batched_tokens < self.max_model_len
                 and not self.chunked_prefill_enabled):
             raise ValueError(
@@ -106,3 +109,8 @@ class AscendSchedulerConfig(SchedulerConfig):
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support scheduler_delay_factor."
             )
+        if self.dynamic_batch:
+            #TODO: Check the device that dynamic batch supports.
+
+            self.chunked_prefill_enabled=True
+            self.enable_chunked_prefill=True
