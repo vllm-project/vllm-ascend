@@ -98,31 +98,29 @@ class AscendW8A8LinearMethod:
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
         if x.dtype != torch.int8:
-            attn_weight_map = {
-                "AscendQKVParallelLinear": "qkv",
-                "AscendRowParallelLinear": "o",
-            }
             layer_cls_name = layer.__class__.__name__
             weight_prefetch_method = get_forward_context(
             ).weight_prefetch_method
-            assert weight_prefetch_method is not None
 
-            # prefetch_qkvo_proj.weight preprocess
-            weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
-                prefix=attn_weight_map.get(layer_cls_name, ""),
-                weight=layer.weight,
-                start_flag=x,
-            )
+            # prefetch qkvo_proj.weight preprocess
+            if weight_prefetch_method:
+                weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
+                    layer_cls_name=layer_cls_name,
+                    weight=layer.weight,
+                    start_flag=x,
+                )
             # quant
             x = quant_per_tensor(
                 x,
                 layer.aclnn_input_scale_reciprocal,
                 layer.aclnn_input_offset,
             )
-            # prefetch_qkvo_proj.weight postprocess
-            if layer_cls_name in attn_weight_map.keys():
+            # prefetch qkvo_proj.weight postprocess
+            if weight_prefetch_method:
                 weight_prefetch_method.maybe_prefetch_attn_weight_postprocess(
-                    x)
+                    layer_cls_name=layer_cls_name,
+                    stop_flag=x,
+                )
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
         if is_310p():
