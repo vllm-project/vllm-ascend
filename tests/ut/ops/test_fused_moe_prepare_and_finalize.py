@@ -8,7 +8,6 @@ from vllm_ascend.ops.moe.fused_moe_prepare_and_finalize import (
     FusedMoEPrepareAndFinalizeWithAll2All,
     FusedMoEPrepareAndFinalizeWithAllGather, FusedMoEPrepareAndFinalizeWithMC2,
     FusedMoEPrepareAndFinalizeWithNaiveMulticast)
-from vllm_ascend.utils import vllm_version_is
 
 
 class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
@@ -22,6 +21,7 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         self.moe_config.tp_size = 1
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = MagicMock()
+        self.moe_config.original_num_experts = 8
 
     @patch(
         "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_tensor_model_parallel_world_size",
@@ -197,7 +197,6 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
 
         h_out, r_out, _ = layer.prepare(hidden_states,
                                         router_logits,
-                                        rm_router_logits=False,
                                         gate=mock_gate)
 
         # After all-gather with DP=2, should double the batch size
@@ -231,12 +230,8 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
                                               mock_get_dp_group):
         # Mock forward context with DP metadata
         mock_context = MagicMock()
-        if vllm_version_is("0.10.2"):
-            mock_context.dp_metadata.cu_tokens_across_dp_cpu = torch.tensor(
-                [2, 5, 7])
-        else:
-            mock_context.dp_metadata.cu_tokens_across_sp.return_value = torch.tensor(
-                [2, 5, 7])
+        mock_context.dp_metadata.cu_tokens_across_sp.return_value = torch.tensor(
+            [2, 5, 7])
         mock_get_forward_context.return_value = mock_context
 
         # Setup DP group mock
@@ -270,7 +265,6 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         # Run prepare
         h_out, r_out, _ = layer.prepare(hidden_states,
                                         router_logits,
-                                        rm_router_logits=False,
                                         gate=mock_gate)
 
         # Should be global tensor: [7, 8] and [7, 2]

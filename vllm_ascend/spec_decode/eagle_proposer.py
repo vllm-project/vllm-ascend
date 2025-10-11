@@ -21,7 +21,6 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
-from vllm_ascend.utils import vllm_version_is
 
 PADDING_SLOT_ID = -1
 
@@ -352,10 +351,7 @@ class EagleProposer(Proposer):
                 decode_token_per_req=self.runner.decode_token_per_req,
                 num_computed_tokens_cpu=None,
                 seq_lens=None)
-            if vllm_version_is("0.10.2"):
-                builder = self.runner.attn_groups[0][0].metadata_builder
-            else:
-                builder = self.runner.attn_groups[0][0].get_metadata_builder()
+            builder = self.runner.attn_groups[0][0].get_metadata_builder()
             attn_metadata_i = builder.build(0, common_attn_metadata,
                                             self.runner.get_model())
             for layer_name in kv_cache_group_spec.layer_names:
@@ -447,10 +443,7 @@ class EagleProposer(Proposer):
             num_computed_tokens_cpu=None,
             seq_lens=None)
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        if vllm_version_is("0.10.2"):
-            builder = self.runner.attn_groups[0][0].metadata_builder
-        else:
-            builder = self.runner.attn_groups[0][0].get_metadata_builder()
+        builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata = builder.build(0, common_attn_metadata,
                                       self.runner.get_model())
         if self.use_cuda_graph and \
@@ -479,10 +472,7 @@ class EagleProposer(Proposer):
                 hidden_states=self.hidden_states[:num_input_tokens],
             )
         sample_hidden_states = last_hidden_states[last_token_indices]
-        if vllm_version_is("0.10.2"):
-            logits = self.model.compute_logits(sample_hidden_states, None)
-        else:
-            logits = self.model.compute_logits(sample_hidden_states)
+        logits = self.model.compute_logits(sample_hidden_states)
         draft_token_ids = logits.argmax(dim=-1)
 
         # Early exit if there is only one draft token to be generated.
@@ -586,12 +576,7 @@ class EagleProposer(Proposer):
                     hidden_states=self.hidden_states[:input_batch_size],
                 )
             hidden_states = hidden_states[:batch_size]
-            if vllm_version_is("0.10.2"):
-                logits = self.model.compute_logits(
-                    last_hidden_states[:batch_size], None)
-            else:
-                logits = self.model.compute_logits(
-                    last_hidden_states[:batch_size])
+            logits = self.model.compute_logits(last_hidden_states[:batch_size])
 
             # TODO(wenlong): get more than one token for tree attention
             draft_token_ids = logits.argmax(dim=-1)

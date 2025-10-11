@@ -51,6 +51,7 @@ _CUSTOM_OP_ENABLED = None
 _IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
+_PREFETCH_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
 
@@ -239,6 +240,15 @@ def current_stream() -> torch.npu.Stream:
         # we return the default stream.
         _CURRENT_STREAM = torch.npu.current_stream()
     return _CURRENT_STREAM
+
+
+def prefetch_stream() -> torch.npu.Stream:
+    global _PREFETCH_STREAM
+    if _PREFETCH_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _PREFETCH_STREAM = torch_npu.npu.Stream()
+    return _PREFETCH_STREAM
 
 
 def adapt_patch(is_global_patch: bool = False):
@@ -446,20 +456,6 @@ class ProfileExecuteDuration:
         return durations
 
 
-# TODO(wxy): Move to ops module
-def npu_prefetch(input: torch.Tensor,
-                 dependency: torch.Tensor,
-                 max_size: int = 0,
-                 *,
-                 enabled: bool = True):
-    if not enabled:
-        return
-    input_size = input.element_size() * input.numel()
-    if max_size <= 0 or max_size > input_size:
-        max_size = input_size
-    torch_npu.npu_prefetch(input, dependency, max_size)
-
-
 # TODO(ttanzhiqiang): rm_router_logits
 # dp>1 will trigger
 # In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
@@ -512,7 +508,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendQKVParallelLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding,
+        AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -524,6 +521,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "RotaryEmbedding": AscendRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
+        "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
         "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
         "QKVParallelLinear": AscendQKVParallelLinear,
         "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,

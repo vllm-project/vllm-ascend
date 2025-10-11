@@ -63,6 +63,10 @@ class AscendCommonAttentionMetadata:
 
     graph_pad_size: int = -1
 
+    # NOTE: This is a temporary solution for rotary embedding in MLA
+    cos: torch.Tensor = None
+    sin: torch.Tensor = None
+
 
 def split_decodes_and_prefills(
     common_attn_metadata: AscendCommonAttentionMetadata,
@@ -97,7 +101,7 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    assert torch.all(query_lens[first_prefill:] >= decode_threshold)
+    assert torch.all(query_lens[first_prefill:] > decode_threshold)
     assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes

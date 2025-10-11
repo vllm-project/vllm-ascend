@@ -1,7 +1,7 @@
 import math
 from contextlib import contextmanager
 from enum import Enum
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
@@ -13,6 +13,11 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import enable_sp
 from vllm_ascend.ascend_config import get_ascend_config
+
+if TYPE_CHECKING:
+    from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
+else:
+    WeightPrefetchMethod = None
 
 
 class FusedMoEState(Enum):
@@ -66,7 +71,8 @@ def set_ascend_forward_context(
         aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         batch_descriptor: Optional[BatchDescriptor] = None,
         prefetch_stream: torch.npu.Stream = None,
-        model_instance: torch.nn.Module = None):
+        model_instance: torch.nn.Module = None,
+        weight_prefetch_method: Optional[WeightPrefetchMethod] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -131,6 +137,7 @@ def set_ascend_forward_context(
             hasattr(model_instance.model, "start_layer"):
             forward_context.layer_idx = model_instance.model.start_layer
 
+        # TODO(rjg-lyh): refactor mlp weight prefetch method
         # set for mlp weight prefetch
         prefetch_mlp_enabled = envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE and \
             envs_ascend.VLLM_ASCEND_ENABLE_PREFETCH_MLP and \
@@ -142,6 +149,8 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
+        # TODO(yuzhup): integrate moe weight prefetch method
+        forward_context.weight_prefetch_method = weight_prefetch_method
 
         # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
         # It will be improved later by implementing operator fusion through the FX graph.

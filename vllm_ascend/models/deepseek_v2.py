@@ -62,7 +62,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.models.layers.sfa import (AscendSFAModules,
                                            AscendSparseFlashAttention, Indexer)
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
 
 
 class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
@@ -422,7 +422,10 @@ class CustomDeepseekV2SFAAttention(DeepseekV2MLAAttention):
 
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 prefix: str,
+                 topk_indices_buffer=None) -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         model_config = vllm_config.model_config

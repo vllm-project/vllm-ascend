@@ -21,6 +21,7 @@ import torch
 import torch_npu
 from vllm.attention.backends.abstract import AttentionType
 from vllm.distributed.parallel_state import get_ep_group
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.moe.experts_selector import select_experts
@@ -97,11 +98,30 @@ class AscendW8A8LinearMethod:
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
         if x.dtype != torch.int8:
+            layer_cls_name = layer.__class__.__name__
+            weight_prefetch_method = get_forward_context(
+            ).weight_prefetch_method
+
+            # prefetch qkvo_proj.weight preprocess
+            if weight_prefetch_method:
+                weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
+                    layer_cls_name=layer_cls_name,
+                    weight=layer.weight,
+                    start_flag=x,
+                )
+            # quant
             x = quant_per_tensor(
                 x,
                 layer.aclnn_input_scale_reciprocal,
                 layer.aclnn_input_offset,
             )
+            # prefetch qkvo_proj.weight postprocess
+            if weight_prefetch_method:
+                weight_prefetch_method.maybe_prefetch_attn_weight_postprocess(
+                    layer_cls_name=layer_cls_name,
+                    stop_flag=x,
+                )
+
         quant_bias = layer.quant_bias if tp_rank == 0 else None
         if is_310p():
             # On 300I Duo platform, we need transpose again if
