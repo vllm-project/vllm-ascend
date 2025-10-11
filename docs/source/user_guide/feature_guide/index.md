@@ -11,4 +11,6 @@ sleep_mode
 structured_output
 lora
 eplb_swift_balancer
+pd
+speculative_decoding
 :::
