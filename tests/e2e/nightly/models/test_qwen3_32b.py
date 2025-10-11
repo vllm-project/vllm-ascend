@@ -22,7 +22,7 @@ import pytest
 from tests.e2e.conftest import RemoteOpenAIServer
 
 MODELS = [
-    "vllm-ascend/Qwen3-32B-W8A8",
+    "Qwen/Qwen3-32B",
 ]
 
 TENSOR_PARALLELS = [4]
@@ -52,8 +52,8 @@ async def test_models(model: str, tp_size: int) -> None:
         "--tensor-parallel-size",
         str(tp_size), "--max-model-len", "36864", "--max-num-batched-tokens",
         "36864", "--block-size", "128", "--trust-remote-code",
-        "--quantization", "ascend", "--gpu-memory-utilization", "0.9",
-        "--additional-config", '{"enable_weight_nz_layout":true}'
+        "--gpu-memory-utilization", "0.9", "--additional-config",
+        '{"enable_weight_nz_layout":true}'
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
