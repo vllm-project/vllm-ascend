@@ -28,6 +28,7 @@ from unittest.mock import patch
 
 import pytest
 import torch_npu
+from modelscope import snapshot_download  # type: ignore
 
 MODELS = ["Qwen/Qwen3-0.6B"]
 MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
@@ -35,6 +36,7 @@ DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 
 
 @pytest.mark.parametrize("model", MODELS)
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "500"})
 def test_external_launcher(model):
     script = Path(
         __file__
@@ -152,12 +154,64 @@ def test_external_launcher_and_sleepmode():
     assert proc.returncode == 0
 
 
+def test_external_launcher_and_sleepmode_level2():
+    script = Path(
+        __file__
+    ).parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
+    env = os.environ.copy()
+    model_path = snapshot_download("Qwen/Qwen3-8B")
+    # TODO: Add moe model test
+    cmd = [
+        sys.executable,
+        str(script),
+        "--model",
+        model_path,
+        "--tp-size",
+        "1",
+        "--node-size",
+        "1",
+        "--node-rank",
+        "0",
+        "--proc-per-node",
+        "2",
+        "--trust-remote-code",
+        "--enable-sleep-mode",
+        "--temperature",
+        "0",
+        "--model-weight-gib",
+        "16",
+        "--sleep-mode-level",
+        "2",
+    ]
+
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=300,
+    )
+    output = proc.stdout.decode()
+
+    print(output)
+
+    assert "TP RANKS: [0]" in output
+    assert "TP RANKS: [1]" in output
+    assert "Generated text:" in output
+    assert "Sleep and wake up successfully!!" in output
+    assert proc.returncode == 0
+
+
 @pytest.mark.skipif(
     DEVICE_NAME != "Ascend910B",
     reason="This test is only for Ascend910B devices.",
 )
 @pytest.mark.parametrize("model", MODELS)
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1"})
+@patch.dict(os.environ, {
+    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1",
+    "HCCL_BUFFSIZE": "500"
+})
 def test_mm_allreduce(model):
     script = Path(
         __file__
