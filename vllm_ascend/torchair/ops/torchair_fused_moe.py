@@ -1268,7 +1268,7 @@ class TorchairAscendFusedMoE(FusedMoE):
         )
 
         if shared_experts:
-            if isinstance(e_hidden_states, 
+            if isinstance(e_hidden_states,
                           tuple) and len(e_hidden_states) == 2:
                 e_hidden_states, shared_hidden_states = e_hidden_states
                 
