@@ -7,6 +7,7 @@
         "server_parameters": {
             "leader_config": {
                 "model": "vllm-ascend/DeepSeek-V3-W8A8",
+                "quantization": "ascend",
                 "additional_config": {
                     "ascend_scheduler_config": {
                         "enabled": true
@@ -18,6 +19,7 @@
             },
             "worker_config": {
                 "model": "vllm-ascend/DeepSeek-V3-W8A8",
+                "quantization": "ascend",
                 "additional_config": {
                     "ascend_scheduler_config": {
                         "enabled": true
