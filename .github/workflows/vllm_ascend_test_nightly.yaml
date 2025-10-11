@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: 'ascend nightly test'
+name: 'ascend test / nightly'
 
 on:
   schedule:
@@ -44,17 +44,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  e2e-nightly:
-    name: e2e-nightly
+  qwen3-32b:
     strategy:
       matrix:
-        vllm_version: [v0.11.0]
         # should add A3 chip runner when available
-        os: [linux-aarch64-a2]
+        os: [linux-aarch64-a2-4]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
     uses: ./.github/workflows/_e2e_nightly.yaml
     with:
-      vllm: ${{ matrix.vllm_version }}
+      vllm: v0.11.0
       runner: ${{ matrix.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      tests: tests/e2e/nightly/models/test_qwen3_32b.py
