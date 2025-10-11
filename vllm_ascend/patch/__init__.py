@@ -87,6 +87,19 @@
 # ** File: worker/patch_common/patch_distributed.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
+#   (1) __init__()
+#    Why:
+#       The original GroupCoordinator initialization lacks pg_options to generate new
+#       process group with customized options.
+#    How:
+#       Inject HCCL options during process group initialization.
+#    Related PR (if no, explain why):
+#       Need a PR to vllm to support a dictionary as input while initializing distributed
+#       environment (e.g., Dict[str, torch.distributed.ProcessGroupHCCL.Options])
+#       https://github.com/vllm-project/vllm/pull/25417
+#    Future Plan:
+#       Remove this patch when vllm merges this PR.
+#   (2) all_to_all()
 #    Why:
 #       vllm doesn't support all_to_all for GroupCoordinator.
 #    How：
