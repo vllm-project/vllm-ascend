@@ -30,11 +30,13 @@ from tests.e2e.conftest import VllmRunner
 MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 
 
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [1])
 def test_models(
     model: str,
     max_tokens: int,
+    enforce_eager,
 ) -> None:
     prompts = ["The president of the United States is"]
 
@@ -44,11 +46,11 @@ def test_models(
     )
 
     with VllmRunner(model, long_prefill_token_threshold=20,
-                    enforce_eager=True) as vllm_model:
+                    enforce_eager=enforce_eager) as vllm_model:
         output1 = vllm_model.generate(prompts, sampling_params)
 
     with VllmRunner(model,
-                    enforce_eager=True,
+                    enforce_eager=enforce_eager,
                     additional_config={
                         'ascend_scheduler_config': {
                             'enabled': True

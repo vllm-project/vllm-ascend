@@ -61,17 +61,19 @@ def eagle3_model_name():
     return "vllm-ascend/EAGLE3-LLaMA3.1-Instruct-8B"
 
 
+@pytest.mark.parametrize("enforce_eager", [True, False])
 def test_ngram_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
     model_name: str,
+    enforce_eager,
 ):
     '''
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     '''
     pytest.skip("Not current support for the test.")
-    ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=True)
+    ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=enforce_eager)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
     with VllmRunner(model_name,
@@ -82,7 +84,7 @@ def test_ngram_correctness(
                         "num_speculative_tokens": 3,
                     },
                     max_model_len=1024,
-                    enforce_eager=True) as runner:
+                    enforce_eager=enforce_eager) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
     matches = 0
     misses = 0
@@ -99,19 +101,21 @@ def test_ngram_correctness(
     assert matches > int(0.7 * len(ref_outputs))
 
 
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("use_eagle3", [False, True], ids=["eagle", "eagle3"])
 def test_eagle_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
     model_name: str,
     use_eagle3: bool,
+    enforce_eager,
 ):
     '''
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
     '''
 
-    ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=True)
+    ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=enforce_eager)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
 
@@ -129,7 +133,7 @@ def test_eagle_correctness(
                 "max_model_len": 128,
             },
             max_model_len=128,
-            enforce_eager=True,
+            enforce_eager=enforce_eager,
     ) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
 

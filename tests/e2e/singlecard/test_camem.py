@@ -65,8 +65,9 @@ def test_basic_camem():
     torch.npu.reset_peak_memory_stats()
 
 
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @fork_new_process_for_each_test
-def test_end_to_end():
+def test_end_to_end(enforce_eager):
     free, total = torch.npu.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
 
@@ -74,7 +75,7 @@ def test_end_to_end():
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
     with VllmRunner("Qwen/Qwen3-0.6B",
-                    enforce_eager=True,
+                    enforce_eager=enforce_eager,
                     enable_sleep_mode=True) as runner:
 
         output = runner.model.generate(prompt, sampling_params)

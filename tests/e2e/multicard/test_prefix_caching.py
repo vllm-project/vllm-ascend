@@ -58,11 +58,12 @@ INPUT_PROMPTS = [
 ]
 
 
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
-def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
+def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int, enforce_eager) -> None:
     with VllmRunner(model,
-                    enforce_eager=True,
+                    enforce_eager=enforce_eager,
                     max_model_len=2048,
                     tensor_parallel_size=2,
                     gpu_memory_utilization=0.7) as vllm_model:
@@ -71,7 +72,7 @@ def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
 
     with VllmRunner(model,
                     enable_prefix_caching=False,
-                    enforce_eager=True,
+                    enforce_eager=enforce_eager,
                     max_model_len=2048,
                     tensor_parallel_size=2,
                     gpu_memory_utilization=0.7) as vllm_model:
@@ -85,10 +86,12 @@ def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
     )
 
 
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
 def test_prefix_cache_with_ascend_scheduler(model: str,
-                                            max_tokens: int) -> None:
+                                            max_tokens: int,
+                                            enforce_eager) -> None:
 
     with VllmRunner(model,
                     additional_config={
@@ -96,7 +99,7 @@ def test_prefix_cache_with_ascend_scheduler(model: str,
                             'enabled': True,
                         },
                     },
-                    enforce_eager=True,
+                    enforce_eager=enforce_eager,
                     max_model_len=2048,
                     tensor_parallel_size=2,
                     gpu_memory_utilization=0.7) as vllm_model:
@@ -109,7 +112,7 @@ def test_prefix_cache_with_ascend_scheduler(model: str,
                             'enable_prefix_caching': True,
                         },
                     },
-                    enforce_eager=True,
+                    enforce_eager=enforce_eager,
                     max_model_len=2048,
                     tensor_parallel_size=2,
                     gpu_memory_utilization=0.7) as vllm_model:

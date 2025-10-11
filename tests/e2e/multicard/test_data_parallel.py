@@ -71,3 +71,44 @@ def test_data_parallel_inference(model, max_tokens):
     assert "DP rank 1 needs to process" in output
     assert "Generated text:" in output
     assert proc.returncode == 0
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("max_tokens", [32])
+@patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
+def test_data_parallel_inference_aclgraph(model, max_tokens):
+    script = "examples/offline_data_parallel.py"
+
+    env = os.environ.copy()
+
+    cmd = [
+        sys.executable,
+        script,
+        "--model",
+        model,
+        "--dp-size",
+        "2",
+        "--tp-size",
+        "1",
+        "--node-size",
+        "1",
+        "--node-rank",
+        "0",
+        "--trust-remote-code",
+    ]
+    if model == "Qwen/Qwen3-30B-A3B":
+        cmd.append("--enable-expert-parallel")
+
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(cmd,
+                          env=env,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT,
+                          timeout=600)
+    output = proc.stdout.decode()
+
+    print(output)
+
+    assert "DP rank 0 needs to process" in output
+    assert "DP rank 1 needs to process" in output
+    assert "Generated text:" in output
+    assert proc.returncode == 0

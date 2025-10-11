@@ -4,8 +4,9 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model_name", ["deepseek-ai/DeepSeek-V2-Lite-Chat"])
-def test_e2e_ep_correctness(model_name):
+def test_e2e_ep_correctness(model_name, enforce_eager):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -21,7 +22,7 @@ def test_e2e_ep_correctness(model_name):
             additional_config={"ascend_scheduler_config": {
                 "enabled": True
             }},
-            enforce_eager=True) as vllm_model:
+            enforce_eager=enforce_eager) as vllm_model:
         tp_output = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     with VllmRunner(
@@ -31,7 +32,7 @@ def test_e2e_ep_correctness(model_name):
             additional_config={"ascend_scheduler_config": {
                 "enabled": True
             }},
-            enforce_eager=True) as vllm_model:
+            enforce_eager=enforce_eager) as vllm_model:
         ep_output = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(

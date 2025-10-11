@@ -40,8 +40,8 @@ DEEPSEEK_W4A8_MODELS = [
     "vllm-ascend/DeepSeek-V3.1-W4A8-puring"
 ]
 
-
-def test_models_distributed_QwQ():
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_models_distributed_QwQ(enforce_eager):
     example_prompts = [
         "Hello, my name is",
     ]
@@ -52,7 +52,7 @@ def test_models_distributed_QwQ():
             dtype=dtype,
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
-            enforce_eager=True,
+            enforce_eager=enforce_eager,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -113,10 +113,10 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC():
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
-
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_MLA_PA": "1"})
-def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
+def test_models_distributed_DeepSeek_W4A8DYNAMIC(model, enforce_eager):
     prompts = [
         "Hello, my name is",
     ]
@@ -126,7 +126,7 @@ def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
-            enforce_eager=True,
+            enforce_eager=enforce_eager,
             enable_expert_parallel=True,
             additional_config={
                 "torchair_graph_config": {
@@ -139,8 +139,8 @@ def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
     ) as vllm_model:
         vllm_model.generate_greedy(prompts, max_tokens)
 
-
-def test_sp_for_qwen3_moe() -> None:
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_sp_for_qwen3_moe(enforce_eager) -> None:
     example_prompts = [
         "Hello, my name is",
     ]
@@ -159,7 +159,7 @@ def test_sp_for_qwen3_moe() -> None:
                         }
                     },
                     enable_expert_parallel=True,
-                    enforce_eager=True) as vllm_model:
+                    enforce_eager=enforce_eager) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 

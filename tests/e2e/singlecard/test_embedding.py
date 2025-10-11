@@ -22,14 +22,15 @@ from tests.e2e.conftest import HfRunner, VllmRunner
 from tests.e2e.utils import check_embeddings_close
 
 
-def test_embed_models_correctness():
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_embed_models_correctness(enforce_eager):
     queries = ['What is the capital of China?', 'Explain gravity']
 
     model_name = snapshot_download("Qwen/Qwen3-Embedding-0.6B")
     with VllmRunner(
             model_name,
             task="embed",
-            enforce_eager=True,
+            enforce_eager=enforce_eager,
     ) as vllm_runner:
         vllm_outputs = vllm_runner.encode(queries)
 
