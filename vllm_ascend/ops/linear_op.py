@@ -414,6 +414,8 @@ def get_column_parallel_op(
                           SequenceQKVParallelOp]], int, int]:
     if disable_tp:
         return None, 0, 1
+    if "shared_experts.gate_up_proj" in prefix and enable_sp():
+        return None, 0, 1
 
     custom_op: Optional[Union[
         MLPColumnParallelOp,
@@ -424,7 +426,7 @@ def get_column_parallel_op(
         custom_op = MLPColumnParallelOp(layer)
     elif "gate_up_proj" in prefix and enable_sp():
         custom_op = SequenceMergedColumnParallelOp(layer)
-    elif enable_sp():
+    elif "qkv_proj" in prefix and enable_sp():
         custom_op = SequenceQKVParallelOp(layer, prefix)
 
     if custom_op is not None:
@@ -439,6 +441,8 @@ def get_row_parallel_op(
                           MatmulAllreduceRowParallelOp,
                           SequenceRowParallelOp]], int, int]:
     if disable_tp:
+        return None, 0, 1
+    if "shared_experts.down_proj" in prefix and enable_sp():
         return None, 0, 1
 
     custom_op: Optional[Union[MLPRowParallelOp, OProjRowParallelOp,

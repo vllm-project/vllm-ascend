@@ -10,6 +10,7 @@ from vllm.forward_context import get_forward_context
 from vllm.utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
@@ -36,6 +37,11 @@ def _maybe_chunk_residual_impl(x: torch.Tensor,
     return residual
 
 
+def fake_maybe_chunk_residual_impl(x: torch.Tensor,
+                                   residual: torch.Tensor) -> torch.Tensor:
+    return torch.empty_like(x)
+
+
 def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
                                            label: bool) -> torch.Tensor:
     try:
@@ -49,6 +55,17 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
         pad_size = forward_context.pad_size
         if pad_size > 0:
             x = x[:-pad_size, :]
+    return x
+
+
+def fake_maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
+                                               label: bool) -> torch.Tensor:
+    if get_ascend_config().enable_shared_expert_dp:
+        tp_size = get_tensor_model_parallel_world_size()
+        num_tokens = x.shape[0] * tp_size
+        return torch.empty((num_tokens, x.shape[1]),
+                           dtype=x.dtype,
+                           device=x.device)
     return x
 
 
@@ -66,6 +83,16 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
         return tensor_model_parallel_reduce_scatter(x, 0)
     else:
         return tensor_model_parallel_all_reduce(x)
+
+
+def fake_maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
+    if get_ascend_config().enable_shared_expert_dp:
+        tp_size = get_tensor_model_parallel_world_size()
+        num_tokens = x.shape[0] // tp_size
+        return torch.empty((num_tokens, x.shape[1]),
+                           dtype=x.dtype,
+                           device=x.device)
+    return x
 
 
 def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
@@ -189,19 +216,19 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
 
 direct_register_custom_op(op_name="maybe_chunk_residual",
                           op_func=_maybe_chunk_residual_impl,
-                          fake_impl=lambda x, residual: residual,
+                          fake_impl=fake_maybe_chunk_residual_impl,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,
-                          fake_impl=lambda x, label: x,
+                          fake_impl=fake_maybe_all_gather_and_maybe_unpad_impl,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
 direct_register_custom_op(op_name="maybe_pad_and_reduce",
                           op_func=_maybe_pad_and_reduce_impl,
-                          fake_impl=lambda x: x,
+                          fake_impl=fake_maybe_pad_and_reduce_impl,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
