@@ -4,6 +4,8 @@ import torch
 import torch_npu
 
 from vllm_ascend.ascend_config import WeightPrefetchConfig
+from vllm_ascend.ops.linear import (AscendQKVParallelLinear,
+                                    AscendRowParallelLinear)
 
 SUPPORTED_MODULES = ["attn", "mlp", "moe"]
 
@@ -13,6 +15,7 @@ class ModuleWeightPrefetchConfig:
     module_name: str
     enable: bool = False
     prefetch_ratio: dict = field(default_factory=dict)
+    linear_prefix_map: dict = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.prefetch_ratio = {
@@ -38,14 +41,19 @@ class WeightPrefetchMethod:
             module_name="attn",
             enable=weight_prefetch_config.enabled,
             prefetch_ratio=weight_prefetch_config.prefetch_ratio.get(
-                "attn", {}))
+                "attn", {}),
+            linear_prefix_map={
+                AscendQKVParallelLinear.__name__: "qkv",
+                AscendRowParallelLinear.__name__: "o",
+            })
 
     def maybe_prefetch_attn_weight_preprocess(
-            self, prefix: str, weight: torch.Tensor,
+            self, layer_cls_name: str, weight: torch.Tensor,
             start_flag: torch.Tensor) -> None:
-        if not self.attn.enable:
+        if not self.attn.enable or layer_cls_name not in self.attn.linear_prefix_map:
             return
 
+        prefix = self.attn.linear_prefix_map.get(layer_cls_name, "")
         weight_size = weight.data.element_size() * weight.data.numel(
         ) * self.attn.prefetch_ratio.get(prefix, 0)
 
@@ -54,8 +62,8 @@ class WeightPrefetchMethod:
                                            max_weight_size=int(weight_size))
 
     def maybe_prefetch_attn_weight_postprocess(
-            self, stop_flag: torch.Tensor) -> None:
-        if not self.attn.enable:
+            self, layer_cls_name: str, stop_flag: torch.Tensor) -> None:
+        if not self.attn.enable or layer_cls_name not in self.attn.linear_prefix_map:
             return
 
         torch.ops.vllm.prefetch_postprocess(stop_flag)
