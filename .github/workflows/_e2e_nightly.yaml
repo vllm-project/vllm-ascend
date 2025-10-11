@@ -27,8 +27,13 @@ on:
         required: true
         type: string
       image:
+        required: false
+        type: string
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11"
+      tests:
         required: true
         type: string
+        default: 'tests/e2e/nightly/models/test_qwen3_32b.py'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -44,9 +49,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  e2e-nightly-4-cards:
-    name: e2e-nightly-4-cards
-    runs-on: ${{ inputs.runner }}-4
+  e2e-nightly:
+    name: e2e-nightly
+    runs-on: ${{ inputs.runner }}
     container:
       image: ${{ inputs.image }}
       env:
@@ -98,4 +103,4 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           # TODO: enable more tests
-          pytest -sv tests/e2e/nightly/models/test_qwen3_32b.py
+          pytest -sv ${{ inputs.tests }}
