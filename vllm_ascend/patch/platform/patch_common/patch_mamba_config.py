@@ -24,7 +24,10 @@ def verify_and_update_config(cls, vllm_config) -> None:
     logger = init_logger(__name__)
     # Enable FULL_AND_PIECEWISE by default
     MambaModelConfig.verify_and_update_config(vllm_config)
-    ascend_config = get_ascend_config()
+    try:
+        ascend_config = get_ascend_config()
+    except RuntimeError:
+        ascend_config = None
 
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
@@ -41,7 +44,9 @@ def verify_and_update_config(cls, vllm_config) -> None:
         num_kv_heads=model_config.get_num_kv_heads(parallel_config),
         head_size=model_config.get_head_size(),
         dtype=kv_cache_dtype,
-        use_mla=model_config.use_mla or ascend_config.use_sfa).page_size_bytes
+        use_mla=model_config.use_mla,
+        use_sfa=ascend_config.use_sfa
+        if ascend_config is not None else False).page_size_bytes
 
     model_cls, _ = ModelRegistry.resolve_model_cls(
         model_config.architecture,
