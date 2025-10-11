@@ -175,7 +175,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         with_quant: bool = False,
     ):
         print("using mc2 dispatcher")
-        self.with_quant = with_quant  # 这个可以保留，是配置标志
+        self.with_quant = with_quant
 
         # Apply log2phy if needed
         if log2phy is not None:
@@ -208,7 +208,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                 shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)
                 shared_act = shared_experts.act_fn(shared_gate_up)
 
-        # ✅ 构建完整的 dispatch_metadata
         dispatch_metadata = {
             "output": output,
             "topk_ids": topk_ids,

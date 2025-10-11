@@ -134,8 +134,8 @@ class MoECommMethod(ABC):
             apply_router_weight_on_input=apply_router_weight_on_input,
             with_quant=use_int8_w8a8 or use_int4_w4a8)
 
-        permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales = \
-            results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales")
+        permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, dispatch_metadata = \
+            results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("dispatch_metadata")
 
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
                                        w1=w1,
@@ -154,7 +154,7 @@ class MoECommMethod(ABC):
                                        need_trans=need_trans)
 
         final_hidden_states = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output)
+            hidden_states=mlp_output, dispatch_metadata=dispatch_metadata)
 
         if dynamic_eplb:
             return (final_hidden_states, group_list_type, expert_tokens)
