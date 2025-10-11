@@ -444,7 +444,7 @@ def torchair_fused_experts_with_all2all(
         token_counts_combined = token_counts_combined.view(
             2, ep_group.world_size, -1).sum(dim=2)
         token_counts_combined_cpu = token_counts_combined.to(
-            torch.device("cpu"), non_blocking=True).numpy()
+            torch.device("cpu"), non_blocking=False).numpy()
         all_tokens = gather_sizes.sum()
 
         gathered_tokens = quantized_tokens.new_empty(all_tokens.item(),
