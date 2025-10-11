@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -83,7 +84,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_data = self._maybe_pad_weight(layer.w2_weight.data)
             layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        if not is_310p():
+        if not is_310p() and envs_ascend.VLLM_ASCEND_ENABLE_NZ:
             layer.w13_weight.data = torch_npu.npu_format_cast(
                 layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(

@@ -23,11 +23,11 @@ CustomTensorParallelOp
 │   ├── DenseOptimMergedColumnParallelOp
 │   └── DenseOptimQKVParallelOp
 └── CustomRowParallelOp
-    ├── MLPRowParallelOp
-    ├── OProjRowParallelOp
-    ├── MatmulAllreduceRowParallelOp
-    └── DenseOptimRowParallelOp
-
+│   ├── MLPRowParallelOp
+│   ├── OProjRowParallelOp
+│   ├── MatmulAllreduceRowParallelOp
+│   └── DenseOptimRowParallelOp
+└── CustomReplicatedOp
 How to extend a new linear op? Taking column parallel op as an example:
 1. Inherit from CustomColumnParallelOp and create a new class MyColumnParallelOp
 2. [Optional] The default communication group is the TP group. If a custom communication group is needed, override the comm_group method
@@ -127,6 +127,18 @@ class CustomRowParallelOp(CustomTensorParallelOp):
             torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
         if not self.return_bias:
             return output
+        return output, output_bias
+
+
+class CustomReplicatedOp(CustomTensorParallelOp):
+
+    def apply_impl(self, input_):
+        bias = self.bias if not self.skip_bias_add else None
+        assert self.quant_method is not None
+
+        output = self.quant_method.apply(self.layer, input_, bias)
+        output_bias = self.bias if self.skip_bias_add else None
+
         return output, output_bias
 
 
@@ -457,3 +469,12 @@ def get_row_parallel_op(
         return custom_op, custom_op.tp_rank, custom_op.tp_size
 
     return None, get_tp_group().rank_in_group, get_tp_group().world_size
+
+
+def get_replicated_op(
+    disable_tp, prefix, layer
+) -> CustomReplicatedOp:
+    if disable_tp:
+        return None
+
+    return CustomReplicatedOp(layer)

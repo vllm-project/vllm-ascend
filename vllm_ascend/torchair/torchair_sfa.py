@@ -841,7 +841,8 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         wd_qkv = wd_qkv.t().contiguous()
         wd_qkv = transdata(wd_qkv,
                            block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+            self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
 
         kv_a_proj_deq_scl = self.kv_a_proj_with_mqa.deq_scale.clone()
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(
@@ -874,7 +875,8 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim),
             -1)
         wu_q = transdata(wu_q, block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
+        if envs_ascend.VLLM_ASCEND_ENABLE_NZ:
+            self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
 
         qb_deq_scl = self.q_proj.deq_scale.data.clone()
         qb_deq_scl = qb_deq_scl.reshape(
