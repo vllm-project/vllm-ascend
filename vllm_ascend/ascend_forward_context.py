@@ -176,7 +176,7 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             # FIXME cu_tokens_across_dp_cpu and max_tokens_across_dp_cpu should be cpu tensor
             forward_context.dp_metadata.cu_tokens_across_dp_cpu = \
-                forward_context.dp_metadata.cu_tokens_across_dp_cpu.cpu()
+                forward_context.dp_metadata.cu_tokens_across_sp(1)
             max_tokens_across_dp = \
                 forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
             if sp_enabled:
