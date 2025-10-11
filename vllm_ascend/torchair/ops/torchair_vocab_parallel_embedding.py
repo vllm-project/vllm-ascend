@@ -29,8 +29,7 @@ def vocab_embedding_forward(self, input_):
     else:
         masked_input = input_
     # Get the embeddings.
-    output_parallel = self.quant_method.embedding(self,
-                                                  masked_input.long())
+    output_parallel = self.quant_method.embedding(self, masked_input.long())
     # Mask the output embedding.
     if self.tp_size > 1:
         output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
