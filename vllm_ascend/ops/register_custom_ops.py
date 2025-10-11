@@ -57,17 +57,17 @@ def _maybe_all_gather_and_maybe_unpad_impl(
         else:
             x = get_ep_group().all_gather(x, 0)
             # unpad
-            cu_tokens_across_dp_cpu = dp_metadata.cu_tokens_across_dp_cpu
-            result = torch.empty((cu_tokens_across_dp_cpu[-1], *x.shape[1:]),
+            num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
+            result = torch.empty((num_tokens_across_dp_cpu.sum(), *x.shape[1:]),
                                  device=x.device,
                                  dtype=x.dtype)
             dp_size = get_dp_group().world_size
             x = x.view(dp_size, forward_context.padded_length, *x.shape[1:])
+            start = 0
             for idx in range(dp_size):
-                start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
-                end = cu_tokens_across_dp_cpu[idx]
-                num_tokens_dp = end - start
-                result[start:end, :] = x[idx, :num_tokens_dp, :]
+                num_tokens_dp = num_tokens_across_dp_cpu[idx]
+                result[start:start+num_tokens_dp, :] = x[idx, :num_tokens_dp, :]
+                start += num_tokens_dp
             x = result
 
     return x
@@ -92,17 +92,17 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor,
     else:
         # padding
         dp_size = get_dp_group().world_size
-        cu_tokens_across_dp_cpu = \
-            get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
+        num_tokens_across_dp_cpu = \
+            get_forward_context().dp_metadata.num_tokens_across_dp_cpu
         padded_x = torch.empty(
             (dp_size, forward_context.padded_length, *x.shape[1:]),
             device=x.device,
             dtype=x.dtype)
+        start = 0
         for idx in range(dp_size):
-            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
-            end = cu_tokens_across_dp_cpu[idx]
-            num_tokens_dp = end - start
-            padded_x[idx, :num_tokens_dp] = x[start:end]
+            num_tokens_dp = num_tokens_across_dp_cpu[idx]
+            padded_x[idx, :num_tokens_dp] = x[start:start+num_tokens_dp]
+            start += num_tokens_dp
 
         return get_ep_group().reduce_scatter(padded_x.view(-1, *x.shape[1:]),
                                              0)
