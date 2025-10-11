@@ -44,7 +44,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  e2e-light-4-cards:
+  e2e-nightly-4-cards:
     name: e2e-nightly-4-cards
     runs-on: ${{ inputs.runner }}-4
     container:
