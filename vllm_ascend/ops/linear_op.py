@@ -50,7 +50,7 @@ from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.utils import (dense_optim_enable, enable_sp,
                                matmul_allreduce_enable, mlp_tp_enable,
-                               oproj_tp_enable)
+                               oproj_tp_enable, shared_expert_dp_enabled)
 
 
 class CustomTensorParallelOp:
@@ -412,7 +412,8 @@ def get_column_parallel_op(
     disable_tp, prefix, layer
 ) -> Tuple[Optional[Union[MLPColumnParallelOp, SequenceMergedColumnParallelOp,
                           SequenceQKVParallelOp]], int, int]:
-    if disable_tp:
+    if disable_tp or ("shared_experts" in prefix
+                      and shared_expert_dp_enabled()):
         return None, 0, 1
 
     custom_op: Optional[Union[
@@ -420,11 +421,13 @@ def get_column_parallel_op(
         SequenceMergedColumnParallelOp,
         SequenceQKVParallelOp,
     ]] = None
-    if "gate_up_proj" in prefix and mlp_tp_enable():
+    if "shared_experts" in prefix:
+        custom_op = None
+    elif "gate_up_proj" in prefix and mlp_tp_enable():
         custom_op = MLPColumnParallelOp(layer)
     elif "gate_up_proj" in prefix and enable_sp():
         custom_op = SequenceMergedColumnParallelOp(layer)
-    elif enable_sp():
+    elif "qkv_proj" in prefix and enable_sp():
         custom_op = SequenceQKVParallelOp(layer, prefix)
 
     if custom_op is not None:
@@ -438,13 +441,16 @@ def get_row_parallel_op(
 ) -> Tuple[Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                           MatmulAllreduceRowParallelOp,
                           SequenceRowParallelOp]], int, int]:
-    if disable_tp:
+    if disable_tp or ("shared_experts" in prefix
+                      and shared_expert_dp_enabled()):
         return None, 0, 1
 
     custom_op: Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                               MatmulAllreduceRowParallelOp,
                               SequenceRowParallelOp]] = None
-    if "down_proj" in prefix and mlp_tp_enable():
+    if "shared_experts" in prefix:
+        custom_op = None
+    elif "down_proj" in prefix and mlp_tp_enable():
         custom_op = MLPRowParallelOp(layer)
     elif "o_proj" in prefix and oproj_tp_enable():
         custom_op = OProjRowParallelOp(layer)
