@@ -35,6 +35,7 @@ The following table lists the additional configuration options available in vLLM
 | `enable_shared_expert_dp`           | bool | `False` | When the shared expert in DP, it has better performance but consumes more memory. Currently only DeepSeek series models are supported to use. |
 | `lmhead_tensor_parallel_size`       | int  | `None`  | The custom tensor parallel size of lmhead.                                                                                                    |
 | `oproj_tensor_parallel_size`        | int  | `None`  | The custom tensor parallel size of oproj.                                                                                                     |
+| `embedding_tensor_parallel_size` | int | `None` | The custom tensor parallel size of embedding.                                                                                                      |
 | `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effects on moe models with shared experts.                                |
 | `dynamic_eplb`                      | bool | `False` | Whether to enable dynamic eplb                                                                                                                |
 | `num_iterations_eplb_update`        | int  | `400`   | Forward iterations when eplb would begin                                                                                                      |

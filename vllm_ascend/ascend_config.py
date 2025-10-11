@@ -127,6 +127,17 @@ class AscendConfig:
                 raise AssertionError(
                     "Only support P node tp size lagger then D node tp size")
 
+        self.embedding_tensor_parallel_size = additional_config.get(
+            "embedding_tensor_parallel_size", None)
+        if self.embedding_tensor_parallel_size is not None:
+            logger.info(
+                f"Enable embedding_tensor_parallel_size = {self.embedding_tensor_parallel_size} in pure DP scenario"
+            )
+            if vllm_config.parallel_config.tensor_parallel_size != 1:
+                raise AssertionError(
+                    "embedding_tensor_parallel_size is only supported in the pure DP scenario"
+                )
+
 
 class TorchairGraphConfig:
     """
