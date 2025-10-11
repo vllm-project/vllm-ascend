@@ -117,14 +117,6 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(self.platform.get_device_name(device_id), device_name)
         mock_get_device_name.assert_called_once_with(0)
 
-    def test_is_async_output_supported(self):
-        self.assertTrue(
-            self.platform.is_async_output_supported(enforce_eager=None))
-        self.assertTrue(
-            self.platform.is_async_output_supported(enforce_eager=True))
-        self.assertTrue(
-            self.platform.is_async_output_supported(enforce_eager=False))
-
     @patch("torch.inference_mode")
     def test_inference_mode(self, mock_inference_mode):
         mock_inference_mode.return_value = None
