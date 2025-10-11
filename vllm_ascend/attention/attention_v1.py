@@ -39,6 +39,7 @@ from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d, nd_to_nz_spec)
 
+from ..utils import weak_ref_tensors
 
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -389,26 +390,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             graph_params = get_graph_params()
             forward_context: ForwardContext = get_forward_context()
-            num_tokens_origin = query.shape[0]
             if forward_context.capturing:
-                num_tokens = attn_metadata.query_start_loc[-1]
+                query_start_loc = attn_metadata.query_start_loc[1:].cpu().int().tolist()
+                seq_lens = attn_metadata.seq_lens.cpu().int().tolist()
+                num_tokens = query_start_loc[-1]
                 query = query[:num_tokens]
                 # Prepare tensors for attention output
                 # TODO: Refactor this to step-level instead of layer-level
 
                 # Get workspace from cache or calculate it if not present.
-                workspace = graph_params.workspaces.get(num_tokens_origin)
+                workspace = graph_params.workspaces.get(num_tokens)
                 num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
                 key = self.key_cache.view(  # type: ignore
                     num_block, block_size, -1)
                 value = self.value_cache.view(  # type: ignore
                     num_block, block_size, -1)
-                output = torch.empty_like(query)
                 softmax_lse = torch.empty(num_tokens,
                                         dtype=query.dtype,
                                         device=query.device)
-                query_start_loc = attn_metadata.query_start_loc[1:].cpu().int().tolist()
-                seq_lens = attn_metadata.seq_lens.cpu().int().tolist()
                 if workspace is None:
                     workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                         query=query,
@@ -423,7 +422,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_heads=self.num_heads,
                         sparse_mode=0,
                         scale=self.scale,)
-                    graph_params.workspaces[num_tokens_origin] = workspace
+                    graph_params.workspaces[num_tokens] = weak_ref_tensors(workspace)
                   
                 # Handle graph capturing mode
                 stream = torch_npu.npu.current_stream()
@@ -431,20 +430,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 event = torch.npu.ExternalEvent()
                 event.wait(stream)
                 event.reset(stream)
-                graph_params.events[num_tokens_origin].append(event)
-                graph_params.attn_params[num_tokens_origin].append((
-                    query,
-                    key,
-                    value,
-                    attn_metadata.block_tables,
+                graph_params.events[num_tokens].append(event)
+                graph_params.attn_params[num_tokens].append((
+                    weak_ref_tensors(query),
+                    weak_ref_tensors(key),
+                    weak_ref_tensors(value),
+                    weak_ref_tensors(attn_metadata.block_tables),
                     block_size,
                     seq_lens,
                     query_start_loc,
                     self.num_kv_heads,
                     self.num_heads,
                     self.scale,
-                    attn_output,
-                    softmax_lse
+                    weak_ref_tensors(output),
+                    weak_ref_tensors(softmax_lse)
                 ))
 
                 torch.npu.graph_task_group_begin(stream)
@@ -461,7 +460,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     num_heads=self.num_heads,
                     scale=self.scale,
                     sparse_mode=0,
-                    # workspace=workspace,
+                    workspace=workspace,
                     out=[output, softmax_lse],
                 )
                
@@ -469,7 +468,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                          self.head_size)
                 
                 handle = torch.npu.graph_task_group_end(stream)
-                graph_params.handles[num_tokens_origin].append(handle)
+                graph_params.handles[num_tokens].append(handle)
             else:
                 num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
                 key = self.key_cache.view(  # type: ignore
