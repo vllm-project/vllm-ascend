@@ -48,8 +48,7 @@ async def test_models(model: str, tp_size: int) -> None:
         "PAGED_ATTENTION_MASK_LEN": "5500"
     }
     server_args = [
-        "--port", "20002", "--no-enable-prefix-caching",
-        "--tensor-parallel-size",
+        "--no-enable-prefix-caching", "--tensor-parallel-size",
         str(tp_size), "--max-model-len", "36864", "--max-num-batched-tokens",
         "36864", "--block-size", "128", "--trust-remote-code",
         "--gpu-memory-utilization", "0.9", "--additional-config",
@@ -60,6 +59,7 @@ async def test_models(model: str, tp_size: int) -> None:
     }
     with RemoteOpenAIServer(model,
                             server_args,
+                            server_port=20002,
                             env_dict=env_dict,
                             auto_port=False) as server:
         client = server.get_async_client()
