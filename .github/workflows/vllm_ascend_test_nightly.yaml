@@ -22,16 +22,13 @@ on:
       # Run test at 24:00 Beijing time (UTC+8)
       - cron: "0 16 * * *"
   workflow_dispatch:
-  pull_request:
+  pull_request: 
     branches:
-      - '**'   # 所有目标分支
-    # pull_request: 
-    #   branches:
-    #     - 'main'
-    #     - '*-dev'
-    #   paths:
-    #     - 'tests/e2e/nightly/**'
-    #     - '.github/workflows/vllm_ascend_test_nightly.yaml'
+      - 'main'
+      - '*-dev'
+    paths:
+      - 'tests/e2e/nightly/**'
+      - '.github/workflows/vllm_ascend_test_nightly.yaml'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
