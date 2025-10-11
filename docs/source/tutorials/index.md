@@ -18,6 +18,7 @@ multi-node_dsv3.2.md
 multi_node
 multi_node_kimi
 multi_node_qwen3vl
-multi_node_pd_disaggregation
+multi_node_pd_disaggregation_llmdatadist
+multi_node_pd_disaggregation_mooncake
 multi_node_ray
 :::
