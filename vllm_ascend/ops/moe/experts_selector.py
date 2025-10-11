@@ -20,17 +20,6 @@ import torch
 import torch_npu
 
 
-def return_row_idx(hidden_states, top_k):
-    num_tokens = hidden_states.shape[0]
-    row_idx_len = num_tokens * top_k
-    row_idx = (torch.arange(0,
-                            row_idx_len,
-                            dtype=torch.int32,
-                            device=hidden_states.device).view(
-                                top_k, -1).permute(1, 0).contiguous())
-    return row_idx
-
-
 def select_experts(hidden_states: torch.Tensor,
                    router_logits: torch.Tensor,
                    top_k: int,
@@ -94,8 +83,7 @@ def select_experts(hidden_states: torch.Tensor,
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
         )
-    if row_idx is None:
-        row_idx = return_row_idx(hidden_states, top_k)
+
     return topk_weights, topk_ids, row_idx
 
 
@@ -200,7 +188,7 @@ def _select_experts_with_fusion_ops(
             # y2_flag=False, # old api; should the third output be output
             routed_scaling_factor=1,
             eps=float(1e-20))
-        row_idx = return_row_idx(hidden_states, top_k)
+
     if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax":
         topk_weights, topk_ids, row_idx = torch_npu.npu_moe_gating_top_k_softmax(
             x=router_logits, finished=None, k=top_k)
