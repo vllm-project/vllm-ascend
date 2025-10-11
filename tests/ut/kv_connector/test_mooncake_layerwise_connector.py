@@ -78,7 +78,8 @@ class TestKVCacheSendingLayerThreadBasic(unittest.TestCase):
     def setUp(self):
         self.p1 = patch(
             'vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config',
-            new=MagicMock(return_value=SimpleNamespace(pd_tp_ratio=1)))
+            new=MagicMock(return_value=SimpleNamespace(
+                pd_tp_ratio=1, num_head_replica=0, pd_head_ratio=1)))
         self.p2 = patch(
             'vllm_ascend.distributed.mooncake_layerwise_connector.get_current_vllm_config',
             new=MagicMock(return_value=SimpleNamespace(
@@ -242,7 +243,8 @@ class TestSendingLayerThread(unittest.TestCase):
     def setUp(self):
         self.p1 = patch(
             'vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config',
-            new=MagicMock(return_value=SimpleNamespace(pd_tp_ratio=1)))
+            new=MagicMock(return_value=SimpleNamespace(
+                pd_tp_ratio=1, num_head_replica=0, pd_head_ratio=1)))
         self.p2 = patch(
             'vllm_ascend.distributed.mooncake_layerwise_connector.get_current_vllm_config',
             new=MagicMock(return_value=SimpleNamespace(
@@ -900,7 +902,9 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
                        {'vllm_ascend.envs': self.envs_ascend_mock}),
             patch(
                 'vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config',
-                return_value=SimpleNamespace(pd_tp_ratio=1),
+                return_value=SimpleNamespace(pd_tp_ratio=1,
+                                             num_head_replica=0,
+                                             pd_head_ratio=1),
             ),
             patch(
                 'vllm_ascend.distributed.mooncake_layerwise_connector.get_current_vllm_config',
