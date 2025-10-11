@@ -86,6 +86,8 @@ jobs:
           VLLM_TARGET_DEVICE=empty pip install -e .
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
