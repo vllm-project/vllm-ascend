@@ -18,17 +18,17 @@
 name: 'e2e nightly test'
 
 on:
-    workflow_call:
-      inputs:
-        vllm:
-            required: true
-            type: string
-        runner:
-            required: true
-            type: string
-        image:
-            required: true
-            type: string
+  workflow_call:
+    inputs:
+      vllm:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
