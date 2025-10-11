@@ -2411,10 +2411,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
-            if self.is_multimodal_model:
-                input_ids = None
-                inputs_embeds = None
-            elif self.enable_prompt_embeds:
+            if self.is_multimodal_model or self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
             else:
