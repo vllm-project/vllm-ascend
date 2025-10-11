@@ -95,4 +95,4 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           # TODO: enable more tests
-          pytest -sv /Users/wangli/vllm-project/vllm-ascend/tests/e2e/nightly/models/test_qwen3_32b_int8.py
+          pytest -sv tests/e2e/nightly/models/test_qwen3_32b_int8.py
