@@ -1,8 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_gather,
+from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
@@ -99,17 +98,6 @@ def _maybe_prefetch_mlp_down_proj_impl(x_dependency: torch.Tensor) -> None:
     return
 
 
-def _maybe_pad_and_reduce_fake(x: torch.Tensor) -> torch.Tensor:
-    if get_forward_context().sp_enabled:
-        return torch.empty(
-            (x.shape[0] // get_tensor_model_parallel_world_size(),
-             *x.shape[1:]),
-            device=x.device,
-            dtype=x.dtype)
-
-    return x
-
-
 def _maybe_prefetch_mlp_down_proj_impl_fake(
         x_dependency: torch.Tensor) -> None:
     return
@@ -155,7 +143,7 @@ direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
 
 direct_register_custom_op(op_name="maybe_pad_and_reduce",
                           op_func=_maybe_pad_and_reduce_impl,
-                          fake_impl=_maybe_pad_and_reduce_fake,
+                          fake_impl=lambda x: x,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
