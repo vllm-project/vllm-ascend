@@ -471,12 +471,22 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
     def add_new_req(
         self,
         request_id: str,
+        unhashed_block_idxs: list[int],
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
     ):
+        # Filter out the remote block ids that correspond to the unhashed local
+        # block ids. We assume that the order of remote_block_ids matches the
+        # order of local_block_ids.
+        remote_block_ids = []
+        for block_idx, remote_block_id in enumerate(
+                kv_transfer_params["remote_block_ids"]):
+            if local_block_ids[block_idx] in unhashed_block_idxs:
+                remote_block_ids.append(remote_block_id)
+
         self.requests[request_id] = ReqMeta(
-            local_block_ids=local_block_ids,
-            remote_block_ids=kv_transfer_params["remote_block_ids"],
+            local_block_ids=unhashed_block_idxs,
+            remote_block_ids=remote_block_ids,
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
@@ -591,7 +601,8 @@ class MooncakeConnectorScheduler:
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+        self._reqs_need_recv: dict[str, tuple[Request, list[int],
+                                              list[int]]] = {}
         self._reqs_need_send: dict[str, float] = {}
 
     def get_num_new_matched_tokens(
@@ -619,11 +630,10 @@ class MooncakeConnectorScheduler:
             num_computed_tokens, params)
 
         if params is not None and params.get("do_remote_prefill"):
-            assert num_computed_tokens == 0, "Currently only support " \
-                                             "prefill with num_computed_tokens == 0."
             # Assume that the request's KV cache is already fully prefilled and
             # can be fetched entirely from the prefill node.
-            count = max(len(request.prompt_token_ids) - 1, 0)
+            num_user_prompt_tokens = len(request.prompt_token_ids) - 1
+            count = max(num_user_prompt_tokens - num_computed_tokens, 0)
             if count > 0:
                 return count, True
 
@@ -644,11 +654,20 @@ class MooncakeConnectorScheduler:
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
                                              "remote_port")):
-                    local_block_ids = (blocks.get_unhashed_block_ids()
-                                       if num_external_tokens > 0 else [])
-                    # Get unhashed blocks to pull from remote.
+                    # The unhashed blocks represent the blocks that must be
+                    # fetched from the remote host. Their count should match the
+                    # number of blocks required for the external tokens.
+                    unhashed_block_idxs = blocks.get_unhashed_block_ids()
+                    block_ids = blocks.get_block_ids()[0]
+                    num_pulled_blocks = math.ceil(num_external_tokens /
+                                                  self.block_size)
+                    assert num_pulled_blocks == len(unhashed_block_idxs), (
+                        f"The number of blocks to pull ({num_pulled_blocks}) "
+                        "does not match the number of unhashed blocks "
+                        f"({len(unhashed_block_idxs)}) for request "
+                        f"{request.request_id}.")
                     self._reqs_need_recv[request.request_id] = (
-                        request, local_block_ids)
+                        request, unhashed_block_idxs, block_ids)
                 else:
                     logger.warning(
                         "Got invalid KVTransferParams: %s. This "
@@ -665,14 +684,16 @@ class MooncakeConnectorScheduler:
         meta = MooncakeConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        for req_id, (req, block_ids) in self._reqs_need_recv.items():
+        for req_id, (req, unhashed_block_idxs,
+                     local_block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             # For the case where there are no remote blocks to pull
             # (block_ids is empty), we don't need to schedule
             # an async read on the worker side.
             meta.add_new_req(
                 request_id=req_id,
-                local_block_ids=block_ids,
+                unhashed_block_idxs=unhashed_block_idxs,
+                local_block_ids=local_block_ids,
                 kv_transfer_params=req.kv_transfer_params,
             )
 
