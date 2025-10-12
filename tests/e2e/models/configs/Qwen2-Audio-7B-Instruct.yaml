@@ -1,0 +1,10 @@
+model_name: "Qwen/Qwen2-Audio-7B-Instruct"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.44
+  - name: "exact_match,flexible-extract"
+    value: 0.45
+num_fewshot: 5
