@@ -478,11 +478,12 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         # Filter out the remote block ids that correspond to the unhashed local
         # block ids. We assume that the order of remote_block_ids matches the
         # order of local_block_ids.
-        remote_block_ids = []
-        for block_idx, remote_block_id in enumerate(
-                kv_transfer_params["remote_block_ids"]):
-            if local_block_ids[block_idx] in unhashed_block_idxs:
-                remote_block_ids.append(remote_block_id)
+        unhashed_block_idxs_set = set(unhashed_block_idxs)
+        remote_block_ids = [
+            remote_id for remote_id, local_id in zip(
+                kv_transfer_params["remote_block_ids"], local_block_ids)
+            if local_id in unhashed_block_idxs_set
+        ]
 
         self.requests[request_id] = ReqMeta(
             local_block_ids=unhashed_block_idxs,
