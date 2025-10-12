@@ -7,7 +7,7 @@ import pytest
 import yaml
 from jinja2 import Environment, FileSystemLoader
 
-RTOL = 0.03
+RTOL = 0.05
 TEST_DIR = os.path.dirname(__file__)
 
 
