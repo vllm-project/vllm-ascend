@@ -110,10 +110,10 @@ class RemoteOpenAIServer:
 
     def __init__(self,
                  model: str,
-                 server_host: str,
-                 server_port: int,
                  vllm_serve_args: list[str],
                  *,
+                 server_host: str = "0.0.0.0",
+                 server_port: int = 8080,
                  env_dict: Optional[dict[str, str]] = None,
                  seed: Optional[int] = 0,
                  auto_port: bool = True,

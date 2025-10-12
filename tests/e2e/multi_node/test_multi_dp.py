@@ -30,9 +30,9 @@ def test_multi_dp(config: MultiNodeConfig) -> None:
 
     with RemoteOpenAIServer(
             model_name,
-            config.server_host,
-            config.server_port,
             server_args,
+            server_host=config.server_host,
+            server_port=config.server_port,
             env_dict=env_dict,
             auto_port=False,
             seed=1024,
