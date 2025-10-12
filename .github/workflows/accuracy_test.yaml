@@ -19,10 +19,20 @@
 # 1. PR labeled with: '*accuracy-test' (ONLY 1 label valid) & 'ready-for-test'
 # 2. workflow_dispatch with models input
 # See detail rule in strategy.matrix note
-name: ascend test / accuracy-report
+name: ascend test / models
 
 on:
+  schedule:
+    # Runs every 6 hours
+    - cron:  '0 */6 * * *'
   pull_request:
+    branches:
+      - 'main'
+      - '*-dev'
+    paths:
+      - '.github/workflows/accuracy_test.yml'
+      - 'tests/e2e/models/test_lm_eval_correctness.py'
+      - 'tests/e2e/models/configs/accuracy.txt'
     types: [ labeled ]
   workflow_dispatch:
     inputs:
@@ -55,7 +65,7 @@ jobs:
       ${{
       contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
       contains(github.event.pull_request.labels.*.name, 'ready-for-test') ||
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
       }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -69,6 +79,14 @@ jobs:
             runner: linux-aarch64-a2-2
           - model_name: DeepSeek-V2-Lite
             runner: linux-aarch64-a2-2
+          - model_name: Qwen2.5-VL-7B-Instruct
+            runner: linux-aarch64-a2-1
+          - model_name: Qwen3-30B-A3B
+            runner: linux-aarch64-a2-2
+          - model_name: DeepSeek-V2-Lite
+            runner: linux-aarch64-a2-2
+          - model_name: Qwen2-Audio-7B-Instruct
+            runner: linux-aarch64-a2-1
       fail-fast: false
 
     name: ${{ matrix.model_name }} accuracy
