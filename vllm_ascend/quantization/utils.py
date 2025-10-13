@@ -2,6 +2,7 @@ from typing import Any, Dict, Optional, Type
 
 from vllm.logger import logger
 
+from .w4a4_flatquant_dynamic import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
                            AscendW4A8DynamicLinearMethod)
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
@@ -13,6 +14,9 @@ ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     "W4A8_DYNAMIC": {
         "linear": AscendW4A8DynamicLinearMethod,
         "moe": AscendW4A8DynamicFusedMoEMethod,
+    },
+    "W4A4_FLATQUANT_DYNAMIC": {
+        "linear": AscendW4A4FlatQuantDynamicLinearMethod,
     },
     "W8A8": {
         "linear": AscendW8A8LinearMethod,
