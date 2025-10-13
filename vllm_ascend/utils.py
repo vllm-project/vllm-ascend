@@ -295,6 +295,20 @@ def get_max_hidden_layers(hf_config) -> int:
     return max(layer_counts)
 
 
+def update_sizes_for_sequence_parallelism(tp_size,
+                                          possible_sizes: list) -> list:
+    # remove the sizes that not multiple of tp_size when
+    # enable sequence parallelism
+    removed_sizes = [size for size in possible_sizes if size % tp_size != 0]
+    if removed_sizes:
+        logger.warning(
+            "Batch sizes %s are removed because they are not "
+            "multiple of tp_size %d when "
+            "sequence parallelism is enabled", removed_sizes, tp_size)
+
+    return [size for size in possible_sizes if size % tp_size == 0]
+
+
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
     # NOTE: Currently, we can only capture 1800 graphs at most,
@@ -376,6 +390,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "increase the number of supported shapes, set HCCL_OP_EXPANSION_MODE=AIV."
         )
 
+    # remove the sizes that not multiple of tp_size when enable sequence parallelism
+    if enable_sp():
+        original_sizes = update_sizes_for_sequence_parallelism(
+            parallel_config.tensor_parallel_size, original_sizes)
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
         # Sample uniformly from original sizes
@@ -603,7 +621,8 @@ def enable_sp(vllm_config=None) -> bool:
         vllm_config = get_current_vllm_config()
     return (
         vllm_config.compilation_config.pass_config.enable_sequence_parallelism
-        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM)
+        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM
+        or get_ascend_config().enable_shared_expert_dp)
 
 
 def is_moe_model(vllm_config: VllmConfig):

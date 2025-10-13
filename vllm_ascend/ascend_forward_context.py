@@ -11,6 +11,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_sp
 
 if TYPE_CHECKING:
@@ -116,11 +117,15 @@ def set_ascend_forward_context(
             tp_world_size > 1 and \
             num_tokens is not None and num_tokens > 1000
 
+        if get_ascend_config(
+        ).enable_shared_expert_dp and num_tokens is not None:
+            sp_enabled = True
         if sp_enabled:
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
         forward_context.sp_enabled = sp_enabled
+        forward_context.num_tokens = num_tokens
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True

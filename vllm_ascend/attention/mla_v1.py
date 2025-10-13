@@ -1044,9 +1044,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_metadata.num_decode_tokens is not None
         num_decode_tokens = attn_metadata.num_decode_tokens
         # Inputs and outputs may be padded for CUDA graphs
-        output_padded = output
-        output = output[:num_actual_tokens, ...]
-        o_proj_input_shape = (num_actual_tokens,
+        num_padded_tokens = get_forward_context().num_tokens
+        o_proj_input_shape = (num_padded_tokens,
                               self.num_heads * self.v_head_dim)
         o_proj_input = torch.empty(o_proj_input_shape,
                                    dtype=hidden_states.dtype,
@@ -1084,10 +1083,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
-                    o_proj_input[num_decode_tokens:] = output_prefill
+                    o_proj_input[
+                        num_decode_tokens:num_actual_tokens] = output_prefill
                     current_ms_metadata.after_comm_event.record()
             else:
-                o_proj_input[num_decode_tokens:] = output_prefill
+                o_proj_input[
+                    num_decode_tokens:num_actual_tokens] = output_prefill
         # O proj
         current_ms_metadata = get_multistream_comm_context()
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
@@ -1097,24 +1098,18 @@ class AscendMLAImpl(MLAAttentionImpl):
                                max_size=MAX_O_PROJ_PREFETCH_SIZE,
                                enabled=self.enable_prefetch)
 
-            output[...] = self.o_proj(
-                o_proj_input,
-                is_prefill=prefill_preprocess_res is not None,
-                is_force_scatter=self.enable_shared_expert_dp)[0]
+            output[...] = self.o_proj(o_proj_input)[0]
         else:
             with torch.npu.stream(current_ms_metadata.comm_stream):
                 maybe_npu_prefetch(inputs=self.o_proj.weight,
                                    dependency=o_proj_input,
                                    max_size=MAX_O_PROJ_PREFETCH_SIZE,
                                    enabled=self.enable_prefetch)
-                output[...] = self.o_proj(
-                    o_proj_input,
-                    is_prefill=prefill_preprocess_res is not None,
-                    is_force_scatter=self.enable_shared_expert_dp)[0]
+                output[...] = self.o_proj(o_proj_input)[0]
                 current_ms_metadata.after_comm_event.record()
         del o_proj_input
 
         has_prefill = attn_metadata.num_prefills > 0
         if has_prefill:
             maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
-        return output_padded
+        return output
