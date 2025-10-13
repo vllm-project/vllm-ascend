@@ -56,13 +56,13 @@ def get_net_interface(ip: Optional[str] = None) -> Optional[str]:
 
 def get_default_envs() -> dict[str, str]:
     """Returns default network and system environment variables."""
-    result = get_net_interface()
-    if result is None:
+    nic_name = get_net_interface()
+    cur_ip = get_cur_ip()
+    if nic_name is None:
         raise RuntimeError("Failed to get default network IP and interface")
-    ip, nic_name = result
 
     return {
-        "HCCL_IF_IP": ip,
+        "HCCL_IF_IP": cur_ip,
         "GLOO_SOCKET_IFNAME": nic_name,
         "TP_SOCKET_IFNAME": nic_name,
         "HCCL_SOCKET_IFNAME": nic_name,

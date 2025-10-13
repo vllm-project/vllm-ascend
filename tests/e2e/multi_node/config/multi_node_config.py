@@ -7,8 +7,7 @@ from typing import Any, Dict, List, Optional, Type, TypeVar, Union
 
 from tests.e2e.multi_node.config.common import CONFIG_PATH
 from tests.e2e.multi_node.config.utils import (get_avaliable_port,
-                                               get_leader_ip,
-                                               get_net_interface)
+                                               get_cluster_ips, get_cur_ip)
 
 LOG = logging.getLogger(__name__)
 
@@ -85,10 +84,11 @@ class ServerConfig(BaseConfig):
         world_size: int,
     ) -> None:
         """Initialize distributed parallel parameters."""
-        iface = get_net_interface()
-        if iface is None:
-            raise RuntimeError("No available network interface found")
-        self.data_parallel_address = iface[0]
+        ips = get_cluster_ips(world_size)
+        cur_ip = get_cur_ip()
+        if cur_ip is None:
+            raise RuntimeError("No available addr found")
+        self.data_parallel_address = cur_ip
 
         if is_disaggregate_prefill:
             self.data_parallel_start_rank = 0
@@ -98,10 +98,7 @@ class ServerConfig(BaseConfig):
         if not is_leader:
             self.headless = True
             self.data_parallel_start_rank = dp_size // world_size
-            self.data_parallel_address = get_leader_ip()
-
-    def generate_rank_table(self):
-        pass
+            self.data_parallel_address = ips[0]  # leader ip
 
 
 @dataclass
@@ -167,7 +164,7 @@ class MultiNodeConfig:
 
         # network info
         leader_cfg = server_cfg_data.get("leader_config", {})
-        server_host = get_leader_ip()
+        server_host = get_cluster_ips()[0]
         server_port = (get_avaliable_port() if is_disaggregate_prefill else
                        leader_cfg.get("port", 8080))
 

@@ -7,8 +7,11 @@ from pathlib import Path
 from tests.e2e.multi_node.config.common import (ASCEND_ENV_PATH,
                                                 DISAGGEGATED_PREFILL_PORT,
                                                 LIB_PATH, RANKTABLE_GEN_PATH,
-                                                RANKTABLE_PATH)
-from tests.e2e.multi_node.config.utils import setup_logger
+                                                RANKTABLE_PATH,
+                                                get_npu_per_node,
+                                                get_world_size)
+from tests.e2e.multi_node.config.utils import (get_cluster_ips,
+                                               get_net_interface, setup_logger)
 
 setup_logger()
 logger = logging.getLogger(__name__)
@@ -116,12 +119,19 @@ def setup_and_run_ranktable(
             f"Skip generating ranktable: {ranktable_path} already exists.")
 
 
-if __name__ == "__main__":
+def generate_rank_table(self):
+    """Generate ranktable.json for multi-node setup."""
+    npus_per_node = get_npu_per_node()
+    ips = get_cluster_ips(get_world_size())
     setup_and_run_ranktable(
-        ips=["10.0.0.158", "10.0.0.143"],
-        npus_per_node=16,
-        network_card_name="eth0",
-        prefill_device_cnt=16,
-        decode_device_cnt=16,
+        ips=ips,
+        npus_per_node=npus_per_node,
+        network_card_name=get_net_interface(),
+        prefill_device_cnt=npus_per_node,
+        decode_device_cnt=npus_per_node,
         gen_ranktable=True,
     )
+
+
+if __name__ == "__main__":
+    generate_rank_table()
