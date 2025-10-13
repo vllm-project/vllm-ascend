@@ -3,7 +3,7 @@ import os
 import socket
 import subprocess
 
-from .utils import setup_logger
+from tests.e2e.multi_node.config.utils import setup_logger
 
 setup_logger()
 logger = logging.getLogger(__name__)
