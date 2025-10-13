@@ -3,6 +3,7 @@ import subprocess
 import pytest
 
 from tests.e2e.conftest import RemoteOpenAIServer
+from tests.e2e.multi_node.config.common import RANKTABLE_PATH
 from tests.e2e.multi_node.config.multi_node_config import (MultiNodeConfig,
                                                            load_configs)
 from tests.e2e.multi_node.config.utils import get_default_envs
@@ -25,6 +26,8 @@ def test_multi_dp(config: MultiNodeConfig) -> None:
     perf_config = config.perf_config
     model_name = server_config.model
     assert model_name is not None, "Model name must be specified"
+    if config.is_disaggregate_prefill:
+        env_dict["DISAGGREGATED_PREFILL_RANK_TABLE_PATH"] = RANKTABLE_PATH
 
     server_args = server_config.to_list()
 

@@ -32,6 +32,11 @@ def setup_and_run_ranktable(
         gen_ranktable (bool): whether to generate ranktable.json.
     """
 
+    if Path(RANKTABLE_PATH).exists():
+        logger.info(
+            f"RANKTABLE_PATH is already set: {os.getenv('RANKTABLE_PATH')}")
+        return
+
     # === setup env ===
     ascend_env = ASCEND_ENV_PATH
     if os.path.exists(ascend_env):
