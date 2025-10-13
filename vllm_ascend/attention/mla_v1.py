@@ -742,7 +742,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                                    k_rope=k_pe,
                                    value=value,
                                    mask=self.prefill_mask,
-                                   seqlen=attn_metadata.prefill.query_lens.to(torch.int32),
+                                   seqlen=attn_metadata.prefill.query_lens.to(
+                                       torch.int32),
                                    head_num=self.num_heads,
                                    kv_head_num=self.num_heads,
                                    pre_out=None,
