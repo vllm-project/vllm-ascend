@@ -1,14 +1,11 @@
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 import torch
 import torch.nn as nn
 
 from vllm_ascend.quantization.w4a4_flatquant_dynamic import (
-    pack_int4_to_int32,
-    pack_int4_weights,
-    get_decompose_dim,
-    AscendW4A4FlatQuantDynamicLinearMethod,
-)
+    AscendW4A4FlatQuantDynamicLinearMethod, get_decompose_dim,
+    pack_int4_to_int32, pack_int4_weights)
 
 
 class TestW4A4FlatQuantDynamic(unittest.TestCase):
@@ -73,8 +70,8 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         mock_torch_npu.npu_convert_weight_to_int4pack.assert_called_once()
         self.assertTrue(torch.equal(result, mock_packed_tensor))
 
-    @patch('vllm_ascend.quantization.w4a4_flatquant_dynamic.pack_int4_to_int32'
-           )
+    @patch(
+        'vllm_ascend.quantization.w4a4_flatquant_dynamic.pack_int4_to_int32')
     @patch('vllm_ascend.quantization.w4a4_flatquant_dynamic.torch_npu')
     def test_pack_int4_weights_fallback(self, mock_torch_npu,
                                         mock_pack_manual):

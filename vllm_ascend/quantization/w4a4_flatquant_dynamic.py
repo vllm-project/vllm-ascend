@@ -15,9 +15,10 @@
 # limitations under the License.
 #
 import math
+from typing import Any, Dict, Optional
+
 import torch
 import torch_npu
-from typing import Any, Dict, Optional
 
 KRONECKER_QUANT_MAX_BATCH_SIZE = 8192
 
@@ -92,8 +93,6 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
     - Activation: 4-bit dynamic quantization with FlatQuant transform matrices (left_trans, right_trans) for distribution smoothing
     - Parameters: clip_ratio for controlling quantization clipping, weight_offset for asymmetric quantization, loaded from external weights
     """
-    input_size = 0
-    output_size = 0
 
     def __init__(self):
         self.transpose_weight = False
@@ -106,18 +105,16 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
             raise ValueError(
                 f"input_size ({input_size}) must be divisible by 8 for int4 packing"
             )
-        AscendW4A4FlatQuantDynamicLinearMethod.input_size = input_size
-        AscendW4A4FlatQuantDynamicLinearMethod.output_size = output_size
         params_dict = {
             "weight": torch.empty(output_size, input_size, dtype=torch.int8)
         }
         return params_dict
 
     @staticmethod
-    def get_pertensor_param(params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pertensor_param(input_size: int,
+                              params_dtype: torch.dtype) -> Dict[str, Any]:
         params_dict = {}
-        left_trans_dim, right_trans_dim = get_decompose_dim(
-            AscendW4A4FlatQuantDynamicLinearMethod.input_size)
+        left_trans_dim, right_trans_dim = get_decompose_dim(input_size)
         params_dict["left_trans"] = torch.empty(left_trans_dim,
                                                 left_trans_dim,
                                                 dtype=params_dtype)
@@ -206,16 +203,11 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
 
     def process_weights_after_loading(self, layer):
         weight_packed = pack_int4_weights(layer.weight.data)
+        if self.transpose_weight:
+            weight_packed = weight_packed.transpose(0, 1).contiguous()
         layer.register_parameter(
             'weight_packed',
             torch.nn.Parameter(weight_packed, requires_grad=False))
-        if self.transpose_weight:
-            weight_packed_transposed = layer.weight_packed.transpose(
-                0, 1).contiguous()
-            layer.register_parameter(
-                'weight_packed',
-                torch.nn.Parameter(weight_packed_transposed,
-                                   requires_grad=False))
         del layer.weight
         layer.weight_scale.data = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.to(torch.float32)
