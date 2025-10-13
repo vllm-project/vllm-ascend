@@ -10,65 +10,9 @@ from vllm.model_executor.layers.rotary_embedding import (
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.ops.rotary_embedding import _custom_rotary_embedding_enabled
 
 MODEL = "Qwen3-0.6B"
 MAX_NUM_BATCHED_TOKEND = 10000
-
-
-class TestCustomRotaryEmbeddingEnabled(unittest.TestCase):
-
-    def setUp(self):
-        # Common setup for tests
-        self.positions = torch.tensor([1, 2, 3])
-        self.query = torch.randn(3, 4, dtype=torch.float16)
-        self.key = torch.randn(3, 4, dtype=torch.float16)
-        self.head_size = 32
-        self.cos_sin_cache = torch.randn(3, 4)
-
-        # Mock self object for rope_forward_oot
-        self.mock_self = MagicMock()
-        self.mock_self.head_size = self.head_size
-        self.mock_self.cos_sin_cache = self.cos_sin_cache
-        self.mock_self.is_neox_style = True
-        self.mock_self.forward_native.return_value = (self.query, self.key)
-
-    def test_custom_rotary_embedding_enabled(self):
-        # Test when all conditions are True
-        with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
-                   return_value=True):
-            result = _custom_rotary_embedding_enabled(self.query, True,
-                                                      self.head_size)
-            self.assertTrue(result)
-
-        # Test when dtype is not float16
-        with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
-                   return_value=True):
-            query = self.query.to(torch.float32)
-            result = _custom_rotary_embedding_enabled(query, True,
-                                                      self.head_size)
-            self.assertFalse(result)
-
-        # Test when neox_style is False
-        with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
-                   return_value=True):
-            result = _custom_rotary_embedding_enabled(self.query, False,
-                                                      self.head_size)
-            self.assertFalse(result)
-
-        # Test when head_size is not divisible by 32
-        with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
-                   return_value=True):
-            result = _custom_rotary_embedding_enabled(self.query, True,
-                                                      self.head_size + 1)
-            self.assertFalse(result)
-
-        # Test when custom op is disabled
-        with patch('vllm_ascend.ops.rotary_embedding.enable_custom_op',
-                   return_value=False):
-            result = _custom_rotary_embedding_enabled(self.query, True,
-                                                      self.head_size)
-            self.assertFalse(result)
 
 
 class TestAscendRotaryEmbedding(unittest.TestCase):
@@ -96,8 +40,6 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
 
     @patch('torch.ops._C_ascend')
     @patch('vllm_ascend.ops.rotary_embedding.is_310p', return_value=False)
-    @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
-           return_value=True)
     @patch('torch.ops._npu_rotary_embedding')
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
@@ -126,8 +68,6 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         self.assertEqual(result_q.shape, self.query.shape)
         self.assertEqual(result_k.shape, self.key.shape)
 
-    @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
-           return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
@@ -177,8 +117,6 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
                 self.layer.forward(self.positions, self.query, self.key,
                                    offsets)
 
-    @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
-           return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
@@ -206,8 +144,6 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         args, kwargs = mock_npu_rotary.call_args
         self.assertFalse(args[-1])
 
-    @patch('vllm_ascend.ops.rotary_embedding._custom_rotary_embedding_enabled',
-           return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
