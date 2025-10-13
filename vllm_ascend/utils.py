@@ -666,7 +666,7 @@ def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
 
     Args:
         group_name: Name of the communication group
- 
+
     Returns:
         HCCL pg_options or None for mc2 group
     """
@@ -689,7 +689,7 @@ def get_default_buffer_config() -> dict:
 
 def calculate_dp_buffer_size() -> int:
     """
-    formula of dp buffer size: 
+    formula of dp buffer size:
     dp_size + 2 (flags: with_prefill and enable_dbo)
     """
     from vllm.config import get_current_vllm_config
@@ -698,3 +698,11 @@ def calculate_dp_buffer_size() -> int:
     int32_size = torch.iinfo(torch.int32).bits // 8
     dp_buffer_size = math.ceil((dp_size + 2) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
+
+
+# Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
+# and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
+# significantly improve communication performance of MC2 ops dispatch/combine.
+def is_hierarchical_communication_enabled():
+    return (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
+            and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
