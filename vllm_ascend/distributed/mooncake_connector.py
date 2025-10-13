@@ -31,9 +31,8 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata

@@ -2,15 +2,15 @@
 import os
 
 # Third Party
+from mooncake.store import ReplicateConfig  # type: ignore
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.utils import get_ip, logger
 
 from vllm_ascend.distributed.mooncake.config_data import MooncakeEngineKey
+from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
 
 from .config_data import MooncakeStoreConfig
-from mooncake.store import ReplicateConfig
-from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
 
 METADATA_BYTES_LEN = 24
 BASE_PORT = int(os.getenv("VLLM_BASE_PORT", "8790"))

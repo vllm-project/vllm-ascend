@@ -1,6 +1,7 @@
 import threading
-from mooncake.engine import TransferEngine  # type: ignore
 from typing import Optional
+
+from mooncake.engine import TransferEngine  # type: ignore
 
 _global_te = None
 _global_te_lock = threading.Lock()
