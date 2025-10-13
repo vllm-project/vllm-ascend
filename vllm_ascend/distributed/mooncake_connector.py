@@ -882,7 +882,9 @@ class MooncakeConnectorScheduler:
             "get_finished_count, kv_role=%s, num_need_pulls=%d, decode_tp_size=%d",
             kv_role, num_need_pulls, self._decode_tp_size)
         if kv_role == 'kv_producer':
-            return num_need_pulls * self._decode_tp_size
+            if self.vllm_config.model_config.is_deepseek_mla:
+                return self._prefill_tp_size
+            return num_need_pulls * self._prefill_tp_size
         else:
             return self._decode_tp_size
 
@@ -1158,7 +1160,11 @@ class MooncakeConnectorWorker:
                     self.kv_send_thread.add_delayed_request(
                         req_id, delay_start_time)
                 else:
-                    self.kv_send_thread.add_not_transfer_request(req_id)
+                    if self.vllm_config.model_config.is_deepseek_mla:
+                        self.kv_send_thread.add_not_transfer_request(req_id)
+
+    def _prefill_get_remote_tp_rank(self, req_id: str) -> List[int]:
+        return sum(self._get_remote_tp_ranks_for_req(req_id), [])
 
     def _prefill_get_remote_tp_rank(self, req_id: str) -> List[int]:
         return sum(self._get_remote_tp_ranks_for_req(req_id), [])
