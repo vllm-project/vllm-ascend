@@ -45,7 +45,8 @@ class Mooncakestore():
             ret = self.store.setup(local_hostname, self.config.metadata_server,
                                    self.config.global_segment_size,
                                    self.config.local_buffer_size,
-                                   self.config.protocol, self.config.device_name,
+                                   self.config.protocol,
+                                   self.config.device_name,
                                    self.config.master_server_address)
         else:
             local_hostname = get_ip()
@@ -54,8 +55,10 @@ class Mooncakestore():
             ret = self.store.setup(self.local_seg, self.config.metadata_server,
                                    self.config.global_segment_size,
                                    self.config.local_buffer_size,
-                                   self.config.protocol, self.config.device_name,
-                                   self.config.master_server_address, te.get_engine())
+                                   self.config.protocol,
+                                   self.config.device_name,
+                                   self.config.master_server_address,
+                                   te.get_engine())
         if ret != 0:
             msg = "Initialize mooncake failed."
             logger.error(msg)
