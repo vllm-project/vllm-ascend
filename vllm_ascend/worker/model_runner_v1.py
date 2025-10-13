@@ -2874,7 +2874,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 layer_name = kv_cache_tensor.shared_by[idx]
                 if "linear_attn" in layer_name:
                     # for mamba linear attention
-                   kv_cache_raw_tensors[layer_name] = tensor
+                    kv_cache_raw_tensors[layer_name] = tensor
                 elif "attn" in layer_name:
                     # for other attentions, e.g., self_attn, sliding window attn
                     kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
