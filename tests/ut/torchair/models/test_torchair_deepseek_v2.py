@@ -133,6 +133,33 @@ def mock_forward_context():
         yield
 
 
+@pytest.fixture
+def patch_attention_init():
+    try:
+        from vllm_ascend.torchair.models.torchair_deepseek_v2 import \
+            DeepseekV2Attention
+        original_init = DeepseekV2Attention.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs.pop("decoder_layer", None)
+            if 'vllm_config' not in kwargs:
+                mock_vllm_config = Mock()
+                mock_vllm_config.model_config = Mock()
+                mock_vllm_config.model_config.hf_config = Mock()
+                mock_vllm_config.model_config.hf_config.hidden_size = 128
+                mock_vllm_config.model_config.dtype = torch.float32
+                mock_vllm_config.model_config.quant_config = None
+                mock_vllm_config.cache_config = CacheConfig()
+                kwargs['vllm_config'] = mock_vllm_config
+            return original_init(self, *args, **kwargs)
+
+        DeepseekV2Attention.__init__ = patched_init
+        yield
+        DeepseekV2Attention.__init__ = original_init
+    except ImportError:
+        yield
+
+
 def test_torchair_deepseek_v2_silu_and_mul():
     torch.set_default_device("cpu")
 
@@ -279,7 +306,8 @@ def test_torchair_deepseek_v2_mla_attention(mock_rms_norm, mock_distributed,
 def test_torchair_deepseek_v2_decoder_layer(mock_maybe_wait_prefetch_done,
                                             mock_rms_norm, mock_add_norm,
                                             mock_distributed, base_config,
-                                            vllm_config, mock_forward_context):
+                                            vllm_config, mock_forward_context,
+                                            patch_attention_init):
     mock_rms_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128))
     mock_add_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128),
                                   torch.randn(2, 128))
@@ -309,7 +337,8 @@ def test_torchair_deepseek_v2_decoder_layer(mock_maybe_wait_prefetch_done,
     assert isinstance(layer.mlp, TorchairDeepseekV2MLP)
 
 
-def test_torchair_deepseek_v2_for_causal_lm(mock_distributed, vllm_config):
+def test_torchair_deepseek_v2_for_causal_lm(mock_distributed, vllm_config,
+                                            patch_attention_init):
     model = TorchairDeepseekV2ForCausalLM(vllm_config=vllm_config)
 
     input_ids = torch.randint(0, 10000, (2, 4))
