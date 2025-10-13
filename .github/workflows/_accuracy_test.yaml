@@ -1,0 +1,175 @@
+name: 'accuracy test'
+
+on:
+  workflow_call:
+    inputs:
+      vllm:
+        required: true
+        type: string
+      vllm-ascend:
+        required: false
+        type: string
+        default: main
+      runner:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+      model_name:
+        required: true
+        type: string
+      upload:
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  accuracy_tests:
+
+    runs-on: ${{ inputs.runner }}
+    name: ${{ inputs.model_name }} accuracy
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      env:
+        VLLM_USE_MODELSCOPE: True
+        # 1. If version specified (work_dispatch), do specified branch accuracy test
+        # 2. If no version (labeled PR), do accuracy test by default ref:
+        # The branch, tag or SHA to checkout. When checking out the repository that
+        # triggered a workflow, this defaults to the reference or SHA for that event.
+        # Otherwise, uses the default branch.
+        GHA_VLLM_ASCEND_VERSION: ${{ inputs.vllm-ascend }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set model name as output
+        id: set_output
+        run: |
+          echo "model_name=${{ inputs.model_name }}" >> $GITHUB_OUTPUT
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Resolve vllm-ascend version
+        run: |
+          VERSION_INPUT="${{ inputs.vllm-ascend }}"
+          
+          if [[ "$VERSION_INPUT" == "latest" ]]; then
+            TAGS=$(git ls-remote --tags --sort=-v:refname https://github.com/vllm-project/vllm-ascend "v*" | cut -f2 | sed 's|refs/tags/||')
+            LATEST_TAG=$(echo "$TAGS" | head -n1)
+            if [[ -z "$LATEST_TAG" ]]; then
+              RESOLVED_VERSION="main"
+            else
+              RESOLVED_VERSION="$LATEST_TAG"
+            fi
+          else
+            RESOLVED_VERSION="$VERSION_INPUT"
+          fi
+          echo "GHA_VLLM_ASCEND_VERSION=$RESOLVED_VERSION" >> $GITHUB_ENV
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm-ascend
+          path: ./vllm-ascend
+          ref: ${{ env.GHA_VLLM_ASCEND_VERSION }}
+
+      - name: Install vllm-project/vllm-ascend
+        working-directory: ./vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Get vLLM commit hash and URL
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_COMMIT=$(git rev-parse --short=7 HEAD)
+          echo "VLLM_COMMIT=$VLLM_COMMIT" >> $GITHUB_ENV
+
+      - name: Get vLLM-Ascend commit hash and URL
+        working-directory: ./vllm-ascend
+        run: |
+          VLLM_ASCEND_COMMIT=$(git rev-parse --short=7 HEAD)
+          echo "VLLM_ASCEND_COMMIT=$VLLM_ASCEND_COMMIT" >> $GITHUB_ENV
+
+      - name: Collect version info
+        run: |
+          for dir in /usr/local/Ascend/ascend-toolkit/*; do
+            dname=$(basename "$dir")
+            if [ "$dname" != "latest" ]; then
+              TOOLKIT_DIR="$dname"
+              break
+            fi
+          done
+          INFO_FILE="/usr/local/Ascend/ascend-toolkit/${TOOLKIT_DIR}/$(uname -i)-linux/ascend_toolkit_install.info"
+          GHA_CANN_VERSION=$(grep "version=" "$INFO_FILE" \
+                           | head -n1 \
+                           | cut -d'=' -f2 \
+                           | tr -d '"')
+          {
+            echo "GHA_CANN_VERSION=$GHA_CANN_VERSION"
+            pip show torch | grep "Version:" | awk '{print "GHA_TORCH_VERSION="$2}'
+            pip show torch_npu | grep "Version:" | awk '{print "GHA_TORCH_NPU_VERSION="$2}'
+            pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
+          } >> "$GITHUB_ENV"
+
+      - name: Run accuracy test
+        id: report
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+          VLLM_VERSION: ${{ env.GHA_VLLM_VERSION }}
+          VLLM_COMMIT: ${{ env.VLLM_COMMIT }}
+          VLLM_ASCEND_VERSION: ${{ env.GHA_VLLM_ASCEND_VERSION || github.ref }}
+          VLLM_ASCEND_COMMIT: ${{ env.VLLM_ASCEND_COMMIT }}
+          CANN_VERSION: ${{ env.GHA_CANN_VERSION }}
+          TORCH_VERSION: ${{ env.GHA_TORCH_VERSION }}
+          TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
+        run: |
+          model_base_name=$(basename ${{ inputs.model_name }})
+          markdown_name="${model_base_name}"
+          echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
+          mkdir -p ./benchmarks/accuracy
+          pytest -sv ./tests/e2e/models/test_lm_eval_correctness.py \
+          --config ./tests/e2e/models/configs/${{ inputs.model_name }}.yaml
+
+      - name: Generate step summary
+        if: ${{ always() }}
+        run: |
+          cat ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload Report
+        if: ${{ inputs.upload == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: "report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}"
+          path: ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
