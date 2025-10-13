@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
 from vllm.utils import cdiv, logger
 from vllm.v1.core.sched.output import NewRequestData
+from vllm_ascend import envs
 
 
 @dataclass
@@ -326,6 +327,7 @@ class ReqMeta:
         skip_save: Optional[bool] = False,
         is_last_chunk: Optional[bool] = None,
         discard_partial_chunks: bool = True,
+        first_scheduled: bool = False,
     ) -> Optional["ReqMeta"]:
         """Create the request metadata from a request tracker.
 
@@ -342,6 +344,7 @@ class ReqMeta:
         """
         input_token_ids = tracker.token_ids
         input_token_len = len(input_token_ids)
+        is_consumer = skip_save
 
         # For save operation: do not save if the following condition is met
         # 1. has already been saved before (num_saved_tokens > 0)
@@ -354,9 +357,21 @@ class ReqMeta:
         num_tokens_to_save = ((input_token_len // block_size * block_size)
                               if discard_partial_chunks else input_token_len)
 
-        skip_save = skip_save or num_tokens_to_save < chunk_boundary
-        if skip_save and load_spec is None:
-            return None
+        if is_consumer:
+            prefill_saved_tokens = (input_token_len - 1) if envs.fisrt_token_generation_in_prefill else input_token_len
+            skip_leading_tokens = prefill_saved_tokens // block_size * block_size
+            tracker.num_saved_tokens = skip_leading_tokens
+            if first_scheduled and skip_leading_tokens == prefill_saved_tokens:
+                return None
+            if input_token_len % 128 != 0:
+                return None
+            skip_save = False
+        else:
+            skip_save = is_consumer or num_tokens_to_save < chunk_boundary
+            if skip_save and load_spec is None:
+                return None
+            if not skip_save:
+                tracker.num_saved_tokens = num_tokens_to_save
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
@@ -374,6 +389,8 @@ class ReqMeta:
                 load_spec.mooncake_cached_tokens,
                 tracker.req_id,
             )
+        elif is_consumer:
+            load_spec = None
         else:
             # Do not load if not in `can_load` state
             load_spec = None
@@ -386,7 +403,7 @@ class ReqMeta:
             block_ids=tracker.allocated_block_ids,
             save_spec=save_spec,
             load_spec=load_spec,
-            is_last_chunk=is_last_chunk,
+            is_last_chunk=is_last_chunk if not is_consumer else None,
         )
 
 
