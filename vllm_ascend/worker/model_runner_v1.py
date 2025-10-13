@@ -458,12 +458,28 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-        # NOTE: To be clear, we need to make sure that during graph capture, the number
-        # of tokens is less than or equal to mc2_tokens_capacity. According to
-        # VllmConfig._set_cudagraph_sizes, the max graph size is min(max_num_seqs * 2, 512),
-        # so we set mc2_tokens_capacity to max_num_seqs // tp_size.
-        self.mc2_tokens_capacity = self.scheduler_config.max_num_seqs // \
-            self.parallel_config.tensor_parallel_size
+        # NOTE: To be clear, we need to make sure that during graph capture, the number of
+        # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
+        # the max number of tokens in graph is min(max_num_seqs * 2, 512).
+        max_graph_size = self.compilation_config.cudagraph_capture_sizes[0]
+        tp_size = self.parallel_config.tensor_parallel_size
+        # Use integer arithmetic for ceiling division.
+        num_tokens_per_tp_rank = (max_graph_size + tp_size - 1) // tp_size
+        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+
+        soc_version = get_ascend_soc_version()
+        limit = None
+        if soc_version in {AscendSocVersion.A3}:
+            limit = 512
+        elif soc_version in {AscendSocVersion.A2}:
+            limit = 256
+
+        if limit is not None and num_tokens_per_tp_rank > limit:
+            raise ValueError(
+                f"For {soc_version}, the max supported tokens per TP rank for MC2 is {limit}, "
+                f"but got {num_tokens_per_tp_rank}. Please try to reduce `max_num_seqs` "
+                f"(current: {self.max_num_reqs}) or increase `tp_size` (current: {tp_size}).")
+
         self.reserved_mc2_mask = torch.zeros(
             self.mc2_tokens_capacity,
             dtype=torch.bool,
