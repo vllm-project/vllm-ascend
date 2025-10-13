@@ -38,10 +38,12 @@ def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, ("mlp group is not initialized")
     return _MLP_TP
 
+
 def get_p_tp_group() -> GroupCoordinator:
     assert _P_TP is not None, (
         "distributed prefill tensor parallel group is not initialized")
     return _P_TP
+
 
 def get_embed_tp_group() -> GroupCoordinator:
     assert _EMBED_TP is not None, ("emtp group is not initialized")
