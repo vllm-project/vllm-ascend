@@ -73,6 +73,7 @@ if vllm_version_is("0.11.0"):
 else:
     from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 
+
 @support_torch_compile
 class AscendDeepseekV2Model(DeepseekV2Model, nn.Module):
 

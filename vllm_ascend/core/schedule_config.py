@@ -59,7 +59,7 @@ class AscendSchedulerConfig(SchedulerConfig):
                 scheduler_config[k] = getattr(ascend_scheduler_config, k)
         return cls(**scheduler_config)
 
-    def __post_init__(self, is_encoder_decoder: bool) -> None:
+    def __post_init__(self, *args) -> None:
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
         self.chunked_prefill_enabled = self.enable_chunked_prefill
