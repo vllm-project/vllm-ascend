@@ -296,6 +296,8 @@ class NPUPlatform(Platform):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
 
+        assert not (use_sfa and not use_mla), "SFA is a specialization of MLA and requires use_mla=True"
+
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:
