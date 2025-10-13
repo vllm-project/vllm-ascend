@@ -458,10 +458,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-        # NOTE: Technically, MC2 can have 512 tokens each rank, but this will consume too much memory. The formula is:
-        # ((maxBs * tokenNeedSizeDispatch * ep_worldsize * localMoeExpertNum) + (maxBs * tokenNeedSizeCombine * (k + sharedExpertNum))) * 2
-        # so we have to limit the MC2 tokens to save memory, should fix this in the future.
-        self.mc2_tokens_capacity = 512
+        # NOTE: To be clear, we need to make sure that during graph capture, the number
+        # of tokens is less than or equal to mc2_tokens_capacity. According to
+        # VllmConfig._set_cudagraph_sizes, the max graph size is min(max_num_seqs * 2, 512),
+        # so we set mc2_tokens_capacity to max_num_seqs // tp_size.
+        self.mc2_tokens_capacity = self.scheduler_config.max_num_seqs // \
+            self.parallel_config.tensor_parallel_size
         self.reserved_mc2_mask = torch.zeros(
             self.mc2_tokens_capacity,
             dtype=torch.bool,
