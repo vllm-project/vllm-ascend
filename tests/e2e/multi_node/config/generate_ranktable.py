@@ -92,6 +92,7 @@ def setup_and_run_ranktable(
             master_addr,
             "--master_port",
             str(master_port),
+            "--ranktable-path",
             RANKTABLE_GEN_PATH,
             "--local-host",
             local_host,
