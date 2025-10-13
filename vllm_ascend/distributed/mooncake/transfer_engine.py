@@ -15,13 +15,13 @@ def get_global_te(hostname: str, device_name: Optional[str]):
             if _global_te is None:
                 if TransferEngine is None:
                     raise RuntimeError("mooncake is not available")
-                te = TransferEngine()
+                transfer_engine = TransferEngine()
                 device_name = device_name if device_name is not None else ""
-                ret_value = te.initialize(hostname, "P2PHANDSHAKE", "ascend",
+                ret_value = transfer_engine.initialize(hostname, "P2PHANDSHAKE", "ascend",
                                           device_name)
                 if ret_value != 0:
                     raise RuntimeError(
                         f"TransferEngine initialization failed with ret_value: {ret_value}"
                     )
-                _global_te = te
+                _global_te = transfer_engine
     return _global_te
