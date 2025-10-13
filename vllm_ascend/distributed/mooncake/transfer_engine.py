@@ -1,0 +1,24 @@
+import threading
+from mooncake.engine import TransferEngine  # type: ignore
+from typing import Optional
+
+_global_te = None
+_global_te_lock = threading.Lock()
+
+def get_global_te(hostname: str, device_name: Optional[str]):
+    global _global_te
+    if _global_te is None:
+        with _global_te_lock:
+            # Double-Checked Locking
+            if _global_te is None:
+                if TransferEngine is None:
+                    raise RuntimeError("mooncake is not available")
+                te = TransferEngine()
+                device_name = device_name if device_name is not None else ""
+                ret_value = te.initialize(hostname, "P2PHANDSHAKE", "ascend",
+                                                   device_name)
+                if ret_value != 0:
+                    raise RuntimeError(
+                        f"TransferEngine initialization failed with ret_value: {ret_value}")
+                _global_te = te
+    return _global_te
