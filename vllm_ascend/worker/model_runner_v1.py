@@ -469,8 +469,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
         )
         self.dynamic_eplb = self.ascend_config.dynamic_eplb
-        if self.dynamic_eplb:
-            os.environ["PYTHONOPTIMIZE"]="1"
+        self.expert_map_record_path = self.ascend_config.expert_map_record_path
+        if self.dynamic_eplb or (self.expert_map_record_path and os.access(self.expert_map_record_path,
+                                                    os.W_OK)):
             self.is_eplb_warmuped = False
             self.policy_type = self.ascend_config.eplb_policy_type
             self.eplb_loader = D2DExpertWeightLoader()
@@ -487,7 +488,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             ascend_config = get_ascend_config()
             self.eplb_updator = EplbUpdator(ascend_config, self.eplb_loader,
                                             self.eplb_process, self.process)
-            os.environ["PYTHONOPTIMIZE"]="0"
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.async_output_copy_stream = torch.npu.Stream() if \
