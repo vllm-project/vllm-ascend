@@ -207,6 +207,7 @@ class MooncakeStoreConnectorV1Scheduler:
         else:
             token_ids = torch.tensor(request.prompt_token_ids)
 
+        # decode阶段由于wordsize不一样查询不到，返回值为0
         num_external_hit_tokens = self.client.lookup(token_ids)
 
         if num_external_hit_tokens == request.num_tokens:
@@ -222,6 +223,7 @@ class MooncakeStoreConnectorV1Scheduler:
             need_to_allocate,
         )
 
+        # decode
         if need_to_allocate <= 0:
             return 0, False
 
@@ -253,6 +255,7 @@ class MooncakeStoreConnectorV1Scheduler:
             # No KV tokens from external KV cache, return
             return
 
+        # decode
         if num_external_tokens == 0:
             # No need to load anything
             self.load_specs[request.request_id].can_load = False
@@ -282,6 +285,7 @@ class MooncakeStoreConnectorV1Scheduler:
         """
 
         force_skip_save = self.kv_role == "kv_consumer"
+        is_consumer = self.kv_role == "pd_consumer"
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
@@ -307,16 +311,18 @@ class MooncakeStoreConnectorV1Scheduler:
                 request_tracker,
                 self._block_size,
                 load_spec=load_spec,
-                skip_save=force_skip_save,
+                skip_save=is_consumer,
                 is_last_chunk=len(request_tracker.token_ids)
                 >= last_chunk_tokens_num,
                 discard_partial_chunks=self._discard_partial_chunks,
+                first_scheduled=True,
             )
             if req_meta is not None:
                 meta.add_request(req_meta)
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         if isinstance(cached_reqs, list) and not force_skip_save:
+            # 适配vllm 0.9.2，实际走不进来
             for i, req in enumerate(cached_reqs):
                 request_tracker = self._request_trackers[req.req_id]
                 request_tracker.update(req.new_token_ids, req.new_block_ids)
@@ -366,7 +372,7 @@ class MooncakeStoreConnectorV1Scheduler:
                     request_tracker,
                     self._block_size,
                     load_spec=None,
-                    skip_save=force_skip_save,
+                    skip_save=is_consumer,
                     is_last_chunk=len(request_tracker.token_ids)
                     >= last_chunk_tokens_num,
                     discard_partial_chunks=self._discard_partial_chunks,

@@ -349,14 +349,22 @@ class MooncakeEngine:
                 skip_leading_tokens,
                 request.req_id,
             )
-
-            self.kv_send_thread.add_request(  # type: ignore[union-attr]
-                req_id,
-                token_ids,
-                request.block_ids,
-                store_mask,
-                request.is_last_chunk,
-            )
+            if self.kv_role == 'kv_consumer':
+                req = ({
+                    "req_id": req_id,
+                    "tokens": token_ids,
+                    "block_ids": request.block_ids,
+                    "mask": store_mask,
+                })
+                self.kv_send_thread._handle_request(req) # type: ignore[union-attr]
+            else:
+                self.kv_send_thread.add_request(  # type: ignore[union-attr]
+                    req_id,
+                    token_ids,
+                    request.block_ids,
+                    store_mask,
+                    request.is_last_chunk,
+                )
 
     def retrieve_layer(
         self,
