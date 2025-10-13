@@ -208,11 +208,15 @@ def torchair_ops_patch():
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+    from vllm_ascend.ops.vocab_parallel_embedding import \
+        AscendVocabParallelEmbedding
     from vllm_ascend.torchair.ops import (torchair_activation,
                                           torchair_layernorm)
     from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
         deepseek_rope_init_func, native_rope_deepseek_forward,
         qwen_rope_init_func, rope_forward)
+    from vllm_ascend.torchair.ops.torchair_vocab_parallel_embedding import \
+        vocab_embedding_forward
 
     AscendRotaryEmbedding.__init__ = qwen_rope_init_func  # type: ignore[method-assign]
     AscendRotaryEmbedding.forward_oot = rope_forward  # type: ignore[method-assign]
@@ -222,3 +226,4 @@ def torchair_ops_patch():
 
     AscendRMSNorm.forward_oot = torchair_layernorm.torchair_rmsnorm_forward_oot  # type: ignore[method-assign]
     AscendSiluAndMul.forward_oot = torchair_activation.torchair_silu_and_mul_forward_oot  # type: ignore[method-assign]
+    AscendVocabParallelEmbedding.forward = vocab_embedding_forward  # type: ignore[method-assign]
