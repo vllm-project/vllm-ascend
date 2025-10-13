@@ -466,25 +466,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Use integer arithmetic for ceiling division.
         num_tokens_per_tp_rank = (max_graph_size + tp_size - 1) // tp_size
         self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
-
-        soc_version = get_ascend_soc_version()
-        limit = None
-        if soc_version in {AscendSocVersion.A3}:
-            limit = 512
-        elif soc_version in {AscendSocVersion.A2}:
-            limit = 256
-
-        if limit is not None and num_tokens_per_tp_rank > limit:
-            raise ValueError(
-                f"For {soc_version}, the max supported tokens per TP rank for MC2 is {limit}, "
-                f"but got {num_tokens_per_tp_rank}. Please try to reduce `max_num_seqs` "
-                f"(current: {self.max_num_reqs}) or increase `tp_size` (current: {tp_size}).")
-
         self.reserved_mc2_mask = torch.zeros(
             self.mc2_tokens_capacity,
             dtype=torch.bool,
             device=self.device,
         )
+
         self.dynamic_eplb = self.ascend_config.dynamic_eplb
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False
