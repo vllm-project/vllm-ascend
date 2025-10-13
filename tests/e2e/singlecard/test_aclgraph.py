@@ -28,12 +28,17 @@ from vllm import SamplingParams
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
-MODELS = [
+MODELS_QWEN = [
     "Qwen/Qwen3-0.6B",
 ]
 
+MODELS_QWEN_AND_DEEPSEEKV31 = [
+    "Qwen/Qwen3-0.6B",
+    "deepseek-ai/DeepSeek-V3.1",
+]
 
-@pytest.mark.parametrize("model", MODELS)
+
+@pytest.mark.parametrize("model", MODELS_QWEN)
 @pytest.mark.parametrize("max_tokens", [32])
 def test_models_with_aclgraph(
     model: str,
@@ -77,7 +82,7 @@ def test_models_with_aclgraph(
     )
 
 
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model", MODELS_QWEN_AND_DEEPSEEKV31)
 @pytest.mark.parametrize("max_tokens", [5])
 def test_models_with_aclgraph_full_decode_only(
     model: str,
@@ -112,7 +117,7 @@ def test_models_with_aclgraph_full_decode_only(
          'Compute the sum $a + b + c$.')
     ]
 
-    sampling_params = SamplingParams(max_tokens=5,
+    sampling_params = SamplingParams(max_tokens=max_tokens,
                                      n=1,
                                      temperature=0.0,
                                      top_p=1.0,
