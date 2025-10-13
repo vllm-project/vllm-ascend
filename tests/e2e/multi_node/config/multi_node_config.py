@@ -5,14 +5,12 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type, TypeVar, Union
 
+from tests.e2e.multi_node.config.common import CONFIG_PATH
 from tests.e2e.multi_node.config.utils import (get_avaliable_port,
                                                get_leader_ip,
                                                get_net_interface)
 
 LOG = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-CONFIG_PATH = Path("tests/e2e/multi_node/config/config.json")
 
 T = TypeVar("T", bound="BaseConfig")
 

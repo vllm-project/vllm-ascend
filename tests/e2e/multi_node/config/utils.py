@@ -1,15 +1,25 @@
 import os
 import socket
 import subprocess
-from typing import Optional, Tuple
+from typing import Optional
 
 import psutil
 
 
-def get_leader_ip():
+def get_cluster_ips(word_size: int = 2) -> list[str]:
+    """
+    Returns the IP addresses of all nodes in the cluster.
+    0: leader
+    1~N-1: workers
+    """
     leader_dns = os.getenv("LWS_LEADER_ADDRESS")
-    assert leader_dns is not None, "cannot find leader address"
-    return socket.gethostbyname(leader_dns)
+    if not leader_dns:
+        raise RuntimeError("LWS_LEADER_ADDRESS is not set")
+    cluster_dns = [leader_dns]
+    for i in range(1, word_size):
+        cur_dns = f"vllm-0-{i}.vllm.vllm-project"
+        cluster_dns.append(cur_dns)
+    return [socket.gethostbyname(dns) for dns in cluster_dns]
 
 
 def get_avaliable_port(start_port: int = 6000, end_port: int = 7000) -> int:
@@ -24,11 +34,8 @@ def get_avaliable_port(start_port: int = 6000, end_port: int = 7000) -> int:
     raise RuntimeError("No available port found")
 
 
-def get_net_interface(ip: Optional[str] = None) -> Optional[Tuple[str, str]]:
-    """
-    Returns specified IP and its network interface.
-    If no IP is provided, uses the first from hostname -I.
-    """
+def get_cur_ip() -> str:
+    """Returns the current machine's IP address."""
     if ip is None:
         ips = subprocess.check_output(["hostname",
                                        "-I"]).decode().strip().split()
@@ -36,10 +43,19 @@ def get_net_interface(ip: Optional[str] = None) -> Optional[Tuple[str, str]]:
             return None
         ip = ips[0]
 
+
+def get_net_interface(ip: Optional[str] = None) -> Optional[str]:
+    """
+    Returns specified IP's inetwork interface.
+    If no IP is provided, uses the first from hostname -I.
+    """
+    if ip is None:
+        ip = get_cur_ip()
+
     for iface, addrs in psutil.net_if_addrs().items():
         for addr in addrs:
             if addr.family == socket.AF_INET and addr.address == ip:
-                return ip, iface
+                return iface
     return None
 
 
@@ -64,5 +80,18 @@ def get_default_envs() -> dict[str, str]:
     }
 
 
-def generate_ranktable():
-    pass
+def generate_ranktable(word_size: int = 2, npus_per_node: int = 16):
+    # gen_ranktable.sh --ips 172.19.32.175 172.19.241.49 \
+    # --npus-per-node 16 --network-card-name eth0 --prefill-device-cnt 16 --decode-device-cnt 16
+    ips = get_cluster_ips(word_size)
+    iface = get_net_interface(ips[0])
+    if iface is None:
+        raise RuntimeError("Failed to get network interface")
+    cmd = [
+        "bash", "gen_ranktable.sh", "--ips", *ips, "--npus-per-node",
+        str(npus_per_node), "--network-card-name", iface,
+        "--prefill-device-cnt",
+        str(npus_per_node), "--decode-device-cnt",
+        str(npus_per_node)
+    ]
+    subprocess.check_output()
