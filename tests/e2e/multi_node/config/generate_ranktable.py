@@ -88,7 +88,7 @@ def setup_and_run_ranktable(
             master_addr,
             "--master_port",
             str(master_port),
-            "gen_ranktable.py",
+            "examples/disaggregated_prefill_v1/gen_ranktable.py",
             "--local-host",
             local_host,
             "--prefill-device-cnt",
@@ -112,7 +112,7 @@ def setup_and_run_ranktable(
 
 if __name__ == "__main__":
     setup_and_run_ranktable(
-        ips=["192.168.1.1", "192.168.1.2"],
+        ips=["10.0.0.158", "10.0.0.143"],
         npus_per_node=16,
         network_card_name="eth0",
         prefill_device_cnt=16,
