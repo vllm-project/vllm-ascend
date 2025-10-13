@@ -1,6 +1,6 @@
+import logging
 import os
 import socket
-import subprocess
 from typing import Optional
 
 import psutil
@@ -36,12 +36,7 @@ def get_avaliable_port(start_port: int = 6000, end_port: int = 7000) -> int:
 
 def get_cur_ip() -> str:
     """Returns the current machine's IP address."""
-    if ip is None:
-        ips = subprocess.check_output(["hostname",
-                                       "-I"]).decode().strip().split()
-        if not ips:
-            return None
-        ip = ips[0]
+    return socket.gethostbyname_ex(socket.gethostname())[2][0]
 
 
 def get_net_interface(ip: Optional[str] = None) -> Optional[str]:
@@ -83,15 +78,24 @@ def get_default_envs() -> dict[str, str]:
 def generate_ranktable(word_size: int = 2, npus_per_node: int = 16):
     # gen_ranktable.sh --ips 172.19.32.175 172.19.241.49 \
     # --npus-per-node 16 --network-card-name eth0 --prefill-device-cnt 16 --decode-device-cnt 16
-    ips = get_cluster_ips(word_size)
-    iface = get_net_interface(ips[0])
-    if iface is None:
-        raise RuntimeError("Failed to get network interface")
-    cmd = [
-        "bash", "gen_ranktable.sh", "--ips", *ips, "--npus-per-node",
-        str(npus_per_node), "--network-card-name", iface,
-        "--prefill-device-cnt",
-        str(npus_per_node), "--decode-device-cnt",
-        str(npus_per_node)
-    ]
-    subprocess.check_output()
+    # ips = get_cluster_ips(word_size)
+    # iface = get_net_interface(ips[0])
+    # if iface is None:
+    #     raise RuntimeError("Failed to get network interface")
+    # cmd = [
+    #     "bash", "gen_ranktable.sh", "--ips", *ips, "--npus-per-node",
+    #     str(npus_per_node), "--network-card-name", iface,
+    #     "--prefill-device-cnt",
+    #     str(npus_per_node), "--decode-device-cnt",
+    #     str(npus_per_node)
+    # ]
+    pass
+
+
+def setup_logger():
+    """Setup logging configuration."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )

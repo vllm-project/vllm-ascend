@@ -3,6 +3,9 @@ import os
 import socket
 import subprocess
 
+from .utils import setup_logger
+
+setup_logger()
 logger = logging.getLogger(__name__)
 
 
