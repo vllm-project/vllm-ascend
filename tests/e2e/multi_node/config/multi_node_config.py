@@ -96,10 +96,14 @@ class ServerConfig(BaseConfig):
             self.data_parallel_start_rank = 0
             return
 
+        # for none disaggregate prefill, leader and worker have different dp rank
         if not is_leader:
             self.headless = True
             self.data_parallel_start_rank = dp_size // world_size
             self.data_parallel_address = get_leader_ip()
+
+    def generate_rank_table(self):
+        pass
 
 
 @dataclass

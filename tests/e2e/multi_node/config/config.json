@@ -39,5 +39,57 @@
             "request_rate": 1
         },
         "accuracy_parameters": {}
+    },
+    {
+        "test_name": "test_deepseek_pd_llmdatadist",
+        "disaggregate_prefill": true,
+        "num_nodes": 2,
+        "server_parameters": {
+            "leader_config": {
+                "model": "vllm-ascend/DeepSeek-V3-W8A8",
+                "enforce_eager": true,
+                "enable_expert_parallel": true,
+                "data_parallel_size": 2,
+                "data_parallel_size_local": 2,
+                "quantization": "ascend",
+                "tensor_parallel_size": 8,
+                "kv_transfer_config": {
+                    "kv_connector": "LLMDataDistCMgrConnector",
+                    "kv_buffer_device": "npu",
+                    "kv_role": "kv_producer",
+                    "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+                },
+                "additional_config": {}
+            },
+            "worker_config": {
+                "model": "vllm-ascend/DeepSeek-V3-W8A8",
+                "enable_expert_parallel": true,
+                "data_parallel_size": 2,
+                "data_parallel_size_local": 2,
+                "quantization": "ascend",
+                "tensor_parallel_size": 8,
+                "max_num_seqs": 28,
+                "kv_transfer_config": {
+                    "kv_connector": "LLMDataDistCMgrConnector",
+                    "kv_buffer_device": "npu",
+                    "kv_role": "kv_consumer",
+                    "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+                },
+                "additional_config": {
+                    "torchair_graph_config": {
+                        "enabled": true,
+                        "graph_batch_sizes": [28]
+                    }
+                }
+            }
+        },
+        "client_parameters": {
+            "model": "vllm-ascend/DeepSeek-V3-W8A8",
+            "backend": "vllm",
+            "dataset_name": "sharegpt",
+            "dataset_path": "/root/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json",
+            "num_prompts": 200,
+            "request_rate": 1
+        }
     }
 ]
