@@ -492,7 +492,6 @@ class KVCacheRecvingThread(threading.Thread):
         buffer = buffer.view(num_blocks, self.num_need_pulls, block_size, -1)
         buffer.transpose_(1, 2)
         return buffer.contiguous().view(block_len, num_kv_head, -1)
-        # return buffer.contiguous().view(block_len, -1)
 
     def _get_remote_metadata(self, remote_host: str,
                              remote_handshake_port: int) -> None:
