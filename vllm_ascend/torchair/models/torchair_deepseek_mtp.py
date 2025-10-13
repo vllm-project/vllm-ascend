@@ -104,12 +104,13 @@ class TorchairDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer
         
         replace_allreduce = hidden_states.shape[0] % self.tp_size == 0
 
-        hidden_states, residual = self.mtp_block(positions=positions,
-                                                 hidden_states=hidden_states,
-                                                 residual=None,
-                                                 kv_cache=kv_cache,
-                                                 attn_metadata=attn_metadata,
-                                                 replace_allreduce=replace_allreduce)
+        hidden_states, residual = self.mtp_block(
+            positions=positions,
+            hidden_states=hidden_states,
+            residual=None,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            replace_allreduce=replace_allreduce)
         hidden_states = residual + hidden_states
         return hidden_states
 
