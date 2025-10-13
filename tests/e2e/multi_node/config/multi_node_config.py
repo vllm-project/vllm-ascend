@@ -5,14 +5,13 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type, TypeVar, Union
 
-from tests.e2e.multi_node.config.common import CONFIG_PATH
+from tests.e2e.multi_node.config.common import CONFIG_PATH, get_npu_per_node
 from tests.e2e.multi_node.config.utils import (get_avaliable_port,
                                                get_cluster_ips, get_cur_ip)
 
 LOG = logging.getLogger(__name__)
 
 T = TypeVar("T", bound="BaseConfig")
-
 
 # =========================
 # Base Config

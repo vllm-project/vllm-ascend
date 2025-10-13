@@ -1,12 +1,14 @@
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from tests.e2e.conftest import RemoteOpenAIServer
-from tests.e2e.multi_node.config.common import RANKTABLE_PATH
-from tests.e2e.multi_node.config.multi_node_config import (MultiNodeConfig,
+from tests.e2e.multi_node.config.common import RANKTABLE_PATH, get_world_size, get_npu_per_node
+from tests.e2e.multi_node.config.multi_node_config import (MultiNodeConfig
                                                            load_configs)
-from tests.e2e.multi_node.config.utils import get_default_envs
+from tests.e2e.multi_node.config.utils import get_default_envs, get_cluster_ips
+from tests.e2e.multi_node.config.generate_ranktable import DisaggegatedPrefill
 
 configs = load_configs()
 
@@ -27,7 +29,17 @@ def test_multi_dp(config: MultiNodeConfig) -> None:
     model_name = server_config.model
     assert model_name is not None, "Model name must be specified"
     if config.is_disaggregate_prefill:
+        disaggerated_prefill = DisaggegatedPrefill(config)
+
+        # generate ranktable.json
+        disaggerated_prefill.setup_and_run_ranktable()
+        # run proxy
+        
+
+        if not Path(RANKTABLE_PATH).exists():
+            raise RuntimeError(f"Ranktable file not found: {RANKTABLE_PATH}")
         env_dict["DISAGGREGATED_PREFILL_RANK_TABLE_PATH"] = RANKTABLE_PATH
+        env_dict["VLLM_ASCEND_LLMDD_RPC_PORT"] = "5559"
 
     server_args = server_config.to_list()
 
