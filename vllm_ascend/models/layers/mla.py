@@ -36,10 +36,12 @@ from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.11.0"):
     from vllm.attention import Attention
-    from vllm.model_executor.layers.mla import MultiHeadLatentAttention as MultiHeadLatentAttentionWrapper
+    from vllm.model_executor.layers.mla import \
+        MultiHeadLatentAttention as MultiHeadLatentAttentionWrapper
 else:
-    from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
     from vllm.attention.layer import MLAAttention
+    from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
+
 
 if vllm_version_is("0.11.0"):
     from vllm.attention import Attention
