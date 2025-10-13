@@ -69,9 +69,9 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.models.layers.sfa import AscendSFAModules, Indexer
+from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
 from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import \
@@ -79,11 +79,10 @@ from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import \
 from vllm_ascend.utils import dispose_tensor, oproj_tp_enable, vllm_version_is
 
 if vllm_version_is("0.11.0"):
-    from vllm.attention import Attention
     from vllm.model_executor.layers.mla import MultiHeadLatentAttention
 else:
     from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
-    from vllm.attention.layer import MLAAttention
+
 
 class TorchairDeepseekV2SiluAndMul(SiluAndMul):
 
