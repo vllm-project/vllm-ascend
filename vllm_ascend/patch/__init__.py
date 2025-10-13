@@ -46,6 +46,15 @@
 #       Need a PR to vllm to support get port from environment.
 #    Future Plan:
 #       Remove those patch when vllm merged them
+#   2. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
+#    Why:
+#       tensor alignment for 310p
+#    How：
+#       rewrite all_reduce and broadcast in torch.distributed
+#    Related PR (if no, explain why):
+#       No, not ready yet.
+#    Future Plan:
+#       Find a better way to support tensor alignment for 310p without this patch.
 #
 # * Worker Patch:
 # ===============
@@ -86,19 +95,15 @@
 #       - https://github.com/vllm-project/vllm/pull/21591
 #    Future Plan:
 #       Revert it when vLLM merge #21591 and release new version
-# ** File: worker/patch_common/patch_linear.py **
+# ** File: worker/patch_common/patch_logits.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.model_executor.layers.linear.RowParallelLinear`
+#   1. `vllm._custom_ops.apply_repetition_penalties`
 #    Why:
-#       We need to fuse matmul and allreuce in `RowParallelLinear`
-#       to improve performance.
+#       apply_repetition_penalties in vLLM use tensor.is_cuda to check if tensor is on cuda. But the value is always True
+#       on ascend, thus we need to patch apply_repetition_penalties.
 #    How：
-#       Create a new class `AscendRowParallelLinear` that inherits from `RowParallelLinear`.
-#       In this class, we override the `forward` method to use
-#       torch_npu.npu_mm_all_reduce_base to replace matmul and allreduce.
+#       Remove the related cuda check in apply_repetition_penalties.
 #    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm-ascend/pull/1926
+#       - this is a bug by Ascend only. It can' be fixed in vLLM.
 #    Future Plan:
-#       Validate more models in all kinds of scenario,
-#       if performance is always improved, we can enable this patch by default and remove the env
-#       variable `VLLM_ASCEND_ENABLE_FUSE_MATMUL_ALLREDUCE` in the future.
+#       Fix this bug in torch-npu, bump torch-npu version and remove this patch.

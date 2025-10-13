@@ -25,9 +25,12 @@ from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.utils import cdiv
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
+from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
+                                        delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, is_310p,
                                update_aclgraph_sizes)
 
@@ -126,11 +129,39 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
+        decoding_config = vllm_config.decoding_config
+        scheduler_config = vllm_config.scheduler_config
+        ascend_scheduler_config = ascend_config.ascend_scheduler_config
+
+        if model_config is not None and not model_config.use_mla:
+            logger.info(
+                "Non-MLA LLMs forcibly disable the chunked prefill feature,"
+                "as the performance of operators supporting this feature "
+                "functionality is currently suboptimal.")
+            if not model_config.is_multimodal_model and \
+                decoding_config.backend == "auto" and \
+                not scheduler_config.delay_factor > 0 and \
+                not scheduler_config.send_delta_data and \
+                scheduler_config.policy == "fcfs":
+                ascend_scheduler_config.enabled = True
+                chunked_prefill_enabled_in_ascend_scheduler = getattr(
+                    ascend_scheduler_config, "enable_chunked_prefill", False)
+                if chunked_prefill_enabled_in_ascend_scheduler:
+                    logger.warning(
+                        "Chunked prefill feature is enabled in ascend_scheduler,"
+                        "but note that the operator supporting this feature "
+                        "would lead to performance degradation.")
+                # In this situation, max_num_batched_tokens would have been rewritten.
+                # So we must make sure max_num_batched_tokens is not smaller than max_model_len.
+                if (scheduler_config.max_num_batched_tokens
+                        < scheduler_config.max_model_len
+                        and not chunked_prefill_enabled_in_ascend_scheduler):
+                    scheduler_config.max_num_batched_tokens = scheduler_config.max_model_len
+
         kv_cache_dtype = vllm_config.additional_config.get(
             "kv_cache_dtype", None)
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
-
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
@@ -170,12 +201,18 @@ class NPUPlatform(Platform):
                 "Torchair compilation enabled on NPU. Setting CUDAGraphMode to NONE"
             )
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
-        if parallel_config.distributed_executor_backend == "ray":
-            logger.warning(
-                "Ray distributed executor backend is not compatible with ACL Graph mode "
-                "right now. Setting CUDAGraphMode to NONE")
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            # Note: We delete the torchair cache folder here to prevent runtime issues caused by dimension
+            # mismatches or configuration inconsistencies when users reuse cached computation graphs. Though
+            # this will increase graph compilation duration, it significantly enhances robustness and decreases
+            # graph launching time during inference.
+            if check_torchair_cache_exist(
+            ) and not ascend_config.torchair_graph_config.use_cached_kv_cache_bytes:
+                logger.warning(
+                    "Torchair cache folder is deleted here to prevent runtime issues caused by dimension "
+                    "mismatches or configuration inconsistencies when users reuse cached computation graphs. "
+                    "In order to decrease torchair graph compilation time, users can enable both use_cached_graph "
+                    "and use_cached_kv_cache_bytes in torchair_graph_config.")
+                delete_torchair_cache_file()
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
@@ -190,8 +227,9 @@ class NPUPlatform(Platform):
                 "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
             compilation_config.set_splitting_ops_for_v1()
             compilation_config.use_inductor = False
-            compilation_config.splitting_ops.extend(
-                ["vllm.unified_ascend_attention_with_output"])
+            compilation_config.splitting_ops.extend([
+                "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
+            ])
             update_aclgraph_sizes(vllm_config)
         else:
             logger.info(
@@ -201,7 +239,7 @@ class NPUPlatform(Platform):
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
         if parallel_config and parallel_config.worker_cls == "auto":
-            if ascend_config.torchair_graph_config.enabled:
+            if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
@@ -209,6 +247,11 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
+            else:
+                if not vllm_config.model_config.is_deepseek_mla:
+                    cache_config.block_size = cdiv(cache_config.block_size,
+                                                   64) * 64
+
             if cache_config.enable_prefix_caching and cache_config.block_size != 128:
                 logger.warning(
                     "If prefix caching is enabled, block size must be set to 128."
@@ -247,7 +290,12 @@ class NPUPlatform(Platform):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
 
-        use_torchair = get_ascend_config().torchair_graph_config.enabled
+        ascend_config = get_ascend_config()
+
+        if use_mla and ascend_config.enable_shared_expert_dp:
+            return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
+
+        use_torchair = ascend_config.torchair_graph_config.enabled
         # choose attention backend based on use_mla and use_torchair
         backend_map = {
             (True, True):
@@ -263,7 +311,7 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm_ascend.lora.punica_wrapper.punica_npu.PunicaWrapperNPU"
+        return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"
 
     @classmethod
     def get_current_memory_usage(cls,
@@ -329,3 +377,7 @@ class NPUPlatform(Platform):
 
         pg._register_backend(device, backend_type, backend_class)
         return pg
+
+    @classmethod
+    def support_hybrid_kv_cache(cls) -> bool:
+        return True

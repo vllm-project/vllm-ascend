@@ -23,6 +23,7 @@ from pytest_mock import MockerFixture
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 from vllm_ascend.ascend_forward_context import _get_fused_moe_state
+from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
     TorchairAscendFusedMoE, TorchairAscendUnquantizedFusedMoEMethod)
 from vllm_ascend.utils import AscendSocVersion, adapt_patch  # noqa E402
@@ -64,8 +65,6 @@ def mock_dist_env(mocker: MockerFixture):
          patch('torch.distributed.all_gather', return_value=MagicMock(return_value=torch.randn(10,32))), \
          patch('torch.distributed.all_to_all_single', return_value=torch.randn(8, 32)), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.tensor_model_parallel_all_reduce',
-               return_value=torch.randn(5, 32)), \
-         patch('vllm_ascend.torchair.ops.torchair_fused_moe.data_parallel_reduce_scatter',
                return_value=torch.randn(5, 32)), \
          patch('vllm.model_executor.layers.fused_moe.config.get_dp_group',
                return_value=mock_dp_and_tp_group(mocker)), \
@@ -233,12 +232,25 @@ class TestTorchairAscendFusedMoe:
         mock_quant_config = MagicMock()
         mock_quant_method = MockFusedMoEMethod()
         mock_quant_config.get_quant_method.return_value = mock_quant_method
+        mock_quant_config.is_layer_skipped_ascend.return_value = False
+        with patch("vllm_ascend.quantization.quant_config.get_quant_method"):
+            moe = TorchairAscendFusedMoE(**default_moe_config,
+                                         quant_config=mock_quant_config)
+            assert moe.quant_method is not None
+            assert isinstance(moe.quant_method, AscendFusedMoEMethod)
+
+    def test_init_with_mixed_quant(self, mock_dist_env, default_moe_config):
+        mock_quant_config = MagicMock()
+        mock_quant_method = MockFusedMoEMethod()
+        mock_quant_config.get_quant_method.return_value = mock_quant_method
+        mock_quant_config.is_layer_skipped_ascend.return_value = True
 
         moe = TorchairAscendFusedMoE(**default_moe_config,
                                      quant_config=mock_quant_config)
 
         assert moe.quant_method is not None
-        assert moe.quant_method == mock_quant_method
+        assert isinstance(moe.quant_method,
+                          TorchairAscendUnquantizedFusedMoEMethod)
 
     @pytest.mark.parametrize(
         "others_param",
@@ -353,8 +365,7 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
             else:
                 assert result.shape == x.shape
 
-    @pytest.mark.parametrize("others_param",
-                             [[16, False], [1, True], [1, False], [4, False]])
+    @pytest.mark.parametrize("others_param", [16, 1, 4])
     def test_apply_with_expert_map(self, moe_method, mock_dist_env,
                                    mock_moe_env, others_param):
         """
@@ -363,13 +374,11 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
         3 test use_select_experts and fused_experts_with_all2all
         4 test use_select_experts and fused_experts
         """
-        ep_size, alltoall_buffer = others_param
+        ep_size = others_param
         is_prefill = False
         forward_context = MagicMock(
             fused_moe_state=_get_fused_moe_state(ep_size, is_prefill, True))
-        with patch("vllm_ascend.torchair.ops.torchair_fused_moe.MOE_ALL2ALL_BUFFER",
-                   alltoall_buffer), \
-             patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context", return_value=forward_context), \
+        with patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_forward_context", return_value=forward_context), \
              patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_soc_version", return_value=AscendSocVersion.A3):
             expert_map = torch.tensor([0, 1, 2, -1, -1, -1, -1, -1])
             moe_method.ep_size = ep_size
@@ -377,8 +386,6 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
             if ep_size == 1:
                 x = x.view(-1, 2)
             router_logits = torch.randn(8, 8)
-            if alltoall_buffer:
-                moe_method.max_model_len = 1
             layer = MagicMock()
             layer.w13_weight = torch.randn(8, 16, 1)
             layer.w2_weight = torch.randn(16, 8, 1)

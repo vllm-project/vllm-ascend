@@ -42,7 +42,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5559
+export VLLM_ASCEND_LLMDD_RPC_PORT=5559
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
@@ -70,9 +70,7 @@ vllm serve /models/deepseek_r1_w8a8 \
   "kv_port": "20001",
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
-  }'  \
-  --additional-config \
-  '{"chunked_prefill_for_mla":true}' 
+  }'
 ```
 
 Run prefill server P2 on second node:
@@ -85,7 +83,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5659
+export VLLM_ASCEND_LLMDD_RPC_PORT=5659
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
@@ -114,9 +112,7 @@ vllm serve /models/deepseek_r1_w8a8 \
   "kv_port": "20001",
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
-  }'  \
-  --additional-config \
-  '{"chunked_prefill_for_mla":true}'
+  }'
 ```
 
 Run decode server d1 on third node:
@@ -131,7 +127,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5759
+export VLLM_ASCEND_LLMDD_RPC_PORT=5759
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
@@ -173,7 +169,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5859
+export VLLM_ASCEND_LLMDD_RPC_PORT=5859
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \

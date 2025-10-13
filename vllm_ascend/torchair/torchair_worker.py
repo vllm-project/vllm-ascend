@@ -17,9 +17,9 @@ import torch
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.torchair.torchair_model_runner import NPUTorchairModelRunner
 from vllm_ascend.torchair.utils import (check_kv_cache_bytes_cache_exist,
-                                        check_torchair_cache_exist,
                                         delete_torchair_cache_file,
                                         read_kv_cache_bytes_from_file)
 from vllm_ascend.worker.worker_v1 import NPUWorker
@@ -32,8 +32,11 @@ class NPUTorchairWorker(NPUWorker):
         """Override determine_available_memory to use cached torchair kv_cache_bytes."""
 
         available_kv_cache_memory = super().determine_available_memory()
-
-        if check_torchair_cache_exist() and check_kv_cache_bytes_cache_exist():
+        ascend_config = get_ascend_config()
+        if ascend_config.enable_shared_expert_dp:
+            return available_kv_cache_memory
+        if ascend_config.torchair_graph_config.use_cached_kv_cache_bytes and check_kv_cache_bytes_cache_exist(
+        ):
             old_kv_cache_bytes = read_kv_cache_bytes_from_file(
                 torch.distributed.get_rank())
             if 0 < old_kv_cache_bytes <= available_kv_cache_memory:

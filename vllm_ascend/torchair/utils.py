@@ -18,8 +18,8 @@ except ImportError:
 KV_CACHE_BYTES_CACHE_PATH_NAME = ".kv_cache_bytes"
 KV_CACHE_BYTES_CACHE_FILE_NAME = "kv_cache_bytes"
 TORCHAIR_CACHE_PATH_NAME = ".torchair_cache"
-TORCHAIR_CACHE_DIR = os.getenv(
-    'TORCHAIR_CACHE_HOME', os.path.join(os.getcwd(), TORCHAIR_CACHE_PATH_NAME))
+TORCHAIR_CACHE_DIR = os.path.join(
+    os.getenv('TORCHAIR_CACHE_HOME', os.getcwd()), TORCHAIR_CACHE_PATH_NAME)
 
 
 @dataclass
@@ -111,8 +111,10 @@ def write_kv_cache_bytes_to_file(rank, kv_cache_bytes):
 
 def delete_torchair_cache_file():
     torch_air_abs_path = _get_torchair_current_work_dir()
-    if os.path.exists(torch_air_abs_path):
+    try:
         shutil.rmtree(torch_air_abs_path)
+    except FileNotFoundError:
+        pass
 
 
 def npu_stream_switch(tag: str, priority: int, *, enabled: bool = True):
@@ -168,17 +170,50 @@ def register_torchair_model():
         "vllm_ascend.torchair.models.qwen2:CustomQwen2ForCausalLM")
 
     ModelRegistry.register_model(
-        "Qwen3ForCausalLM",
+        "Qwen3MoeForCausalLM",
         "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+
+    ModelRegistry.register_model(
+        "PanguProMoEForCausalLM",
+        "vllm_ascend.torchair.models.torchair_pangu_moe:PanguProMoEForCausalLM"
+    )
 
 
 def torchair_quant_method_register():
-    from vllm_ascend.quantization.quantizer import \
-        SUPPORT_ASCEND_QUANTIZER_TYPE
-    from vllm_ascend.torchair.quantization.torchair_quantizer import (
-        TorchairW4A8DYNAMICQuantizer, TorchairW8A8DYNAMICQuantizer)
+    from vllm_ascend.quantization.utils import ASCEND_QUANTIZATION_METHOD_MAP
+    from vllm_ascend.torchair.quantization.torchair_w4a8_dynamic import (
+        TorchairAscendW4A8DynamicFusedMoEMethod,
+        TorchairAscendW4A8DynamicLinearMethod)
+    from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import (
+        TorchairAscendW8A8DynamicFusedMoEMethod,
+        TorchairAscendW8A8DynamicLinearMethod)
 
-    SUPPORT_ASCEND_QUANTIZER_TYPE[
-        "W8A8_DYNAMIC"] = TorchairW8A8DYNAMICQuantizer
-    SUPPORT_ASCEND_QUANTIZER_TYPE[
-        "W4A8_DYNAMIC"] = TorchairW4A8DYNAMICQuantizer
+    ASCEND_QUANTIZATION_METHOD_MAP["W8A8_DYNAMIC"][
+        "linear"] = TorchairAscendW8A8DynamicLinearMethod
+    ASCEND_QUANTIZATION_METHOD_MAP["W8A8_DYNAMIC"][
+        "moe"] = TorchairAscendW8A8DynamicFusedMoEMethod
+    ASCEND_QUANTIZATION_METHOD_MAP["W4A8_DYNAMIC"][
+        "linear"] = TorchairAscendW4A8DynamicLinearMethod
+    ASCEND_QUANTIZATION_METHOD_MAP["W4A8_DYNAMIC"][
+        "moe"] = TorchairAscendW4A8DynamicFusedMoEMethod
+
+
+def torchair_ops_patch():
+    from vllm_ascend.ops.activation import AscendSiluAndMul
+    from vllm_ascend.ops.layernorm import AscendRMSNorm
+    from vllm_ascend.ops.rotary_embedding import (
+        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+    from vllm_ascend.torchair.ops import (torchair_activation,
+                                          torchair_layernorm)
+    from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
+        deepseek_rope_init_func, native_rope_deepseek_forward,
+        qwen_rope_init_func, rope_forward)
+
+    AscendRotaryEmbedding.__init__ = qwen_rope_init_func  # type: ignore[method-assign]
+    AscendRotaryEmbedding.forward_oot = rope_forward  # type: ignore[method-assign]
+
+    AscendDeepseekScalingRotaryEmbedding.__init__ = deepseek_rope_init_func  # type: ignore[method-assign]
+    AscendDeepseekScalingRotaryEmbedding.forward = native_rope_deepseek_forward  # type: ignore[method-assign]
+
+    AscendRMSNorm.forward_oot = torchair_layernorm.torchair_rmsnorm_forward_oot  # type: ignore[method-assign]
+    AscendSiluAndMul.forward_oot = torchair_activation.torchair_silu_and_mul_forward_oot  # type: ignore[method-assign]

@@ -21,6 +21,13 @@ class AscendCommonAttentionMetadata:
     """(batch_size,), the length of each request including both computed tokens
     and newly scheduled tokens"""
 
+    seq_lens: torch.Tensor
+    """same to seq_lens_cpu, for compatibility with some new attn metadata
+    (such as GDN)."""
+
+    num_computed_tokens_cpu: torch.Tensor
+    """(batch_size,), the number of computed tokens for each request"""
+
     num_reqs: int
     """Number of requests"""
     num_actual_tokens: int

@@ -98,10 +98,12 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
 
     def __init__(
         self,
+        kv_cache_spec,
+        layer_names,
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        super().__init__(vllm_config, device)
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.max_num_blocks_per_req = cdiv(
             self.model_config.max_model_len,
             self.vllm_config.cache_config.block_size)
@@ -171,6 +173,7 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
 
     def build(
         self,
+        common_prefix_len: int,
         common_attn_metadata: AscendCommonAttentionMetadata,
         model: nn.Module,
     ):
@@ -304,6 +307,7 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+        self.scale_tensor = torch.zeros((), device='npu', dtype=torch.int32)
 
     def forward(
         self,
@@ -366,13 +370,16 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             key_cache, value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
 
-            block_size = key_cache.shape[1]
+            block_size = self.scale_tensor + key_cache.shape[1]
             slots_indices = slots.reshape(-1, 1)
             block_indices = slots_indices // block_size
             slots_indices = slots_indices % block_size
             indices = torch.cat((block_indices, slots_indices), dim=1)
             torch_npu.npu_scatter_nd_update_(key_cache, indices, key)
             torch_npu.npu_scatter_nd_update_(value_cache, indices, value)
+            if attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
+                self.key_cache = key_cache
+                self.value_cache = value_cache
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             assert attn_metadata is not None
@@ -410,11 +417,13 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             assert attn_metadata is not None
             assert attn_metadata.attn_mask is not None
             compress_mask = attn_metadata.attn_mask
+            batch_size = attn_metadata.query_lens.shape[0]
+            block_table = attn_metadata.block_tables[:batch_size, :]
             torch_npu._npu_flash_attention_qlens(
                 query=query,
                 key_cache=self.key_cache,
                 value_cache=self.value_cache,
-                block_table=attn_metadata.block_tables,
+                block_table=block_table,
                 mask=compress_mask,
                 seq_len=attn_metadata.query_lens,
                 context_lens=attn_metadata.seq_lens,
@@ -430,17 +439,24 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             block_size = key_cache.shape[1]
             query = query.view(num_tokens, 1,
                                self.num_heads * self.head_size).contiguous()
-            output = torch_npu.npu_incre_flash_attention(
-                query,
-                key_cache,
-                value_cache,
-                num_key_value_heads=self.num_kv_heads,
+            output, _ = torch_npu.npu_fused_infer_attention_score(
+                query=query,
+                key=key_cache,
+                value=value_cache,
+                query_rope=None,
+                key_rope=None,
                 num_heads=self.num_heads,
-                actual_seq_lengths=seq_lens,
-                scale_value=self.scale,
-                block_table=block_table,
+                num_key_value_heads=self.num_kv_heads,
                 input_layout='BSH',
-                block_size=block_size)
+                atten_mask=decode_meta.attn_mask,
+                sparse_mode=0,
+                scale=self.scale,
+                antiquant_mode=0,
+                antiquant_scale=None,
+                block_table=block_table,
+                block_size=block_size,
+                actual_seq_lengths_kv=seq_lens,
+            )
         else:
             raise NotImplementedError(
                 "Torchair graph mode with non-MLA attention backend is still experimental."

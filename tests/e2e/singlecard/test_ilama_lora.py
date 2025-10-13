@@ -47,9 +47,11 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 def test_ilama_lora(ilama_lora_files):
     with VllmRunner(snapshot_download(MODEL_PATH),
                     enable_lora=True,
+                    dtype="half",
                     max_loras=4,
                     max_model_len=1024,
-                    max_num_seqs=16) as vllm_model:
+                    max_num_seqs=16,
+                    enforce_eager=True) as vllm_model:
 
         output1 = do_sample(vllm_model.model, ilama_lora_files, lora_id=1)
         for i in range(len(EXPECTED_LORA_OUTPUT)):

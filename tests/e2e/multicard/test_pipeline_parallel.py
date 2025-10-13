@@ -42,6 +42,5 @@ def test_models(model: str, tp_size: int, pp_size: int,
                     tensor_parallel_size=tp_size,
                     pipeline_parallel_size=pp_size,
                     distributed_executor_backend=distributed_executor_backend,
-                    enforce_eager=True,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_model.generate_greedy(prompts, 64)

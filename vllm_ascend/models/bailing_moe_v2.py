@@ -116,7 +116,6 @@ def rotate_half(x):
 # Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     """Applies Rotary Position Embedding to the query and key tensors.
-
     Args:
         q (`torch.Tensor`): The query tensor.
         k (`torch.Tensor`): The key tensor.
@@ -166,18 +165,22 @@ class BailingAttention(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.total_num_heads = config.num_attention_heads
-        self.total_kv_heads = config.num_key_value_heads
+        self.total_num_kv_heads = config.num_key_value_heads
         tp_size = get_tensor_model_parallel_world_size()
 
         assert self.total_num_heads % tp_size == 0
-        assert self.total_kv_heads % tp_size == 0
-        assert self.total_num_heads >= self.total_kv_heads
+        if self.total_num_kv_heads > tp_size:
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            assert tp_size % self.total_num_kv_heads == 0
+        assert self.total_num_heads >= self.total_num_kv_heads
+
 
         self.num_heads = self.total_num_heads // tp_size
         self.head_dim = config.head_dim or (self.hidden_size //
                                             self.total_num_heads)
         self.q_size_per_rank = self.head_dim * self.num_heads
-        self.num_kv_heads = self.total_kv_heads // tp_size
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.kv_size_per_rank = self.num_kv_heads * self.head_dim
         self.scale = self.head_dim**-0.5
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
@@ -187,7 +190,7 @@ class BailingAttention(nn.Module):
             self.hidden_size,
             self.head_dim,
             self.total_num_heads,
-            self.total_kv_heads,
+            self.total_num_kv_heads,
             bias=(config.use_bias or config.use_qkv_bias),
             quant_config=quant_config,
             prefix=f"{prefix}.query_key_value",
@@ -198,7 +201,6 @@ class BailingAttention(nn.Module):
                 else nn.LayerNorm(self.head_dim, eps=1e-6)
             self.key_layernorm = BailingMoeV2RMSNorm(self.head_dim, eps=config.rms_norm_eps) if self.use_rmsnorm \
                 else nn.LayerNorm(self.head_dim, eps=1e-6)
-        
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
@@ -214,7 +216,6 @@ class BailingAttention(nn.Module):
             self.rotary_dim = config.rotary_dim
         else:
             self.rotary_dim = self.head_dim
-        
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.rotary_dim,
@@ -353,7 +354,6 @@ class BailingMoe(nn.Module):
             and self.topk_group is not None
         )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-        
         router_dtype = getattr(config, "router_dtype", None)
         if router_dtype is None:
             self.router_dtype = None
@@ -374,7 +374,6 @@ class BailingMoe(nn.Module):
             self.gate.expert_bias = nn.Parameter(torch.empty((self.num_experts,), dtype=torch.bfloat16))
         else:
             self.gate.expert_bias = None
-        
         self.correction_bias = (
             self.gate.expert_bias.data if self.gate.expert_bias is not None else None
         )
@@ -387,7 +386,6 @@ class BailingMoe(nn.Module):
             ), "score_funciton and correction_bias should be in 2 combination (softmax, None) or (sigmoid, not None)"
         else:
             self.score_function = "softmax"
-        
         self.experts = FusedMoE(
             num_experts=self.num_experts,
             top_k=self.top_k,
@@ -491,7 +489,6 @@ class BailingMoeBlock(nn.Module):
             mlp_class = BailingMLP
         else:
             mlp_class = BailingMoe
-        
         self.mlp = mlp_class(intermediate_size, config, quant_config, True, prefix=f"{prefix}.mlp")
 
     def forward(
@@ -516,14 +513,12 @@ class BailingMoeBlock(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states.to(residual.device)
         return hidden_states
-        
 
 
 @support_torch_compile
 class BailingMoeModel(nn.Module):
     """
     Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`BailingMoeV2DecoderLayer`]
-
     Args:
         config: BailingMoeV2Config
     """
@@ -541,7 +536,7 @@ class BailingMoeModel(nn.Module):
         self.config = config
         self.vocab_size = self.config.vocab_size
         self.embed_dim = self.config.hidden_size
-        self.num_mtp_layers = self.config.num_mtp_layers
+        self.num_mtp_layers = getattr(config, "num_mtp_layers", None)
         self.embed_dim = config.hidden_size
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
 
@@ -555,10 +550,10 @@ class BailingMoeModel(nn.Module):
             )
         else:
             self.word_embeddings = PPMissingLayer()
-        
+
         self.embedding_dropout = torch.nn.Dropout(config.embedding_dropout)
         self.rotary_emb = BailingMoeV2RotaryEmbedding(config=config)
-        
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
             lambda prefix: BailingMoeBlock(
@@ -580,7 +575,7 @@ class BailingMoeModel(nn.Module):
             self.norm = BailingMoeV2RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-    
+            
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.word_embeddings(input_ids)
 

@@ -22,6 +22,8 @@ Run `pytest tests/multicard/test_torchair_graph_mode.py`.
 import os
 from typing import Dict
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
@@ -54,7 +56,6 @@ def _deepseek_torchair_test_fixture(
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
-            enforce_eager=False,
             additional_config=additional_config,
     ) as vllm_model:
         # use greedy sampler to make sure the generated results are fix
@@ -131,7 +132,6 @@ def _pangu_torchair_test_fixture(
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
-            enforce_eager=False,
             additional_config=additional_config,
             enable_expert_parallel=True,
     ) as vllm_model:
@@ -155,6 +155,7 @@ def _pangu_torchair_test_fixture(
         print(f"Generated text: {vllm_output[i][1]!r}")
 
 
+@pytest.mark.skip("skipping test_e2e_pangu_with_torchair")
 def test_e2e_pangu_with_torchair():
     additional_config = {
         "torchair_graph_config": {

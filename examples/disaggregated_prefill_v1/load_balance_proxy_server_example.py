@@ -363,6 +363,7 @@ async def send_request_to_service(client: httpx.AsyncClient,
     }
     req_data["stream"] = False
     req_data["max_tokens"] = 1
+    req_data["min_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
     headers = {

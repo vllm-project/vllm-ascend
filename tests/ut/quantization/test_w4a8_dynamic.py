@@ -11,8 +11,19 @@ from vllm_ascend.quantization.w4a8_dynamic import (
 class TestAscendW4A8DynamicLinearMethod(TestBase):
 
     def setUp(self):
-        self.method = AscendW4A8DynamicLinearMethod()
-        self.method.group_size = 8
+        with patch(
+                'vllm_ascend.quantization.w4a8_dynamic.get_current_vllm_config'
+        ) as mock_get_current_vllm_config:
+            mock_vllm_config = Mock()
+            mock_vllm_config.quant_config = Mock(
+                quant_description={"group_size": 256})
+            mock_vllm_config.scheduler_config = Mock(
+                max_num_batched_tokens=2048,
+                max_model_len=2048,
+                enable_chunked_prefill=False)
+            mock_get_current_vllm_config.return_value = mock_vllm_config
+            self.method = AscendW4A8DynamicLinearMethod()
+            self.method.group_size = 8
 
     def test_get_weight(self):
         weight = self.method.get_weight(8, 32, torch.bfloat16)

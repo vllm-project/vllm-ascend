@@ -258,7 +258,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
-
+            worker._sleep_saved_buffers = {}
             # Test wake_up method
             worker.wake_up(tags=["test_tag"])
 
@@ -452,11 +452,13 @@ class TestNPUWorker(TestBase):
         mock_logger,
         mock_envs_vllm,
     ):
-        """Test _init_profiler method - profiler enabled case"""
+        """Test _init_profiler method - profiler enabled case with stack and memory profiling enabled"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
 
         # Set environment variables to enable profiler
         mock_envs_vllm.VLLM_TORCH_PROFILER_DIR = "/path/to/traces"
+        mock_envs_vllm.VLLM_TORCH_PROFILER_WITH_STACK = True
+        mock_envs_vllm.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY = True
 
         # Set enum mocks
         mock_export_type.Text = "Text"
@@ -516,8 +518,8 @@ class TestNPUWorker(TestBase):
             # Verify profiler parameters
             expected_activities = ["CPU", "NPU"]
             self.assertEqual(profile_kwargs["activities"], expected_activities)
-            self.assertFalse(profile_kwargs["with_stack"])
-            self.assertFalse(profile_kwargs["profile_memory"])
+            self.assertTrue(profile_kwargs["with_stack"])
+            self.assertTrue(profile_kwargs["profile_memory"])
             self.assertFalse(profile_kwargs["with_modules"])
             self.assertEqual(profile_kwargs["experimental_config"],
                              mock_experimental_config_instance)
@@ -1007,7 +1009,9 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker_v1.NPUPlatform.seed_everything")
     @patch("vllm_ascend.worker.worker_v1.logger")
-    def test_compile_or_warm_up_model_with_eager_mode(self, mock_logger,
+    @patch("vllm_ascend.worker.worker_v1.NPUWorker._warm_up_atb")
+    def test_compile_or_warm_up_model_with_eager_mode(self, mock_warm_up_atb,
+                                                      mock_logger,
                                                       mock_seed_everything):
         """Test compile_or_warm_up_model method - eager mode"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
@@ -1049,10 +1053,14 @@ class TestNPUWorker(TestBase):
             # Verify seed setting
             mock_seed_everything.assert_called_once_with(12345)
 
+            # Verify atb warm up
+            mock_warm_up_atb.assert_called_once()
+
     @patch("vllm_ascend.worker.worker_v1.NPUPlatform.seed_everything")
     @patch("vllm_ascend.worker.worker_v1.logger")
+    @patch("vllm_ascend.worker.worker_v1.NPUWorker._warm_up_atb")
     def test_compile_or_warm_up_model_with_graph_capture(
-            self, mock_logger, mock_seed_everything):
+            self, mock_warm_up_atb, mock_logger, mock_seed_everything):
         """Test compile_or_warm_up_model method - with graph capture enabled"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
 
@@ -1084,6 +1092,9 @@ class TestNPUWorker(TestBase):
 
             # Verify seed setting
             mock_seed_everything.assert_called_once_with(67890)
+
+            # Verify atb warm up
+            mock_warm_up_atb.assert_called_once()
 
     @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
     def test_initialize_from_config_with_sleep_mode(self,

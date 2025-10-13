@@ -25,9 +25,10 @@ from vllm.config import SchedulerConfig
 class AscendSchedulerConfig(SchedulerConfig):
     enable_chunked_prefill: bool = False
     policy: str = "fcfs"
-    num_scheduler_steps: int = 1
     scheduler_cls: Union[str, Type[object]] = (
         "vllm_ascend.core.scheduler.AscendScheduler")
+    enable_pd_transfer: bool = False
+    decode_max_num_seqs: int = 0
 
     @classmethod
     def initialize_from_config(
@@ -42,9 +43,10 @@ class AscendSchedulerConfig(SchedulerConfig):
         # Override default values into original SchedulerConfig
         scheduler_config["enable_chunked_prefill"] = False
         scheduler_config["policy"] = "fcfs"
-        scheduler_config["num_scheduler_steps"] = 1
         scheduler_config["scheduler_cls"] = (
             "vllm_ascend.core.scheduler.AscendScheduler")
+        scheduler_config["enable_pd_transfer"] = False
+        scheduler_config["decode_max_num_seqs"] = 0
         # Override params in original SchedulerConfig with params in ascend_scheduler_config
         for k, _ in scheduler_config.items():
             if hasattr(ascend_scheduler_config, k):
@@ -69,12 +71,6 @@ class AscendSchedulerConfig(SchedulerConfig):
             raise NotImplementedError(
                 f"currently AscendScheduler only supports fcfs policy, got {self.policy}"
             )
-        if self.is_multimodal_model:
-            raise NotImplementedError(
-                "currently AscendScheduler only supports LLM models.")
-        if self.num_scheduler_steps > 1:
-            raise NotImplementedError(
-                "currently AscendScheduler doesn't support multi-step.")
         if self.send_delta_data:
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support send_delta_data.")
