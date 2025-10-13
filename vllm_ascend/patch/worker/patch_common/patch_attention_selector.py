@@ -22,9 +22,10 @@ import torch
 import vllm
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import (backend_name_to_enum,
                                      get_global_forced_attn_backend)
-from vllm.platforms import _Backend, current_platform
+from vllm.platforms import current_platform
 from vllm.utils import resolve_obj_by_qualname
 
 
