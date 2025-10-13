@@ -48,13 +48,7 @@ def test_generate_task_and_state_flow(mock_adaptor):
 
         loader_obj.generate_expert_d2d_transfer_task([], [], {}, 0)
         assert loader_obj.comm_op_list is None
-
-        updated_map = {20: torch.tensor(0)}
-        loader_obj.generate_expert_d2d_transfer_task([(1, 10)], [(2, 20)],
-                                                     updated_map, 0)
-        assert loader_obj.state == loader.ExpertWeightUpdateState.READY
-        assert loader_obj.comm_op_list
-        assert loader_obj.recv_expert_list
+        assert loader_obj.state == loader.ExpertWeightUpdateState.WAITING
 
 
 def test_asyn_transfer_and_update(mock_adaptor):

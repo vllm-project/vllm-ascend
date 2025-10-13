@@ -1,0 +1,142 @@
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: vllm
+  namespace: vllm-project
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec:
+        containers:
+          - name: vllm-leader
+            image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+            env:
+              - name: VLLM_USE_MODELSCOPE
+                value: "true"
+              - name: WORKSPACE
+                value: "/root/workspace"
+              - name: WORLD_SIZE
+                value: "2"
+              - name: NPU_PER_NODE
+                value: "16"
+              # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
+              - name: VLLM_VERSION
+                value: "v0.11.0"
+              - name: VLLM_ASCEND_VERSION
+                value: "main"
+              - name: MOONCAKE_VERSION
+                value: "06cc217504a6f1b0cdaa26b096b985651b262748"
+            command:
+              - sh
+              - -c
+              - |
+                bash /root/.cache/tests/run.sh
+            resources:
+              limits:
+                huawei.com/ascend-1980: "16"
+                memory: 512Gi
+                ephemeral-storage: 100Gi
+              requests:
+                huawei.com/ascend-1980: "16"
+                ephemeral-storage: 100Gi
+                cpu: 125
+            ports:
+              - containerPort: 8080
+            # readinessProbe:
+            #   tcpSocket:
+            #     port: 8080
+            #   initialDelaySeconds: 15
+            #   periodSeconds: 10
+            volumeMounts:
+              - mountPath: /root/.cache
+                name: shared-volume
+              - mountPath: /usr/local/Ascend/driver/tools
+                name: driver-tools
+              - mountPath: /dev/shm
+                name: dshm
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 15Gi
+        - name: shared-volume
+          persistentVolumeClaim:
+            claimName: nv-action-vllm-benchmarks-v2
+        - name: driver-tools
+          hostPath:
+            path: /usr/local/Ascend/driver/tools
+    workerTemplate:
+      spec:
+        containers:
+          - name: vllm-worker
+            image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+            env:
+              - name: VLLM_USE_MODELSCOPE
+                value: "true"
+              - name: WORKSPACE
+                value: "/root/workspace"
+              - name: WORLD_SIZE
+                value: "2"
+              - name: NPU_PER_NODE
+                value: "16"
+              # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
+              - name: VLLM_VERSION
+                value: "v0.11.0"
+              - name: VLLM_ASCEND_VERSION
+                value: "main"
+              - name: MOONCAKE_VERSION
+                value: "06cc217504a6f1b0cdaa26b096b985651b262748"
+            command:
+              - sh
+              - -c
+              - |
+                bash /root/.cache/tests/run.sh
+            resources:
+              limits:
+                huawei.com/ascend-1980: "16"
+                memory: 512Gi
+                ephemeral-storage: 100Gi
+              requests:
+                huawei.com/ascend-1980: "16"
+                ephemeral-storage: 100Gi
+                cpu: 125
+            volumeMounts:
+              - mountPath: /root/.cache
+                name: shared-volume
+              - mountPath: /usr/local/Ascend/driver/tools
+                name: driver-tools
+              - mountPath: /dev/shm
+                name: dshm
+        volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 15Gi
+        - name: shared-volume
+          persistentVolumeClaim:
+            claimName: nv-action-vllm-benchmarks-v2
+        - name: driver-tools
+          hostPath:
+            path: /usr/local/Ascend/driver/tools
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-leader
+  namespace: vllm-project
+spec:
+  ports:
+    - name: http
+      port: 8080
+      protocol: TCP
+      targetPort: 8080
+  selector:
+    leaderworkerset.sigs.k8s.io/name: vllm
+    role: leader
+  type: ClusterIP

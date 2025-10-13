@@ -23,6 +23,7 @@ from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
                               tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
@@ -185,13 +186,23 @@ class AscendFusedMoE(FusedMoE):
                                                     os.R_OK):
             self.expert_load_balancer = ExpertLoadBalancer(
                 self.expert_map_path, self.global_num_experts)
-            self.local_num_experts, self.expert_map = (
-                self.expert_load_balancer.get_rank_placement_map(
-                    self.moe_instance_id, self.ep_rank))
-            self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id, self.ep_rank).npu()
             self.global_redundant_expert_num = (
                 self.expert_load_balancer.get_global_redundant_expert_num())
+            try:
+                self.local_num_experts, self.expert_map = (
+                    self.expert_load_balancer.get_rank_placement_map(
+                        self.moe_instance_id, self.ep_rank))
+                self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
+                    self.moe_instance_id, self.ep_rank).npu()
+            except Exception as e:
+                logger.warning(
+                    f"Init expert map of mtp/eagle when using sample.{e}")
+                self.local_num_experts, self.expert_map = determine_default_expert_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank,
+                    self.global_redundant_expert_num)
+                self.log2phy = determine_default_log2phy_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank,
+                    self.global_redundant_expert_num).npu()
         else:
             # init moe.
             self.local_num_experts, self.expert_map = determine_expert_map(
@@ -227,6 +238,7 @@ class AscendFusedMoE(FusedMoE):
         if (self.quant_method.__class__.__name__
                 in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
             moe_quant_params["intermediate_size_full"] = intermediate_size
+        self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
