@@ -1405,7 +1405,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             else:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
             # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds[:total_num_scheduled_tokens].copy_(
+            self.inputs_embeds.gpu[:total_num_scheduled_tokens].copy_(
                 inputs_embeds)
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             input_ids = None
