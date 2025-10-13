@@ -2569,7 +2569,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                              dtype=torch.int8,
                                              device=self.device)
                         kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "self_attn" in layer_name:
+                elif "self_attn" in layer_name or "attention" in layer_name:
                     tensor = torch.zeros(kv_cache_tensor.size,
                                          dtype=torch.int8,
                                          device=self.device)
