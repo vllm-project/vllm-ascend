@@ -312,12 +312,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
 
-        if torch.version.cann.startswith("8.3"):
+        if torch.version.cann.startswith("8.3") and self.head_size != 256:
             output, _ = torch_npu.npu_fused_infer_attention_score(
                 query=query,
                 key=key,
                 value=value,
-                atten_mask=attn_metadata.attn_mask,
+                atten_mask=mask,
                 input_layout="TND",
                 actual_seq_lengths=attn_metadata.query_start_loc[1:],
                 actual_seq_lengths_kv=attn_metadata.query_start_loc[1:],
