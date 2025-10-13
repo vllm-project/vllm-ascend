@@ -289,9 +289,9 @@ class NPUPlatform(Platform):
                              dtype,
                              kv_cache_dtype,
                              block_size,
-                             use_v1,
-                             use_mla,
-                             use_sfa,
+                             use_v1=True,
+                             use_mla=False,
+                             use_sfa=False,
                              has_sink=False):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")

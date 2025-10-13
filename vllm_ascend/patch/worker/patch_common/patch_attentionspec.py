@@ -16,8 +16,8 @@ class AttentionSpec(KVCacheSpec):
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
-    use_mla: bool
-    use_sfa: bool
+    use_mla: bool = False
+    use_sfa: bool = False
 
     @property
     def page_size_bytes(self) -> int:
