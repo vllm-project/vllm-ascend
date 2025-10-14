@@ -28,7 +28,7 @@ def test_multi_dp(config: MultiNodeConfig) -> None:
     perf_config = config.perf_config
     model_name = server_config.model
     assert model_name is not None, "Model name must be specified"
-    if config.is_disaggregate_prefill:
+    if config.disaggregate_prefill:
         disaggerated_prefill = DisaggegatedPrefill(config)
 
         # generate ranktable.json
