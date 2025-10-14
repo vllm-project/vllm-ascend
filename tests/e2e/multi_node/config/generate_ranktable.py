@@ -3,6 +3,8 @@ import os
 import socket
 import subprocess
 
+import torch.distributed as dist
+
 from tests.e2e.multi_node.config.common import (ASCEND_ENV_PATH,
                                                 DECODER_START_PORT,
                                                 DISAGGEGATED_PREFILL_PORT,
@@ -12,8 +14,9 @@ from tests.e2e.multi_node.config.common import (ASCEND_ENV_PATH,
                                                 RANKTABLE_GEN_PATH,
                                                 RANKTABLE_PATH)
 from tests.e2e.multi_node.config.multi_node_config import MultiNodeConfig
-from tests.e2e.multi_node.config.utils import (get_cluster_ips, get_cur_ip,
-                                               get_net_interface, setup_logger)
+from tests.e2e.multi_node.config.utils import (dist_group, get_cluster_ips,
+                                               get_cur_ip, get_net_interface,
+                                               setup_logger, temp_env)
 
 setup_logger()
 logger = logging.getLogger(__name__)
@@ -42,9 +45,12 @@ class DisaggegatedPrefill:
         self.ips = get_cluster_ips(self.world_size)
         self.cur_ip = get_cur_ip()
         self.with_prefill = os.getenv("WITH_PREFILL", "1") == "1"
+        # headless means that there is no API server on this node
+        self.headless = config.server_config.headless
         self.is_leader = self.cur_ip == self.ips[0]
         if self.is_leader:
             assert self.with_prefill, "Leader node must have prefill enabled"
+            assert not self.headless, "Leader node cannot be headless"
 
         self.nic_name = get_net_interface(self.cur_ip)
         if self.nic_name is None:
@@ -64,7 +70,7 @@ class DisaggegatedPrefill:
         local_host = "127.0.0.1"
         master_addr = self.ips[0]
         master_port = DISAGGEGATED_PREFILL_PORT
-        nnodes = len(self.ips)
+        nnodes = self.world_size
         node_rank = None
 
         for i, ip in enumerate(self.ips):
@@ -121,48 +127,99 @@ class DisaggegatedPrefill:
 
         subprocess.run(cmd, env=env, check=True)
 
+    def sync_node_roles(self, local_ip: str, with_prefill: bool,
+                        headless: bool) -> list[tuple[bool, bool]]:
+        """
+        sync (local_ip, with_prefill, headless) info across all nodes
+        """
+        world_size = dist.get_world_size()
+        local_info = (local_ip, with_prefill, headless)
+        gathered_info = [None for _ in range(world_size)]
+        dist.all_gather_object(gathered_info, local_info)
+        return gathered_info
+
     def launch_server_proxy(self):
         """
-        Launch the proxy server for disaggregated prefill.
-        Currently, we assume prefillers and decoders share all devices equally
-        eg: we have 2 nodes (16 NPUs each), and prefillers and decoders 
-        Occupy all devices of these two nodes in turn
+        Launch the proxy server for the disaggregated prefill architecture.
+
+        In this setup, prefillers and decoders are distributed across multiple nodes.
+        For example:
+            - If there are 2 nodes (16 NPUs each)
+            - Prefillers and decoders will each occupy all NPUs of one node
+
+        This method:
+            1. Synchronizes role information (prefill/decoder) across nodes
+            2. Collects IPs for prefillers and decoders
+            3. Assigns communication ports
+            4. Launches the proxy load balancer
         """
-        if not self.is_leader:
-            logger.info(
-                "Skipping proxy server launch, proxy only launch on leader node"
-            )
-            return
         assert self.world_size == len(
-            self.ips), "World size and IPs length mismatch"
-        assert self.world_size >= self.num_decoder_nodes + self.num_prefiller_nodes, \
-            "Not enough nodes for the specified number of prefillers and decoders"
+            self.ips), "World size does not match the number of IPs"
+        assert self.world_size >= self.num_decoder_nodes + self.num_prefiller_nodes, (
+            "Insufficient nodes for the configured number of prefillers and decoders"
+        )
 
-        # prefillers and decoders ips should be equal to num_prefiller and num_decoder
-        prefill_ips = self.ips[
-            :self.num_prefillers,
-        ]
+        prefill_ips, decode_ips = [], []
 
-        # Assign ports for each prefillers and decoders
-        prefiller_ports = [
+        # === Step 1. Synchronize node roles using distributed communication ===
+        with temp_env({
+                "MASTER_ADDR": self.ips[0],
+                "MASTER_PORT": str(DISAGGEGATED_PREFILL_PORT),
+                "WORLD_SIZE": str(self.world_size),
+                "RANK": str(self.ips.index(self.cur_ip)),
+        }):
+            with dist_group(backend="gloo"):
+                rank = dist.get_rank()
+                world_size = dist.get_world_size()
+                logger.info(
+                    f"[Rank {rank}] Connected to process group (world_size={world_size})"
+                )
+
+                all_roles = self.sync_node_roles(self.cur_ip,
+                                                 self.with_prefill,
+                                                 self.headless)
+
+        assert len(
+            all_roles
+        ) == self.world_size, "Mismatch between world size and gathered roles"
+
+        # === Step 2. Split IPs by role ===
+        for local_ip, with_prefill, headless in all_roles:
+            if headless:
+                continue
+            if with_prefill:
+                prefill_ips.append(local_ip)
+            else:
+                decode_ips.append(local_ip)
+
+        # === Step 3. Assign ports ===
+        prefill_ports = [
             PREFILLER_START_PORT + i for i in range(len(prefill_ips))
         ]
-        decoder_ports = [
-            DECODER_START_PORT + i for i in range(len(decode_ips))
-        ]
+        decode_ports = [DECODER_START_PORT + i for i in range(len(decode_ips))]
 
+        # === Step 4. Build and launch proxy command ===
         proxy_cmd = [
-            "python", LOAD_BALANCER_PROXY_SCRIPT, "--host", self.ips[0],
-            "--port", "1025", "--prefiller-hosts", ",".join(self.prefill_ips),
-            "--prefiller-port", ",".join(prefiller_ports), "--decoder-hosts",
-            ",".join(self.decode_ips), "--decoder-ports",
-            ",".join(decoder_ports)
+            "python",
+            LOAD_BALANCER_PROXY_SCRIPT,
+            "--host",
+            self.ips[0],
+            "--port",
+            "1025",
+            "--prefiller-hosts",
+            " ".join(prefill_ips),
+            "--prefiller-ports",
+            " ".join(map(str, prefill_ports)),
+            "--decoder-hosts",
+            " ".join(decode_ips),
+            "--decoder-ports",
+            " ".join(map(str, decode_ports)),
         ]
 
-        logger.info("Launching proxy server with command:")
+        logger.info("Launching proxy server with the following command:")
         logger.info(" ".join(proxy_cmd))
 
-        subprocess.Popen(proxy_cmd, env=env)
+        #subprocess.Popen(proxy_cmd, env=os.environ.copy())
 
     @classmethod
     def _set_env(cls):
@@ -185,3 +242,4 @@ if __name__ == "__main__":
     print(pd_config.server_config.to_list())
     dp = DisaggegatedPrefill(pd_config)
     dp.setup_and_run_ranktable()
+    dp.launch_server_proxy()

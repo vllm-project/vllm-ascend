@@ -47,7 +47,6 @@
         "num_prefiller_nodes": 1,
         "num_decoders": 1,
         "num_decoder_nodes": 1,
-        "num_nodes": 2,
         "server_parameters": {
             "leader_config": {
                 "model": "vllm-ascend/DeepSeek-V3-W8A8",

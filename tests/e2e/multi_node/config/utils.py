@@ -1,9 +1,40 @@
 import logging
 import os
 import socket
+from contextlib import contextmanager
 from typing import Optional
 
 import psutil
+import torch.distributed as dist
+
+
+@contextmanager
+def temp_env(env_dict):
+    old_env = {}
+    for k, v in env_dict.items():
+        old_env[k] = os.environ.get(k)
+        os.environ[k] = str(v)
+    try:
+        yield
+    finally:
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+@contextmanager
+def dist_group(backend="gloo"):
+    if dist.is_initialized():
+        yield
+        return
+
+    dist.init_process_group(backend=backend)
+    try:
+        yield
+    finally:
+        dist.destroy_process_group()
 
 
 def get_cluster_ips(word_size: int = 2) -> list[str]:

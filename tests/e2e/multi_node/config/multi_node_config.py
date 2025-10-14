@@ -137,7 +137,7 @@ class MultiNodeConfig:
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "MultiNodeConfig":
         """Create a MultiNodeConfig from raw dict."""
-        num_nodes = cfg.get("num_nodes", 2)
+        num_nodes = os.getenv("WORLD_SIZE", 2)
         is_disaggregate_prefill = cfg.get("disaggregate_prefill", False)
         node_index = int(os.getenv("LWS_WORKER_INDEX", 0))
         is_leader = node_index == 0
@@ -146,6 +146,9 @@ class MultiNodeConfig:
         server_cfg_data = cfg.get("server_parameters", {})
         if not server_cfg_data:
             raise ValueError("Missing required key: 'server_parameters'")
+        # each node should have one server config
+        assert len(server_cfg_data) == num_nodes, \
+            (f"num server instance miss match num of nodes, expect server config num is: {num_nodes}, got {len(server_cfg_data)}")
 
         role_key = "leader_config" if is_leader else "worker_config"
         server_cfg_dict = server_cfg_data.get(role_key, {})
