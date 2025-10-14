@@ -137,7 +137,6 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 32768 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
@@ -197,7 +196,6 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 32768 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
@@ -386,7 +384,6 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 32768 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
@@ -446,7 +443,6 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 32768 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
