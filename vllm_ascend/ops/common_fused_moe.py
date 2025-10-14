@@ -38,7 +38,8 @@ from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, npu_stream_switch
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, is_310p, is_enable_nz,
+                               npu_stream_switch)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -84,7 +85,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_data = self._maybe_pad_weight(layer.w2_weight.data)
             layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        if not is_310p():
+        if not is_310p() and is_enable_nz():
             layer.w13_weight.data = torch_npu.npu_format_cast(
                 layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(

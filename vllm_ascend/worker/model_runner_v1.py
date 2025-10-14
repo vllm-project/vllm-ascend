@@ -97,6 +97,7 @@ from vllm.v1.worker.utils import (AttentionGroup, bind_kv_cache,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (MoECommType,
                                                 set_ascend_forward_context)
@@ -125,7 +126,7 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
-                               get_ascend_soc_version, is_310p,
+                               get_ascend_soc_version, is_310p, is_enable_nz,
                                lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
@@ -136,8 +137,6 @@ else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
 import torch_npu
-
-import vllm_ascend.envs as envs_ascend
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -458,10 +457,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-        # NOTE: Technically, MC2 can have 512 tokens each rank, but this will consume too much memory. The formula is:
-        # ((maxBs * tokenNeedSizeDispatch * ep_worldsize * localMoeExpertNum) + (maxBs * tokenNeedSizeCombine * (k + sharedExpertNum))) * 2
-        # so we have to limit the MC2 tokens to save memory, should fix this in the future.
-        self.mc2_tokens_capacity = 512
+        # NOTE: To be clear, we need to make sure that during graph capture, the number of
+        # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
+        # the max number of tokens in graph is min(max_num_seqs * 2, 512).
+        if self.compilation_config.cudagraph_capture_sizes:
+            max_num_tokens = self.compilation_config.cudagraph_capture_sizes[0]
+        else:
+            max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
+        tp_size = self.parallel_config.tensor_parallel_size
+        # Use integer arithmetic for ceiling division.
+        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
         self.reserved_mc2_mask = torch.zeros(
             self.mc2_tokens_capacity,
             dtype=torch.bool,
@@ -2601,6 +2607,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                          runtime_mode=CUDAGraphMode.FULL)
 
     def _convert_torch_format(self, tensor):
+        if ACL_FORMAT == ACL_FORMAT_FRACTAL_NZ \
+                and not is_enable_nz():
+            return tensor
         tensor = torch_npu.npu_format_cast(tensor, ACL_FORMAT)
         return tensor
 

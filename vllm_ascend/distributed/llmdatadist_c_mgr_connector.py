@@ -180,7 +180,10 @@ class LLMDataDistCMgrConnectorScheduler():
         # Can not retrieve the parallel config since it is not initialized.
         self.local_dp_rank = None
         self.tp_size = None
-        dp_rank_local = self.vllm_config.parallel_config.data_parallel_rank_local
+        if vllm_config.parallel_config.data_parallel_external_lb:
+            dp_rank_local = vllm_config.parallel_config.data_parallel_rank
+        else:
+            dp_rank_local = vllm_config.parallel_config.data_parallel_rank_local
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
 
         self.port = dp_rank_local * tp_size + envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT
@@ -312,7 +315,10 @@ class LLMDataDistCMgrConnectorWorker():
             vllm_config.parallel_config.data_parallel_size_local *
             vllm_config.parallel_config.tensor_parallel_size)
         self.local_rank = get_world_group().local_rank
-        self.local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        if vllm_config.parallel_config.data_parallel_external_lb:
+            self.local_dp_rank = vllm_config.parallel_config.data_parallel_rank
+        else:
+            self.local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_rank = get_tp_group().rank_in_group
         self.rank = get_world_group().rank

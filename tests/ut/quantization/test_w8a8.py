@@ -137,8 +137,10 @@ class TestAscendW8A8LinearMethod(TestBase):
         expected_y_output += bias
         self.assertTrue(torch.equal(output, expected_y_output))
 
+    @patch("vllm_ascend.quantization.w8a8.is_enable_nz")
     @patch('torch_npu.npu_format_cast')
-    def test_process_weights_after_loading(self, mock_npu_format_cast):
+    def test_process_weights_after_loading_not_nz(self, mock_npu_format_cast,
+                                                  mock_is_nz):
         layer = MagicMock()
 
         layer.weight.data = torch.randn(128, 256)
@@ -148,6 +150,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         layer.weight_scale.data = torch.randn(128, 1)
         layer.weight_offset.data = torch.randn(128, 1)
 
+        mock_is_nz.return_value = 0
         mock_npu_format_cast.return_value = MagicMock
         self.method.process_weights_after_loading(layer)
 
@@ -160,6 +163,35 @@ class TestAscendW8A8LinearMethod(TestBase):
 
         self.assertEqual(layer.weight_scale.data.shape, (128, ))
         self.assertEqual(layer.weight_offset.data.shape, (128, ))
+        mock_npu_format_cast.assert_not_called()
+
+    @patch("vllm_ascend.quantization.w8a8.is_enable_nz")
+    @patch('torch_npu.npu_format_cast')
+    def test_process_weights_after_loading_nz(self, mock_npu_format_cast,
+                                              mock_is_nz):
+        layer = MagicMock()
+
+        layer.weight.data = torch.randn(128, 256)
+        layer.input_scale.data = torch.tensor([0.1])
+        layer.input_offset.data = torch.tensor([0])
+        layer.deq_scale = torch.tensor([0.5])
+        layer.weight_scale.data = torch.randn(128, 1)
+        layer.weight_offset.data = torch.randn(128, 1)
+
+        mock_is_nz.return_value = 1
+        mock_npu_format_cast.return_value = MagicMock
+        self.method.process_weights_after_loading(layer)
+
+        expected_offset = torch.tensor([0]).repeat(256).to(torch.int8)
+        self.assertTrue(
+            torch.equal(layer.aclnn_input_offset.data, expected_offset))
+        self.assertFalse(layer.aclnn_input_offset.requires_grad)
+
+        self.assertFalse(layer.deq_scale.requires_grad)
+
+        self.assertEqual(layer.weight_scale.data.shape, (128, ))
+        self.assertEqual(layer.weight_offset.data.shape, (128, ))
+        mock_npu_format_cast.assert_called_once()
 
 
 class TestAscendW8A8FusedMoEMethod(TestBase):
@@ -722,6 +754,14 @@ class TestSelectExperts(TestBase):
 
         self.hidden_states = torch.randn(self.num_tokens, self.hidden_size)
         self.router_logits = torch.randn(self.num_tokens, self.num_experts)
+
+        self.mock_ctx = MagicMock()
+        self.mock_ctx.weight_prefetch_method = MagicMock()
+        patcher = patch(
+            'vllm_ascend.ops.moe.experts_selector.get_forward_context',
+            return_value=self.mock_ctx)
+        self.addCleanup(patcher.stop)
+        patcher.start()
 
     @patch('torch_npu.npu_moe_gating_top_k_softmax')
     def test_softmax_scoring(self, mock_topk):
