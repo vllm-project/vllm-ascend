@@ -18,3 +18,4 @@ enable_expert_parallel: True
 tensor_parallel_size: 2
 apply_chat_template: False
 fewshot_as_multiturn: False
+max_num_batched_tokens: 128

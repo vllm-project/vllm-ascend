@@ -10,3 +10,4 @@ max_model_len: 8192
 tensor_parallel_size: 2
 gpu_memory_utilization: 0.7
 enable_expert_parallel: True
+max_num_batched_tokens: 128
