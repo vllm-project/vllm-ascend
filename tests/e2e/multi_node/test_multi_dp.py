@@ -34,12 +34,10 @@ def test_multi_dp(config: MultiNodeConfig) -> None:
         # generate ranktable.json
         disaggerated_prefill.setup_and_run_ranktable()
         # run proxy
-        
+        disaggerated_prefill.launch_server_proxy()
 
-        if not Path(RANKTABLE_PATH).exists():
-            raise RuntimeError(f"Ranktable file not found: {RANKTABLE_PATH}")
         env_dict["DISAGGREGATED_PREFILL_RANK_TABLE_PATH"] = RANKTABLE_PATH
-        env_dict["VLLM_ASCEND_LLMDD_RPC_PORT"] = "5559"
+        #env_dict["VLLM_ASCEND_LLMDD_RPC_PORT"] = "5559"
 
     server_args = server_config.to_list()
 
