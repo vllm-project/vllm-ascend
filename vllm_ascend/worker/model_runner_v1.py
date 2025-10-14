@@ -459,7 +459,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if vllm_config.kv_transfer_config is not None:
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
-        
+
         # Since not all models have moe modules and requires mc2, we leave
         # the initialization of mc2 related parameters later.
         self.mc2_tokens_capacity = None
@@ -1796,7 +1796,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for module in self.model.modules()):
             return True
         return False
-    
+
     def _initialize_mc2(self):
         # NOTE: To be clear, we need to make sure that during graph capture, the number of
         # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
@@ -2527,7 +2527,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self._select_moe_comm_method(
                         self.mc2_tokens_capacity,
                         with_prefill=True) == MoECommType.MC2:
-                    self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
+                    self._dummy_run(self.mc2_tokens_capacity,
+                                    with_prefill=True)
 
         output = None
         if get_pp_group().is_last_rank:
