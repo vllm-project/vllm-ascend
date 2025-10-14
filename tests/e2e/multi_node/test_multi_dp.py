@@ -5,7 +5,7 @@ import pytest
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.multi_node.config.common import RANKTABLE_PATH, get_world_size, get_npu_per_node
-from tests.e2e.multi_node.config.multi_node_config import (MultiNodeConfig
+from tests.e2e.multi_node.config.multi_node_config import (MultiNodeConfig,
                                                            load_configs)
 from tests.e2e.multi_node.config.utils import get_default_envs, get_cluster_ips
 from tests.e2e.multi_node.config.generate_ranktable import DisaggegatedPrefill
