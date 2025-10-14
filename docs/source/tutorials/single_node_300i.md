@@ -3,6 +3,7 @@
 ```{note}
 1. This Atlas 300I series is currently experimental. In future versions, there may be behavioral changes around model coverage, performance improvement.
 2. Currently, the 310I series only supports eager mode and the data type is float16.
+3. The latest version has a large number of PRs for new features and models that need to be merged urgently. However, these PRs are not compatible with the 310I Duo, causing support for the 310I Duo in the main branch in breaking state. This issue is still in fixing. The current stable version for 310I Duo is vllm-ascend v0.10.0rc1.
 ```
 
 ## Run vLLM on Altlas 300I series
@@ -12,7 +13,7 @@ Run docker container:
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
+export IMAGE=quay.io/ascend/vllm-ascend:v0.10.0rc1-310p
 docker run --rm \
 --name vllm-ascend \
 --device /dev/davinci0 \
