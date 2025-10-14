@@ -118,12 +118,6 @@ def test_token_dispatcher_with_all_gather(
     score = torch.softmax(score, dim=-1, dtype=dtype)
     topk_weights, topk_ids = torch.topk(score, topk)
     topk_ids = topk_ids.to(torch.int32)
-    row_idx = (torch.arange(
-        0,
-        m * topk,
-        device=device,
-        dtype=torch.int32,
-    ).view(topk, -1).permute(1, 0).contiguous())
 
     dispatcher_kwargs = {
         "num_experts": e,
@@ -137,7 +131,6 @@ def test_token_dispatcher_with_all_gather(
         hidden_states=a,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        row_idx=row_idx,
         expert_map=expert_map,
         apply_router_weight_on_input=apply_router_weight_on_input)
 
@@ -201,12 +194,6 @@ def test_token_dispatcher_with_all_gather_quant(
         score = torch.softmax(score, dim=-1, dtype=dtype)
         topk_weights, topk_ids = torch.topk(score, topk)
         topk_ids = topk_ids.to(torch.int32)
-        row_idx = (torch.arange(
-            0,
-            m * topk,
-            device=device,
-            dtype=torch.int32,
-        ).view(topk, -1).permute(1, 0).contiguous())
 
         dispatcher_kwargs = {
             "num_experts": e,
@@ -220,7 +207,6 @@ def test_token_dispatcher_with_all_gather_quant(
             hidden_states=a,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            row_idx=row_idx,
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             with_quant=True)
@@ -295,7 +281,7 @@ def test_select_experts(
         mock_native_grouped_topk.side_effect = lambda x, num_groups, k: torch.randn_like(
             x)
 
-        topk_weights, topk_ids, row_idx = select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             top_k=topk,
@@ -316,7 +302,6 @@ def test_select_experts(
     assert topk_weights.shape == (m, topk)
     assert topk_ids.shape == (m, topk)
     assert topk_ids.dtype == torch.int32
-    assert row_idx.shape == (m, topk)
 
     gc.collect()
     torch.npu.empty_cache()
