@@ -145,7 +145,7 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
-        # TODO(yuzhup): integrate moe weight prefetch method
+        forward_context.model_instance = model_instance
         forward_context.weight_prefetch_method = weight_prefetch_method
 
         # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.

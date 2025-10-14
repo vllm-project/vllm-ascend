@@ -755,6 +755,14 @@ class TestSelectExperts(TestBase):
         self.hidden_states = torch.randn(self.num_tokens, self.hidden_size)
         self.router_logits = torch.randn(self.num_tokens, self.num_experts)
 
+        self.mock_ctx = MagicMock()
+        self.mock_ctx.weight_prefetch_method = MagicMock()
+        patcher = patch(
+            'vllm_ascend.ops.moe.experts_selector.get_forward_context',
+            return_value=self.mock_ctx)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     @patch('torch_npu.npu_moe_gating_top_k_softmax')
     def test_softmax_scoring(self, mock_topk):
         """Test softmax scoring function"""
