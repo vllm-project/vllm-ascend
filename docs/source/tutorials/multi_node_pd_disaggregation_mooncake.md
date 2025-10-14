@@ -363,6 +363,10 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export ASCEND_AGGREGATE_ENABLE=1
+export ASCEND_TRANSPORT_PRINT=0
+export ACL_OP_INIT_MODE=1
+export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -419,6 +423,10 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export ASCEND_AGGREGATE_ENABLE=1
+export ASCEND_TRANSPORT_PRINT=0
+export ACL_OP_INIT_MODE=1
+export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -475,6 +483,10 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export ASCEND_AGGREGATE_ENABLE=1
+export ASCEND_TRANSPORT_PRINT=0
+export ACL_OP_INIT_MODE=1
+export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -532,6 +544,10 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export ASCEND_AGGREGATE_ENABLE=1
+export ASCEND_TRANSPORT_PRINT=0
+export ACL_OP_INIT_MODE=1
+export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
