@@ -35,6 +35,7 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
                                update_aclgraph_sizes,
                                update_cudagraph_capture_sizes,
                                update_default_aclgraph_sizes, vllm_version_is)
+from vllm_ascend.compilation.compiler_interface import AscendAdaptor
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
