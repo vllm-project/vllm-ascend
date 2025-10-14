@@ -528,7 +528,7 @@ class MooncakeEngine:
                 multi_tp_keys = keys[:]
                 for i in range(1, self.tp_size):
                     for key in keys:
-                        new_str = key.replace("@0", f"@{i}", 1)    
+                        new_str = key.replace("@0", f"@{i}", 1)
                         multi_tp_keys.append(new_str)
                 res = self.m_store.batch_exists(multi_tp_keys)
                 num_block = len(keys)
@@ -547,7 +547,7 @@ class MooncakeEngine:
 
     def find_min_first_non_one_index(self, arr):
         try:
-            return min(idx for row in arr for idx, val in enumerate(row) 
+            return min(idx for row in arr for idx, val in enumerate(row)
                        if val != 1)
         except ValueError:
             return -1
