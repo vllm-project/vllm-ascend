@@ -18,6 +18,8 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.platforms import current_platform
 
+from vllm_ascend.attention.utils import version_check
+
 from ..utils import weak_ref_tensors
 
 
@@ -212,18 +214,32 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
         ) = param
         # block_table = forward_context.attn_metadata[key].block_tables
         seq_lens = forward_context.attn_metadata[key].seq_lens
+        torch_npu_check = version_check()
 
         with torch.npu.stream(update_stream):
             torch.npu.graph_task_update_begin(update_stream, handle)
-            torch_npu._npu_paged_attention(query=query,
-                                           key_cache=key_cache,
-                                           value_cache=value_cache,
-                                           num_kv_heads=num_kv_heads,
-                                           num_heads=num_heads,
-                                           scale_value=scale,
-                                           block_table=block_table,
-                                           context_lens=seq_lens,
-                                           out=output)
+            if torch_npu_check:
+                torch_npu._npu_paged_attention(
+                    query=query,
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    num_kv_heads=num_kv_heads,
+                    num_heads=num_heads,
+                    scale_value=scale,
+                    block_table=block_table,
+                    context_lens=seq_lens,
+                    out=output,
+                    workspace=graph_params.workspaces.get(runtime_shape))
+            else:
+                torch_npu._npu_paged_attention(query=query,
+                                               key_cache=key_cache,
+                                               value_cache=value_cache,
+                                               num_kv_heads=num_kv_heads,
+                                               num_heads=num_heads,
+                                               scale_value=scale,
+                                               block_table=block_table,
+                                               context_lens=seq_lens,
+                                               out=output)
             torch.npu.graph_task_update_end(update_stream)
 
             event.record(update_stream)
@@ -300,6 +316,12 @@ def set_graph_params(aclgraph_capture_sizes: set[int]):
         {size: []
          for size in aclgraph_capture_sizes},
     )
+
+
+def update_graph_params_workspaces(num_tokens: int, workspace: int):
+    global _graph_params
+    if _graph_params is not None:
+        _graph_params.workspaces[num_tokens] = workspace
 
 
 def get_graph_params():
