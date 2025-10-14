@@ -34,9 +34,8 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, AscendDeviceType,
                                enable_sp, get_ascend_device_type, is_vl_model,
                                prefill_context_parallel_enable,
                                update_aclgraph_sizes,
-                               update_cudagraph_capture_sizes,
                                update_default_aclgraph_sizes)
-
+from vllm_ascend.compilation.compiler_interface import AscendAdaptor
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
