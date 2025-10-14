@@ -134,7 +134,8 @@ class NPUPlatform(Platform):
         structured_outputs_config = vllm_config.structured_outputs_config
 
         if (model_config is not None and not model_config.use_mla
-                and not scheduler_config.async_scheduling):
+                and not scheduler_config.async_scheduling
+                and model_config.runner_type != "pooling"):
             logger.info(
                 "Non-MLA LLMs forcibly disable the chunked prefill feature,"
                 "as the performance of operators supporting this feature "

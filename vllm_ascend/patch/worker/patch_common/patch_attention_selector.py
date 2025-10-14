@@ -64,6 +64,7 @@ def _cached_get_attn_backend(
     use_mla: bool = False,
     use_sfa: bool = False,
     has_sink: bool = False,
+    use_sparse: bool = False,
 ) -> type[AttentionBackend]:
     # Check whether a particular choice of backend was
     # previously forced.
