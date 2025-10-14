@@ -207,7 +207,7 @@ class DisaggegatedPrefill:
                 "--host",
                 self.ips[0],
                 "--port",
-                self.server_port,
+                str(self.server_port),
                 "--prefiller-hosts",
                 " ".join(prefill_ips),
                 "--prefiller-ports",
