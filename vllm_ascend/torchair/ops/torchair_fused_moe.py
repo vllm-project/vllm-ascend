@@ -35,7 +35,8 @@ from vllm.model_executor.layers.fused_moe.config import \
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEParallelConfig  # isort: skip
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map, get_compressed_expert_map)
+    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map,
+    get_compressed_expert_map)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
