@@ -1,7 +1,7 @@
 # deepseek-ai/DeepSeek-V2-Lite
 
 - **vLLM Version**: vLLM: 0.10.1.1 ([1da94e6](https://github.com/vllm-project/vllm/commit/1da94e6)), **vLLM Ascend Version**: v0.10.1rc1 ([7e16b4a](https://github.com/vllm-project/vllm-ascend/commit/7e16b4a))  
-- **Software Environment**: **CANN**: 8.2.RC1, **PyTorch**: 2.7.1, **torch-npu**: 2.7.1.dev20250724  
+- **Software Environment**: **CANN**: 8.3.RC1, **PyTorch**: 2.7.1, **torch-npu**: 2.7.1.dev20250724  
 - **Hardware Environment**: Atlas A2 Series  
 - **Parallel mode**: TP2
 - **Execution mode**: ACLGraph
