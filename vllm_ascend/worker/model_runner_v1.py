@@ -80,6 +80,7 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheGroupSpec,
                                         KVCacheSpec, MambaSpec,
+                                        MLAAttentionSpec,
                                         UniformTypeKVCacheSpecs)
 # yapf: enable
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
@@ -3220,13 +3221,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # TODO(lucas): move the attention specs into the model layers like
             # the attention backends
             if attn_module.attn_type == AttentionType.DECODER:
-                kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=attn_module.num_kv_heads,
-                    head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype,
-                    use_mla=use_mla,
-                    use_sfa=use_sfa)
+                if use_mla and not use_sfa:
+                    kv_cache_spec[layer_name] = MLAAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        cache_dtype_str=self.cache_config.cache_dtype)
+                else:
+                    # TODO(cmq): This is a hack way to fix deepseek kvcache when
+                    # using DSA. Fix the spec in vLLM is a finnal way.
+                    kv_cache_spec[layer_name] = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=attn_module.num_kv_heads,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
