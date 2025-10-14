@@ -43,6 +43,10 @@
     {
         "test_name": "test_deepseek_pd_llmdatadist",
         "disaggregate_prefill": true,
+        "num_prefillers": 1,
+        "num_prefiller_nodes": 1,
+        "num_decoders": 1,
+        "num_decoder_nodes": 1,
         "num_nodes": 2,
         "server_parameters": {
             "leader_config": {
