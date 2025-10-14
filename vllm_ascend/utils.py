@@ -65,6 +65,10 @@ def is_310p():
     return _IS_310P
 
 
+def is_enable_nz():
+    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
+
+
 def sleep_mode_enabled():
     global _SLEEP_MODE_ENABLED
     if _SLEEP_MODE_ENABLED is None:
@@ -508,6 +512,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
+                                        AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding,
@@ -526,6 +531,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
         "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
         "QKVParallelLinear": AscendQKVParallelLinear,
+        "ReplicatedLinear": AscendReplicatedLinear,
         "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
         "VocabParallelEmbedding": AscendVocabParallelEmbedding,
         "ParallelLMHead": AscendParallelLMHead,
