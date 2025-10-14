@@ -14,6 +14,7 @@ try:
 except ImportError:
     from torchair.ops import NpuStreamSwitch as _npu_stream_switch
     from torchair.ops import npu_wait_tensor as _npu_wait_tensor
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 KV_CACHE_BYTES_CACHE_PATH_NAME = ".kv_cache_bytes"
 KV_CACHE_BYTES_CACHE_FILE_NAME = "kv_cache_bytes"
@@ -140,6 +141,9 @@ def converting_weight_acl_format(model, format):
     for module in model.modules():
         if isinstance(module, FusedMoE):
             if torch_npu.get_npu_format(module.w13_weight.data) == format:
+                return
+            if format == ACL_FORMAT_FRACTAL_NZ \
+                    and not is_enable_nz():
                 return
             module.w13_weight.data = torch_npu.npu_format_cast(
                 module.w13_weight.data, format)

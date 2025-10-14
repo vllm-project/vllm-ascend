@@ -27,6 +27,8 @@ from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
+                               is_enable_nz)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -595,6 +597,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 del eye
                 # standardize to (output, input)
                 return dequant_weights.T
+            # Weight will be reshaped next. To be on the safe side, the format
+            # of the weight should be reverted to FRACTAL_AND.
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_ND)
             return layer.weight
 
         # we currently do not have quantized bmm's which are needed for
@@ -622,6 +628,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.W_UV = W_UV.transpose(0, 1).contiguous()
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
+
+        # Function `get_and_maybe_dequant_weights` will cast the weights to
+        # FRACTAL_AND. So we need to cast to FRACTAL_NZ again.
+        if is_enable_nz():
+            self.kv_b_proj.weight.data = torch_npu.npu_format_cast(
+                self.kv_b_proj.weight.data, ACL_FORMAT_FRACTAL_NZ)
 
         # Waiting for BMM NZ support
         # self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)

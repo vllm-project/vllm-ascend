@@ -25,7 +25,7 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, is_enable_nz
 
 
 def quant_per_tensor(in_tensor: torch.Tensor,
@@ -156,8 +156,9 @@ class AscendW8A8LinearMethod:
             requires_grad=False).to(layer.aclnn_input_scale.dtype)
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data,
-                                                      ACL_FORMAT_FRACTAL_NZ)
+        if is_enable_nz():
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
 
@@ -340,7 +341,7 @@ class AscendW8A8FusedMoEMethod:
         # converting ACL_FORMAT_FRACTAL_NZ.
         # npu_quant_grouped_matmul_dequant in eager mode does not accept
         # ACL_FORMAT_FRACTAL_NZ.
-        if not is_310p():
+        if not is_310p() and is_enable_nz():
             layer.w13_weight.data = torch_npu.npu_format_cast(
                 layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ).contiguous()
             layer.w2_weight.data = torch_npu.npu_format_cast(

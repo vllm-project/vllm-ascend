@@ -17,16 +17,16 @@ This file extends the functionality of linear operations by encapsulating custom
 communication groups and forward functions into classes (linear ops).
 
 Current class inheritance structure:
-CustomTensorParallelOp
+CustomLinearOp
 ├── CustomColumnParallelOp
 │   ├── MLPColumnParallelOp
 │   ├── SequenceColumnParallelOp
 └── CustomRowParallelOp
-    ├── MLPRowParallelOp
-    ├── OProjRowParallelOp
-    ├── MatmulAllreduceRowParallelOp
-    └── SequenceRowParallelOp
-
+│   ├── MLPRowParallelOp
+│   ├── OProjRowParallelOp
+│   ├── MatmulAllreduceRowParallelOp
+│   └── SequenceRowParallelOp
+└── CustomReplicatedOp
 How to extend a new linear op? Taking column parallel op as an example:
 1. Inherit from CustomColumnParallelOp and create a new class MyColumnParallelOp
 2. [Optional] The default communication group is the TP group. If a custom communication group is needed, override the comm_group method
@@ -52,7 +52,7 @@ from vllm_ascend.utils import (dense_optim_enable, enable_sp,
                                oproj_tp_enable)
 
 
-class CustomTensorParallelOp:
+class CustomLinearOp:
 
     def __init__(self, layer):
         self.layer = layer
@@ -95,7 +95,7 @@ class CustomTensorParallelOp:
         return output, output_bias
 
 
-class CustomColumnParallelOp(CustomTensorParallelOp):
+class CustomColumnParallelOp(CustomLinearOp):
 
     def __init__(self, layer):
         super().__init__(layer)
@@ -106,7 +106,7 @@ class CustomColumnParallelOp(CustomTensorParallelOp):
         self.gather_output = self.layer.gather_output
 
 
-class CustomRowParallelOp(CustomTensorParallelOp):
+class CustomRowParallelOp(CustomLinearOp):
 
     def __init__(self, layer):
         super().__init__(layer)
@@ -126,6 +126,18 @@ class CustomRowParallelOp(CustomTensorParallelOp):
             torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
         if not self.return_bias:
             return output
+        return output, output_bias
+
+
+class CustomReplicatedOp(CustomLinearOp):
+
+    def apply_impl(self, input_):
+        bias = self.bias if not self.skip_bias_add else None
+        assert self.quant_method is not None
+
+        output = self.quant_method.apply(self.layer, input_, bias)
+        output_bias = self.bias if self.skip_bias_add else None
+
         return output, output_bias
 
 
@@ -422,3 +434,11 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
         return custom_op, custom_op.tp_rank, custom_op.tp_size
 
     return None, get_tp_group().rank_in_group, get_tp_group().world_size
+
+
+def get_replicated_op(disable_tp, prefix,
+                      layer) -> Optional[Union[CustomReplicatedOp]]:
+    if disable_tp:
+        return None
+
+    return CustomReplicatedOp(layer)

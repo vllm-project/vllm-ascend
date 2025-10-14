@@ -169,6 +169,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
     "VLLM_ASCEND_ENABLE_MLAPO":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '0'))),
+    # Whether to enable transpose weight and cast format to FRACTAL_NZ.
+    "VLLM_ASCEND_ENABLE_NZ":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
 }
 
 # end-env-vars-definition
