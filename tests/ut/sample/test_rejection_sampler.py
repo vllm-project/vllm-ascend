@@ -201,3 +201,4 @@ class TestAscendRejectionSampler(TestBase):
             IS_NGRAM=False,
         )
         assert output_token_ids[0].item() == 0
+        assert output_token_ids[1].item() == 0
