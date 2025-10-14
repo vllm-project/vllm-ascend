@@ -138,5 +138,6 @@ if __name__ == "__main__":
     from tests.e2e.multi_node.config.multi_node_config import load_configs
     configs = load_configs(CONFIG_PATH)
     pd_config = configs[1]
+    print(pd_config.server_config.to_list())
     dp = DisaggegatedPrefill(pd_config)
     dp.setup_and_run_ranktable()
