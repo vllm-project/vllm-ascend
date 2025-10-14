@@ -51,7 +51,8 @@ class Mooncakestore():
         else:
             local_hostname = get_ip()
             transfer_engine = get_global_te(local_hostname, device_name=None)
-            self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
+            self.local_seg = local_hostname + ":" + str(
+                transfer_engine.get_rpc_port())
             ret = self.store.setup(self.local_seg, self.config.metadata_server,
                                    self.config.global_segment_size,
                                    self.config.local_buffer_size,
