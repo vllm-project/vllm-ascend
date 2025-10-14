@@ -6,8 +6,6 @@ from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
 
-from vllm_ascend.ascend_config import get_ascend_config
-
 
 @classmethod
 def verify_and_update_config(cls, vllm_config) -> None:
@@ -24,7 +22,6 @@ def verify_and_update_config(cls, vllm_config) -> None:
     logger = init_logger(__name__)
     # Enable FULL_AND_PIECEWISE by default
     MambaModelConfig.verify_and_update_config(vllm_config)
-    ascend_config = get_ascend_config()
 
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config

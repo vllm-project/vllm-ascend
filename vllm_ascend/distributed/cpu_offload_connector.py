@@ -18,8 +18,10 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.utils import logger
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
+                                        MLAAttentionSpec)
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.cpu_offload_manager.metadata import (
     MetadataServer, MetadataServerProc, MLAConfig)
 
@@ -434,17 +436,30 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     forward_ctx = vllm_config.compilation_config.static_forward_context
     block_size = vllm_config.cache_config.block_size
     use_mla = vllm_config.model_config.use_mla
+    ascend_config = get_ascend_config()
+    use_sfa = ascend_config.use_sfa
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     for layer_name, attn_module in forward_ctx.items():
         if isinstance(attn_module, FusedMoE):
             continue
         assert isinstance(attn_module, Attention)
         if attn_module.attn_type == AttentionType.DECODER:
-            kv_cache_spec[layer_name] = FullAttentionSpec(
-                block_size=block_size,
-                num_kv_heads=attn_module.num_kv_heads,
-                head_size=attn_module.head_size,
-                dtype=attn_module.dtype)
+            if use_mla and not use_sfa:
+                kv_cache_spec[layer_name] = MLAAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=attn_module.dtype,
+                    cache_dtype_str=vllm_config.cache_config.cache_dtype)
+            else:
+                # TODO(cmq): This is a hack way to fix deepseek kvcache when
+                # using DSA. Fix the spec in vLLM is a finnal way.
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=attn_module.dtype)
+
         elif attn_module.attn_type in (AttentionType.ENCODER,
                                        AttentionType.ENCODER_ONLY):
             continue
