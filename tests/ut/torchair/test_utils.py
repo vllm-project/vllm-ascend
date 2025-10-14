@@ -96,15 +96,17 @@ class TestTorchairUtils(TestBase):
             self.assertEqual(args[0], expected_name)
             self.assertEqual(args[1], expected_path)
 
+    @mock.patch('vllm_ascend.torchair.utils.is_enable_nz')
     @mock.patch('torch_npu.get_npu_format')
     @mock.patch('torch_npu.npu_format_cast')
     @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
                 new=mock.MagicMock)
-    def test_converting_weight_acl_format(self, mock_npu_cast,
-                                          mock_get_format):
+    def test_converting_weight_acl_format_to_nz(self, mock_npu_cast,
+                                                mock_get_format, mock_is_nz):
         ACL_FORMAT_FRACTAL_NZ = 29
         mock_get_format.return_value = 1
         mock_npu_cast.return_value = 1
+        mock_is_nz.return_value = 1
 
         fused_moe = mock.MagicMock()
         fused_moe.w13_weight = mock.MagicMock()
@@ -126,6 +128,29 @@ class TestTorchairUtils(TestBase):
         ACL_FORMAT_FRACTAL_NZ = 29
         mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
         mock_npu_cast.return_value = 1
+
+        fused_moe = mock.MagicMock()
+        fused_moe.w13_weight = mock.MagicMock()
+        fused_moe.w2_weight = mock.MagicMock()
+        fused_moe.w13_weight.data = torch.randn(128, 256)
+        fused_moe.w2_weight.data = torch.randn(256, 128)
+        model = mock.MagicMock()
+        model.modules.return_value = [fused_moe]
+
+        utils.converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
+        mock_npu_cast.assert_not_called()
+
+    @mock.patch('vllm_ascend.torchair.utils.is_enable_nz')
+    @mock.patch('torch_npu.get_npu_format')
+    @mock.patch('torch_npu.npu_format_cast')
+    @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
+                new=mock.MagicMock)
+    def test_converting_weight_acl_format_no_nz(self, mock_npu_cast,
+                                                mock_get_format, mock_is_nz):
+        ACL_FORMAT_FRACTAL_NZ = 29
+        mock_get_format.return_value = 1
+        mock_npu_cast.return_value = 1
+        mock_is_nz.return_value = 0
 
         fused_moe = mock.MagicMock()
         fused_moe.w13_weight = mock.MagicMock()
