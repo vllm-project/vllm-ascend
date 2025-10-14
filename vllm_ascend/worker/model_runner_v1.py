@@ -3225,9 +3225,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
-                        use_mla=use_mla,
-                        use_sfa=use_sfa)
+                        dtype=self.kv_cache_dtype)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
