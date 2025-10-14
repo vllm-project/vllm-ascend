@@ -231,7 +231,7 @@ class RemoteOpenAIServer:
                 if result is not None and result != 0:
                     raise RuntimeError("Server exited unexpectedly.") from None
 
-                time.sleep(1)
+                time.sleep(5)
                 if time.time() - start > timeout:
                     raise RuntimeError(
                         "Server failed to start in time.") from None
