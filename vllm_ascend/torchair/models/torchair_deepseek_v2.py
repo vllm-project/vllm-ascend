@@ -975,7 +975,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 # to save npu memory because they're no longer used.
                 dispose_tensor(previous_hidden_states)
                 dispose_tensor(previous_residual)
-        if mla_moe_communication and self.layer_idx > self.first_k_dense_replace and self.layer_idx != self.layers:
+        if mla_moe_communication and self.layer_idx > self.first_k_dense_replace and self.layer_idx < self.layers:
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
 
