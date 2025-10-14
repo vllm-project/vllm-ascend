@@ -14,19 +14,21 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-name: 'ascend test / vllm 0.11.0'
+
+name: 'ascend test / nightly'
 
 on:
-  # Run 1-card and 2-cards e2e tests per 2h
   schedule:
-    - cron: '0 */2 * * *'
-  pull_request:
+      # Run test at 24:00 Beijing time (UTC+8)
+      - cron: "0 16 * * *"
+  workflow_dispatch:
+  pull_request: 
     branches:
       - 'main'
+      - '*-dev'
     paths:
-      # If we are changing the doctest we should do a PR test
-      - 'vllm_ascend_test_full_vllm_0.11.0.yaml'
-  workflow_dispatch:
+      - 'tests/e2e/nightly/**'
+      - '.github/workflows/vllm_ascend_test_nightly.yaml'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -38,14 +40,19 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ascend-nightly-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  e2e-test:
-    uses: ./.github/workflows/_e2e_test.yaml
+  qwen3-32b:
+    strategy:
+      matrix:
+        # should add A3 chip runner when available
+        os: [linux-aarch64-a2-4]
+    # Note (yikun): If CI resource are limited we can split job into two chain jobs
+    # only trigger e2e test after lint passed and the change is e2e related with pull request.
+    uses: ./.github/workflows/_e2e_nightly.yaml
     with:
       vllm: v0.11.0
-      runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
-      type: full
+      runner: ${{ matrix.os }}
+      tests: tests/e2e/nightly/models/test_qwen3_32b.py

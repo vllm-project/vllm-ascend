@@ -1,0 +1,10 @@
+model_name: "Qwen/Qwen2-VL-7B-Instruct"
+hardware: "Atlas A2 Series"
+model: "vllm-vlm"
+tasks:
+- name: "mmmu_val"
+  metrics:
+  - name: "acc,none"
+    value: 0.50
+max_model_len: 8192
+gpu_memory_utilization: 0.7

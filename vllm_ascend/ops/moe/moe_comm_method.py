@@ -67,12 +67,11 @@ class MoECommMethod(ABC):
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 enable_shared_expert_dp: bool = False,
-                rm_router_logits: bool = False,
                 replace_allreduce: bool = False,
                 gate=None) -> tuple[torch.Tensor, torch.Tensor]:
         hidden_states, router_logits, mc2_mask = self.fused_moe_prepare_finalize.prepare(
             hidden_states, router_logits, enable_shared_expert_dp,
-            rm_router_logits, replace_allreduce, gate)
+            replace_allreduce, gate)
         self.mc2_mask = mc2_mask
         return hidden_states, router_logits
 
@@ -151,7 +150,8 @@ class MoECommMethod(ABC):
                                        with_quant=use_int8_w8a8
                                        or use_int4_w4a8,
                                        fusion=use_int8_w8a8,
-                                       need_trans=need_trans)
+                                       need_trans=need_trans,
+                                       dynamic_eplb=dynamic_eplb)
 
         final_hidden_states = self.token_dispatcher.token_combine(
             hidden_states=mlp_output)

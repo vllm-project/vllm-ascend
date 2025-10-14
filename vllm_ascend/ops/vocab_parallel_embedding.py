@@ -20,7 +20,7 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 from torch.nn.parameter import Parameter
-from vllm.distributed import divide, tensor_model_parallel_all_reduce
+from vllm.distributed import divide
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -163,7 +163,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
         if self.tp_size > 1:
             output_parallel.masked_fill_(input_mask.unsqueeze(-1), 0)
         # Reduce across all the model parallel GPUs.
-        output = tensor_model_parallel_all_reduce(output_parallel)
+        output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
         return output
 
 
@@ -253,16 +253,3 @@ class AscendLogitsProcessor(LogitsProcessor):
             logits = logits[..., :self.org_vocab_size]
 
         return logits
-
-    def forward(
-        self,
-        lm_head: VocabParallelEmbedding,
-        hidden_states: torch.Tensor,
-        # keep this for version compatibility
-        sampling_metadata=None,  # type: ignore
-        embedding_bias: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
-        return LogitsProcessor.forward(self,
-                                       lm_head,
-                                       hidden_states,
-                                       embedding_bias=embedding_bias)

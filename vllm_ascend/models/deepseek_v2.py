@@ -32,13 +32,15 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+from vllm.distributed import (divide, get_pp_group,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
+                                               ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -57,15 +59,80 @@ from vllm.model_executor.models.deepseek_v2 import (
 from vllm.model_executor.models.utils import (PPMissingLayer,
                                               is_pp_missing_parameter,
                                               maybe_prefix)
+from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.models.layers.sfa import (AscendSFAModules,
                                            AscendSparseFlashAttention, Indexer)
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+from vllm_ascend.ops.linear import AscendLinearBase
 
 
 class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        input_is_parallel: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        reduce_results: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+    ):
+        # Divide the weight matrix along the first dimension.
+        self.tp_rank = (get_tensor_model_parallel_rank()
+                        if not disable_tp else 0)
+        self.tp_size = (get_tensor_model_parallel_world_size()
+                        if not disable_tp else 1)
+        self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.output_size_per_partition = output_size
+        self.output_partition_sizes = [output_size]
+
+        AscendLinearBase.__init__(self,
+                                  input_size,
+                                  output_size,
+                                  skip_bias_add,
+                                  params_dtype,
+                                  quant_config,
+                                  prefix,
+                                  return_bias=return_bias,
+                                  disable_tp=disable_tp)
+
+        self.input_is_parallel = input_is_parallel
+        self.reduce_results = reduce_results
+
+        assert self.quant_method is not None
+        self.quant_method.create_weights(
+            layer=self,
+            input_size_per_partition=self.input_size_per_partition,
+            output_partition_sizes=self.output_partition_sizes,
+            input_size=self.input_size,
+            output_size=self.output_size,
+            params_dtype=self.params_dtype,
+            weight_loader=(
+                self.weight_loader_v2 if self.quant_method.__class__.__name__
+                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
+        if not reduce_results and (bias and not skip_bias_add):
+            raise ValueError("When not reduce the results, adding bias to the "
+                             "results can lead to incorrect results")
+
+        if bias:
+            self.bias = nn.Parameter(
+                torch.empty(self.output_size, dtype=params_dtype))
+            set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "weight_loader": self.weight_loader,
+            })
+        else:
+            self.register_parameter("bias", None)
+        self.update_param_tp_status()
 
     def forward(
         self,
