@@ -2,18 +2,21 @@ from dataclasses import dataclass, field
 
 import torch
 import torch_npu
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import WeightPrefetchConfig
 from vllm_ascend.ops.linear import (AscendQKVParallelLinear,
                                     AscendRowParallelLinear)
 
 SUPPORTED_MODULES = ["attn", "mlp", "moe"]
+MOE_PREFETCH_TOKEN_THRESHOLD = 96
 
 
 @dataclass
 class ModuleWeightPrefetchConfig:
     module_name: str
     enable: bool = False
+    is_active_this_forward: bool = False
     prefetch_ratio: dict = field(default_factory=dict)
     linear_prefix_map: dict = field(default_factory=dict)
 
@@ -46,6 +49,11 @@ class WeightPrefetchMethod:
                 AscendQKVParallelLinear.__name__: "qkv",
                 AscendRowParallelLinear.__name__: "o",
             })
+        self.moe = ModuleWeightPrefetchConfig(
+            module_name="moe",
+            enable=weight_prefetch_config.enabled,
+            prefetch_ratio=weight_prefetch_config.prefetch_ratio.get(
+                "moe", {}))
 
     def maybe_prefetch_attn_weight_preprocess(
             self, layer_cls_name: str, weight: torch.Tensor,
@@ -64,6 +72,27 @@ class WeightPrefetchMethod:
     def maybe_prefetch_attn_weight_postprocess(
             self, layer_cls_name: str, stop_flag: torch.Tensor) -> None:
         if not self.attn.enable or layer_cls_name not in self.attn.linear_prefix_map:
+            return
+
+        torch.ops.vllm.prefetch_postprocess(stop_flag)
+
+    def maybe_prefetch_moe_weight_preprocess(self, hidden_states, prefix):
+        self.moe.is_active_this_forward = hidden_states.shape[
+            0] >= MOE_PREFETCH_TOKEN_THRESHOLD if self.moe.enable else False
+        if not self.moe.is_active_this_forward:
+            return
+        forward_context = get_forward_context()
+        weight = forward_context.model_instance.model.layers[
+            forward_context.layer_idx].mlp.experts.w13_weight
+        weight_size = weight.data.element_size() * weight.data.numel(
+        ) * self.moe.prefetch_ratio.get(prefix, 0)
+        torch.ops.vllm.prefetch_preprocess(weight=weight,
+                                           start_flag=None,
+                                           max_weight_size=int(weight_size))
+        forward_context.layer_idx += 1
+
+    def maybe_prefetch_moe_weight_postprocess(self, stop_flag: torch.Tensor):
+        if not self.moe.is_active_this_forward:
             return
 
         torch.ops.vllm.prefetch_postprocess(stop_flag)
