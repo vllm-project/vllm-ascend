@@ -444,8 +444,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 block_size=block_size,
                 num_kv_heads=attn_module.num_kv_heads,
                 head_size=attn_module.head_size,
-                dtype=attn_module.dtype,
-                use_mla=use_mla)
+                dtype=attn_module.dtype)
         elif attn_module.attn_type in (AttentionType.ENCODER,
                                        AttentionType.ENCODER_ONLY):
             continue
