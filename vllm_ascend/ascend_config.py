@@ -216,6 +216,9 @@ class WeightPrefetchConfig:
             "qkv": 1.0,
             "o": 1.0,
         },
+        "moe": {
+            "gate_up": 0.8
+        }
     }
 
     def __init__(self, weight_prefetch_config: dict):
