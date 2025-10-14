@@ -55,6 +55,7 @@ from vllm.distributed.parallel_state import (get_dp_group, get_pp_group,
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
@@ -470,6 +471,26 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Use integer arithmetic for ceiling division.
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
         self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+
+        # Additional check for MC2 restrictions on specific hardwares.
+        if self._is_moe_model() and self._select_moe_comm_method(
+                self.mc2_tokens_capacity,
+                with_prefill=True) == MoECommType.MC2:
+
+            soc_version = get_ascend_soc_version()
+            limit = None
+            if soc_version in {AscendSocVersion.A3}:
+                limit = 512
+            elif soc_version in {AscendSocVersion.A2}:
+                limit = 256
+
+            if limit is not None and num_tokens_per_tp_rank > limit:
+                raise ValueError(
+                    f"For {soc_version}, the max supported tokens per TP rank for MC2 is {limit}, "
+                    f"but got {num_tokens_per_tp_rank}. Please try to reduce `max_num_seqs` "
+                    f"(current: {self.max_num_reqs}) or increase `tp_size` (current: {tp_size})."
+                )
+
         self.reserved_mc2_mask = torch.zeros(
             self.mc2_tokens_capacity,
             dtype=torch.bool,
@@ -1800,6 +1821,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
 
+    def _is_moe_model(self):
+        """Checks if the model contains FusedMoE layers."""
+        if any(
+                isinstance(module, FusedMoE)
+                for module in self.model.modules()):
+            return True
+        return False
+
     def _select_moe_comm_method(self, num_tokens: int,
                                 with_prefill: bool) -> MoECommType:
         """1. If expert parallel is not enabled, we use all-gather since MC2 and all-to-all
@@ -2486,7 +2515,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # MC2 will consume additional NPU memory.
             # Therefore, we need to run the MC2 path once here to complete its initialization,
             # allowing vLLM to correctly estimate the maximum memory required.
-            if self.max_num_tokens > self.mc2_tokens_capacity and \
+            if self._is_moe_model() and \
+                self.max_num_tokens > self.mc2_tokens_capacity and \
                 self._select_moe_comm_method(
                     self.mc2_tokens_capacity,
                     with_prefill=True) == MoECommType.MC2:
