@@ -30,6 +30,7 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
+from vllm_ascend.compilation.compiler_interface import AscendAdaptor
 
 # isort: off
 from vllm_ascend.utils import (
