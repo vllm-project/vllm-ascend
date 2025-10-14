@@ -25,17 +25,22 @@
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
-from typing import Any, Dict, Iterable, Optional, Union
+from typing import Any, Dict, Iterable, Optional, Union,List,Callable,Tuple
 
 import torch
+import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
-                              tensor_model_parallel_all_reduce)
+                              tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_reduce_scatter)
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group,get_world_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -45,7 +50,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead,VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.deepseek_v2 import \
@@ -56,13 +61,124 @@ from vllm.model_executor.models.deepseek_v2 import (
     get_spec_layer_idx_from_weight_name)
 from vllm.model_executor.models.utils import (PPMissingLayer,
                                               is_pp_missing_parameter,
+                                              make_empty_intermediate_tensors_factory,
+                                              make_layers,
                                               maybe_prefix)
 
+from vllm.sequence import IntermediateTensors
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.models.layers.sfa import (AscendSFAModules,
                                            AscendSparseFlashAttention, Indexer)
+from typing import Any, Optional, Union
 from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+from vllm.model_executor.layers.activation import SiluAndMul
+
+
+class CustomDeepseekV2SiluAndMul(SiluAndMul):
+
+    def __init__(self,
+                 *,
+                 weight_scale: Optional[Callable[[], torch.Tensor]] = None):
+        super().__init__()
+        self.weight_scale = weight_scale
+
+    def forward_oot(self, x: Union[torch.Tensor, Tuple[torch.Tensor,
+                                                       torch.Tensor]]):
+        if isinstance(x, tuple):
+            assert self.weight_scale is not None
+            # For AscendW8A8DynamicLinearMethod:
+            # a dynamic scale is passed along with the quantized value.
+            quantized_x, dynamic_scale = x
+            return torch_npu.npu_dequant_swiglu_quant(
+                x=quantized_x,
+                weight_scale=self.weight_scale(),
+                activation_scale=dynamic_scale,
+                activate_left=True,
+                quant_mode=1)
+        else:
+            return super().forward_oot(x)
+
+
+class CustomDeepseekV2MergedReplicatedLinear(ReplicatedLinear):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        bias: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        self.output_sizes = output_sizes
+        super().__init__(input_size,
+                         sum(output_sizes),
+                         bias=bias,
+                         quant_config=quant_config,
+                         prefix=prefix)
+
+    def weight_loader(self, param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor, loaded_shard_id: int):
+        # With no support for GGUF format yet.
+        assert not getattr(param, "is_gguf_weight", False)
+        assert not getattr(param, "is_gguf_weight_type", False)
+
+        assert loaded_shard_id < len(self.output_sizes)
+        shard_offset = sum(self.output_sizes[:loaded_shard_id])
+        shard_size = self.output_sizes[loaded_shard_id]
+        shard = param.data.narrow(param.output_dim, shard_offset, shard_size)
+
+        assert shard.size() == loaded_weight.size(), (
+            f"Tried to load weights of size {loaded_weight.size()}"
+            f"to a parameter shard of id {loaded_shard_id} size {shard.size()}"
+        )
+        shard.copy_(loaded_weight)
+
+
+class CustomDeepseekV2RowParallelLinearReplaceAllreduce(RowParallelLinear):
+
+    def forward(
+        self,
+        input_,
+        is_prefill=True,
+        is_force_scatter=False
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[nn.Parameter]]]:
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            tp_rank = get_tensor_model_parallel_rank()
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[tp_rank].contiguous()
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        # Only fuse bias add into GEMM for rank 0 (this ensures that
+        # bias will not get added more than once in TP>1 case)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self,
+                                                  input_parallel,
+                                                  bias=bias_)
+        if self.reduce_results and self.tp_size > 1:
+            num_tokens = output_parallel.shape[0]
+            if is_force_scatter and num_tokens % self.tp_size:
+                output_parallel = nn.functional.pad(
+                    output_parallel, (0, 0, 0, -num_tokens % self.tp_size))
+            if is_force_scatter or (not is_prefill
+                                    and output_parallel.shape[0] % self.tp_size
+                                    == 0):
+                output = tensor_model_parallel_reduce_scatter(output_parallel,
+                                                              dim=0)
+            else:
+                output = tensor_model_parallel_all_reduce(output_parallel)
+        else:
+            output = output_parallel
+
+        output_bias = self.bias if self.skip_bias_add else None
+
+        if not self.return_bias:
+            return output
+        return output, output_bias
 
 
 class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
@@ -439,6 +555,14 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
+        self.enable_afd = vllm_config.additional_config.get(
+            "enable_afd", False)
+        
+        afd_config = vllm_config.afd_config
+        if afd_config:
+            self.role = afd_config.afd_role
+        else:
+            self.role = None
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
@@ -446,53 +570,58 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.layers = config.num_hidden_layers
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
-        # TODO: enable mla in vllm-ascend
-        if model_config.use_mla:
-            if ascend_config.use_sfa:
-                attn_cls = CustomDeepseekV2SFAAttention
-            else:
-                attn_cls = CustomDeepseekV2MLAAttention
-        else:
-            attn_cls = DeepseekV2Attention
-        self.self_attn = attn_cls(
-            config=config,
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank
-            if hasattr(config, "q_lora_rank") else None,
-            kv_lora_rank=config.kv_lora_rank,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
-            max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-        )
+        ascend_config = get_ascend_config()
 
-        if (config.n_routed_experts is not None
+        if self.role is None or self.role == "attention":
+            # TODO: enable mla in vllm-ascend
+            if model_config.use_mla:
+                if ascend_config.use_sfa:
+                    attn_cls = CustomDeepseekV2SFAAttention
+                else:
+                    attn_cls = CustomDeepseekV2MLAAttention
+            else:
+                attn_cls = DeepseekV2Attention
+            self.self_attn = attn_cls(
+                config=config,
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                qk_nope_head_dim=config.qk_nope_head_dim,
+                qk_rope_head_dim=config.qk_rope_head_dim,
+                v_head_dim=config.v_head_dim,
+                q_lora_rank=config.q_lora_rank
+                if hasattr(config, "q_lora_rank") else None,
+                kv_lora_rank=config.kv_lora_rank,
+                rope_theta=rope_theta,
+                rope_scaling=rope_scaling,
+                max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+            )
+        
+        if self.role is None or self.role == "ffn":
+            if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
-            self.mlp = DeepseekV2MoE(
-                config=config,
-                parallel_config=parallel_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-            )
-            if self.mlp.gate.e_score_correction_bias is not None:
-                self.mlp.gate.e_score_correction_bias.data = (
-                    self.mlp.gate.e_score_correction_bias.data.to(
-                        dtype=torch.get_default_dtype()))
-        else:
-            self.mlp = DeepseekV2MLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-            )
+                self.mlp = DeepseekV2MoE(
+                    config=config,
+                    parallel_config=parallel_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                )
+                if self.mlp.gate.e_score_correction_bias is not None:
+                    self.mlp.gate.e_score_correction_bias.data = (
+                        self.mlp.gate.e_score_correction_bias.data.to(
+                            dtype=torch.get_default_dtype()))
+            else:
+                self.mlp = DeepseekV2MLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                )
+        
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -500,8 +629,9 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.first_k_dense_replace = config.first_k_dense_replace
         self.tp_group = get_tp_group().device_group
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
-
+    
 class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -510,6 +640,13 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.enable_afd = vllm_config.additional_config.get(
+            "enable_afd", False)
+        self.afd_config = vllm_config.afd_config
+        if self.afd_config:
+            self.role = self.afd_config.afd_role
+        else:
+            self.role = None
 
         # `packed_modules_mapping` needs to be modified before
         # initializing DeepseekV2Model, as it is passed inplace to
@@ -537,7 +674,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
         self.expert_weights: list[Any] = []
-
+       
         # Set MoE hyperparameters
         self.num_moe_layers = (config.num_hidden_layers -
                                config.first_k_dense_replace)
@@ -550,11 +687,15 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                 continue
 
             assert isinstance(layer, DeepseekV2DecoderLayer)
-            if isinstance(layer.mlp, DeepseekV2MoE):
+            if (self.afd_config is None or self.role == "ffn") and isinstance(
+                layer.mlp, DeepseekV2MoE):
+            #if isinstance(layer.mlp, DeepseekV2MoE):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
+        if self.role == "attention":
+            return
         if example_moe is None:
             raise RuntimeError("No DeepseekV2MoE layer found in model.layers.")
 
@@ -564,6 +705,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.num_routed_experts = example_moe.n_routed_experts
         self.num_shared_experts = example_moe.n_shared_experts
         self.num_redundant_experts = example_moe.n_redundant_experts
+        
 
     # NOTE: This `load_weights` is mainly copied from
     # https://github.com/vllm-project/vllm/commit/07b8fae219b1fff51ef115c38c44b51395be5bb5
@@ -571,7 +713,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     # TODO: support eplb style load_weights
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        """"""
+        # TODO remove 852 and 853
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -584,7 +726,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts)
+            num_experts=self.config.n_routed_experts,
+            )
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -594,6 +737,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             if "module" in name:
                 continue
 
+            if self.role == "attention" and self.is_moe_weight(name):
+                continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
@@ -611,6 +756,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                 if (("mlp.experts." in name) and name not in params_dict):
                     continue
                 name = name.replace(weight_name, param_name)
+               
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -623,9 +769,14 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                is_expert_weight = False
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
+                        continue
+
+                   
+                    if self.role is not None and self.role == "attention":
                         continue
                     name = name.replace(weight_name, param_name)
 
@@ -633,6 +784,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                         continue
 
                     param = params_dict[name]
+
                     weight_loader = param.weight_loader
                     weight_loader(param,
                                   loaded_weight,
@@ -642,6 +794,11 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                   return_success=False)
                     break
                 else:
+                    if self.role == "ffn" and not self.is_moe_weight(
+                            name) and not self.is_common_weight(name):
+                        continue
+
+
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
@@ -659,11 +816,24 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+
         return loaded_params
 
+    def is_moe_weight(self,name):
+        if "shared_experts" in name or "experts" in name or "gate" in name \
+            or "up" in name or "down" in name:
+            return True
+        return False
+    # MoE 和 attn 都要加载
+    def is_common_weight(self,name):
+        if "lm_head" in name or "model.norm.weight" in name or "embed_tokens" in name \
+            or "input_layernorm" in name or "post_attention_layernorm" in name:
+            # or "model.layers.0.self_attn.o_proj.weight" in name:# for init kv cache
+            return True
+        return False
+    
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
     pass
-
 
 DeepseekV2DecoderLayer.__init__ = CustomDeepseekV2DecoderLayer.__init__

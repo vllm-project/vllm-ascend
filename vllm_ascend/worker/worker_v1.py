@@ -29,8 +29,9 @@ from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
-from vllm.distributed.parallel_state import get_pp_group, get_tp_group
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          has_kv_transfer_group)
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group,get_world_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
@@ -51,6 +52,7 @@ from vllm_ascend.utils import (init_ascend_soc_version,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.npu_ffn_model_runner_v1 import NPUFFNModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -192,7 +194,63 @@ class NPUWorker(WorkerBase):
     def init_device(self):
         device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = NPUModelRunner(self.vllm_config, device)
+        # Construct the model runner
+        self.model_runner: NPUModelRunner | NPUFFNModelRunner
+        if (self.vllm_config.afd_config
+                and self.vllm_config.afd_config.is_ffn_server):
+            self.model_runner = NPUFFNModelRunner(self.vllm_config,
+                                                  device)
+        else:
+            self.model_runner = NPUModelRunner(self.vllm_config, device)
+
+
+    def start_ffn_server_loop(self) -> None:
+        """Start FFN server loop for AFD FFN workers"""
+        if not (self.vllm_config.afd_config
+                and self.vllm_config.afd_config.is_ffn_server):
+            return
+
+        # self.model_runner.capture_model()
+        # self.model_runner.initialize_afd_connector()
+
+        if self.profiler:
+            self.profiler.start()
+            for _ in range(1000):  # FIXME: hardcoded profiler iterations
+                self.model_runner.execute_model(scheduler_output=None)
+            torch.npu.synchronize()  # Ensure NPU operations complete
+            self.profiler.stop()
+            print(self.profiler.key_averages().table(
+                sort_by="self_cuda_time_total"))
+
+        import threading
+        self._ffn_shutdown_event = threading.Event()
+
+        def ffn_worker_loop():
+            # Set NPU device for this thread (thread-local context)
+            device = torch.device(f"npu:{self.local_rank}")
+            NPUPlatform.set_device(device)
+            logger.info("FFN worker loop started")
+
+            try:
+                while not self._ffn_shutdown_event.is_set():
+                    # Execute FFN computation
+                    self.model_runner.execute_model(scheduler_output=None)
+            except Exception as e:
+                logger.error("FFN worker loop error: %s", e)
+                raise
+
+        self._ffn_thread = threading.Thread(target=ffn_worker_loop,
+                                            daemon=True)
+        self._ffn_thread.start()
+        logger.info("FFN server loop started in worker")
+
+    def stop_ffn_server_loop(self) -> None:
+        """Stop FFN server loop"""
+        if hasattr(self, '_ffn_shutdown_event'):
+            self._ffn_shutdown_event.set()
+            if hasattr(self, '_ffn_thread'):
+                self._ffn_thread.join(timeout=5)
+            logger.info("FFN server loop stopped")
 
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
@@ -238,8 +296,18 @@ class NPUWorker(WorkerBase):
 
     def execute_model(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: Optional["SchedulerOutput"] = None,
     ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+        # FFN server mode: direct execution without pipeline parallelism
+        if (self.vllm_config.afd_config
+                and self.vllm_config.afd_config.is_ffn_server):
+            return self.model_runner.execute_model(scheduler_output)
+
+        if scheduler_output is None:
+            raise ValueError(
+                "scheduler_output is required in normal inference mode")
+
+        # Normal inference mode
         # enable msMonitor to monitor the performance of vllm-ascend
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
