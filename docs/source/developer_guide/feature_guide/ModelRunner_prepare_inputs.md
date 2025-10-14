@@ -1,4 +1,6 @@
-# Purpose
+# Prepare inputs for model forwarding
+
+## Purpose
 What information should we have in order to perform model forward pass?
  - the inputs
  - the corresponding attention metadata of the inputs
@@ -17,8 +19,8 @@ Therefore, as long as we have these two pieces of information mentioned above, w
 
 This article will explain **how we obtain the inputs and their corresponding attention metadata** which are on the left part of above diagram.
 
-# Overview
-## 1. Obtain inputs
+## Overview
+### 1. Obtain inputs
 The workflow of obtain inputs:
 1. Get `token positions`: The relative position of each token within its request sequence.
 
@@ -29,7 +31,7 @@ The workflow of obtain inputs:
 At last, these `Token IDs` required to feed into the model, and also, `positions` should be send into model to create `Rope` (Rotary positional embedding). Both of them are the inputs of a model.
 
 **Note**: because the `Token IDs` is the inputs of the model, so we will call it `Inputs IDs`
-## 2. Build inputs attention metadata
+### 2. Build inputs attention metadata
 The model requires these attention metadata during the forward pass:
 - `query start location`: represents the start and end location of each request corresponding to the scheduled tokens.
 - `sequence length`: the length of each request including both computed tokens and newly scheduled tokens.
@@ -41,7 +43,7 @@ The model requires these attention metadata during the forward pass:
 - `slot mapping`: the indices of each token that input token will be stored into.
 - `attention mask`: The mask matrix applied to attention scores before softmax to control which tokens can attend to each other. (usually a causal attention)
 
-# Before start
+## Before start
 There are mainly three types of variables.
 - token level: represents one attribute corresponding to each scheduled token, so the length of this variable is the number of scheduled tokens
 - request level: represents one attribute of each scheduled request, which length usually is the number of scheduled requests. (`query start location` is a special case, which has one more element)
@@ -52,7 +54,7 @@ There are mainly three types of variables.
 **Note**: How were these two tables formed?
 - Both of them are come from the `_update_states` method before **prepare inputs**. You can take a look if you need more inspiration.
 
-## Tips
+### Tips
 What is `Token ID`?
 For simple, a `token ID` is an **integer** (usually `int32`), which represents a token.
 example of `Token ID`:
@@ -74,7 +76,7 @@ example of `Token ID`:
 | vocab_size-1 | <|im_end|>    |
 ```
 
-# Go through details
+## Go through details
 Make a simple example, assumption:
 - max tokens can be scheduled at once: 10.
 - `block size`: 2
@@ -82,19 +84,19 @@ Make a simple example, assumption:
 - `max model length`: 12 (the max token count can be handled at one request sequence in this model).
 
 These assumption are configured in the beginning when starting the vllm. They are not fixed, so you can manually set them.
-## Step 1: All requests in the prefill phase
+### Step 1: All requests in the prefill phase
 
-### Obtain inputs
+#### Obtain inputs
 Due to the max schedule token count limitation is 10, The scheduled token of each request: `{'0': 3, '1': 2, '2': 5}`. Note that the `request_2` is in chunked prefill, still has 3 prompt tokens not be scheduled.
 
-#### 1. Get token positions:
+##### 1. Get token positions:
 First, find out each token belong to which request: the 0~2 tokens belong to request_0, 3~4 tokens belong to request_1 and 5~9 tokens belong to request_2. So, we can use `request indices` to point out each token belongs to which request. `request indices`: `[0, 0, 0, 1, 1, 2, 2, 2, 2, 2]`
 
 For each request, use **the number of tokens already computed** + **the relative position in current scheduled tokens**: `request_0: [0 + 0, 0 + 1, 0 + 2]`, `request_1: [0 + 0, 0 + 1]`, `request_2: [0 + 0, 0 + 1,..., 0 + 4]` and then concat them together: `[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`. Note: there is more efficient way (using `request indices`) to create positions in actual code.
 
 Finally, `token opsitions` is `[0, 1, 2, 0, 1, 0, 1, 2, 3, 4]`. This variable is **token level**
 
-#### 2. Get token indices:
+##### 2. Get token indices:
 Current **Token IDs table**, which shape is `(max num request, max model len)`.
 
 Why these `T_3_5`, `T_3_6`, `T_3_7` are in this table even them are not scheduled this time?
@@ -116,7 +118,7 @@ Let's say `M = max model len`, Then we can use `token positions` together with t
 
 So `token indices` = `[0 + 0 * M, 1 + 0 * M, 2 + 0 * M, 0 + 1 * M, 1 + 1 * M, 0 + 2 * M, 1 + 2 * M, 2 + 2 * M, 3 + 2 * M, 4 + 2 * M]` = `[0, 1, 2, 12, 13, 24, 25, 26, 27, 28]`
 
-#### 3. Retrieve the Token IDs
+##### 3. Retrieve the Token IDs
 As mentioned before, we will refer to these `Token IDs` as `Input IDs`.
 
 We use the `token indices` to select out the corresponding `Input IDs` from the token table, The Pseudocode like:
@@ -128,7 +130,7 @@ input_ids = token_table[token_indices]
 As mentioned before, we will refer these Token IDs as Inputs IDs:
 - `Input IDs` = `[T_0_0, T_0_1, T_0_2, T_1_0, T_1_1, T_2_0, T_2_1, T_3_2, T_3_3, T_3_4]`
 
-### Build inputs attention metadata
+#### Build inputs attention metadata
 Current **Block Table**, we use the first block (i.e. block_0) to mark the unused block. The shape of the block is `(max num request, max model len / block size)`, the `max model len / block size = 12 / 2 = 6`
 
 ```
@@ -172,10 +174,10 @@ First, we know the scheduled token count is `[3, 2, 5]` **request level**
 - `slot mapping`: `[2, 3, 4, 6, 7, 8, 9, 10, 11, 12]`. **token level**
 - `attention mask`: For all request do prefill, we simply create only one mask matrix for reuse across different requests. The shape of this mask matrix is `5 * 5`:
 
-## Step 2: Chunked prefill
+### Step 2: Chunked prefill
 In Step 2, we will no longer provide explanations or perform calculations; instead, we will directly present the final result.
 
-### Obtain inputs
+#### Obtain inputs
 The scheduled token of each request: `{'0': 1, '1': 1, '2': 3}`.
 
 1. `request indices`: `[0, 1, 2, 2, 2]`
@@ -198,7 +200,7 @@ Current **Token IDs table**:
 3. `token indices`: `[3, 14, 29, 30, 31]`
 4. `Input IDs`: `[T_0_3, T_1_2, T_3_5, T_3_6, T_3_7]`
 
-### Build inputs attention metadata
+#### Build inputs attention metadata
 Current **Block Table**. **Note**: We allocate the `7` and `8` block to `request_1` and `request_2` respectively. Because they need more space in device to store kv cache after generate new tokens or chunked prefill new tokens.
 
 ```
@@ -231,7 +233,7 @@ scheduled token count is `[1, 1, 3]`
 - `slot mapping`: `[5, 14, 13, 16, 17]`
 - `attention mask`: `5 * 8` Each token will have a `1 * 8` vector, and there are 5 scheduled tokens.
 
-# At last
+## At last
 If you under stand the step_1 and step_2, you will know the all following steps.
 
 Hope this article can help you get better understand to how vllm prepare inputs for model forwarding. If you have any good idea, welcome to contribute to us.
