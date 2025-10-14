@@ -20,7 +20,6 @@
 import copy
 import gc
 import itertools
-import re
 import time
 from collections import defaultdict
 from collections.abc import Iterator
@@ -33,6 +32,7 @@ from typing import (TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional,
 
 import numpy as np
 import numpy.typing as npt
+import regex as re
 import torch
 import torch._dynamo.cache_size
 import torch.distributed as dist
@@ -315,13 +315,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.block_size,
             use_mla=self.model_config.use_mla,
             use_sfa=self.ascend_config.use_sfa)
-        if torch.version.cann.startswith("8.3"):
-            self.attn_mask_builder = AttentionMaskBuilder(
-                self.scheduler_config.max_num_batched_tokens, self.dtype,
-                self.device)
-        else:
-            self.attn_mask_builder = AttentionMaskBuilder(
-                self.model_config.max_model_len, self.dtype)
+
+        self.attn_mask_builder = AttentionMaskBuilder(
+            self.scheduler_config.max_num_batched_tokens, self.dtype,
+            self.device)
 
         # Set up speculative decoding.
         self.spec_attn_mask = None
@@ -869,11 +866,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                              attn_state) -> torch.Tensor:
         # Chunk Prefill situation.
         if attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.ascend_config.use_sfa:
-            if torch.version.cann.startswith("8.3"):
-                return self.attn_mask_builder.get_splitfuse_attn_mask()
-            else:
-                return self.attn_mask_builder.get_splitfuse_attn_mask(
-                    seq_lens, position, self.dtype, self.device)
+            return self.attn_mask_builder.get_splitfuse_attn_mask()
 
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
