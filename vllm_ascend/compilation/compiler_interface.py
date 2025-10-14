@@ -45,9 +45,10 @@ def get_shapes_from_args(args: list[Any]) -> list[torch.Size]:
             shape_list.append(value.shape)
     return shape_list
 
+
 class AscendAdaptor(CompilerInterface):
     name = "AscendAdaptor"
-    
+
     def compile(
         self,
         graph: fx.GraphModule,
@@ -68,5 +69,3 @@ class AscendAdaptor(CompilerInterface):
         graph = current_pass_manager(graph, **kwargs)
         compilation_counter.num_eager_compiles += 1
         return graph, None
-        
-        

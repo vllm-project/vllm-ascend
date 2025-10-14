@@ -40,9 +40,11 @@ class AscendConfig:
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
         self.torchair_graph_config = TorchairGraphConfig(torchair_graph_config)
-        
-        ascend_compilation_config = additional_config.get("ascend_compilation_config", {})
-        self.ascend_compilation_config = AscendCompilationConfig(**ascend_compilation_config)
+
+        ascend_compilation_config = additional_config.get(
+            "ascend_compilation_config", {})
+        self.ascend_compilation_config = AscendCompilationConfig(
+            **ascend_compilation_config)
 
         ascend_scheduler_config = additional_config.get(
             "ascend_scheduler_config", {})
@@ -129,6 +131,7 @@ class AscendConfig:
             if self.pd_tp_ratio == 0:
                 raise AssertionError(
                     "Only support P node tp size lagger then D node tp size")
+
 
 class AscendCompilationConfig:
     """
@@ -307,7 +310,7 @@ def check_ascend_config(vllm_config, enforce_eager):
                     logger.info(
                         "Quantization fusion enabled! op fusion on quantization are expected. "
                     )
-            
+
             if vllm_config.model_config:
                 model_type = vllm_config.model_config.hf_config.model_type
                 if "qwen" not in model_type:

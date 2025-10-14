@@ -18,11 +18,11 @@
 from typing import Optional, Tuple, Union, cast
 
 import torch
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
 class AscendRMSNorm(RMSNorm):
+
     def forward_oot(
         self,
         x: torch.Tensor,

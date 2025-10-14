@@ -228,7 +228,7 @@ class NPUPlatform(Platform):
                 "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
             ])
             compilation_config.oot_compiler = AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
-            
+
             update_aclgraph_sizes(vllm_config)
         elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
             logger.info(
@@ -289,7 +289,7 @@ class NPUPlatform(Platform):
     @property
     def pass_key(self) -> str:
         return "graph_rewriter_manager"
-    
+
     @classmethod
     def get_attn_backend_cls(cls,
                              selected_backend,
@@ -329,12 +329,12 @@ class NPUPlatform(Platform):
             "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend",
         }
         return backend_map[(use_mla, use_sfa, use_torchair)]
-    
+
     @classmethod
     def get_pass_manager_cls(cls) -> str:
         """Get the pass manager class of a device."""
         return "vllm_ascend.compilation.graph_rewrite_pass_manager.GraphRewritePassManager"
-    
+
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"

@@ -21,7 +21,7 @@ from typing import Callable, List, Tuple
 import torch
 from torch.fx.subgraph_rewriter import replace_pattern
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
-  
+
 
 class AddRMSNormQuantPattern:
 
@@ -34,7 +34,8 @@ class AddRMSNormQuantPattern:
             """
           Pattern for AddRMSNormQuant fusion.
           """
-            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, 1e-6)
+            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual,
+                                                    rms_norm_weight, 1e-6)
             out0 = output[0]
             out1 = output[2]
             quantized_output = torch.ops.npu.npu_quantize(
@@ -70,11 +71,11 @@ class AscendQuantFusionPass(VllmInductorPass):
         self.patterns: List[Tuple[Callable, Callable]] = []
         # Register the AddRMSNormQuant fusion pattern into the graph rewriter pattern list
         AddRMSNormQuantPattern(vllm_config).register(self.patterns)
-               
+
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         for pattern, replace in self.patterns:
-            replace_pattern(graph, pattern, replace)     
+            replace_pattern(graph, pattern, replace)
             self.end_and_log()
 
     def is_applicable(self, **kwargs):
@@ -90,4 +91,4 @@ class AscendQuantFusionPass(VllmInductorPass):
             arg_dtypes, list) and len(arg_dtypes) > 0 else arg_dtypes
         # We found that the kernel npu_add_rms_norm_quant accept varying data format for different dtypes, therefore, we only
         # provide the solution on bfloat16 here.
-        return dtype in (torch.bfloat16, )                     
+        return dtype in (torch.bfloat16, )
