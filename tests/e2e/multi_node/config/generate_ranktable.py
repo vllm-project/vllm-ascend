@@ -35,29 +35,30 @@ class DisaggegatedPrefill:
         npus_per_node: number of NPUs per node (default 16)
         ips: list of IPs for all nodes, len should be equal to world_size
         """
-        self.world_size = config.world_size
-        self.num_prefillers = config.num_prefillers
-        self.num_prefiller_nodes = config.num_prefiller_nodes
-        self.num_decoders = config.num_decoders
-        self.num_decoder_nodes = config.num_decoder_nodes
+        self.world_size: int = config.world_size
+        self.num_prefillers: int = config.num_prefillers
+        self.num_prefiller_nodes: int = config.num_prefiller_nodes
+        self.num_decoders: int = config.num_decoders
+        self.num_decoder_nodes: int = config.num_decoder_nodes
         # for A3 cluster, we assume 16 NPUs per node
-        self.npus_per_node = int(os.getenv("NPU_PER_NODE", "16"))
-        self.ips = get_cluster_ips(self.world_size)
-        self.cur_ip = get_cur_ip()
-        self.with_prefill = os.getenv("WITH_PREFILL", "1") == "1"
+        self.npus_per_node: int = int(os.getenv("NPU_PER_NODE", "16"))
+        self.ips: list[str] = get_cluster_ips(self.world_size)
+        self.cur_ip: str = get_cur_ip()
+        self.with_prefill: bool = os.getenv("WITH_PREFILL", "1") == "1"
         # headless means that there is no API server on this node
-        self.headless = config.server_config.headless
-        self.is_leader = self.cur_ip == self.ips[0]
+        self.headless: bool = config.server_config.headless
+        self.server_port: int = config.server_port
+        self.is_leader: bool = self.cur_ip == self.ips[0]
         if self.is_leader:
             assert self.with_prefill, "Leader node must have prefill enabled"
             assert not self.headless, "Leader node cannot be headless"
 
-        self.nic_name = get_net_interface(self.cur_ip)
+        self.nic_name: str = get_net_interface(self.cur_ip)
         if self.nic_name is None:
             raise RuntimeError("Failed to get network interface")
 
-        self.prefill_device_cnt = self.num_prefillers * self.num_prefiller_nodes * self.npus_per_node
-        self.decode_device_cnt = self.num_decoders * self.num_decoder_nodes * self.npus_per_node
+        self.prefill_device_cnt: int = self.num_prefillers * self.num_prefiller_nodes * self.npus_per_node
+        self.decode_device_cnt: int = self.num_decoders * self.num_decoder_nodes * self.npus_per_node
 
     def setup_and_run_ranktable(self):
         """Generate ranktable.json for multi-node setup."""
@@ -198,28 +199,29 @@ class DisaggegatedPrefill:
         ]
         decode_ports = [DECODER_START_PORT + i for i in range(len(decode_ips))]
 
-        # === Step 4. Build and launch proxy command ===
-        proxy_cmd = [
-            "python",
-            LOAD_BALANCER_PROXY_SCRIPT,
-            "--host",
-            self.ips[0],
-            "--port",
-            "1025",
-            "--prefiller-hosts",
-            " ".join(prefill_ips),
-            "--prefiller-ports",
-            " ".join(map(str, prefill_ports)),
-            "--decoder-hosts",
-            " ".join(decode_ips),
-            "--decoder-ports",
-            " ".join(map(str, decode_ports)),
-        ]
+        if self.is_leader:
+            # === Step 4. Build and launch proxy command ===
+            proxy_cmd = [
+                "python",
+                LOAD_BALANCER_PROXY_SCRIPT,
+                "--host",
+                self.ips[0],
+                "--port",
+                self.server_port,
+                "--prefiller-hosts",
+                " ".join(prefill_ips),
+                "--prefiller-ports",
+                " ".join(map(str, prefill_ports)),
+                "--decoder-hosts",
+                " ".join(decode_ips),
+                "--decoder-ports",
+                " ".join(map(str, decode_ports)),
+            ]
 
-        logger.info("Launching proxy server with the following command:")
-        logger.info(" ".join(proxy_cmd))
+            logger.info("Launching proxy server with the following command:")
+            logger.info(" ".join(proxy_cmd))
 
-        #subprocess.Popen(proxy_cmd, env=os.environ.copy())
+            subprocess.Popen(proxy_cmd, env=os.environ.copy())
 
     @classmethod
     def _set_env(cls):
