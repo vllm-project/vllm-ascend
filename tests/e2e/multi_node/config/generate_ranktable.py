@@ -10,7 +10,7 @@ from tests.e2e.multi_node.config.common import (ASCEND_ENV_PATH,
                                                 RANKTABLE_GEN_PATH,
                                                 RANKTABLE_PATH)
 from tests.e2e.multi_node.config.multi_node_config import MultiNodeConfig
-from tests.e2e.multi_node.config.utils import (get_cluster_ips,
+from tests.e2e.multi_node.config.utils import (get_cluster_ips, get_cur_ip,
                                                get_net_interface, setup_logger)
 
 setup_logger()
@@ -23,7 +23,8 @@ class DisaggegatedPrefill:
         self.world_size = config.world_size
         self.npus_per_node = int(os.getenv("NPU_PER_NODE", "16"))
         self.ips = get_cluster_ips(self.world_size)
-        self.nic_name = get_net_interface(self.ips[0])
+        cur_ip = get_cur_ip()
+        self.nic_name = get_net_interface(cur_ip)
         if self.nic_name is None:
             raise RuntimeError("Failed to get network interface")
         if config is not None:
