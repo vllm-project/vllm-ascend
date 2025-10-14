@@ -462,7 +462,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Since not all models have moe modules and requires mc2, we leave
         # the initialization of mc2 related parameters later.
-        self.mc2_tokens_capacity = None
+        self.mc2_tokens_capacity = 0
         self.reserved_mc2_mask = None
 
         self.dynamic_eplb = self.ascend_config.dynamic_eplb
