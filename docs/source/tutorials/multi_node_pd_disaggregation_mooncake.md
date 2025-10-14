@@ -58,10 +58,11 @@ git clone -b pooling_async_memecpy_v1 https://github.com/AscendTransport/Mooncak
 Update and install Python
 
 ```shell
+apt-get update
 apt-get install python3
 ```
 
-Install the relevant dependencies.
+Install the relevant dependencies. The installation of Go is not required.
 
 ```shell
 cd Mooncake
@@ -89,12 +90,11 @@ make -j
 make install
 cp mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/libascend_transport_mem.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
 cp mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 ```
 
 ## Prefiller / Decoder Deployment
 
-We can run the following scripts to launch a server on the prefiller/decoder node respectively.
+We can run the following scripts to launch a server on the prefiller/decoder node respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
 ### layerwise
 
@@ -118,6 +118,8 @@ export ASCEND_AGGREGATE_ENABLE=1
 export ASCEND_TRANSPORT_PRINT=0
 export ACL_OP_INIT_MODE=1
 export ASCEND_A3_ENABLE=1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
@@ -133,7 +135,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --distributed-executor-backend mp \
   --served-model-name qwen3-moe \
   --max-model-len 32768 \
-  --max-num-batched-tokens 4096 \
+  --max-num-batched-tokens 32768 \
   --trust-remote-code \
   --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
@@ -144,7 +146,6 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
@@ -177,6 +178,8 @@ export ASCEND_AGGREGATE_ENABLE=1
 export ASCEND_TRANSPORT_PRINT=0
 export ACL_OP_INIT_MODE=1
 export ASCEND_A3_ENABLE=1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
@@ -192,7 +195,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --distributed-executor-backend mp \
   --served-model-name qwen3-moe \
   --max-model-len 32768 \
-  --max-num-batched-tokens 4096 \
+  --max-num-batched-tokens 32768 \
   --trust-remote-code \
   --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
@@ -217,7 +220,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 ::::
 
-::::{tab-item} Decoder node 1
+::::{tab-item} Decoder node 1 (master Node)
 
 ```shell
 unset ftp_proxy
@@ -235,6 +238,8 @@ export ASCEND_AGGREGATE_ENABLE=1
 export ASCEND_TRANSPORT_PRINT=0
 export ACL_OP_INIT_MODE=1
 export ASCEND_A3_ENABLE=1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
@@ -276,7 +281,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 ::::
 
-::::{tab-item} Decoder node 2
+::::{tab-item} Decoder node 2 (primary Node)
 
 ```shell
 unset ftp_proxy
@@ -294,6 +299,8 @@ export ASCEND_AGGREGATE_ENABLE=1
 export ASCEND_TRANSPORT_PRINT=0
 export ACL_OP_INIT_MODE=1
 export ASCEND_A3_ENABLE=1
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
@@ -318,8 +325,8 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
   "kv_role": "kv_consumer",
-  "kv_port": "30300",
-  "engine_id": "3",
+  "kv_port": "30200",
+  "engine_id": "2",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
   "kv_connector_extra_config": {
             "prefill": {
@@ -338,7 +345,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 :::::
 
-### mooncake
+### non-layerwise
 
 :::::{tab-set}
 
@@ -356,6 +363,8 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
@@ -371,7 +380,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --distributed-executor-backend mp \
   --served-model-name qwen3-moe \
   --max-model-len 32768 \
-  --max-num-batched-tokens 4096 \
+  --max-num-batched-tokens 32768 \
   --trust-remote-code \
   --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
@@ -382,14 +391,13 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
-            "use_ascend_direct": true,
             "prefill": {
                     "dp_size": 2,
                     "tp_size": 8
              },
              "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
+                    "dp_size": 4,
+                    "tp_size": 8
              }
       }
   }'
@@ -411,7 +419,9 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-vllm serve /mnt/weight/Qwen3-235B-A22B-W8A8 \
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+
+vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
   --api-server-count 2 \
@@ -426,7 +436,7 @@ vllm serve /mnt/weight/Qwen3-235B-A22B-W8A8 \
   --distributed-executor-backend mp \
   --served-model-name qwen3-moe \
   --max-model-len 32768 \
-  --max-num-batched-tokens 4096 \
+  --max-num-batched-tokens 32768 \
   --trust-remote-code \
   --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
@@ -442,8 +452,8 @@ vllm serve /mnt/weight/Qwen3-235B-A22B-W8A8 \
                     "tp_size": 8
              },
              "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
+                    "dp_size": 4,
+                    "tp_size": 8
              }
       }
   }'
@@ -451,7 +461,7 @@ vllm serve /mnt/weight/Qwen3-235B-A22B-W8A8 \
 
 ::::
 
-::::{tab-item} Decoder node 1
+::::{tab-item} Decoder node 1 (master Node)
 
 ```shell
 unset ftp_proxy
@@ -465,16 +475,17 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
   --api-server-count 4 \
-  --data-parallel-size 32 \
-  --data-parallel-size-local 16 \
+  --data-parallel-size 4 \
+  --data-parallel-size-local 2 \
   --data-parallel-address 192.0.0.3 \
   --data-parallel-rpc-port 5964  \
-  --tensor-parallel-size 1 \
+  --tensor-parallel-size 8 \
   --enable-expert-parallel \
   --seed 1024 \
   --distributed-executor-backend mp \
@@ -498,8 +509,8 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
                     "tp_size": 8
              },
              "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
+                    "dp_size": 4,
+                    "tp_size": 8
              }
       }
   }'
@@ -507,7 +518,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 ::::
 
-::::{tab-item} Decoder node 2
+::::{tab-item} Decoder node 2 (primary Node)
 
 ```shell
 unset ftp_proxy
@@ -521,17 +532,18 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
   --headless \
-  --data-parallel-size 32 \
-  --data-parallel-size-local 16 \
-  --data-parallel-start-rank 16 \
+  --data-parallel-size 4 \
+  --data-parallel-size-local 2 \
+  --data-parallel-start-rank 2 \
   --data-parallel-address 192.0.0.3 \
   --data-parallel-rpc-port 5964  \
-  --tensor-parallel-size 1 \
+  --tensor-parallel-size 8 \
   --enable-expert-parallel \
   --seed 1024 \
   --distributed-executor-backend mp \
@@ -546,8 +558,8 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
   "kv_role": "kv_consumer",
-  "kv_port": "30300",
-  "engine_id": "3",
+  "kv_port": "30200",
+  "engine_id": "2",
   "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
   "kv_connector_extra_config": {
             "prefill": {
@@ -555,8 +567,8 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
                     "tp_size": 8
              },
              "decode": {
-                    "dp_size": 32,
-                    "tp_size": 1
+                    "dp_size": 4,
+                    "tp_size": 8
              }
       }
   }'
@@ -568,7 +580,11 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 ## Example proxy for Deployment
 
-Run a proxy server on the same node with prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+Run a proxy server on the same node with prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py) or [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+
+:::::{tab-set}
+
+::::{tab-item} layerwise
 
 ```shell
 python load_balance_proxy_layerwise_server_example.py \
@@ -576,9 +592,27 @@ python load_balance_proxy_layerwise_server_example.py \
     --port 8080 \
     --prefiller-hosts 192.0.0.1 192.0.0.2\
     --prefiller-port 8004 8004\
-    --decoder-hosts 192.0.0.3 192.0.0.4\
-    --decoder-ports 8004 8004
+    --decoder-hosts 192.0.0.3\
+    --decoder-ports 8004
 ```
+
+::::
+
+::::{tab-item} non-layerwise
+
+```shell
+python load_balance_proxy_server_example.py \
+    --host 192.0.0.1 \
+    --port 8080 \
+    --prefiller-hosts 192.0.0.1 192.0.0.2\
+    --prefiller-port 8004 8004\
+    --decoder-hosts 192.0.0.3\
+    --decoder-ports 8004
+```
+
+::::
+
+:::::
 
 ## Verification
 
