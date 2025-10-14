@@ -24,6 +24,7 @@ from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
 class AscendRMSNorm(RMSNorm):
+
     def forward_oot(
         self,
         x: torch.Tensor,

@@ -226,6 +226,7 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(["vllm::mla_forward"])
             update_aclgraph_sizes(vllm_config)
+            compilation_config.oot_compiler = AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
         elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
             compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
             logger.info(
