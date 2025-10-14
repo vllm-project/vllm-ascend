@@ -43,7 +43,7 @@ class GraphRewritePassManager:
     def add(self, pass_: VllmInductorPass):
         assert isinstance(pass_, VllmInductorPass)
         self.passes.append(pass_)
-        
+
     def configure(self, config: VllmConfig):
         # By default, we enable the graph rewriter and quantization fusion pass.
         self.ascend_compilation_config: dict = config.additional_config.get(
