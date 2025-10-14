@@ -837,6 +837,8 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
 
         ascend_config = get_ascend_config()
         self.dynamic_eplb = ascend_config.dynamic_eplb
+        self.expert_map_record_path = ascend_config.expert_map_record_path
+        self.dynamic_eplb = self.dynamic_eplb or self.expert_map_record_path
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 

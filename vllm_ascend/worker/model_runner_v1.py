@@ -470,8 +470,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )
         self.dynamic_eplb = self.ascend_config.dynamic_eplb
         self.expert_map_record_path = self.ascend_config.expert_map_record_path
-        if self.dynamic_eplb or (self.expert_map_record_path and os.access(self.expert_map_record_path,
-                                                    os.W_OK)):
+        self.dynamic_eplb = self.dynamic_eplb or self.expert_map_record_path
+        if self.dynamic_eplb:
             self.is_eplb_warmuped = False
             self.policy_type = self.ascend_config.eplb_policy_type
             self.eplb_loader = D2DExpertWeightLoader()
