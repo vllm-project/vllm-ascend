@@ -22,7 +22,6 @@ if HAS_TRITON:
 
 # isort: off
 import vllm_ascend.patch.worker.patch_common.patch_attention_selector  # noqa
-import vllm_ascend.patch.worker.patch_common.patch_attentionspec  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_attention_layer  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_logits  # noqa
