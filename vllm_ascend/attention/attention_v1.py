@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import ClassVar, List, Optional, Tuple, Type
 
@@ -138,10 +138,10 @@ class AscendMetadata:
     # tokens + new tokens (is None if it is a decoding).
     # (batch_size,)
     seq_lens: torch.Tensor = None
-    seq_lens_list: list[int]
+    seq_lens_list: List = field(default_factory=list)
 
     query_start_loc: torch.Tensor = None
-    query_start_loc_list: list[int]
+    query_start_loc_list: List = field(default_factory=list)
     query_lens: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
     max_query_len: Optional[int] = None
