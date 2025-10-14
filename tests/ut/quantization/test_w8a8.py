@@ -738,11 +738,11 @@ class TestSelectExperts(TestBase):
                                                                0).contiguous())
 
         weights, ids = select_experts(hidden_states=self.hidden_states,
-                                         router_logits=self.router_logits,
-                                         top_k=self.top_k,
-                                         use_grouped_topk=False,
-                                         renormalize=False,
-                                         scoring_func="softmax")
+                                      router_logits=self.router_logits,
+                                      top_k=self.top_k,
+                                      use_grouped_topk=False,
+                                      renormalize=False,
+                                      scoring_func="softmax")
 
         self.assertEqual(weights.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.shape, (self.num_tokens, self.top_k))
@@ -751,11 +751,11 @@ class TestSelectExperts(TestBase):
         """Test sigmoid scoring function"""
 
         weights, ids = select_experts(hidden_states=self.hidden_states,
-                                         router_logits=self.router_logits,
-                                         top_k=self.top_k,
-                                         use_grouped_topk=False,
-                                         renormalize=False,
-                                         scoring_func="sigmoid")
+                                      router_logits=self.router_logits,
+                                      top_k=self.top_k,
+                                      use_grouped_topk=False,
+                                      renormalize=False,
+                                      scoring_func="sigmoid")
 
         self.assertEqual(weights.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.shape, (self.num_tokens, self.top_k))
@@ -779,12 +779,12 @@ class TestSelectExperts(TestBase):
                                               dtype=torch.long))
 
         weights, ids = select_experts(hidden_states=self.hidden_states,
-                                         router_logits=self.router_logits,
-                                         top_k=self.top_k,
-                                         use_grouped_topk=True,
-                                         renormalize=False,
-                                         topk_group=4,
-                                         num_expert_group=2)
+                                      router_logits=self.router_logits,
+                                      top_k=self.top_k,
+                                      use_grouped_topk=True,
+                                      renormalize=False,
+                                      topk_group=4,
+                                      num_expert_group=2)
 
         mock_topk.assert_called()
         self.assertEqual(weights.shape, (self.num_tokens, self.top_k))
