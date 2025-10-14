@@ -1019,9 +1019,7 @@ class TorchairAscendFusedMoE(FusedMoE):
             self.moe_parallel_config.ep_size, is_deepseek_v3_r1)
 
         ascend_config = get_ascend_config()
-        self.dynamic_eplb = ascend_config.dynamic_eplb
-        self.expert_map_record_path = ascend_config.expert_map_record_path
-        self.dynamic_eplb = self.dynamic_eplb or self.expert_map_record_path
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.expert_map_path = ascend_config.expert_map_path
         self.global_redundant_expert_num = ascend_config.init_redundancy_expert
         self.global_num_experts = num_experts + self.global_redundant_expert_num

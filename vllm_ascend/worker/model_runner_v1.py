@@ -467,9 +467,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             dtype=torch.bool,
             device=self.device,
         )
-        self.dynamic_eplb = self.ascend_config.dynamic_eplb
-        self.expert_map_record_path = self.ascend_config.expert_map_record_path
-        self.dynamic_eplb = self.dynamic_eplb or self.expert_map_record_path
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False
             self.policy_type = self.ascend_config.eplb_policy_type

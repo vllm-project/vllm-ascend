@@ -141,9 +141,7 @@ class AscendW4A8DynamicFusedMoEMethod:
         self.new_quant_version = quant_version == "1.0.0"
         self.tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else self.ep_group.world_size
         ascend_config = get_ascend_config()
-        self.dynamic_eplb = ascend_config.dynamic_eplb
-        self.expert_map_record_path = ascend_config.expert_map_record_path
-        self.dynamic_eplb = self.dynamic_eplb or self.expert_map_record_path
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         if self.new_quant_version and self.tp_size > 16:
             raise ValueError(
                 "The current weight does not support moe part tp>16.")
