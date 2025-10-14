@@ -67,5 +67,6 @@ class AscendAdaptor(CompilerInterface):
         }
         graph = current_pass_manager(graph, **kwargs)
         compilation_counter.num_eager_compiles += 1
+        return graph, None
         
         

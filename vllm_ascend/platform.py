@@ -33,7 +33,6 @@ from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, is_310p,
                                update_aclgraph_sizes)
-from vllm_ascend.compilation.compiler_interface import AscendAdaptor
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -120,6 +119,8 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+
+        from vllm_ascend.compilation.compiler_interface import AscendAdaptor
         if not envs_vllm.VLLM_USE_V1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
         # initialize ascend config from vllm additional_config
@@ -332,7 +333,7 @@ class NPUPlatform(Platform):
     @classmethod
     def get_pass_manager_cls(cls) -> str:
         """Get the pass manager class of a device."""
-        return "vllm_ascend.compilation.pass_manager.GraphRewriterPassManager"
+        return "vllm_ascend.compilation.graph_rewrite_pass_manager.GraphRewritePassManager"
     
     @classmethod
     def get_punica_wrapper(cls) -> str:

@@ -22,46 +22,6 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
 
-# class AddRMSNormW8A8Quant(RMSNorm):
-#     # Fuse AddRmsNorm and W8A8 quantization ops together
-
-#     def __init__(
-#         self,
-#         hidden_size: int,
-#         layer: torch.nn.Module,
-#         eps: float = 1e-6,
-#         var_hidden_size: Optional[int] = None,
-#         has_weight: bool = True,
-#         dtype: Optional[torch.dtype] = None,
-#     ) -> None:
-#         super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
-#         self.layer = layer
-
-#     def forward(
-#         self,
-#         x: torch.Tensor,
-#         residual: Optional[torch.Tensor] = None,
-#     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-#         import torch_npu
-
-#         if residual is not None:
-#             residual = torch.ops.vllm.maybe_chunk_residual(x, residual)
-#             assert x.size(0) == residual.size(0)
-#             x, _, residual = torch_npu.npu_add_rms_norm_quant(
-#                 x,
-#                 residual,
-#                 self.weight,
-#                 self.layer.aclnn_input_scale,
-#                 self.layer.aclnn_input_offset,
-#                 epsilon=self.variance_epsilon)
-#             torch.ops.vllm.maybe_wait_prefetch_done(x)
-#             return x, residual
-
-#         x, residual = torch_npu.npu_rms_norm(x, self.weight,
-#                                              self.variance_epsilon)
-#         return x
-
-
 class AscendRMSNorm(RMSNorm):
     def forward_oot(
         self,
