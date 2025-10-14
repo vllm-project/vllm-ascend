@@ -55,22 +55,18 @@ def batched_kronecker_quant(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     batch_tokens = x.shape[0]
     if batch_tokens <= KRONECKER_QUANT_MAX_BATCH_SIZE:
-        return torch_npu.npu_kronecker_quant(
-            x,
-            left_trans,
-            right_trans,
-            clip_ratio=clip_ratio,
-            dst_dtype=torch.int32
-        )
+        return torch_npu.npu_kronecker_quant(x,
+                                             left_trans,
+                                             right_trans,
+                                             clip_ratio=clip_ratio,
+                                             dst_dtype=torch.int32)
     x_chunks = torch.split(x, KRONECKER_QUANT_MAX_BATCH_SIZE, dim=0)
     processed_chunks = [
-        torch_npu.npu_kronecker_quant(
-            chunk,
-            left_trans,
-            right_trans,
-            clip_ratio=clip_ratio,
-            dst_dtype=torch.int32
-        )
+        torch_npu.npu_kronecker_quant(chunk,
+                                      left_trans,
+                                      right_trans,
+                                      clip_ratio=clip_ratio,
+                                      dst_dtype=torch.int32)
         for chunk in x_chunks
     ]
     quantized_list, scale_list = zip(*processed_chunks)
@@ -158,8 +154,11 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
         left_trans_matched = layer.left_trans.to(original_dtype)
         right_trans_matched = layer.right_trans.to(original_dtype)
         x_reshaped = x.view(-1, left_dim, right_dim)
-        x_quantized_int4, activation_scale = batched_kronecker_quant(x_reshaped, left_trans_matched, right_trans_matched, layer.aclnn_clip_ratio)
-        x_quantized_reshaped = x_quantized_int4.view(-1, left_dim * right_dim // 8)
+        x_quantized_int4, activation_scale = batched_kronecker_quant(
+            x_reshaped, left_trans_matched, right_trans_matched,
+            layer.aclnn_clip_ratio)
+        x_quantized_reshaped = x_quantized_int4.view(-1,
+                                                     left_dim * right_dim // 8)
         pertoken_scale = activation_scale.view(-1).to(torch.float32)
         output = torch_npu.npu_quant_matmul(x_quantized_reshaped,
                                             layer.weight_packed.t(),
