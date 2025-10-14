@@ -459,43 +459,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if vllm_config.kv_transfer_config is not None:
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
-
-        # NOTE: To be clear, we need to make sure that during graph capture, the number of
-        # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
-        # the max number of tokens in graph is min(max_num_seqs * 2, 512).
-        if self.compilation_config.cudagraph_capture_sizes:
-            max_num_tokens = self.compilation_config.cudagraph_capture_sizes[0]
-        else:
-            max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
-        tp_size = self.parallel_config.tensor_parallel_size
-        # Use integer arithmetic for ceiling division.
-        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
-
-        # Additional check for MC2 restrictions on specific hardwares.
-        if self._is_moe_model() and self._select_moe_comm_method(
-                self.mc2_tokens_capacity,
-                with_prefill=True) == MoECommType.MC2:
-
-            soc_version = get_ascend_soc_version()
-            limit = None
-            if soc_version in {AscendSocVersion.A3}:
-                limit = 512
-            elif soc_version in {AscendSocVersion.A2}:
-                limit = 256
-
-            if limit is not None and num_tokens_per_tp_rank > limit:
-                raise ValueError(
-                    f"For {soc_version}, the max supported tokens per TP rank for MC2 is {limit}, "
-                    f"but got {num_tokens_per_tp_rank}. Please try to reduce `max_num_seqs` "
-                    f"(current: {self.max_num_reqs}) or increase `tp_size` (current: {tp_size})."
-                )
-
-        self.reserved_mc2_mask = torch.zeros(
-            self.mc2_tokens_capacity,
-            dtype=torch.bool,
-            device=self.device,
-        )
+        
+        # Since not all models have moe modules and requires mc2, we leave
+        # the initialization of mc2 related parameters later.
+        self.mc2_tokens_capacity = None
+        self.reserved_mc2_mask = None
 
         self.dynamic_eplb = self.ascend_config.dynamic_eplb
         if self.dynamic_eplb:
@@ -1828,6 +1796,44 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for module in self.model.modules()):
             return True
         return False
+    
+    def _initialize_mc2(self):
+        # NOTE: To be clear, we need to make sure that during graph capture, the number of
+        # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
+        # the max number of tokens in graph is min(max_num_seqs * 2, 512).
+        if self.compilation_config.cudagraph_capture_sizes:
+            max_num_tokens = self.compilation_config.cudagraph_capture_sizes[0]
+        else:
+            max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
+        tp_size = self.parallel_config.tensor_parallel_size
+        # Use integer arithmetic for ceiling division.
+        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+
+        # Additional check for MC2 restrictions on specific hardwares.
+        if self._is_moe_model() and self._select_moe_comm_method(
+                self.mc2_tokens_capacity,
+                with_prefill=True) == MoECommType.MC2:
+
+            soc_version = get_ascend_soc_version()
+            limit = None
+            if soc_version in {AscendSocVersion.A3}:
+                limit = 512
+            elif soc_version in {AscendSocVersion.A2}:
+                limit = 256
+
+            if limit is not None and num_tokens_per_tp_rank > limit:
+                raise ValueError(
+                    f"For {soc_version}, the max supported tokens per TP rank for MC2 is {limit}, "
+                    f"but got {num_tokens_per_tp_rank}. Please try to reduce `max_num_seqs` "
+                    f"(current: {self.max_num_reqs}) or increase `tp_size` (current: {tp_size})."
+                )
+
+        self.reserved_mc2_mask = torch.zeros(
+            self.mc2_tokens_capacity,
+            dtype=torch.bool,
+            device=self.device,
+        )
 
     def _select_moe_comm_method(self, num_tokens: int,
                                 with_prefill: bool) -> MoECommType:
@@ -2515,12 +2521,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # MC2 will consume additional NPU memory.
             # Therefore, we need to run the MC2 path once here to complete its initialization,
             # allowing vLLM to correctly estimate the maximum memory required.
-            if self._is_moe_model() and \
-                self.max_num_tokens > self.mc2_tokens_capacity and \
-                self._select_moe_comm_method(
-                    self.mc2_tokens_capacity,
-                    with_prefill=True) == MoECommType.MC2:
-                self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
+            if self._is_moe_model():
+                self._initialize_mc2()
+                if self.max_num_tokens > self.mc2_tokens_capacity and \
+                    self._select_moe_comm_method(
+                        self.mc2_tokens_capacity,
+                        with_prefill=True) == MoECommType.MC2:
+                    self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
 
         output = None
         if get_pp_group().is_last_rank:
