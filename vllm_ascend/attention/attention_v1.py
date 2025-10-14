@@ -203,7 +203,6 @@ class AscendAttentionMetadataBuilder:
         block_table = common_attn_metadata.block_table_tensor
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
-        seq_lens_list = seq_lens[:num_reqs].tolist()
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
         attn_state = common_attn_metadata.attn_state
@@ -212,7 +211,6 @@ class AscendAttentionMetadataBuilder:
                                                                        + 1]
         query_start_loc = query_start_loc_cpu.to(self.device,
                                                  non_blocking=True)
-        query_start_loc_list = query_start_loc[1:].tolist()
 
         if is_310p():
             if attn_state == AscendAttentionState.PrefillNoCache:
@@ -228,15 +226,16 @@ class AscendAttentionMetadataBuilder:
             num_actual_tokens=num_actual_tokens,
             block_tables=block_table,
             query_start_loc=query_start_loc,
-            query_start_loc_list=query_start_loc_list,
+            query_start_loc_list=query_start_loc_cpu[1:].cpu().int().tolist(),
             query_lens=query_lens,
             seq_lens=seq_lens,
-            seq_lens_list=seq_lens_list,
+            seq_lens_list=seq_lens.cpu().int().tolist(),
             max_query_len=common_attn_metadata.max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
             enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp)
+
         return attn_metadata
 
     def build_for_graph_capture(
