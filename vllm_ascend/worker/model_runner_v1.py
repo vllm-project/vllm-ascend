@@ -2326,6 +2326,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
 
+        # In multi-DP scenarios, there may be situations where all DP groups are executing dummy runs.
+        # If sequence parallelism is enabled, it is essential to ensure that num_tokens is divisible by tp_size.
+        if self.use_aclgraph and enable_sp(self.vllm_config):
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            num_tokens = math.ceil(num_tokens / tp_size) * tp_size
+
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self._sync_metadata_across_dp(num_tokens, with_prefill, False)
