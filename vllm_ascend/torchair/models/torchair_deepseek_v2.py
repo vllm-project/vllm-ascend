@@ -791,7 +791,7 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_mla=True,
-            use_sfa=True,
+            use_sparse=True,
             # SFA Args
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
@@ -879,12 +879,12 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
         self.use_mla = False
-        self.use_sfa = False
+        self.use_sparse = False
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
-            if ascend_config.use_sfa:
+            if hasattr(model_config.hf_config, "index_topk"):
                 attn_cls = TorchairDeepseekV2SFAAttention
-                self.use_sfa = True
+                self.use_sparse = True
             else:
                 attn_cls = TorchairDeepseekV2MLAAttention  # type: ignore[assignment]
             self.use_mla = True
@@ -950,7 +950,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         forward_context = get_forward_context()
         if attn_metadata is not None:
             decoding_condition_met = (
-                not attn_metadata.is_prefill if self.use_sfa else
+                not attn_metadata.is_prefill if self.use_sparse else
                 not forward_context.with_prefill if self.use_mla else False)
             mla_moe_communication = decoding_condition_met and self.mla_moe_communication and replace_allreduce
         else:

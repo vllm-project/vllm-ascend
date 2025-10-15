@@ -34,8 +34,6 @@ class AscendConfig:
 
     def __init__(self, vllm_config):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-        self.is_deepseek_sfa = vllm_config.model_config is not None and vllm_config.model_config.is_deepseek_mla and vllm_config.model_config.hf_text_config.model_type == "deepseek_v32"
-        self.use_sfa = self.is_deepseek_sfa
 
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
