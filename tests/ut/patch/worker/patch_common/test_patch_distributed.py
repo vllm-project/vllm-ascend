@@ -29,7 +29,7 @@ class TestPatchDistributed(TestBase):
         self.mock_group_ranks = [[0, 1]]
         self.mock_local_rank = 0
         self.mock_backend = "hccl"
-        self.mock_use_device_comm = True
+        self.mock_use_device_comm = False
 
         patcher_get_rank = patch("torch.distributed.get_rank", return_value=0)
         patcher_new_group = patch("torch.distributed.new_group",
@@ -39,16 +39,24 @@ class TestPatchDistributed(TestBase):
         patcher_device_comm_cls = patch(
             "vllm.distributed.parallel_state.resolve_obj_by_qualname",
             return_value=MagicMock())
+        patcher_calculate_dp_buffer = patch(
+            "vllm_ascend.utils.calculate_dp_buffer_size", return_value=64)
+        patcher_npu_current_device = patch("torch.npu.current_device",
+                                           return_value=MagicMock())
 
         self.mock_get_rank = patcher_get_rank.start()
         self.mock_new_group = patcher_new_group.start()
         self.mock_is_cuda_alike = patcher_is_cuda_alike.start()
         self.mock_resolve_obj = patcher_device_comm_cls.start()
+        self.mock_calculate_dp_buffer = patcher_calculate_dp_buffer.start()
+        self.mock_npu_current_device = patcher_npu_current_device.start()
 
         self.addCleanup(patcher_get_rank.stop)
         self.addCleanup(patcher_new_group.stop)
         self.addCleanup(patcher_is_cuda_alike.stop)
         self.addCleanup(patcher_device_comm_cls.stop)
+        self.addCleanup(patcher_calculate_dp_buffer.stop)
+        self.addCleanup(patcher_npu_current_device.stop)
 
         self.group_coordinator = GroupCoordinatorPatch(
             group_ranks=self.mock_group_ranks,

@@ -18,3 +18,4 @@ self-hosted-runner:
     - linux-amd64-cpu-0
     - linux-amd64-cpu-8
     - linux-amd64-cpu-16
+    - linux-aarch64-a3-0

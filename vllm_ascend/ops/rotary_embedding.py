@@ -22,7 +22,8 @@ import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
-    DeepseekScalingRotaryEmbedding, RotaryEmbedding)
+    DeepseekScalingRotaryEmbedding, RotaryEmbedding,
+    YaRNScalingRotaryEmbedding)
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import enable_custom_op, is_310p
@@ -151,6 +152,47 @@ class AscendRotaryEmbedding(RotaryEmbedding):
                 forward_context.is_first_layer = False
         return _rope_forward_oot(self, positions, query, key, is_neox_style,
                                  offsets)
+
+
+class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
+
+    def __init__(
+        self,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: float,
+        is_neox_style: bool,
+        scaling_factor: float,
+        dtype: torch.dtype,
+        *,
+        extrapolation_factor: float = 1,
+        attn_factor: float = 1,
+        beta_fast: int = 32,
+        beta_slow: int = 1,
+    ) -> None:
+        self.cos = None
+        self.sin = None
+        extra_kwargs = {
+            "extrapolation_factor": extrapolation_factor,
+            "attn_factor": attn_factor,
+            "beta_fast": beta_fast,
+            "beta_slow": beta_slow
+        }
+        super().__init__(head_size, rotary_dim, max_position_embeddings, base,
+                         is_neox_style, scaling_factor, dtype, **extra_kwargs)
+
+    def forward_oot(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+        is_neox_style_override: Optional[bool] = None,
+    ):
+        return AscendRotaryEmbedding.forward_oot(self, positions, query, key,
+                                                 offsets,
+                                                 is_neox_style_override)
 
 
 class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):

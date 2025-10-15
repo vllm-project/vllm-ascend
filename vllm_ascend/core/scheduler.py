@@ -102,6 +102,14 @@ class AscendScheduler(Scheduler):
             # all request prefilled, change phase to decode
             if not self.waiting and not self.running:
                 self.phase = "decode"
+        # Skip long prompt requests in prefill stage.
+        # long_prefill_budget is float('inf') if not use.
+        if self.vllm_config.scheduler_config.long_prefill_token_threshold == 0:
+            long_prefill_budget = float('inf')
+            long_prefill_token_threshold = float('inf')
+        else:
+            long_prefill_budget = self.vllm_config.scheduler_config.max_long_partial_prefills
+            long_prefill_token_threshold = self.vllm_config.scheduler_config.long_prefill_token_threshold
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
@@ -200,20 +208,26 @@ class AscendScheduler(Scheduler):
                 assert num_new_tokens > 0
                 blocks = new_computed_blocks.blocks[0]
 
-            # Schedule encoder inputs.
-            if request.has_encoder_inputs:
-                (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_budget) = self._try_schedule_encoder_inputs(
-                     request, num_computed_tokens, num_new_tokens,
-                     encoder_budget)
-                if num_new_tokens == 0:
-                    # The request cannot be scheduled.
-                    break
+                # Schedule encoder inputs.
+                if request.has_encoder_inputs:
+                    (encoder_inputs_to_schedule, num_new_tokens,
+                     new_encoder_budget) = self._try_schedule_encoder_inputs(
+                         request, num_computed_tokens, num_new_tokens,
+                         encoder_budget)
+                    if num_new_tokens == 0 or len(
+                            encoder_inputs_to_schedule) == 0:
+                        # The request cannot be scheduled.
+                        break
 
             watermark = getattr(self.scheduler_config, "watermark", 0.01)
             if not self._check_watermark_for_prefill(request, num_new_tokens,
                                                      blocks, watermark):
                 # Scheduling would exceed watermark, skip.
+                skip_cur_request()
+                continue
+
+            if  num_new_tokens > long_prefill_token_threshold \
+                and long_prefill_budget <= 0:
                 skip_cur_request()
                 continue
 
@@ -268,6 +282,8 @@ class AscendScheduler(Scheduler):
             # Update request info.
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
+            if num_new_tokens > long_prefill_token_threshold:
+                long_prefill_budget -= 1
             request.status = RequestStatus.RUNNING
             request.num_computed_tokens = num_computed_tokens
             # Count the number of prefix cached tokens.

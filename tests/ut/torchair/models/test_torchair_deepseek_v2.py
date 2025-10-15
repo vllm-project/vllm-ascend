@@ -176,7 +176,7 @@ def test_torchair_deepseek_v2_merged_replicated_linear(mock_distributed):
     TorchairDeepseekV2RowParallelLinearReplaceAllreduce,
     TorchairDeepseekV2RowParallelLinear
 ])
-def test_row_parallel_linear(cls, mock_distributed):
+def test_row_parallel_linear(cls, mock_distributed, mock_forward_context):
     linear = cls(input_size=128, output_size=64, bias=False, quant_config=None)
     linear.quant_method = Mock()
     linear.quant_method.apply.return_value = torch.randn(2, 4, 64)
@@ -276,13 +276,10 @@ def test_torchair_deepseek_v2_mla_attention(mock_rms_norm, mock_distributed,
 @patch("torch_npu.npu_add_rms_norm")
 @patch("torch_npu.npu_rms_norm")
 @patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
-@patch("torch.ops.vllm.maybe_chunk_residual",
-       side_effect=lambda x, residual: residual)
-def test_torchair_deepseek_v2_decoder_layer(mock_maybe_chunk_residual,
-                                            mock_maybe_wait_prefetch_done,
+def test_torchair_deepseek_v2_decoder_layer(mock_maybe_wait_prefetch_done,
                                             mock_rms_norm, mock_add_norm,
                                             mock_distributed, base_config,
-                                            vllm_config):
+                                            vllm_config, mock_forward_context):
     mock_rms_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128))
     mock_add_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128),
                                   torch.randn(2, 128))

@@ -119,7 +119,7 @@ class MooncakeEngine:
 
         if self.use_layerwise:
             self.get_event = threading.Event()
-            if self.kv_role == 'kv_producer':
+            if self.kv_role in ['kv_producer', 'kv_both']:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
                     self.tp_rank, self.tp_size, self.m_store,
@@ -135,7 +135,7 @@ class MooncakeEngine:
             self.kv_recv_thread.start()
             ready_event.wait()
         else:
-            if self.kv_role == 'kv_producer':
+            if self.kv_role in ['kv_producer', 'kv_both']:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreSendingThread(
                     self.tp_rank, self.tp_size, self.m_store,
@@ -429,7 +429,7 @@ class MooncakeEngine:
         done_sending = (
             self.kv_send_thread.
             get_and_clear_finished_requests(  # type: ignore[union-attr]
-            ) if self.kv_role == 'kv_producer' else set())
+            ) if self.kv_role in ['kv_producer', 'kv_both'] else set())
         done_recving = self.kv_recv_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
         )
 

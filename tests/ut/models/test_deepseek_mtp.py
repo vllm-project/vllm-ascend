@@ -168,8 +168,6 @@ class TestCustomDeepSeekMTP(PytestBase):
         mocker.patch(
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekMultiTokenPredictorLayer.__call__",
             return_value=None)
-        mocker.patch("vllm.model_executor.layers.sampler.get_sampler",
-                     return_value=None)
         mocker.patch(
             "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
             return_value=None)

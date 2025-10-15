@@ -97,16 +97,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     o_k = i_k * BK + tl.arange(0, BK)
     o_v = i_v * BV + tl.arange(0, BV)
 
-    # p_q = q + (bos * H + i_h) * K + o_k
-    # p_k = k + (bos * H + i_h) * K + o_k
-    # p_v = v + (bos * HV + i_hv) * V + o_v
-    # if IS_BETA_HEADWISE:
-    #     p_beta = beta + (bos * HV + i_hv) * V + o_v
-    # else:
-    #     p_beta = beta + bos * HV + i_hv
-    # p_g = g + bos * HV + i_hv
-    # p_o = o + ((i_k * all + bos) * HV + i_hv) * V + o_v
-
     mask_k = o_k < K
     mask_v = o_v < V
     mask_h = mask_k[:, None] & mask_v[None, :]
@@ -169,13 +159,6 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             p_ht = ht + (bos + i_t) * stride_final_state_token
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
-
-        # p_q += H * K
-        # p_k += H * K
-        # p_o += HV * V
-        # p_v += HV * V
-        # p_g += HV
-        # p_beta += HV * (V if IS_BETA_HEADWISE else 1)
 
 
 def fused_recurrent_gated_delta_rule_fwd(
@@ -342,13 +325,11 @@ def fused_recurrent_gated_delta_rule(
             Indices to map the input sequences to the initial/final states.
         num_accepted_tokens (Optional[torch.Tensor]):
             Number of accepted tokens for each sequence during decoding.
-
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, HV, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, HV, K, V]`.
-
     Examples::
         >>> import torch
         >>> import torch.nn.functional as F

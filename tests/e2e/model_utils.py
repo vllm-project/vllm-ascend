@@ -19,7 +19,7 @@
 
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-from vllm.sequence import PromptLogprobs, SampleLogprobs
+from vllm.logprobs import PromptLogprobs, SampleLogprobs
 
 TokensText = Tuple[List[int], str]
 

@@ -17,17 +17,16 @@
 # limitations under the License.
 #
 import json
-import os
+from typing import Any, Dict
 
 import jsonschema
 import pytest
 import regex as re
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 
 from tests.e2e.conftest import VllmRunner
 
-os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
@@ -84,16 +83,18 @@ def sample_json_schema():
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_json_completion(guided_decoding_backend: str,
                                 sample_json_schema):
+    runner_kwargs: Dict[str, Any] = {}
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=500,
-        guided_decoding=GuidedDecodingParams(json=sample_json_schema))
-
-    with VllmRunner(
-            MODEL_NAME,
-            seed=0,
-            guided_decoding_backend=guided_decoding_backend,
-    ) as vllm_model:
+        structured_outputs=StructuredOutputsParams(json=sample_json_schema))
+    runner_kwargs = {
+        "seed": 0,
+        "structured_outputs_config": {
+            "backend": guided_decoding_backend
+        },
+    }
+    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
         prompts = [
             f"Give an example JSON for an employee profile "
             f"that fits this schema: {sample_json_schema}"
@@ -121,17 +122,19 @@ def test_guided_json_completion(guided_decoding_backend: str,
 def test_guided_regex(guided_decoding_backend: str, sample_regex):
     if guided_decoding_backend == "outlines":
         pytest.skip("Outlines doesn't support regex-based guided decoding.")
-
+    runner_kwargs: Dict[str, Any] = {}
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_decoding=GuidedDecodingParams(regex=sample_regex))
+        structured_outputs=StructuredOutputsParams(regex=sample_regex))
+    runner_kwargs = {
+        "seed": 0,
+        "structured_outputs_config": {
+            "backend": guided_decoding_backend
+        },
+    }
 
-    with VllmRunner(
-            MODEL_NAME,
-            seed=0,
-            guided_decoding_backend=guided_decoding_backend,
-    ) as vllm_model:
+    with VllmRunner(MODEL_NAME, **runner_kwargs) as vllm_model:
         prompts = [
             f"Give an example IPv4 address with this regex: {sample_regex}"
         ] * 2

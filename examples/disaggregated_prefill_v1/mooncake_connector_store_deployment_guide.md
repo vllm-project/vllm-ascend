@@ -64,6 +64,7 @@ export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ASCEND_TRANSPORT_PRINT=1
+export ACL_OP_INIT_MODE=1
 # The upper boundary environment variable for memory swap logging is set to mooncake, where 1 indicates enabled and 0 indicates disabled.
 export ASCEND_AGGREGATE_ENABLE=1
 # The upper-level environment variable is the switch for enabling the mooncake aggregation function, where 1 means on and 0 means off.
@@ -104,6 +105,7 @@ python3 -m vllm.entrypoints.openai.api_server \
             		{
 				"kv_connector": "MooncakeConnectorStoreV1",
 				"kv_role": "kv_producer",
+                "mooncake_rpc_port":"0"
 			}  
 		]
 	}
@@ -124,6 +126,7 @@ export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
+export ACL_OP_INIT_MODE=1
 export ASCEND_TRANSPORT_PRINT=1
 # The upper boundary environment variable for memory swap logging is set to mooncake, where 1 indicates enabled and 0 indicates disabled.
 export ASCEND_AGGREGATE_ENABLE=1
@@ -165,6 +168,7 @@ python3 -m vllm.entrypoints.openai.api_server \
 			{
 				"kv_connector": "MooncakeConnectorStoreV1",
 				"kv_role": "kv_consumer",
+                "mooncake_rpc_port":"1"
 			}
 		]
 	}
@@ -223,6 +227,7 @@ export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+export ACL_OP_INIT_MODE=1
 export ASCEND_TRANSPORT_PRINT=1
 # The upper boundary environment variable for memory swap logging is set to mooncake, where 1 indicates enabled and 0 indicates disabled.
 export ASCEND_AGGREGATE_ENABLE=1
@@ -242,9 +247,10 @@ python3 -m vllm.entrypoints.openai.api_server \
     --kv-transfer-config \
     '{
 	"kv_connector": "MooncakeConnectorStoreV1",
-	"kv_role": "kv_producer",
+	"kv_role": "kv_both",
 	"kv_connector_extra_config": {
-		"use_layerwise": false
+		"use_layerwise": false,
+        "mooncake_rpc_port":"0"
 	}
 }' > mix.log 2>&1
 ```

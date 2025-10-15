@@ -118,12 +118,6 @@ def test_token_dispatcher_with_all_gather(
     score = torch.softmax(score, dim=-1, dtype=dtype)
     topk_weights, topk_ids = torch.topk(score, topk)
     topk_ids = topk_ids.to(torch.int32)
-    row_idx = (torch.arange(
-        0,
-        m * topk,
-        device=device,
-        dtype=torch.int32,
-    ).view(topk, -1).permute(1, 0).contiguous())
 
     dispatcher_kwargs = {
         "num_experts": e,
@@ -137,13 +131,13 @@ def test_token_dispatcher_with_all_gather(
         hidden_states=a,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        row_idx=row_idx,
         expert_map=expert_map,
         apply_router_weight_on_input=apply_router_weight_on_input)
 
     sorted_hidden_states = dispatch_output["hidden_states"]
     group_list = dispatch_output["group_list"]
     group_list_type = dispatch_output.get("group_list_type", 1)
+    context_metadata = dispatch_output["context_metadata"]
 
     expert_output = apply_mlp(hidden_states=sorted_hidden_states,
                               w1=w1_local,
@@ -151,8 +145,10 @@ def test_token_dispatcher_with_all_gather(
                               group_list=group_list,
                               group_list_type=group_list_type)
 
-    combined_output = dispatcher.token_combine(hidden_states=expert_output,
-                                               bias=None)
+    combined_output = dispatcher.token_combine(
+        hidden_states=expert_output,
+        context_metadata=context_metadata,
+        bias=None)
 
     torch_output = torch_moe(a, w1, w2, topk_weights, topk_ids, topk,
                              expert_map)
@@ -201,12 +197,6 @@ def test_token_dispatcher_with_all_gather_quant(
         score = torch.softmax(score, dim=-1, dtype=dtype)
         topk_weights, topk_ids = torch.topk(score, topk)
         topk_ids = topk_ids.to(torch.int32)
-        row_idx = (torch.arange(
-            0,
-            m * topk,
-            device=device,
-            dtype=torch.int32,
-        ).view(topk, -1).permute(1, 0).contiguous())
 
         dispatcher_kwargs = {
             "num_experts": e,
@@ -220,7 +210,6 @@ def test_token_dispatcher_with_all_gather_quant(
             hidden_states=a,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            row_idx=row_idx,
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             with_quant=True)
@@ -229,6 +218,7 @@ def test_token_dispatcher_with_all_gather_quant(
         group_list = dispatch_output["group_list"]
         group_list_type = dispatch_output.get("group_list_type", 1)
         dynamic_scale = dispatch_output["dynamic_scale"]
+        context_metadata = dispatch_output["context_metadata"]
 
         expert_output = unified_apply_mlp(hidden_states=sorted_hidden_states,
                                           w1=w1,
@@ -239,8 +229,10 @@ def test_token_dispatcher_with_all_gather_quant(
                                           group_list_type=group_list_type,
                                           dynamic_scale=dynamic_scale,
                                           with_quant=True)
-        combined_output = dispatcher.token_combine(hidden_states=expert_output,
-                                                   bias=None)
+        combined_output = dispatcher.token_combine(
+            hidden_states=expert_output,
+            context_metadata=context_metadata,
+            bias=None)
         assert combined_output.shape == (m, k)
         gc.collect()
         torch.npu.empty_cache()
@@ -291,11 +283,13 @@ def test_select_experts(
         custom_routing_function.return_value = (mock_weights, mock_ids)
 
     with patch("vllm_ascend.ops.moe.experts_selector._native_grouped_topk"
-               ) as mock_native_grouped_topk:
+               ) as mock_native_grouped_topk, \
+            patch('vllm_ascend.ops.moe.experts_selector.get_forward_context',
+                  return_value=MagicMock(weight_prefetch_method=MagicMock())):
         mock_native_grouped_topk.side_effect = lambda x, num_groups, k: torch.randn_like(
             x)
 
-        topk_weights, topk_ids, row_idx = select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             top_k=topk,
@@ -316,7 +310,6 @@ def test_select_experts(
     assert topk_weights.shape == (m, topk)
     assert topk_ids.shape == (m, topk)
     assert topk_ids.dtype == torch.int32
-    assert row_idx.shape == (m, topk)
 
     gc.collect()
     torch.npu.empty_cache()
@@ -325,7 +318,9 @@ def test_select_experts(
 
 @pytest.mark.parametrize("device", DEVICE)
 def test_select_experts_invalid_scoring_func(device: str):
-    with pytest.raises(ValueError,
+    with patch('vllm_ascend.ops.moe.experts_selector.get_forward_context',
+                  return_value=MagicMock(weight_prefetch_method=MagicMock())), \
+            pytest.raises(ValueError,
                        match="Unsupported scoring function: invalid"):
         select_experts(hidden_states=torch.randn(1, 128, device=device),
                        router_logits=torch.randn(1, 8, device=device),
