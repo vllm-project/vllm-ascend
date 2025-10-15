@@ -2644,6 +2644,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
+        self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = (len(self.attn_groups) > 1)
         # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
         self.need_accepted_tokens = any([
@@ -2653,7 +2655,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
-        self.initialize_attn_backend(kv_cache_config)
 
         if self.ascend_config.is_deepseek_sfa:
             kv_caches = self.initialize_kv_cache_tensors_deepseek_sfa(
