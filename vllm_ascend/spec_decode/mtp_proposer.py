@@ -16,8 +16,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
-from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
-                               vllm_version_is)
+from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 PADDING_SLOT_ID = -1
 
@@ -332,12 +331,10 @@ class MtpProposer(Proposer):
             num_computed_tokens_cpu=None,
             seq_lens=None)
 
-        if vllm_version_is("0.10.2"):
-            builder = self.runner.attn_groups[0][0].metadata_builder
-        else:
-            builder = self.runner.attn_groups[0][0].get_metadata_builder()
+        builder = self.runner.attn_groups[0][0].get_metadata_builder()
         attn_metadata_mtp = builder.build(0, common_attn_metadata,
                                           self.runner.get_model())
+
         attn_metadata = {}
         for layer_name in self.attn_layer_name:
             attn_metadata[layer_name] = attn_metadata_mtp
@@ -428,6 +425,12 @@ class MtpProposer(Proposer):
             input_ids = draft_token_ids_list[-1].int()
             positions += 1
 
+            attn_metadata_i.decode.actual_seq_lengths_q = attn_metadata_i.query_start_loc[
+                                                          1:batch_size + 1].tolist()
+            attn_metadata_i.decode.cos = builder.cos_cache[
+                positions].unsqueeze(1).unsqueeze(2)
+            attn_metadata_i.decode.sin = builder.sin_cache[
+                positions].unsqueeze(1).unsqueeze(2)
             # NOTE(woosuk): We should handle the case where the draft model
             # generates tokens beyond the max model length. Since it is complex
             # to remove such requests from the batch, we keep them in the batch
@@ -456,11 +459,13 @@ class MtpProposer(Proposer):
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
-            self.hidden_states[:batch_size] = hidden_states
+            self.hidden_states[:hidden_states.shape[0]] = hidden_states
             attn_metadata_i.slot_mapping[:batch_size] = slot_mapping
 
             if attn_metadata_i.prefill is not None:
                 attn_metadata_i.prefill.seq_lens = attn_metadata_i.seq_lens
+                attn_metadata_i.prefill.seq_lens_list = attn_metadata_i.prefill.seq_lens.tolist(
+                )
                 attn_metadata_i.prefill.context_lens = attn_metadata_i.seq_lens
                 attn_metadata_i.prefill.input_positions = self.positions[:
                                                                          num_input_tokens]
@@ -470,6 +475,8 @@ class MtpProposer(Proposer):
                     self.runner.model_config.max_model_len)
             if attn_metadata_i.decode is not None:
                 attn_metadata_i.decode.seq_lens = attn_metadata_i.seq_lens
+                attn_metadata_i.decode.seq_lens_list = attn_metadata_i.decode.seq_lens.tolist(
+                )
                 attn_metadata_i.decode.input_positions = self.positions[:
                                                                         num_input_tokens]
                 attn_metadata_i.decode.max_seq_lens += 1

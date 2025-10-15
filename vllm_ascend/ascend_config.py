@@ -34,6 +34,8 @@ class AscendConfig:
 
     def __init__(self, vllm_config):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+        self.is_deepseek_sfa = vllm_config.model_config is not None and vllm_config.model_config.is_deepseek_mla and vllm_config.model_config.hf_text_config.model_type == "deepseek_v32"
+        self.use_sfa = self.is_deepseek_sfa
 
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
@@ -43,8 +45,15 @@ class AscendConfig:
             "ascend_scheduler_config", {})
         self.ascend_scheduler_config = AscendSchedulerConfig(
             ascend_scheduler_config)
+
+        weight_prefetch_config = additional_config.get(
+            "weight_prefetch_config", {})
+        self.weight_prefetch_config = WeightPrefetchConfig(
+            weight_prefetch_config)
+
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
         self.expert_map_path = additional_config.get("expert_map_path", None)
+        self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
         self.expert_map_record_path = additional_config.get(
             "expert_map_record_path",
             None)  # Provide path to export expert map
@@ -63,7 +72,6 @@ class AscendConfig:
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
         self.multistream_overlap_shared_expert = additional_config.get(
             "multistream_overlap_shared_expert", False)
-        self.enable_prefetch = additional_config.get("enable_prefetch", False)
         self.lmhead_tensor_parallel_size = additional_config.get(
             "lmhead_tensor_parallel_size", None)
         if self.lmhead_tensor_parallel_size is not None:
@@ -92,6 +100,32 @@ class AscendConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
+        self.pd_tp_ratio = 1
+        self.pd_head_ratio = 1
+        self.num_head_replica = 1
+        if vllm_config.kv_transfer_config is not None and not vllm_config.model_config.is_deepseek_mla:
+            prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config(
+                "prefill", {"tp_size": 1})["tp_size"]
+            decode_tp_size = vllm_config.kv_transfer_config.get_from_extra_config(
+                "decode", {"tp_size": 1})["tp_size"]
+            assert prefill_tp_size % decode_tp_size == 0, "Prefill TP size must be divisible by Decode TP size."
+            self.pd_tp_ratio = prefill_tp_size // decode_tp_size
+            if self.pd_tp_ratio > 1:
+                try:
+                    # only support Qwen model now
+                    # TODO: use a more robust method to get kv_head_num
+                    num_kv_head = vllm_config.model_config.hf_config.num_key_value_heads
+                    self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
+                    prefill_tp_size = min(prefill_tp_size, num_kv_head)
+                    decode_tp_size = min(decode_tp_size, num_kv_head)
+                    self.pd_head_ratio = prefill_tp_size // decode_tp_size
+                except Exception:
+                    raise AssertionError(
+                        "Can not get num_key_value_heads from model_config")
+
+            if self.pd_tp_ratio == 0:
+                raise AssertionError(
+                    "Only support P node tp size lagger then D node tp size")
 
 
 class TorchairGraphConfig:
@@ -170,6 +204,27 @@ class AscendSchedulerConfig:
         for k, v in ascend_scheduler_config.items():
             if not hasattr(self, k):
                 setattr(self, k, v)
+
+
+class WeightPrefetchConfig:
+    """
+    Configuration Object for weight_prefetch_config from additional_config
+    """
+
+    prefetch_ratio: dict = {
+        "attn": {
+            "qkv": 1.0,
+            "o": 1.0,
+        },
+        "moe": {
+            "gate_up": 0.8
+        }
+    }
+
+    def __init__(self, weight_prefetch_config: dict):
+        self.enabled = weight_prefetch_config.get("enabled", False)
+        self.prefetch_ratio = weight_prefetch_config.get(
+            "prefetch_ratio", self.prefetch_ratio)
 
 
 _ASCEND_CONFIG: Optional[AscendConfig] = None

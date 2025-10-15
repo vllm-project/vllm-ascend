@@ -1,36 +1,16 @@
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_gather,
+from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
 from vllm.utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
-
-
-def _maybe_chunk_residual_impl(x: torch.Tensor,
-                               residual: torch.Tensor) -> torch.Tensor:
-    try:
-        forward_context = get_forward_context()
-    except AssertionError:
-        return residual
-
-    if x.size(0) != residual.size(0):
-        sp_enabled = forward_context.sp_enabled
-        assert sp_enabled is True, ("Currently, this situation only occurs "
-                                    "when sp is enabled")
-        pad_size = forward_context.pad_size
-        if pad_size > 0:
-            residual = F.pad(residual, (0, 0, 0, pad_size))
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
-
-    return residual
+from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
+from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
 
 def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
@@ -147,11 +127,42 @@ def _maybe_wait_prefetch_done_impl_fake(x: torch.Tensor) -> None:
     return
 
 
-direct_register_custom_op(op_name="maybe_chunk_residual",
-                          op_func=_maybe_chunk_residual_impl,
-                          fake_impl=lambda x, residual: residual,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
+def _prefetch_preprocess_impl(weight: torch.Tensor, start_flag: torch.Tensor,
+                              max_weight_size: int) -> None:
+    calculation_stream = torch_npu.npu.current_stream()
+    weight_prefetch_stream = prefetch_stream()
+    weight_prefetch_stream.wait_stream(calculation_stream)
+    with npu_stream_switch(weight_prefetch_stream):
+        maybe_npu_prefetch(inputs=weight,
+                           dependency=start_flag,
+                           max_size=max_weight_size)
+
+
+def _prefetch_preprocess_impl_fake(weight: torch.Tensor,
+                                   start_flag: torch.Tensor,
+                                   max_weight_size: int) -> None:
+    return
+
+
+def _prefetch_postprocess_impl(stop_flag: torch.Tensor) -> None:
+    calculation_stream = torch_npu.npu.current_stream()
+    weight_prefetch_stream = prefetch_stream()
+    calculation_stream.wait_stream(weight_prefetch_stream)
+
+
+def _prefetch_postprocess_impl_fake(stop_flag: torch.Tensor) -> None:
+    return
+
+
+def _maybe_all_reduce_tensor_model_parallel_impl(
+        final_hidden_states: torch.Tensor) -> torch.Tensor:
+    forward_context = get_forward_context()
+    moe_comm_type = forward_context.moe_comm_type
+    if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
+        return final_hidden_states
+    else:
+        return tensor_model_parallel_all_reduce(final_hidden_states)
+
 
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,
@@ -180,5 +191,23 @@ direct_register_custom_op(op_name="maybe_prefetch_mlp_down_proj",
 direct_register_custom_op(op_name="maybe_wait_prefetch_done",
                           op_func=_maybe_wait_prefetch_done_impl,
                           fake_impl=_maybe_wait_prefetch_done_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="prefetch_preprocess",
+                          op_func=_prefetch_preprocess_impl,
+                          fake_impl=_prefetch_preprocess_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="prefetch_postprocess",
+                          op_func=_prefetch_postprocess_impl,
+                          fake_impl=_prefetch_postprocess_impl_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="maybe_all_reduce_tensor_model_parallel",
+                          op_func=_maybe_all_reduce_tensor_model_parallel_impl,
+                          fake_impl=lambda x: x,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")

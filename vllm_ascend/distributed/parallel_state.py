@@ -1,7 +1,7 @@
 from typing import Optional
 
 import torch
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
                                              init_model_parallel_group)
 
@@ -13,6 +13,7 @@ _MC2: Optional[GroupCoordinator] = None
 _MLP_TP: Optional[GroupCoordinator] = None
 _OTP: Optional[GroupCoordinator] = None
 _LMTP: Optional[GroupCoordinator] = None
+_P_TP: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
@@ -37,6 +38,12 @@ def get_mlp_tp_group() -> GroupCoordinator:
     return _MLP_TP
 
 
+def get_p_tp_group() -> GroupCoordinator:
+    assert _P_TP is not None, (
+        "distributed prefill tensor parallel group is not initialized")
+    return _P_TP
+
+
 def model_parallel_initialized():
     return (_MC2 is not None)
 
@@ -54,6 +61,45 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     all_ranks = torch.arange(world_size).reshape(
         -1, parallel_config.data_parallel_size *
         parallel_config.tensor_parallel_size)
+
+    pd_tp_ratio = get_ascend_config().pd_tp_ratio
+    pd_head_ratio = get_ascend_config().pd_head_ratio
+    global _P_TP
+    assert _P_TP is None, (
+        "distributed prefill tensor parallel group is already initialized")
+    prefill_tensor_model_parallel_size = pd_tp_ratio
+    # divide alltoall groups
+    if pd_head_ratio > 1 and get_current_vllm_config(
+    ).kv_transfer_config.is_kv_producer:
+        num_head_replica = get_ascend_config().num_head_replica
+        remote_tp_size = parallel_config.tensor_parallel_size // pd_tp_ratio
+        if num_head_replica <= 1:
+            group_ranks = all_ranks.view(
+                -1, prefill_tensor_model_parallel_size).unbind(0)
+        else:
+            group_ranks = all_ranks.clone().view(
+                parallel_config.data_parallel_size, -1,
+                num_head_replica)  # [DP_size, num_head, num_head_replica]
+            group_ranks = group_ranks.permute(0, 2, 1)
+            group_ranks = group_ranks.reshape(
+                -1,
+                group_ranks.size(-1))  # [DP_size * num_head_replica, num_head]
+            alltoall_group_size = group_ranks.size(-1) // remote_tp_size
+            group_ranks = group_ranks.unsqueeze(-1).view(
+                parallel_config.data_parallel_size, num_head_replica, -1,
+                alltoall_group_size
+            )  # [DP_size, num_head_replica, num_alltoall_group, alltoall_group_size]
+            group_ranks = group_ranks.view(-1, alltoall_group_size).unbind(0)
+        group_ranks = [x.tolist() for x in group_ranks]
+        local_rank = get_world_group().local_rank
+        num = next(
+            (i for i, ranks in enumerate(group_ranks) if local_rank in ranks),
+            None)
+        _P_TP = init_model_parallel_group(group_ranks,
+                                          get_world_group().local_rank,
+                                          backend,
+                                          group_name=f"p_tp_{num}")
+
     global _MC2
     group_ranks = all_ranks.unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
@@ -142,3 +188,8 @@ def destroy_ascend_model_parallel():
     if _OTP:
         _OTP.destroy()
     _OTP = None
+
+    global _P_TP
+    if _P_TP:
+        _P_TP.destroy()
+    _P_TP = None

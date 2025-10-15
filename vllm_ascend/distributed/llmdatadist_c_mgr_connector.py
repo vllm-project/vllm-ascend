@@ -180,7 +180,10 @@ class LLMDataDistCMgrConnectorScheduler():
         # Can not retrieve the parallel config since it is not initialized.
         self.local_dp_rank = None
         self.tp_size = None
-        dp_rank_local = self.vllm_config.parallel_config.data_parallel_rank_local
+        if vllm_config.parallel_config.data_parallel_external_lb:
+            dp_rank_local = vllm_config.parallel_config.data_parallel_rank
+        else:
+            dp_rank_local = vllm_config.parallel_config.data_parallel_rank_local
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
 
         self.port = dp_rank_local * tp_size + envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs_ascend.VLLM_ASCEND_LLMDD_RPC_PORT
@@ -312,7 +315,10 @@ class LLMDataDistCMgrConnectorWorker():
             vllm_config.parallel_config.data_parallel_size_local *
             vllm_config.parallel_config.tensor_parallel_size)
         self.local_rank = get_world_group().local_rank
-        self.local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        if vllm_config.parallel_config.data_parallel_external_lb:
+            self.local_dp_rank = vllm_config.parallel_config.data_parallel_rank
+        else:
+            self.local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_rank = get_tp_group().rank_in_group
         self.rank = get_world_group().rank
@@ -493,8 +499,11 @@ class LLMDataDistCMgrConnectorWorker():
         assert self.local_agent_metadata is not None
         kv_cache_dtype = first_kv_cache.dtype
         self.use_mla: bool = first_kv_cache_tuple[0].size(
-            -1) != first_kv_cache_tuple[1].size(-1)
+            -1) != first_kv_cache_tuple[1].size(-1) and len(
+                first_kv_cache_tuple) == 2
+        self.use_sfa: bool = len(first_kv_cache_tuple) == 3
         # MLA case. [2 (k_normed, k_pe), num_blocks, ...]
+        # SFA case. [3 (k_normed, k_pe, k_idx), num_blocks, ...]
         # MHA case. [2 (k and v), num_blocks, ...]
         self.num_blocks = first_kv_cache.shape[0]
         block_rank = 3  # [block_size, latent_dim]
@@ -535,6 +544,58 @@ class LLMDataDistCMgrConnectorWorker():
                 cache_k_pe = self.cache_manager.register_blocks_cache(
                     self.cache_desc[1], self.cache_addr[1], self.cache_key[1])
                 self.cache = (cache_k_normed, cache_k_pe)
+                logger.info("LLMDataDistWorker: End of register Paged Cache.")
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to register_block_cache, receiving [cache_desc: {self.cache_desc}, cache_addr: {self.cache_addr}, cache_key: {self.cache_key}]"
+                )
+        elif self.use_sfa:
+            cache_k_normed_addr_list = []
+            cache_k_pe_addr_list = []
+            cache_k_idx_addr_list = []
+            k_normed = None
+            k_pe = None
+            k_idx = None
+            for cache_or_caches in kv_caches.values():
+                assert len(cache_or_caches) > 1
+                k_normed, k_pe, k_idx = cache_or_caches[0], cache_or_caches[
+                    1], cache_or_caches[2]
+                cache_k_normed_addr_list.append(k_normed.data_ptr())
+                cache_k_pe_addr_list.append(k_pe.data_ptr())
+                cache_k_idx_addr_list.append(k_idx.data_ptr())
+            self.cache_addr = (cache_k_normed_addr_list, cache_k_pe_addr_list,
+                               cache_k_idx_addr_list)
+
+            cache_desc_k_normed = CacheDesc(
+                len(self.cache_addr[0]), [*k_normed.shape],
+                TORCH_DTYPE_TO_NPU_DTYPE[kv_cache_dtype])
+            cache_desc_k_pe = CacheDesc(
+                len(self.cache_addr[1]), [*k_pe.shape],
+                TORCH_DTYPE_TO_NPU_DTYPE[kv_cache_dtype])
+            cache_desc_k_idx = CacheDesc(
+                len(self.cache_addr[2]), [*k_idx.shape],
+                TORCH_DTYPE_TO_NPU_DTYPE[kv_cache_dtype])
+            cache_key_k_normed = BlocksCacheKey(cluster_id=int(
+                self.local_agent_metadata.cluster_id),
+                                                model_id=0)
+            cache_key_k_pe = BlocksCacheKey(cluster_id=int(
+                self.local_agent_metadata.cluster_id),
+                                            model_id=1)
+            cache_key_k_idx = BlocksCacheKey(cluster_id=int(
+                self.local_agent_metadata.cluster_id),
+                                             model_id=2)
+            self.cache_desc = (cache_desc_k_normed, cache_desc_k_pe,
+                               cache_desc_k_idx)
+            self.cache_key = (cache_key_k_normed, cache_key_k_pe,
+                              cache_key_k_idx)
+            try:
+                cache_k_normed = self.cache_manager.register_blocks_cache(
+                    self.cache_desc[0], self.cache_addr[0], self.cache_key[0])
+                cache_k_pe = self.cache_manager.register_blocks_cache(
+                    self.cache_desc[1], self.cache_addr[1], self.cache_key[1])
+                cache_k_idx = self.cache_manager.register_blocks_cache(
+                    self.cache_desc[2], self.cache_addr[2], self.cache_key[2])
+                self.cache = (cache_k_normed, cache_k_pe, cache_k_idx)
                 logger.info("LLMDataDistWorker: End of register Paged Cache.")
             except (TypeError, ValueError):
                 raise RuntimeError(
@@ -821,6 +882,38 @@ class LLMDataDistCMgrConnectorWorker():
             except (TypeError, ValueError):
                 raise RuntimeError(
                     f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key_k_normed} {remote_cache_key_k_pe}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}"  # type: ignore[has-type]
+                )
+            except LLMException:
+                raise RuntimeError(
+                    "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
+                )
+        elif self.use_sfa:
+            remote_cache_key_k_normed = BlocksCacheKey(
+                cluster_id=remote_cluster_id, model_id=0)
+            remote_cache_key_k_pe = BlocksCacheKey(
+                cluster_id=remote_cluster_id, model_id=1)
+            remote_cache_key_k_idx = BlocksCacheKey(
+                cluster_id=remote_cluster_id, model_id=2)
+            logger.info("Try pull blocks from remote server")
+            try:
+                self.cache_manager.pull_blocks(
+                    remote_cache_key_k_normed,
+                    self.cache[0],  # type: ignore[has-type]
+                    remote_block_ids,
+                    local_block_ids)
+                self.cache_manager.pull_blocks(
+                    remote_cache_key_k_pe,
+                    self.cache[1],  # type: ignore[has-type]    
+                    remote_block_ids,
+                    local_block_ids)
+                self.cache_manager.pull_blocks(
+                    remote_cache_key_k_idx,
+                    self.cache[2],  # type: ignore[has-type]    
+                    remote_block_ids,
+                    local_block_ids)
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key_k_normed} {remote_cache_key_k_pe} {remote_cache_key_k_idx}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}"  # type: ignore[has-type]
                 )
             except LLMException:
                 raise RuntimeError(

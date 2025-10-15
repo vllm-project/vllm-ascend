@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import os
-
 import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
-
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 @pytest.fixture
@@ -45,6 +41,7 @@ def test_mtp_torchair_correctness(
                             "use_cached_graph": False,
                             "graph_batch_sizes": [1, 2, 4],
                         },
+                        "multistream_overlap_shared_expert": "True"
                     }) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
     with VllmRunner(model_name,
@@ -64,7 +61,8 @@ def test_mtp_torchair_correctness(
                             "enabled": True,
                             "use_cached_graph": False,
                             "graph_batch_sizes": [1, 2, 4],
-                        }
+                        },
+                        "multistream_overlap_shared_expert": "True"
                     }) as spec_llm:
         spec_outputs = spec_llm.generate(example_prompts, sampling_config)
 

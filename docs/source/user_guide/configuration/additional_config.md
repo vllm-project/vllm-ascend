@@ -24,18 +24,24 @@ LLM(model="Qwen/Qwen3-8B", additional_config={"config_key":"config_value"})
 
 The following table lists the additional configuration options available in vLLM Ascend:
 
-| Name                          | Type | Default | Description                                                                                   |
-|-------------------------------| ---- |------|-----------------------------------------------------------------------------------------------|
-| `torchair_graph_config`       | dict | `{}` | The config options for torchair graph mode                                                    |
-| `ascend_scheduler_config`     | dict | `{}` | The config options for ascend scheduler                                                       |
-| `refresh`                     | bool | `false` | Whether to refresh global ascend config content. This value is usually used by rlhf or ut/e2e test case.     |
-| `expert_map_path`             | str  | `None` | When using expert load balancing for the MOE model, an expert map path needs to be passed in. |
-| `enable_prefetch`     | bool | `False` | Whether to enable weight prefetch. |
-| `kv_cache_dtype`     | str | `None` | When using the kv cache quantization method, kv cache dtype needs to be set, currently only int8 is supported. |
-| `enable_shared_expert_dp`     | bool | `False` | When the shared expert in DP, it has better performance but consumes more memory. Currently only DeepSeek series models are supported to use. |
-| `lmhead_tensor_parallel_size` | int | `None` | The custom tensor parallel size of lmhead. |
-| `oproj_tensor_parallel_size` | int | `None` | The custom tensor parallel size of oproj. |
-| `multistream_overlap_shared_expert`| bool | `False` | Whether to enable multistream shared expert. This option only takes effects on moe models with shared experts. |
+| Name                                | Type | Default | Description                                                                                                                                   |
+|-------------------------------------|------|---------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `torchair_graph_config`             | dict | `{}`    | The config options for torchair graph mode                                                                                                    |
+| `ascend_scheduler_config`           | dict | `{}`    | The config options for ascend scheduler                                                                                                       |
+| `weight_prefetch_config`            | dict | `{}`    | The config options for weight prefetch                                                                                                        |
+| `refresh`                           | bool | `false` | Whether to refresh global ascend config content. This value is usually used by rlhf or ut/e2e test case.                                      |
+| `expert_map_path`                   | str  | `None`  | When using expert load balancing for the MOE model, an expert map path needs to be passed in.                                                 |
+| `kv_cache_dtype`                    | str  | `None`  | When using the kv cache quantization method, kv cache dtype needs to be set, currently only int8 is supported.                                |
+| `enable_shared_expert_dp`           | bool | `False` | When the shared expert in DP, it has better performance but consumes more memory. Currently only DeepSeek series models are supported to use. |
+| `lmhead_tensor_parallel_size`       | int  | `None`  | The custom tensor parallel size of lmhead.                                                                                                    |
+| `oproj_tensor_parallel_size`        | int  | `None`  | The custom tensor parallel size of oproj.                                                                                                     |
+| `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effects on moe models with shared experts.                                |
+| `dynamic_eplb`                      | bool | `False` | Whether to enable dynamic eplb                                                                                                                |
+| `num_iterations_eplb_update`        | int  | `400`   | Forward iterations when eplb would begin                                                                                                      |
+| `gate_eplb`                         | bool | `False` | Whether to enale eplb only once.                                                                                                              |
+| `num_wait_worker_iterations`        | int  | `30`    | The  forward iterations when eplb worker will finish cpu task. In our test default value 30 would cover most cases.                           |
+| `expert_map_record_path`            | str  | `None`  | When dynamic eplb is completed, save the current expert load heatmap to the specified path.                                                   |
+| `init_redundancy_expert`            | int  | `0`     | Specify redundant experts during initialization.                                                                                              |
 
 The details of each config option are as follows:
 
@@ -65,6 +71,13 @@ The details of each config option are as follows:
 
 ascend_scheduler_config also support the options from [vllm scheduler config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig). For example, you can add `enable_chunked_prefill: True` to ascend_scheduler_config as well.
 
+**weight_prefetch_config**
+
+| Name             | Type | Default                                                     | Description                        |
+|------------------|------|-------------------------------------------------------------|------------------------------------|
+| `enabled`        | bool | `False`                                                     | Whether to enable weight prefetch. |
+| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}}` | Prefetch ratio of each weights.    |
+
 ### Example
 
 An example of additional configuration is as follows:
@@ -83,6 +96,18 @@ An example of additional configuration is as follows:
         "enable_chunked_prefill": True,
         "max_long_partial_prefills": 1,
         "long_prefill_token_threshold": 4096,
+    },
+    "weight_prefetch_config": {
+        "enabled": True,
+        "prefetch_ratio": {
+            "attn": {
+                "qkv": 1.0,
+                "o": 1.0,
+            },
+            "moe": {
+                "gate_up": 0.8
+            }
+        },
     },
     "multistream_overlap_shared_expert": True,
     "refresh": False,
