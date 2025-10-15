@@ -44,11 +44,13 @@ else()
 endif()
 
 include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
+
 file(GLOB KERNEL_FILES
 ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
 ascendc_library(vllm_ascend_kernels SHARED
     ${KERNEL_FILES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
 )
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
@@ -90,7 +92,11 @@ target_link_libraries(
   libtorch_npu.so
   vllm_ascend_kernels
   ascendcl
+  tiling_api
+  register
   platform
+  ascendalog
+  dl
 )
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib")
