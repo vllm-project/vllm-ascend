@@ -106,4 +106,3 @@ class AscendSchedulerConfig(SchedulerConfig):
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support scheduler_delay_factor."
             )
-
