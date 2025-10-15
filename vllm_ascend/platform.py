@@ -31,7 +31,7 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, is_310p,
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
                                update_aclgraph_sizes)
 
 if TYPE_CHECKING:
@@ -211,6 +211,21 @@ class NPUPlatform(Platform):
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
+        # TODO delete graph size update here when compilation_config.pass_config.enable_sequence_parallelism
+        # is supported by vllm-ascend.
+        if vllm_config.parallel_config.tensor_parallel_size > 1 and not vllm_config.model_config.enforce_eager and \
+                enable_sp(vllm_config):
+            original_sizes = compilation_config.cudagraph_capture_sizes
+            sp_aclgraph_sizes = \
+                vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
+            assert sp_aclgraph_sizes, (
+                f"cudagraph_capture_sizes {original_sizes} does not contain"
+                f"values that are multiples of tp_size "
+                f"{vllm_config.parallel_config.tensor_parallel_size}")
+            if len(sp_aclgraph_sizes) != len(original_sizes):
+                compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
+                vllm_config.compilation_config.init_with_cudagraph_sizes(
+                    sp_aclgraph_sizes)
 
         # TODO: Full graph is fully supported later, and the default value will be set to full graph.
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
