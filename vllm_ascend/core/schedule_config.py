@@ -20,6 +20,8 @@ from typing import Type, Union
 
 from vllm.config import SchedulerConfig
 
+from vllm_ascend.utils import vllm_version_is
+
 MAX_INT = 2147483647
 
 
@@ -59,7 +61,7 @@ class AscendSchedulerConfig(SchedulerConfig):
                 scheduler_config[k] = getattr(ascend_scheduler_config, k)
         return cls(**scheduler_config)
 
-    def __post_init__(self, is_encoder_decoder: bool) -> None:
+    def _common_post_init(self) -> None:
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
         self.chunked_prefill_enabled = self.enable_chunked_prefill
@@ -106,3 +108,14 @@ class AscendSchedulerConfig(SchedulerConfig):
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support scheduler_delay_factor."
             )
+
+    if vllm_version_is("0.11.0"):
+
+        def __post_init__(self) -> None:
+            """Post initialization for vLLM version 0.11.0."""
+            self._common_post_init()
+    else:
+
+        def __post_init__(self, is_encoder_decoder: bool) -> None:
+            """Post initialization for other vLLM versions."""
+            self._common_post_init()
