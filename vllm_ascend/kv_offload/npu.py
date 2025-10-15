@@ -10,6 +10,7 @@ from vllm.v1.kv_offload.lru_manager import LRUOffloadingManager
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
+
 from vllm_ascend.kv_offload.cpu_npu import CpuNpuOffloadingHandler
 
 
