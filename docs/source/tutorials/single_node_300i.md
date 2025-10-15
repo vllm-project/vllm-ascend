@@ -3,7 +3,8 @@
 ```{note}
 1. This Atlas 300I series is currently experimental. In future versions, there may be behavioral changes around model coverage, performance improvement.
 2. Currently, the 310I series only supports eager mode and the data type is float16.
-3. The latest version has a large number of PRs for new features and models that need to be merged urgently. However, these PRs are not compatible with the 310I Duo, causing support for the 310I Duo in the main branch in breaking state. This issue is still in fixing. The current stable version for 310I Duo is vllm-ascend v0.10.0rc1.
+3. There are some known issues for running vLLM on 310p series, you can refer to vllm-ascend [<u>#3316</u>](https://github.com/vllm-project/vllm-ascend/issues/3316),
+ [<u>#2795</u>](https://github.com/vllm-project/vllm-ascend/issues/2795), you can use v0.10.0rc1 version first.
 ```
 
 ## Run vLLM on Altlas 300I series
