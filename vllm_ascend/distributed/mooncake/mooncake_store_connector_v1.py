@@ -164,7 +164,8 @@ class MooncakeStoreConnectorV1Scheduler:
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
-        self.consumer_is_to_load = extra_config.get("consumer_is_to_load", False)
+        self.consumer_is_to_load = extra_config.get("consumer_is_to_load", 
+                                                    False)
         # request_id -> (vllm cached tokes, mooncake cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self._block_size = vllm_config.cache_config.block_size
