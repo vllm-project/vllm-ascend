@@ -114,10 +114,10 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
+export ASCEND_AGGREGATE_ENABLE=1  # enable aggregated transmission
+export ASCEND_TRANSPORT_PRINT=0  # print ascend transport logs
+export ACL_OP_INIT_MODE=1  # acl op initialization mode to prevent device id acquisition failure
+export ASCEND_A3_ENABLE=1  # enable hccs transmission for A3; set to 0 for A2
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -137,7 +137,6 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 32768 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
@@ -197,7 +196,6 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 32768 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeLayerwiseConnector",
@@ -363,6 +361,10 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export ASCEND_AGGREGATE_ENABLE=1
+export ASCEND_TRANSPORT_PRINT=0
+export ACL_OP_INIT_MODE=1
+export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -382,7 +384,6 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 32768 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
@@ -419,6 +420,10 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export ASCEND_AGGREGATE_ENABLE=1
+export ASCEND_TRANSPORT_PRINT=0
+export ACL_OP_INIT_MODE=1
+export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -438,7 +443,6 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --max-model-len 32768 \
   --max-num-batched-tokens 32768 \
   --trust-remote-code \
-  --no-enable-prefix-caching \
   --gpu-memory-utilization 0.9 \
   --kv-transfer-config \
   '{"kv_connector": "MooncakeConnector",
@@ -475,6 +479,10 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export ASCEND_AGGREGATE_ENABLE=1
+export ASCEND_TRANSPORT_PRINT=0
+export ACL_OP_INIT_MODE=1
+export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -532,6 +540,10 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
+export ASCEND_AGGREGATE_ENABLE=1
+export ASCEND_TRANSPORT_PRINT=0
+export ACL_OP_INIT_MODE=1
+export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
