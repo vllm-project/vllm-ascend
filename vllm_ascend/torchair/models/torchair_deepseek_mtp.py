@@ -24,6 +24,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -66,6 +67,7 @@ class TorchairDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer
     ) -> None:
         nn.Module.__init__(self)
 
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2,
@@ -100,11 +102,15 @@ class TorchairDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer
         hidden_states = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
-        hidden_states, residual = self.mtp_block(positions=positions,
-                                                 hidden_states=hidden_states,
-                                                 kv_cache=kv_cache,
-                                                 attn_metadata=attn_metadata,
-                                                 residual=None)
+        replace_allreduce = hidden_states.shape[0] % self.tp_size == 0
+
+        hidden_states, residual = self.mtp_block(
+            positions=positions,
+            hidden_states=hidden_states,
+            residual=None,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+            replace_allreduce=replace_allreduce)
         hidden_states = residual + hidden_states
         return hidden_states
 
