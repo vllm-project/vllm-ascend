@@ -125,11 +125,12 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.dispatcher.with_quant = True
         hidden_states = torch.randn(10, 128)
         topk_ids = torch.randint(0, 8, (10, 1))
-        topk_weights = torch.randn(10, 1)  # 注意：应为 float，不是 int
+        topk_weights = torch.randn(10, 1)
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
         ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
         mc2_mask = None
-        assist_info_for_combine = torch.arange(10)  # mock 值
+        assist_info_for_combine = torch.arange(10)
 
         context_metadata = {
             "topk_ids": topk_ids,
@@ -139,6 +140,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             "mc2_mask": mc2_mask,
             "assist_info_for_combine": assist_info_for_combine,
             "expand_scales": None,
+            "tp_recv_counts": tp_recv_counts,
         }
 
         self.dispatcher.need_extra_args = True
@@ -157,6 +159,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         topk_weights = torch.randn(10, 1)
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
         ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
         assist_info_for_combine = torch.arange(10)
 
         context_metadata = {
@@ -170,6 +173,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             "shared_experts": shared_experts,
             "shared_act": torch.randn(10, 128),
             "swiglu_out_scale": torch.randn(10, 1),
+            "tp_recv_counts": tp_recv_counts,
         }
 
         self.dispatcher.with_quant = True

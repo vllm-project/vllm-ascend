@@ -190,7 +190,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             **kwargs_mc2)
         # comm_stream.wait_stream(torch.npu.current_stream())
         expand_x, dynamic_scale, assist_info_for_combine, expert_token_nums, \
-            ep_recv_counts, _, expand_scales = output[0:7]
+            ep_recv_counts, tp_recv_counts, expand_scales = output[0:7]
 
         # Handle shared experts (store intermediate results in local vars, not self)
         shared_act = None
@@ -220,7 +220,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "shared_experts": shared_experts,
             "shared_act": shared_act,
             "swiglu_out_scale": swiglu_out_scale,
-            "expand_scales": expand_scales
+            "expand_scales": expand_scales,
+            "tp_recv_counts": tp_recv_counts
         }
 
         return {
@@ -240,6 +241,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         assist_info_for_combine = context_metadata["assist_info_for_combine"]
         mc2_mask = context_metadata["mc2_mask"]
         expand_scales = context_metadata["expand_scales"]
+        tp_recv_counts = context_metadata["tp_recv_counts"]
 
         assert expert_map is not None
         moe_expert_num = len(expert_map)
@@ -258,8 +260,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             tp_recv_counts = torch.empty(1,
                                          dtype=torch.int32,
                                          device=hidden_states.device)
-        else:
-            tp_recv_counts = ep_recv_counts
 
         stage3_kwargs = {
             "ep_send_counts": ep_recv_counts,
