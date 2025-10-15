@@ -62,7 +62,7 @@ class CpuNpuOffloadingHandler(OffloadingHandler):
 
         # job_id -> transfer npu event
         self.transfer_events: dict[int, torch.npu.Event] = {}
-        # list of npu events available for re-use
+        # list of npu events available for reuse
         self.events_pool: list[torch.npu.Event] = []
 
         pin_memory = is_pin_memory_available()
