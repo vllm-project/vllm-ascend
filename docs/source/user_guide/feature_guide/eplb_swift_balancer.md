@@ -16,7 +16,7 @@ Expert balancing for MoE models in LLM serving is essential for optimal performa
 
 ### Dynamic EPLB
 
-Enable dynamic balancing with auto-tuned parameters. Adjust num_iterations_eplb_update and num_wait_worker_iterations based on workload patterns.
+We need to add environment variable `export PYTHONOPTIMIZE=1` to get context of vllm process. Enable dynamic balancing with auto-tuned parameters. Adjust num_iterations_eplb_update and num_wait_worker_iterations based on workload patterns.
 
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
@@ -25,7 +25,6 @@ vllm serve Qwen/Qwen3-235B-A22 \
   --additional-config '{
     "dynamic_eplb": true,
     "num_iterations_eplb_update": 400,
-    "gate_eplb": true,
     "num_wait_worker_iterations": 30
   }'
 ```
@@ -42,9 +41,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
   --additional-config '{
     "expert_map_record_path": "/path/to/eplb.json",
     "init_redundancy_expert": 16,
-    "dynamic_eplb": true,
     "num_iterations_eplb_update": 400,
-    "gate_eplb": true,
     "num_wait_worker_iterations": 30
   }'
 ```
