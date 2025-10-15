@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch_npu
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
@@ -120,10 +120,10 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        self.use_aclgraph = (
-            vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
-            and not vllm_config.model_config.enforce_eager
-            and not ascend_config.torchair_graph_config.enabled)
+        self.use_aclgraph = (vllm_config.compilation_config.level
+                             == CompilationMode.VLLM_COMPILE
+                             and not vllm_config.model_config.enforce_eager and
+                             not ascend_config.torchair_graph_config.enabled)
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
 
         try:

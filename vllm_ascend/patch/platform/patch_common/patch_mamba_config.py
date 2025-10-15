@@ -20,7 +20,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
         vllm_config: vLLM Config
     """
     logger = init_logger(__name__)
-    # Enable FULL_AND_PIECEWISE by default
+    # Enable FULL_AND_VLLM_COMPILE by default
     MambaModelConfig.verify_and_update_config(vllm_config)
 
     cache_config = vllm_config.cache_config

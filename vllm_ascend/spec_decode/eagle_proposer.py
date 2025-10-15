@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from vllm.attention.layer import Attention
-from vllm.config import (CompilationLevel, VllmConfig,
+from vllm.config import (CompilationMode, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import logger
@@ -44,7 +44,7 @@ class EagleProposer(Proposer):
         )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
-                               == CompilationLevel.PIECEWISE and
+                               == CompilationMode.VLLM_COMPILE and
                                not self.vllm_config.model_config.enforce_eager)
         self.cudagraph_batch_sizes = list(
             reversed(

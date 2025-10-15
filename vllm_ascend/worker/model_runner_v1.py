@@ -44,7 +44,7 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
+from vllm.config import (CompilationMode, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
@@ -568,7 +568,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
 
     def _use_aclgraph(self) -> bool:
-        return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.level == CompilationLevel.PIECEWISE and not self.model_config.enforce_eager
+        return self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.compilation_config.level == CompilationMode.VLLM_COMPILE and not self.model_config.enforce_eager
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove finished requests from the cached states.
@@ -2322,9 +2322,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         force_attention: bool = False,
         uniform_decode: bool = False,
     ) -> torch.Tensor:
-        # only support eager mode and piecewise graph now
+        # only support eager mode and VLLM_COMPILE graph now
         assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
-            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
+            CUDAGraphMode.NONE, CUDAGraphMode.VLLM_COMPILE, CUDAGraphMode.FULL
         }
 
         # In multi-DP scenarios, there may be situations where all DP groups are executing dummy runs.
@@ -3371,15 +3371,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                    f"{min_ag_support})")
             if min_ag_support == AttentionCGSupport.NEVER:
                 # if not supported any full graphs, just raise it.
-                msg += "; please try cudagraph_mode=PIECEWISE, and "\
-                    "make sure compilation level is piecewise"
+                msg += "; please try cudagraph_mode=VLLM_COMPILE, and "\
+                    "make sure compilation level is VLLM_COMPILE"
                 raise ValueError(msg)
 
             # attempt to resolve the full graph related mode
             if splitting_ops_contain_attention:
-                msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
+                msg += "; setting cudagraph_mode=FULL_AND_VLLM_COMPILE"
                 aclgraph_mode = self.compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.FULL_AND_PIECEWISE)
+                    CUDAGraphMode.FULL_AND_VLLM_COMPILE)
             else:
                 msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
                 aclgraph_mode = self.compilation_config.cudagraph_mode = (
@@ -3394,9 +3394,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                    f" with spec-decode for attention backend "
                    f"{min_ag_builder_name} (support: {min_ag_support})")
             if splitting_ops_contain_attention:
-                msg += "; setting cudagraph_mode=PIECEWISE"
+                msg += "; setting cudagraph_mode=VLLM_COMPILE"
                 aclgraph_mode = self.compilation_config.cudagraph_mode = \
-                    CUDAGraphMode.PIECEWISE
+                    CUDAGraphMode.VLLM_COMPILE
             else:
                 msg += "; setting cudagraph_mode=NONE"
                 aclgraph_mode = self.compilation_config.cudagraph_mode = \
@@ -3410,8 +3410,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             raise ValueError(f"CUDAGraphMode.{aclgraph_mode.name} is not "
                              f"supported with {min_ag_builder_name} backend ("
                              f"support:{min_ag_support}) "
-                             "; please try cudagraph_mode=PIECEWISE, "
-                             "and make sure compilation level is piecewise")
+                             "; please try cudagraph_mode=VLLM_COMPILE, "
+                             "and make sure compilation level is VLLM_COMPILE")
 
         self.aclgraph_dispatcher.initialize_cudagraph_keys(
             self.compilation_config.cudagraph_mode,
@@ -3422,7 +3422,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                            uniform_decode: bool):
         assert aclgraph_runtime_mode != CUDAGraphMode.NONE and \
             aclgraph_runtime_mode in [CUDAGraphMode.FULL,
-                                      CUDAGraphMode.PIECEWISE]
+                                      CUDAGraphMode.VLLM_COMPILE]
 
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
@@ -3443,7 +3443,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # But be careful, warm up with `NONE`is orthogonal to
                 # if we want to warm up attention or not. This is
                 # different from the case where `FULL` implies capture
-                # attention while `PIECEWISE` implies no attention.
+                # attention while `VLLM_COMPILE` implies no attention.
                 force_attention = (aclgraph_runtime_mode == CUDAGraphMode.FULL)
                 self._dummy_run(num_tokens,
                                 aclgraph_runtime_mode=CUDAGraphMode.NONE,

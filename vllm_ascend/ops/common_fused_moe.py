@@ -19,7 +19,7 @@ from typing import Any, Callable, Optional
 
 import torch
 import torch_npu
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
                               tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
@@ -68,7 +68,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             self.use_aclgraph = False
         else:
             self.use_aclgraph = (vllm_config.compilation_config.level
-                                 == CompilationLevel.PIECEWISE and
+                                 == CompilationMode.VLLM_COMPILE and
                                  not vllm_config.model_config.enforce_eager)
         self.transpose = True
 

@@ -40,7 +40,7 @@ class ACLGraphWrapper:
 
     The workflow of this wrapper in the aclgraph dispatching is as follows:
     1. At initialization, a runtime mode is assigned to the wrapper (FULL or
-    PIECEWISE).
+    VLLM_COMPILE).
     2. At runtime, the wrapper receives a runtime_mode and a
     batch_descriptor(key) from the forward context and blindly trust them
     for aclgraph dispatching.
@@ -126,7 +126,7 @@ class ACLGraphWrapper:
                 # Since we capture aclgraph for many different shapes and
                 # capturing is fast, we don't need to log it for every
                 # shape. E.g. we only log it for the first subgraph in
-                # piecewise mode.
+                # VLLM_COMPILE mode.
                 logger.debug("Capturing a aclgraph on (%s,%s)",
                              self.runtime_mode.name, entry.batch_descriptor)
             # validate that aclgraph capturing is legal at this point.
@@ -140,7 +140,7 @@ class ACLGraphWrapper:
 
             with ExitStack() as stack:
                 if self.aclgraph_options.gc_disable:
-                    # during every model forward for piecewise aclgraph
+                    # during every model forward for VLLM_COMPILE aclgraph
                     # mode, we will capture many pieces of aclgraphs
                     # (roughly one per layer). running gc again and again
                     # across layers will make the aclgraph capture very slow.
@@ -159,7 +159,7 @@ class ACLGraphWrapper:
                         # by converting it to weak ref,
                         # the original `output` will immediately be released
                         # to save memory. It is only safe to do this for
-                        # the last graph in piecewise aclgraph mode, because
+                        # the last graph in VLLM_COMPILE aclgraph mode, because
                         # the output of the last graph will not be used by
                         # any other acl graph.
                         output = weak_ref_tensors(output)

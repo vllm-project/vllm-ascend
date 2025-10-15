@@ -24,7 +24,7 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, CompilationLevel, VllmConfig
+from vllm.config import CacheConfig, CompilationMode, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group)
@@ -300,7 +300,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                            config.mlp_only_layers)
         self.use_aclgraph = (vllm_config is not None
                              and vllm_config.compilation_config.level
-                             == CompilationLevel.PIECEWISE
+                             == CompilationMode.VLLM_COMPILE
                              and not vllm_config.model_config.enforce_eager)
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and

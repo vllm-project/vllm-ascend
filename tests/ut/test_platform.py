@@ -7,7 +7,7 @@ import pytest
 import torch
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
-from vllm.config import CompilationLevel
+from vllm.config import CompilationMode
 from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import PlatformEnum
 
@@ -301,7 +301,7 @@ class TestNPUPlatform(TestBase):
                         cm.output[0])
         self.assertEqual(
             vllm_config.compilation_config.level,
-            CompilationLevel.NO_COMPILATION,
+            CompilationMode.NONE,
         )
         self.assertEqual(
             vllm_config.compilation_config.cudagraph_mode,
@@ -317,7 +317,7 @@ class TestNPUPlatform(TestBase):
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = False
-        vllm_config.compilation_config.level = CompilationLevel.DYNAMO_ONCE
+        vllm_config.compilation_config.level = CompilationMode.DYNAMO_TRACE_ONCE
 
         with self.assertLogs(logger="vllm", level="WARNING") as cm:
             from vllm_ascend import platform
@@ -327,7 +327,7 @@ class TestNPUPlatform(TestBase):
             self.assertTrue("NPU does not support" in cm.output[0])
             self.assertEqual(
                 vllm_config.compilation_config.level,
-                CompilationLevel.NO_COMPILATION,
+                CompilationMode.NONE,
             )
             self.assertEqual(
                 vllm_config.compilation_config.cudagraph_mode,
@@ -357,7 +357,7 @@ class TestNPUPlatform(TestBase):
                 cm.output[0])
             self.assertEqual(
                 vllm_config.compilation_config.level,
-                CompilationLevel.NO_COMPILATION,
+                CompilationMode.NONE,
             )
             self.assertEqual(
                 vllm_config.compilation_config.cudagraph_mode,
@@ -374,7 +374,7 @@ class TestNPUPlatform(TestBase):
         mock_init_ascend.return_value = mock_ascend_config
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = False
-        vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
+        vllm_config.compilation_config.level = CompilationMode.VLLM_COMPILE
 
         with self.assertLogs(logger="vllm", level="INFO") as cm:
             from vllm_ascend import platform
@@ -384,7 +384,7 @@ class TestNPUPlatform(TestBase):
         self.assertTrue("Torchair compilation enabled" in cm.output[0])
         self.assertEqual(
             vllm_config.compilation_config.level,
-            CompilationLevel.NO_COMPILATION,
+            CompilationMode.NONE,
         )
         self.assertEqual(
             vllm_config.compilation_config.cudagraph_mode,

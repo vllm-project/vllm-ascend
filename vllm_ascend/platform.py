@@ -124,7 +124,7 @@ class NPUPlatform(Platform):
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 
-        from vllm.config import CompilationLevel  # noqa: E402
+        from vllm.config import CompilationMode  # noqa: E402
         compilation_config = vllm_config.compilation_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -178,12 +178,12 @@ class NPUPlatform(Platform):
         from vllm.config.compilation import CUDAGraphMode
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.level = CompilationMode.NONE
 
         compilation_config.cudagraph_num_of_warmups = 1
 
         if compilation_config.level not in [
-                CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE
+                CompilationMode.NONE, CompilationMode.VLLM_COMPILE
         ]:
             logger.warning(
                 "NPU does not support %s compilation level. Setting CUDAGraphMode to NONE",
@@ -232,13 +232,13 @@ class NPUPlatform(Platform):
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            compilation_config.level = CompilationLevel.NO_COMPILATION
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            compilation_config.level = CompilationMode.NONE
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE:
             logger.info(
-                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
+                "VLLM_COMPILE compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
-            assert compilation_config.level == CompilationLevel.PIECEWISE, \
-                "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
+            assert compilation_config.level == CompilationMode.VLLM_COMPILE, \
+                "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.level == CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
             compilation_config.set_splitting_ops_for_v1()
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend([
@@ -268,7 +268,7 @@ class NPUPlatform(Platform):
                 "%s cudagraph_mode is not support on NPU. falling back to NONE",
                 compilation_config.cudagraph_mode)
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.level = CompilationMode.NONE
 
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
@@ -372,7 +372,7 @@ class NPUPlatform(Platform):
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         """
-        Get piecewise backend class for piecewise graph.
+        Get VLLM_COMPILE backend class for VLLM_COMPILE graph.
         """
         return "vllm_ascend.compilation.acl_graph.ACLGraphWrapper"  # noqa
 
