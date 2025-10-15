@@ -6,6 +6,7 @@ from pytest_mock import MockerFixture
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 from tests.ut.base import PytestBase
+from vllm_ascend.attention.utils import torch_npu_check
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 
 
@@ -26,6 +27,15 @@ def mock_add_rms_norm_quant(x, residual, weight, quant_scale, quant_offset,
     return x_out_quant, None, residual_out_quant
 
 
+def mock_add_rms_norm_quant_with_bias(x, residual, weight, quant_scale, quant_offset,
+                                      beta, epsilon):
+    x_out = 2 * x
+    residual_out = 2 * residual
+    x_out_quant = x_out.to(torch.int8)
+    residual_out_quant = residual_out.to(torch.int8)
+    return x_out_quant, None, residual_out_quant
+
+
 class TestAscendRMSNorm(PytestBase):
 
     @pytest.fixture(autouse=True)
@@ -33,8 +43,9 @@ class TestAscendRMSNorm(PytestBase):
         mocker.patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
         mocker.patch("torch_npu.npu_add_rms_norm",
                      side_effect=mock_add_rms_norm)
+        arnq_side_effect = mock_add_rms_norm_quant_with_bias if torch_npu_check else mock_add_rms_norm_quant
         mocker.patch("torch_npu.npu_add_rms_norm_quant",
-                     side_effect=mock_add_rms_norm_quant)
+                     side_effect=arnq_side_effect)
         mocker.patch("torch.ops.vllm.maybe_wait_prefetch_done",
                      side_effect=lambda x: None)
 
@@ -70,8 +81,9 @@ class TestAscendRMSNorm(PytestBase):
 
         mock_model_instance = mocker.MagicMock()
         mock_forward_context.model_instance = mock_model_instance
+        num_hidden_layers = 3 if torch_npu_check else 2
         mock_model_instance.model.layers = [
-            mocker.MagicMock() for _ in range(2)
+            mocker.MagicMock() for _ in range(num_hidden_layers)
         ]
 
         mock_layer_0 = mock_model_instance.model.layers[0]
@@ -101,7 +113,7 @@ class TestAscendRMSNorm(PytestBase):
         mock_forward_context.addrmsnorm_quant_fusion_enabled = True
         mock_forward_context.prefetch_mlp_enabled = False
         mock_forward_context.layer_idx = 0
-        mock_forward_context.num_hidden_layers = 2
+        mock_forward_context.num_hidden_layers = num_hidden_layers
         mock_forward_context.fusion_linear = "gate_up_dense"
 
         # Ensure fusion and layer_idx increment are handled correctly
@@ -121,17 +133,36 @@ class TestAscendRMSNorm(PytestBase):
         assert mock_forward_context.fusion_linear == "gate_up_dense"
         assert mock_forward_context.layer_idx == 1
 
+        if torch_npu_check:
+            mock_forward_context.fusion_linear = "gate_moe"
         x_out, residual_out = layer.forward_oot(x, residual)
 
         assert mock_get_forward_context.call_count == 3
-        assert mock_forward_context.fusion_linear == "qkv_dense"
+        fusion_linear_expected = "qkv_moe" if torch_npu_check else "qkv_dense"
+        assert mock_forward_context.fusion_linear == fusion_linear_expected
         assert mock_forward_context.layer_idx == 2
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
         assert mock_get_forward_context.call_count == 4
-        assert mock_forward_context.fusion_linear == "qkv_dense"
+        fusion_linear_expected = "gate_moe" if torch_npu_check else "qkv_dense"
+        assert mock_forward_context.fusion_linear == fusion_linear_expected
         assert mock_forward_context.layer_idx == 2
+
+        if not torch_npu_check:
+            return
+        # last layer returned directly
+        x_out, residual_out = layer.forward_oot(x, residual)
+
+        assert mock_get_forward_context.call_count == 5
+        assert mock_forward_context.fusion_linear == "qkv_moe"
+        assert mock_forward_context.layer_idx == 3
+
+        x_out, residual_out = layer.forward_oot(x, residual)
+
+        assert mock_get_forward_context.call_count == 6
+        assert mock_forward_context.fusion_linear == "qkv_moe"
+        assert mock_forward_context.layer_idx == 3
 
 
 if __name__ == '__main__':

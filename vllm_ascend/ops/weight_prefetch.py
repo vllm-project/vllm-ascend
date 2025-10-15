@@ -89,7 +89,6 @@ class WeightPrefetchMethod:
         torch.ops.vllm.prefetch_preprocess(weight=weight,
                                            start_flag=None,
                                            max_weight_size=int(weight_size))
-        forward_context.layer_idx += 1
 
     def maybe_prefetch_moe_weight_postprocess(self, stop_flag: torch.Tensor):
         if not self.moe.is_active_this_forward:
