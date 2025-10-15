@@ -1122,10 +1122,6 @@ class TorchairAscendFusedMoE(FusedMoE):
         assert self.quant_method is not None
 
         self.moe_load = None
-        local_num_experts = (torch.sum(self.expert_map != -1)
-                             if self.expert_map is not None else num_experts)
-        if self.dynamic_eplb:
-            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
 
         moe_quant_params = {
             "num_experts": local_num_experts,
