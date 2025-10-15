@@ -94,7 +94,7 @@ class AscendSparseFlashAttention(MultiHeadLatentAttention):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_mla=True,
-            use_sfa=True,
+            use_sparse=True,
             # SFA Args
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,

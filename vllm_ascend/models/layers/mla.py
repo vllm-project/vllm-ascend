@@ -42,6 +42,8 @@ class AscendMLAModules:
     kv_b_proj: torch.nn.Module
     o_proj: torch.nn.Module
     rotary_emb: torch.nn.Module
+    indexer: Optional[torch.nn.Module]
+    is_sparse: bool
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
