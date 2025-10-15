@@ -20,6 +20,7 @@
 import copy
 import gc
 import itertools
+import math
 import re
 import time
 from collections import defaultdict
@@ -128,8 +129,8 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
-                               get_ascend_soc_version, is_310p, is_enable_nz,
-                               lmhead_tp_enable)
+                               enable_sp, get_ascend_soc_version, is_310p,
+                               is_enable_nz, lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -1210,6 +1211,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 total_num_scheduled_tokens)
+        elif self.use_aclgraph and enable_sp(self.vllm_config):
+            # When using aclgraph, if total_num_scheduled_tokens exceeds the maximum graph size,
+            # the model will fall back to running its FX graph in eager mode.
+            # In this case, when sequence parallelism is enabled, we need to pad tokens to align
+            # with tp_size because pad_size cannot be captured by the FX graph
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            num_input_tokens = math.ceil(
+                total_num_scheduled_tokens / tp_size) * tp_size
         else:
             # Eager mode.
             num_input_tokens = total_num_scheduled_tokens
@@ -1850,7 +1859,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
         if moe_comm_type == MoECommType.ALLGATHER and with_prefill:
-            moe_comm_type = MoECommType.NAIVE_MULTICAST
+            if enable_sp():
+                moe_comm_type = MoECommType.ALLGATHER
+            else:
+                moe_comm_type = MoECommType.NAIVE_MULTICAST
 
         # PanguProMoE only supports allgather
         if model_type == "PanguProMoE":
@@ -2313,6 +2325,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert aclgraph_runtime_mode is None or aclgraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
+
+        # In multi-DP scenarios, there may be situations where all DP groups are executing dummy runs.
+        # If sequence parallelism is enabled, it is essential to ensure that num_tokens is divisible by tp_size.
+        if self.use_aclgraph and enable_sp(self.vllm_config):
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            num_tokens = math.ceil(num_tokens / tp_size) * tp_size
 
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
