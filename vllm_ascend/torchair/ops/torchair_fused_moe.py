@@ -1121,8 +1121,6 @@ class TorchairAscendFusedMoE(FusedMoE):
 
         assert self.quant_method is not None
 
-        self.moe_load = None
-
         moe_quant_params = {
             "num_experts": local_num_experts,
             "hidden_size": hidden_size,
