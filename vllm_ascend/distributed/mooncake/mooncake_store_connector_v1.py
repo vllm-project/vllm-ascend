@@ -163,6 +163,8 @@ class MooncakeStoreConnectorV1Scheduler:
         self.client = MooncakeLookupClient(vllm_config)
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "consumer_is_to_load", False)
         # request_id -> (vllm cached tokes, mooncake cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self._block_size = vllm_config.cache_config.block_size
@@ -192,6 +194,8 @@ class MooncakeStoreConnectorV1Scheduler:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
+            return 0, False
 
         if self._discard_partial_chunks:
             token_block_end = len(request.prompt_token_ids
