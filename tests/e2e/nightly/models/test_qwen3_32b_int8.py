@@ -18,7 +18,6 @@ from typing import Any
 
 import openai
 import pytest
-
 from modelscope import snapshot_download
 from vllm.utils import get_open_port
 
