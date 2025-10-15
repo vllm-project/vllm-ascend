@@ -16,12 +16,10 @@
 #
 import json
 import os
-import pandas as pd
 import re
 import subprocess
-import sys
-import time
 
+import pandas as pd
 from modelscope import snapshot_download
 
 DATASET_CONF_DIR = "benchmark/ais_bench/benchmark/configs/datasets"

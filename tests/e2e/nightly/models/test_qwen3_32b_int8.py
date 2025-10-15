@@ -20,9 +20,10 @@ import openai
 import pytest
 
 from modelscope import snapshot_download
+from vllm.utils import get_open_port
+
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
-from vllm.utils import get_open_port
 
 MODELS = [
     "vllm-ascend/Qwen3-32B-W8A8",
