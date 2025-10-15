@@ -20,6 +20,7 @@ from tests.e2e.conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen3-0.6B",
+    "deepseek-ai/DeepSeek-V2-Lite-Chat",
 ]
 
 TENSOR_PARALLELS = [1]
