@@ -110,7 +110,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               shared_experts: Optional[Any] = None,
               **kwargs) -> torch.Tensor:
 
-        topk_weights, topk_ids, row_idx = select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=top_k,
@@ -138,7 +138,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            row_idx=row_idx,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             shared_experts=shared_experts,
