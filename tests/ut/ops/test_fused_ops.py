@@ -263,7 +263,7 @@ class TestExpertsSelector:
 
         x = torch.randn(8, 2)
         router_logits = torch.randn(8, 2)
-        topk_weights, topk_ids, _ = select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=2,

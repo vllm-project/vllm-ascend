@@ -204,7 +204,6 @@ class TestMoECommMethod(TestBase):
         topk_weights = torch.tensor([[0.5, 0.5], [0.3, 0.7], [0.8, 0.2],
                                      [0.6, 0.4]])
         topk_ids = torch.tensor([[0, 1], [1, 2], [2, 0], [1, 1]])
-        row_idx = torch.arange(4)
 
         # Make sure tensors are contiguous and have correct strides
         hidden_states = hidden_states.contiguous()
@@ -216,7 +215,6 @@ class TestMoECommMethod(TestBase):
                                          w2=w2,
                                          topk_weights=topk_weights,
                                          topk_ids=topk_ids,
-                                         row_idx=row_idx,
                                          activation="silu")
 
         # Verify result shape
