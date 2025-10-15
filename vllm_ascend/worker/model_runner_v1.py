@@ -55,7 +55,6 @@ from vllm.distributed.parallel_state import (get_dp_group, get_pp_group,
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
@@ -130,7 +129,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                get_ascend_soc_version, is_310p, is_enable_nz,
-                               lmhead_tp_enable)
+                               is_moe_model, lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -460,10 +459,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-        # Since not all models have moe modules and requires mc2, we leave
-        # the initialization of mc2 related parameters later.
-        self.mc2_tokens_capacity = 0
-        self.reserved_mc2_mask = None
+        self._initialize_mc2()
 
         self.dynamic_eplb = self.ascend_config.dynamic_eplb
         if self.dynamic_eplb:
@@ -1789,15 +1785,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
 
-    def _is_moe_model(self):
-        """Checks if the model contains FusedMoE layers."""
-        if any(
-                isinstance(module, FusedMoE)
-                for module in self.model.modules()):
-            return True
-        return False
-
     def _initialize_mc2(self):
+        """Initialization of mc2-related parameters."""
+
+        self.mc2_tokens_capacity = 0
+        self.reserved_mc2_mask = None
+
+        # For models contains no moe modules, we simply skip the
+        # initialization of mc2.
+        if not is_moe_model(self.vllm_config):
+            return
+
         # NOTE: To be clear, we need to make sure that during graph capture, the number of
         # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
         # the max number of tokens in graph is min(max_num_seqs * 2, 512).
@@ -1808,12 +1806,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         tp_size = self.parallel_config.tensor_parallel_size
         # Use integer arithmetic for ceiling division.
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+        mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
         # Additional check for MC2 restrictions on specific hardwares.
-        if self._is_moe_model() and self._select_moe_comm_method(
-                self.mc2_tokens_capacity,
-                with_prefill=True) == MoECommType.MC2:
+        if self._select_moe_comm_method(
+                mc2_tokens_capacity) == MoECommType.MC2:
 
             soc_version = get_ascend_soc_version()
             limit = None
@@ -1829,11 +1826,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     f"(current: {self.max_num_reqs}) or increase `tp_size` (current: {tp_size})."
                 )
 
-        self.reserved_mc2_mask = torch.zeros(
-            self.mc2_tokens_capacity,
-            dtype=torch.bool,
-            device=self.device,
-        )
+            # Only set these parameters if mc2 is actually needed
+            # and the above check is passed.
+            self.mc2_tokens_capacity = mc2_tokens_capacity
+            self.reserved_mc2_mask = torch.zeros(
+                self.mc2_tokens_capacity,
+                dtype=torch.bool,
+                device=self.device,
+            )
 
     def _select_moe_comm_method(self, num_tokens: int,
                                 with_prefill: bool) -> MoECommType:
@@ -2521,14 +2521,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # MC2 will consume additional NPU memory.
             # Therefore, we need to run the MC2 path once here to complete its initialization,
             # allowing vLLM to correctly estimate the maximum memory required.
-            if self._is_moe_model():
-                self._initialize_mc2()
-                if self.max_num_tokens > self.mc2_tokens_capacity and \
-                    self._select_moe_comm_method(
-                        self.mc2_tokens_capacity,
-                        with_prefill=True) == MoECommType.MC2:
-                    self._dummy_run(self.mc2_tokens_capacity,
-                                    with_prefill=True)
+            # Only run this extra dummy_run when MC2 is actually needed and
+            # cases are not covered by the above dummy_run.
+            if self.reserved_mc2_mask is not None and \
+                self.max_num_tokens > self.mc2_tokens_capacity:
+                self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
 
         output = None
         if get_pp_group().is_last_rank:
