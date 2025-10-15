@@ -283,7 +283,7 @@ class AscendFusedMoE(FusedMoE):
         enable_force_load_balance = forward_context.in_profile_run
 
         forward_context = get_forward_context()
-        hidden_states, router_logits = forward_context.moe_comm_method.prepare(
+        hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=forward_context.sp_enabled,
@@ -311,7 +311,8 @@ class AscendFusedMoE(FusedMoE):
             shared_experts=None,
             enable_force_load_balance=enable_force_load_balance,
             log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num)
+            global_redundant_expert_num=self.global_redundant_expert_num,
+            mc2_mask=mc2_mask)
 
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
@@ -322,7 +323,8 @@ class AscendFusedMoE(FusedMoE):
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
-            reduce_results=self.reduce_results)
+            reduce_results=self.reduce_results,
+            context_metadata=context_metadata)
 
         return final_hidden_states
 
