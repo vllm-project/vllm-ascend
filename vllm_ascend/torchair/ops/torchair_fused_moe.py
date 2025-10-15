@@ -51,7 +51,8 @@ from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
                                get_ascend_soc_version,
-                               get_rm_router_logits_state, is_310p)
+                               get_rm_router_logits_state, is_310p,
+                               is_hierarchical_communication_enabled)
 
 
 def torchair_fused_experts_with_mc2(
@@ -78,6 +79,10 @@ def torchair_fused_experts_with_mc2(
 
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
     a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
+    # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
+    # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
+    # improve communication performance.
+    need_expert_scale = is_hierarchical_communication_enabled()
 
     enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
 
@@ -108,6 +113,10 @@ def torchair_fused_experts_with_mc2(
         stage1_kwargs.update({
             "x_active_mask": mc2_mask,
         })
+    if need_expert_scale:
+        stage1_kwargs.update({
+            "expert_scales": topk_weights.to(torch.float32),
+        })
 
     kwargs_mc2.update(stage1_kwargs)
 
@@ -116,8 +125,8 @@ def torchair_fused_experts_with_mc2(
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_dispatch(
         **kwargs_mc2)
     # comm_stream.wait_stream(torch.npu.current_stream())
-    expand_x, dynamic_scale, assist_info_for_combine, expert_token_nums, ep_recv_counts = output[
-        0:5]
+    expand_x, dynamic_scale, assist_info_for_combine, expert_token_nums, \
+        ep_recv_counts, _, expand_scales = output[0:7]
 
     if shared_experts is not None:
         with npu_stream_switch("moe_secondary", 0):
@@ -167,6 +176,7 @@ def torchair_fused_experts_with_mc2(
         "group_ep": moe_all_to_all_group_name,
         "ep_world_size": ep_world_size,
         "ep_rank_id": ep_rank_id,
+        "expand_scales": expand_scales,
     }
     if enable_dispatch_v2:
         stage3_kwargs.update({
@@ -1279,13 +1289,15 @@ class TorchairAscendFusedMoE(FusedMoE):
         )
 
         if shared_experts:
-            if isinstance(e_hidden_states, tuple):
+            if isinstance(e_hidden_states,
+                          tuple) and len(e_hidden_states) == 2:
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
         if self.dynamic_eplb and isinstance(
                 e_hidden_states, tuple) and len(e_hidden_states) == 3:
-            self.moe_load += e_hidden_states[2] if e_hidden_states[1] == 0 else \
-                torch.cat(e_hidden_states[2][:1], e_hidden_states[2][1:] - e_hidden_states[2][:-1])
+            e_hidden_states, group_list_type, expert_tokens = e_hidden_states
+            self.moe_load += expert_tokens if group_list_type else \
+                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
         if (fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
