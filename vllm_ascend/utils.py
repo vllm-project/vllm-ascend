@@ -34,7 +34,7 @@ from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.utils import torch_npu_check
+from vllm_ascend.attention.utils import version_check
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -547,7 +547,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     if vllm_config is not None and \
         vllm_config.quant_config is not None and \
         any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()) and \
-            not torch_npu_check:
+            not version_check():
         REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():

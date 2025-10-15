@@ -190,7 +190,3 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
         nz_mat,
         (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3]))
     return nz_mat
-
-
-# global variable to check if torch_npu >= dev20250919
-torch_npu_check: bool = version_check()

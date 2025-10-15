@@ -6,7 +6,7 @@ from pytest_mock import MockerFixture
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 from tests.ut.base import PytestBase
-from vllm_ascend.attention.utils import torch_npu_check
+from vllm_ascend.attention.utils import version_check
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 
 
@@ -43,7 +43,7 @@ class TestAscendRMSNorm(PytestBase):
         mocker.patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
         mocker.patch("torch_npu.npu_add_rms_norm",
                      side_effect=mock_add_rms_norm)
-        arnq_side_effect = mock_add_rms_norm_quant_with_bias if torch_npu_check else mock_add_rms_norm_quant
+        arnq_side_effect = mock_add_rms_norm_quant_with_bias if version_check() else mock_add_rms_norm_quant
         mocker.patch("torch_npu.npu_add_rms_norm_quant",
                      side_effect=arnq_side_effect)
         mocker.patch("torch.ops.vllm.maybe_wait_prefetch_done",
@@ -81,6 +81,7 @@ class TestAscendRMSNorm(PytestBase):
 
         mock_model_instance = mocker.MagicMock()
         mock_forward_context.model_instance = mock_model_instance
+        torch_npu_check = version_check()
         num_hidden_layers = 3 if torch_npu_check else 2
         mock_model_instance.model.layers = [
             mocker.MagicMock() for _ in range(num_hidden_layers)
