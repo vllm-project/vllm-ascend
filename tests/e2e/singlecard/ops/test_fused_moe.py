@@ -137,7 +137,6 @@ def test_token_dispatcher_with_all_gather(
     sorted_hidden_states = dispatch_output["hidden_states"]
     group_list = dispatch_output["group_list"]
     group_list_type = dispatch_output.get("group_list_type", 1)
-    context_metadata = dispatch_output["context_metadata"]
 
     expert_output = apply_mlp(hidden_states=sorted_hidden_states,
                               w1=w1_local,
@@ -145,10 +144,8 @@ def test_token_dispatcher_with_all_gather(
                               group_list=group_list,
                               group_list_type=group_list_type)
 
-    combined_output = dispatcher.token_combine(
-        hidden_states=expert_output,
-        context_metadata=context_metadata,
-        bias=None)
+    combined_output = dispatcher.token_combine(hidden_states=expert_output,
+                                               bias=None)
 
     torch_output = torch_moe(a, w1, w2, topk_weights, topk_ids, topk,
                              expert_map)
@@ -218,7 +215,6 @@ def test_token_dispatcher_with_all_gather_quant(
         group_list = dispatch_output["group_list"]
         group_list_type = dispatch_output.get("group_list_type", 1)
         dynamic_scale = dispatch_output["dynamic_scale"]
-        context_metadata = dispatch_output["context_metadata"]
 
         expert_output = unified_apply_mlp(hidden_states=sorted_hidden_states,
                                           w1=w1,
@@ -229,10 +225,8 @@ def test_token_dispatcher_with_all_gather_quant(
                                           group_list_type=group_list_type,
                                           dynamic_scale=dynamic_scale,
                                           with_quant=True)
-        combined_output = dispatcher.token_combine(
-            hidden_states=expert_output,
-            context_metadata=context_metadata,
-            bias=None)
+        combined_output = dispatcher.token_combine(hidden_states=expert_output,
+                                                   bias=None)
         assert combined_output.shape == (m, k)
         gc.collect()
         torch.npu.empty_cache()
