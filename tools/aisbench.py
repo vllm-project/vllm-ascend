@@ -34,12 +34,10 @@ class AisbenchRunner:
         "performance": "Performance Result files locate in ",
         "accuracy": "write csv to "
     }
-    DATASET_RENAME = {
-        "aime2024": "aime"
-    }
+    DATASET_RENAME = {"aime2024": "aime"}
 
     def _run_aisbench_task(self):
-        dataset_conf = re.search(r'/(.*)', self.dataset_conf).group(1)
+        dataset_conf = self.dataset_conf.split('/')[-1]
         if self.task_type == "accuracy":
             aisbench_cmd = [
                 'ais_bench', '--models', f'{self.request_conf}_custom',
@@ -48,23 +46,24 @@ class AisbenchRunner:
         if self.task_type == "performance":
             aisbench_cmd = [
                 'ais_bench', '--models', f'{self.request_conf}_custom',
-                '--datasets', f'{dataset_conf}_custom', '--debug', '--mode', 
+                '--datasets', f'{dataset_conf}_custom', '--debug', '--mode',
                 'perf'
             ]
             if self.num_prompts:
                 aisbench_cmd.extend(['--num-prompts', str(self.num_prompts)])
-        self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd, 
+        self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd,
                                                        stdout=subprocess.PIPE,
                                                        stderr=subprocess.PIPE,
                                                        text=True)
 
-    def __init__(self, 
-                 aisbench_config: dict, 
-                 model_path: str, 
-                 port: int, 
+    def __init__(self,
+                 aisbench_config: dict,
+                 model_path: str,
+                 port: int,
                  verify=True):
         self.result_line = None
-        self.dataset_path = snapshot_download(aisbench_config["dataset_path"], repo_type='dataset')
+        self.dataset_path = snapshot_download(aisbench_config["dataset_path"],
+                                              repo_type='dataset')
         self.task_type = aisbench_config["case_type"]
         self.request_conf = aisbench_config["request_conf"]
         self.dataset_conf = aisbench_config.get("dataset_conf")
@@ -95,13 +94,13 @@ class AisbenchRunner:
             command = ["cp", "-r", self.dataset_path, dst_dir]
             subprocess.call(command)
         if self.task_type == "performance":
-            conf_path = os.path.join(DATASET_CONF_DIR, 
+            conf_path = os.path.join(DATASET_CONF_DIR,
                                      f'{self.dataset_conf}.py')
             with open(conf_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            content = re.sub(r'path=.*', f'path="{self.dataset_path}",', 
+            content = re.sub(r'path=.*', f'path="{self.dataset_path}",',
                              content)
-            conf_path_new = os.path.join(DATASET_CONF_DIR, 
+            conf_path_new = os.path.join(DATASET_CONF_DIR,
                                          f'{self.dataset_conf}_custom.py')
             with open(conf_path_new, 'w', encoding='utf-8') as f:
                 f.write(content)
@@ -112,25 +111,25 @@ class AisbenchRunner:
             content = f.read()
         content = re.sub(r'model=.*', f'model="{self.model_path}",', content)
         content = re.sub(r'host_port.*', f'host_port = {self.port},', content)
-        content = re.sub(r'max_out_len.*', 
+        content = re.sub(r'max_out_len.*',
                          f'max_out_len = {self.max_out_len},', content)
-        content = re.sub(r'batch_size.*', 
-                         f'batch_size = {self.batch_size},', content)
+        content = re.sub(r'batch_size.*', f'batch_size = {self.batch_size},',
+                         content)
         content = content.replace("top_k", "#top_k")
         content = content.replace("seed", "#seed")
         content = content.replace("repetition_penalty", "#repetition_penalty")
         if self.task_type == "performance":
             content = re.sub(r'path=.*', f'path="{self.model_path}",', content)
-            content = re.sub(r'request_rate.*', 
+            content = re.sub(r'request_rate.*',
                              f'request_rate = {self.request_rate},', content)
             content = re.sub(
-                r"temperature.*", 
+                r"temperature.*",
                 "temperature = 0,\n            ignore_eos = True,", content)
             content = content.replace("top_p", "#top_p")
         if self.task_type == "accuracy":
             content = re.sub(r"temperature.*", "temperature = 0.6,", content)
-            conf_path_new = os.path.join(REQUEST_CONF_DIR, 
-                                         f'{self.request_conf}_custom.py')
+        conf_path_new = os.path.join(REQUEST_CONF_DIR,
+                                     f'{self.request_conf}_custom.py')
         with open(conf_path_new, 'w', encoding='utf-8') as f:
             f.write(content)
 
@@ -158,7 +157,7 @@ class AisbenchRunner:
                     "Some errors happen to Aisbench task.") from None
 
     def _get_result_performance(self):
-        result_dir = re.search(r'Performance Result files locate in (.*)', 
+        result_dir = re.search(r'Performance Result files locate in (.*)',
                                self.result_line).group(1)[:-1]
         result_csv_file = os.path.join(result_dir, "gsm8kdataset.csv")
         result_json_file = os.path.join(result_dir, "gsm8kdataset.json")
@@ -180,7 +179,7 @@ class AisbenchRunner:
         ) >= self.threshold * self.baseline, f"Performance verification failed. The current Output Token Throughput is {output_throughput} token/s, which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
 
     def _accuracy_verify(self):
-        acc_value = self. _get_result_accuracy()
+        acc_value = self._get_result_accuracy()
         assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, f"Accuracy verification failed. The accuracy of {self.dataset_path} if not within {self.threshold} relative to baseline {self.baseline}."
 
 
@@ -188,7 +187,8 @@ def run_aisbench_cases(model_path, port, aisbench_cases):
     aisbench_errors = []
     for aisbench_case in aisbench_cases:
         try:
-            AisbenchRunner(aisbench_case, model_path, port)
+            with AisbenchRunner(aisbench_case, model_path, port):
+                pass
         except Exception as e:
             aisbench_errors.append([aisbench_case, e])
             print(e)
@@ -197,4 +197,3 @@ def run_aisbench_cases(model_path, port, aisbench_cases):
             f"The following aisbench case failed: {failed_case}, reason is {error_info}."
         )
     assert not aisbench_errors, "some aisbench cases failed, info were shown above."
-

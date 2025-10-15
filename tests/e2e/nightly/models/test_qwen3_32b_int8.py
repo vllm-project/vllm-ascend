@@ -38,29 +38,26 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_cases = [
-    {
-        "case_type": "performance",
-        "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
-        "request_conf": "vllm_api_stream_chat",
-        "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-        "num_prompts": 176,
-        "max_out_len": 1500,
-        "batch_size": 44,
-        "baseline": 1,
-        "threshold": 0.97
-    },
-    {
-        "case_type": "accuracy",
-        "dataset_path": "vllm-ascend/aime2024",
-        "request_conf": "vllm_api_general_chat",
-        "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
-        "max_out_len": 32768,
-        "batch_size": 30,
-        "baseline": 76,
-        "threshold": 8
-    }
-]
+aisbench_cases = [{
+    "case_type": "performance",
+    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+    "request_conf": "vllm_api_stream_chat",
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+    "num_prompts": 176,
+    "max_out_len": 1500,
+    "batch_size": 44,
+    "baseline": 1,
+    "threshold": 0.97
+}, {
+    "case_type": "accuracy",
+    "dataset_path": "vllm-ascend/aime2024",
+    "request_conf": "vllm_api_general_chat",
+    "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
+    "max_out_len": 32768,
+    "batch_size": 30,
+    "baseline": 76,
+    "threshold": 8
+}]
 
 
 @pytest.mark.asyncio
@@ -76,12 +73,13 @@ async def test_models(model: str, tp_size: int) -> None:
         "PAGED_ATTENTION_MASK_LEN": "5500"
     }
     server_args = [
-        "--quantization", "ascend",
-        "--no-enable-prefix-caching", "--tensor-parallel-size",
-        str(tp_size), "--port", str(port), "--max-model-len", "36864",
-        "--max-num-batched-tokens", "36864", "--block-size", "128",
-        "--trust-remote-code", "--gpu-memory-utilization", "0.9",
-        "--additional-config", '{"enable_weight_nz_layout":true}'
+        "--quantization", "ascend", "--no-enable-prefix-caching",
+        "--tensor-parallel-size",
+        str(tp_size), "--port",
+        str(port), "--max-model-len", "36864", "--max-num-batched-tokens",
+        "36864", "--block-size", "128", "--trust-remote-code",
+        "--gpu-memory-utilization", "0.9", "--additional-config",
+        '{"enable_weight_nz_layout":true}'
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
@@ -101,4 +99,3 @@ async def test_models(model: str, tp_size: int) -> None:
         assert choices[0].text, "empty response"
         # aisbench test
         run_aisbench_cases(model_path, port, aisbench_cases)
-
