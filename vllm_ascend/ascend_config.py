@@ -149,6 +149,9 @@ class TorchairGraphConfig:
         self.enable_frozen_parameter = torchair_graph_config.get(
             "enable_frozen_parameter", True)
         self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
+        self.enable_super_kernel = torchair_graph_config.get(
+            "enable_super_kernel", False
+        )  # maybe get soc version here and maybe set default value true
 
         if not isinstance(self.graph_batch_sizes, list):
             raise TypeError("graph_batch_sizes must be list[int]")
@@ -183,6 +186,10 @@ class TorchairGraphConfig:
             if self.enable_kv_nz:
                 raise RuntimeError(
                     "enable_kv_nz is valid only when Torchair graph mode is enabled"
+                )
+            if self.enable_super_kernel:
+                raise RuntimeError(
+                    "enable_super_kernel is valid only when Torchair graph mode is enabled"
                 )
         if self.use_cached_kv_cache_bytes and not self.use_cached_graph:
             raise RuntimeError(
