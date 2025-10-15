@@ -20,7 +20,7 @@ import re
 import subprocess
 
 import pandas as pd
-from modelscope import snapshot_download
+from modelscope import snapshot_download  # type: ignore
 
 DATASET_CONF_DIR = "benchmark/ais_bench/benchmark/configs/datasets"
 REQUEST_CONF_DIR = "benchmark/ais_bench/benchmark/configs/models/vllm_api"

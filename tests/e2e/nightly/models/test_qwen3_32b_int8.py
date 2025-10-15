@@ -18,7 +18,7 @@ from typing import Any
 
 import openai
 import pytest
-from modelscope import snapshot_download
+from modelscope import snapshot_download  # type: ignore
 from vllm.utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
