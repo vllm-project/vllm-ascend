@@ -18,6 +18,7 @@ class TestNPUWorker(TestBase):
         self.model_config_mock = MagicMock(spec=ModelConfig)
         self.model_config_mock.dtype = torch.float16
         self.model_config_mock.trust_remote_code = False
+        self.model_config_mock.hf_config = None
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
 
