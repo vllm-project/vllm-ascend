@@ -39,57 +39,43 @@ class AscendScheduler(Scheduler):
     """This Scheduler extends vllm's original v1 scheduler
     with prefill-first scheduling strategy."""
 
-    if vllm_version_is("0.11.0"):
+    def _initialize_common(self) -> None:
+        """Initialize common attributes shared across all versions."""
+        self.scheduled_req_ids: set[str] = set()
+        self.running: list[Request] = []
+        self.finished_prefill_reqs: deque[Request] = deque()
 
-        def __init__(
-            self,
-            vllm_config: VllmConfig,
-            kv_cache_config: KVCacheConfig,
-            structured_output_manager: StructuredOutputManager,
-            mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-            include_finished_set: bool = False,
-            log_stats: bool = False,
-        ) -> None:
+        enable_pd_transfer = getattr(self.scheduler_config,
+                                     'enable_pd_transfer', False)
+        decode_max_num_seqs = getattr(self.scheduler_config,
+                                      'decode_max_num_seqs', 0)
+        self.phase = "" if not enable_pd_transfer else "prefill"
+        self.decode_max_num_running_reqs = max(self.max_num_running_reqs,
+                                               decode_max_num_seqs)
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
+        structured_output_manager: StructuredOutputManager,
+        block_size:
+        int = None,  # Optional, only used for versions other than 0.11.0
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+        include_finished_set: bool = False,
+        log_stats: bool = False,
+    ) -> None:
+        # Call the parent class's __init__ method
+        if vllm_version_is("0.11.0"):
             super().__init__(vllm_config, kv_cache_config,
                              structured_output_manager, mm_registry,
                              include_finished_set, log_stats)
-            self.scheduled_req_ids: set[str] = set()
-            self.running: list[Request] = []
-
-            self.finished_prefill_reqs: deque[Request] = deque()
-            enable_pd_transfer = getattr(self.scheduler_config,
-                                         'enable_pd_transfer', False)
-            decode_max_num_seqs = getattr(self.scheduler_config,
-                                          'decode_max_num_seqs', 0)
-            self.phase = "" if not enable_pd_transfer else "prefill"
-            self.decode_max_num_running_reqs = max(self.max_num_running_reqs,
-                                                   decode_max_num_seqs)
-    else:
-
-        def __init__(
-            self,
-            vllm_config: VllmConfig,
-            kv_cache_config: KVCacheConfig,
-            structured_output_manager: StructuredOutputManager,
-            block_size: int,
-            mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-            include_finished_set: bool = False,
-            log_stats: bool = False,
-        ) -> None:
+        else:
             super().__init__(vllm_config, kv_cache_config,
                              structured_output_manager, block_size,
                              mm_registry, include_finished_set, log_stats)
-            self.scheduled_req_ids: set[str] = set()
-            self.running: list[Request] = []
 
-            self.finished_prefill_reqs: deque[Request] = deque()
-            enable_pd_transfer = getattr(self.scheduler_config,
-                                         'enable_pd_transfer', False)
-            decode_max_num_seqs = getattr(self.scheduler_config,
-                                          'decode_max_num_seqs', 0)
-            self.phase = "" if not enable_pd_transfer else "prefill"
-            self.decode_max_num_running_reqs = max(self.max_num_running_reqs,
-                                                   decode_max_num_seqs)
+        # Initialize common attributes
+        self._initialize_common()
 
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:

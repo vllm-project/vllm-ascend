@@ -32,7 +32,8 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.11.0"):
-    from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
+    from vllm.model_executor.layers.shared_fused_moe import \
+        SharedFusedMoE  # noqa: F401
 else:
     from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
         SharedFusedMoE
