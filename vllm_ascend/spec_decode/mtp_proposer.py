@@ -426,7 +426,7 @@ class MtpProposer(Proposer):
             positions += 1
 
             attn_metadata_i.decode.actual_seq_lengths_q = attn_metadata_i.query_start_loc[
-                                                          1:batch_size + 1].tolist()
+                1:batch_size + 1].tolist()
             attn_metadata_i.decode.cos = builder.cos_cache[
                 positions].unsqueeze(1).unsqueeze(2)
             attn_metadata_i.decode.sin = builder.sin_cache[
