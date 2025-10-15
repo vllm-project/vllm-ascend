@@ -122,19 +122,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
             hidden_states: torch.Tensor,
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        num_tokens = hidden_states.shape[0]
-        need_gather_q_kv = False
-        if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
-            # Simulate all gather to calculate output shape
-            num_tokens = num_tokens * self.tp_size
-            need_gather_q_kv = True
-        if not self.enable_shared_expert_dp or self.debug_layer_idx < self.first_k_dense_replace:
-            output_shape = hidden_states.shape
-        else:
-            rows = num_tokens // self.tp_size
-            if num_tokens % self.tp_size:
-                rows += 1
-            output_shape = (rows, hidden_states.shape[1])
+        need_gather_q_kv = get_forward_context().sp_enabled
+        output_shape = hidden_states.shape
         # FIXME: This does not seem right, should make sure the buffer is fixed
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,

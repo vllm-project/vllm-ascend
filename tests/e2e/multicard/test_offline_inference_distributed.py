@@ -166,7 +166,7 @@ def test_sp_for_qwen3_moe() -> None:
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM": "1"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model, enforce_eager):
     example_prompts = [
         "Hello, my name is",
