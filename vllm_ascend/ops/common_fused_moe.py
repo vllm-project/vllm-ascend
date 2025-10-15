@@ -28,8 +28,14 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map,
     get_compressed_expert_map)
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
-    SharedFusedMoE
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
+else:
+    from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
+        SharedFusedMoE
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType

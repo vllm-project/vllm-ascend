@@ -22,11 +22,12 @@ import torch
 import vllm
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.registry import _Backend
 from vllm.attention.selector import (backend_name_to_enum,
                                      get_global_forced_attn_backend)
 from vllm.platforms import current_platform
 from vllm.utils import resolve_obj_by_qualname
+
+from vllm_ascend.utils import vllm_version_is
 
 
 def get_attn_backend(  # type: ignore[misc]
@@ -67,6 +68,11 @@ def _cached_get_attn_backend(
     has_sink: bool = False,
     use_sparse: bool = False,
 ) -> type[AttentionBackend]:
+
+    if vllm_version_is("0.11.0"):
+        from vllm.platforms import _Backend
+    else:
+        from vllm.attention.backends.registry import _Backend
     # Check whether a particular choice of backend was
     # previously forced.
     #

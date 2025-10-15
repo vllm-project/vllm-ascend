@@ -32,35 +32,64 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class AscendScheduler(Scheduler):
     """This Scheduler extends vllm's original v1 scheduler
     with prefill-first scheduling strategy."""
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-        structured_output_manager: StructuredOutputManager,
-        block_size: int,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        include_finished_set: bool = False,
-        log_stats: bool = False,
-    ) -> None:
-        super().__init__(vllm_config, kv_cache_config,
-                         structured_output_manager, block_size, mm_registry,
-                         include_finished_set, log_stats)
-        self.scheduled_req_ids: set[str] = set()
-        self.running: list[Request] = []
+    if vllm_version_is("0.11.0"):
 
-        self.finished_prefill_reqs: deque[Request] = deque()
-        enable_pd_transfer = getattr(self.scheduler_config,
-                                     'enable_pd_transfer', False)
-        decode_max_num_seqs = getattr(self.scheduler_config,
-                                      'decode_max_num_seqs', 0)
-        self.phase = "" if not enable_pd_transfer else "prefill"
-        self.decode_max_num_running_reqs = max(self.max_num_running_reqs,
-                                               decode_max_num_seqs)
+        def __init__(
+            self,
+            vllm_config: VllmConfig,
+            kv_cache_config: KVCacheConfig,
+            structured_output_manager: StructuredOutputManager,
+            mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+            include_finished_set: bool = False,
+            log_stats: bool = False,
+        ) -> None:
+            super().__init__(vllm_config, kv_cache_config,
+                             structured_output_manager, mm_registry,
+                             include_finished_set, log_stats)
+            self.scheduled_req_ids: set[str] = set()
+            self.running: list[Request] = []
+
+            self.finished_prefill_reqs: deque[Request] = deque()
+            enable_pd_transfer = getattr(self.scheduler_config,
+                                         'enable_pd_transfer', False)
+            decode_max_num_seqs = getattr(self.scheduler_config,
+                                          'decode_max_num_seqs', 0)
+            self.phase = "" if not enable_pd_transfer else "prefill"
+            self.decode_max_num_running_reqs = max(self.max_num_running_reqs,
+                                                   decode_max_num_seqs)
+    else:
+
+        def __init__(
+            self,
+            vllm_config: VllmConfig,
+            kv_cache_config: KVCacheConfig,
+            structured_output_manager: StructuredOutputManager,
+            block_size: int,
+            mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+            include_finished_set: bool = False,
+            log_stats: bool = False,
+        ) -> None:
+            super().__init__(vllm_config, kv_cache_config,
+                             structured_output_manager, block_size,
+                             mm_registry, include_finished_set, log_stats)
+            self.scheduled_req_ids: set[str] = set()
+            self.running: list[Request] = []
+
+            self.finished_prefill_reqs: deque[Request] = deque()
+            enable_pd_transfer = getattr(self.scheduler_config,
+                                         'enable_pd_transfer', False)
+            decode_max_num_seqs = getattr(self.scheduler_config,
+                                          'decode_max_num_seqs', 0)
+            self.phase = "" if not enable_pd_transfer else "prefill"
+            self.decode_max_num_running_reqs = max(self.max_num_running_reqs,
+                                                   decode_max_num_seqs)
 
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:
@@ -441,9 +470,14 @@ class AscendScheduler(Scheduler):
             self.kv_cache_config.kv_cache_groups)
         if self.running:
             any_request = self.running[0]
-            num_common_prefix_blocks = (
-                self.kv_cache_manager.get_num_common_prefix_blocks(
-                    any_request.request_id))
+            if vllm_version_is("0.11.0"):
+                num_common_prefix_blocks = (
+                    self.kv_cache_manager.get_num_common_prefix_blocks(
+                        any_request, len(self.running)))
+            else:
+                num_common_prefix_blocks = (
+                    self.kv_cache_manager.get_num_common_prefix_blocks(
+                        any_request.request_id))
 
         # Construct the scheduler output.
         new_reqs_data = [

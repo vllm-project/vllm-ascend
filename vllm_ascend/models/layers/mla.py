@@ -27,9 +27,16 @@ from torch import nn
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils import direct_register_custom_op
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.model_executor.layers.mla import MultiHeadLatentAttention
+else:
+    from vllm.model_executor.layers.mla import \
+        MultiHeadLatentAttentionWrapper as MultiHeadLatentAttention
 
 
 @dataclass
@@ -46,7 +53,7 @@ class AscendMLAModules:
     is_sparse: bool
 
 
-class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
+class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
 
     def __init__(
         self,
