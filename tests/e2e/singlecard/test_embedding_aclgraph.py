@@ -16,35 +16,29 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
-import os
-
-import pytest
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.utils import check_embeddings_close
 
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-MODELS = ["BAAI/bge-m3"]
-
-
-@pytest.mark.parametrize("model_name", MODELS)
-def test_aclgrpah_embed_models_correctness(model_name):
+def test_aclgrpah_embed_models_correctness():
     queries = ['What is the capital of China?', 'Explain gravity']
 
+    model_name = snapshot_download("BAAI/bge-m3")
     with VllmRunner(
             model_name,
-            task="embed",
+            runner="pooling",
             enforce_eager=False,
     ) as vllm_aclgraph_runner:
-        vllm_aclgraph_outputs = vllm_aclgraph_runner.encode(queries)
+        vllm_aclgraph_outputs = vllm_aclgraph_runner.embed(queries)
 
     with VllmRunner(
             model_name,
             task="embed",
             enforce_eager=True,
     ) as vllm_runner:
-        vllm_outputs = vllm_runner.encode(queries)
+        vllm_outputs = vllm_runner.embed(queries)
 
     check_embeddings_close(
         embeddings_0_lst=vllm_outputs,
