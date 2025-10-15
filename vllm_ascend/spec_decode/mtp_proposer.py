@@ -15,7 +15,6 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
-from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
 from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
 
 PADDING_SLOT_ID = -1
@@ -100,19 +99,7 @@ class MtpProposer(Proposer):
         moe_comm_type = self.runner._select_moe_comm_method(
             num_tokens, with_prefill)
 
-        if skip_attn:
-            attn_metadata = None
-        else:
-            common_attn_metadata = TorchairCommonAttentionMetadata(
-                num_reqs=num_reqs,
-                num_actual_tokens=1,
-                actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
-                attn_mask=self.runner.attn_mask,
-                spec_attn_mask=self.runner.spec_attn_mask,
-                decode_token_per_req=self.runner.decode_token_per_req,
-            )
-            attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
-                common_attn_metadata)
+        attn_metadata = None
 
         input_ids = self.input_ids[:num_tokens]
         positions = self.positions[:num_tokens]
