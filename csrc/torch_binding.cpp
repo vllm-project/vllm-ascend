@@ -48,9 +48,7 @@ void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
   } else if (src_device.is_cpu() && (!dst_device.is_cpu())) {
     memcpy_type = ACL_MEMCPY_HOST_TO_DEVICE;
   } else {
-    TORCH_WARN("src tensor device: ", src_device);
-    TORCH_WARN("dst tensor device: ", dst_device);
-    TORCH_CHECK(false, "Invalid device combination");
+    TORCH_CHECK(false, "Invalid device combination, src tensor device: ", src_device, ", dst tensor device: ", dst_device);
   }
 
   TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
