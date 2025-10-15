@@ -314,9 +314,9 @@ class AscendMLAMetadataBuilder:
 
         if self.cos_cache is None:
             self.cos_cache = model.model.layers[
-                0].self_attn.rotary_emb.cos_cached
+                model.model.start_layer].self_attn.rotary_emb.cos_cached
             self.sin_cache = model.model.layers[
-                0].self_attn.rotary_emb.sin_cached
+                model.model.start_layer].self_attn.rotary_emb.sin_cached
         if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
             self.cos_cache = self.cos_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
