@@ -27,8 +27,8 @@ def mock_add_rms_norm_quant(x, residual, weight, quant_scale, quant_offset,
     return x_out_quant, None, residual_out_quant
 
 
-def mock_add_rms_norm_quant_with_bias(x, residual, weight, quant_scale, quant_offset,
-                                      beta, epsilon):
+def mock_add_rms_norm_quant_with_bias(x, residual, weight, quant_scale,
+                                      quant_offset, beta, epsilon):
     x_out = 2 * x
     residual_out = 2 * residual
     x_out_quant = x_out.to(torch.int8)
