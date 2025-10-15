@@ -22,7 +22,7 @@ from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
-from vllm_ascend.attention.utils import version_check
+from vllm_ascend.utils import version_check
 
 
 def _addrmsnorm_forward_oot(

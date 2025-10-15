@@ -34,7 +34,6 @@ from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.utils import version_check
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -714,3 +713,18 @@ def calculate_dp_buffer_size() -> int:
 def is_hierarchical_communication_enabled():
     return (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
             and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
+
+
+@functools.cache
+def version_check():
+    """check if torch_npu version >= dev20250919"""
+    import re
+    torch_npu_version = torch_npu.version.__version__
+    date_pattern = r'dev(\d{8})'
+
+    match = re.search(date_pattern, torch_npu_version)
+    if match:
+        full_date = match.group(1)
+        if full_date >= "20250919":
+            return True
+    return False

@@ -6,8 +6,8 @@ from pytest_mock import MockerFixture
 from vllm.model_executor.layers.layernorm import RMSNorm
 
 from tests.ut.base import PytestBase
-from vllm_ascend.attention.utils import version_check
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+from vllm_ascend.utils import version_check
 
 
 def mock_rms_norm(x, weight, eps):

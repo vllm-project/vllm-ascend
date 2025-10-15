@@ -11,8 +11,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.attention.utils import version_check
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, version_check
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
