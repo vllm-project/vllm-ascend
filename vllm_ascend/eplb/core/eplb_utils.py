@@ -40,14 +40,6 @@ def determine_default_expert_map(global_expert_num, world_size, rank_id,
         end = global_expert_num
         local_count = global_expert_num - rank_id * local_num_experts
 
-    if isinstance(global_redundant_expert_num,
-                  int) and rank_id < global_redundant_expert_num:
-        local_count += 1
-        if end < global_expert_num:
-            end += 1
-        else:
-            start -= 1
-
     if isinstance(local_count, int):
         local_ids = torch.arange(local_count, dtype=torch.int32)
         expert_map[start:end] = local_ids
@@ -117,14 +109,6 @@ def determine_default_log2phy_map(global_expert_num, world_size, rank_id,
             start = r * local_num_experts
             end = global_expert_num
             local_count = global_expert_num - r * local_num_experts
-
-        if isinstance(global_redundant_expert_num,
-                      int) and rank_id < global_redundant_expert_num:
-            local_count += 1
-            if end < global_expert_num:
-                end += 1
-            else:
-                start -= 1
 
         if isinstance(local_count, int):
             local_ids = torch.arange(local_count, dtype=torch.int32)

@@ -203,7 +203,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
-            1] == global_num_experts, "Number of global experts mismatch"
+            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
