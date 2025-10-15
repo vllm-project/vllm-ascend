@@ -124,7 +124,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
             and not vllm_config.model_config.enforce_eager
             and not ascend_config.torchair_graph_config.enabled)
-        self.dynamic_eplb = ascend_config.dynamic_eplb
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
 
         try:
             device_group = get_mc2_group().device_group
