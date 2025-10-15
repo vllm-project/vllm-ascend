@@ -266,7 +266,7 @@ class AscendW4A8DynamicFusedMoEMethod:
             1] == global_num_experts, "Number of global experts mismatch"
 
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-        topk_weights, topk_ids, row_idx = select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=top_k,
@@ -298,7 +298,6 @@ class AscendW4A8DynamicFusedMoEMethod:
             w2_scale_bias=layer.w2_scale_bias,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            row_idx=row_idx,
             use_int4_w4a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
