@@ -20,8 +20,6 @@ from typing import Type, Union
 
 from vllm.config import SchedulerConfig
 
-from vllm_ascend.utils import vllm_version_is
-
 MAX_INT = 2147483647
 
 
