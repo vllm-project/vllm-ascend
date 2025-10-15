@@ -18,6 +18,9 @@ class TestTorchairDeepSeekMultiTokenPredictorLayer(PytestBase):
                                   hidden_size=768,
                                   rms_norm_eps=1e-5)
         mocker.patch(
+            'vllm_ascend.torchair.models.torchair_deepseek_mtp.get_tensor_model_parallel_world_size',
+            return_value=1)
+        mocker.patch(
             "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding.__init__",
             return_value=None)
         mocker.patch("vllm.model_executor.layers.layernorm.RMSNorm.__init__",
@@ -56,6 +59,8 @@ class TestTorchairDeepSeekMultiTokenPredictorLayer(PytestBase):
         mocker.patch("torch.cat", return_value=torch.randn(2, 3, 768))
         mtp_layer.mtp_block.return_value = (torch.randn(2, 3, 768),
                                             torch.randn(2, 3, 768))
+        mtp_layer.enorm.return_value = torch.randn(2, 3, 768)
+        mtp_layer.hnorm.return_value = torch.randn(2, 3, 768)
 
         input_ids = torch.tensor([[1, 2, 3], [4, 5, 6]])
         positions = torch.tensor([[0, 1, 2], [0, 1, 2]])
@@ -65,7 +70,7 @@ class TestTorchairDeepSeekMultiTokenPredictorLayer(PytestBase):
 
         output = mtp_layer(input_ids, positions, kv_cache, None,
                            previous_hidden_states, inputs_embeds, 0)
-        assert output.shape == (2, 3, 768)
+        assert output.shape == (3, 768)
 
 
 class TestTorchairDeepSeekMultiTokenPredictor(PytestBase):

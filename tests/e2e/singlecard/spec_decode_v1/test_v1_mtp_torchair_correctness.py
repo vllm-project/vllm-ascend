@@ -41,6 +41,7 @@ def test_mtp_torchair_correctness(
                             "use_cached_graph": False,
                             "graph_batch_sizes": [1, 2, 4],
                         },
+                        "multistream_overlap_shared_expert": "True"
                     }) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
     with VllmRunner(model_name,
@@ -60,7 +61,8 @@ def test_mtp_torchair_correctness(
                             "enabled": True,
                             "use_cached_graph": False,
                             "graph_batch_sizes": [1, 2, 4],
-                        }
+                        },
+                        "multistream_overlap_shared_expert": "True"
                     }) as spec_llm:
         spec_outputs = spec_llm.generate(example_prompts, sampling_config)
 
