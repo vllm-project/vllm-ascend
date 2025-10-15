@@ -166,7 +166,7 @@ def set_ascend_forward_context(
             forward_context.model_instance = model_instance
             forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
             forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
-            if torch_npu_check and vllm_config.model_config.hf_config.model_type == "qwen3_moe":
+            if vllm_config.model_config.hf_config.model_type == "qwen3_moe":
                 forward_context.fusion_linear = "gate_moe" if forward_context.layer_idx == 0 else "qkv_moe"
         forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
 
