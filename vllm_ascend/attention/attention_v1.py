@@ -585,7 +585,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                  self.head_size,
                                  dtype=query.dtype,
                                  device=query.device)
-        ori_output = output
         if trace_flag:
             torch.ops.vllm.unified_ascend_attention_with_output(
                 query=query,
@@ -668,7 +667,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # to make in-place change to the output tensor
         if hasattr(layer, 'quant_method') and use_kv_cache_int8:
             output = output.view(num_tokens, self.num_heads, self.head_size)
-        ori_output[:num_tokens, :, :] = output[:num_tokens, :, :]
         return output.view(num_tokens, self.hidden_size)
 
 
