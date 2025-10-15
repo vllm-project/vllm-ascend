@@ -97,7 +97,7 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
 
         hidden_states = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
-
+        del inputs_embeds, previous_hidden_states
         hidden_states, residual = self.mtp_block(positions=positions,
                                                  hidden_states=hidden_states,
                                                  residual=None)
