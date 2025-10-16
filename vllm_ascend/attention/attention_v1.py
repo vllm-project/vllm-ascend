@@ -141,6 +141,10 @@ class AscendMetadata:
     # The sequence length per sequence. Sequence length means the computed
     # tokens + new tokens (is None if it is a decoding).
     # (batch_size,)
+    # TODO(Angazenn): The following parameters are quite redundant and
+    # contains similar information (such as seq_lens seq_lens_list). We
+    # should simplified these parameters once attention schema in vLLM-Ascend
+    # is unified.
     seq_lens: torch.Tensor = None
     seq_lens_list: list = []
     actual_seq_lengths_q: list = []
