@@ -2923,7 +2923,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             tensor = self._align_memory(
                                 tensor, alignment)[:kv_cache_tensor.size]
                         kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name:
+                elif "attn" in layer_name or "attention" in layer_name:
                     # for other attentions, e.g., self_attn, sliding window attn
                     if self.vllm_config.kv_transfer_config is None:
                         k_tensor = torch.zeros(kv_cache_tensor.size // 2,

@@ -54,3 +54,9 @@ def register_model():
     ModelRegistry.register_model(
         "Qwen3NextForCausalLM",
         "vllm_ascend.models.qwen3_next:CustomQwen3NextForCausalLM")
+    ModelRegistry.register_model(
+        "BailingMoeForCausalLM",
+        "vllm_ascend.models.bailing_moe_v2:BailingMoeV2ForCausalLM")
+    ModelRegistry.register_model(
+        "BailingMoeV2ForCausalLM",
+        "vllm_ascend.models.bailing_moe_v2:BailingMoeV2ForCausalLM")
