@@ -1,5 +1,5 @@
-test_name: "test DeepSeek-V3 multi-dp"
-model: "vllm-ascend/DeepSeek-V3-W8A8"
+test_name: "test Qwen3-235B-A22B multi-dp"
+model: "Qwen/Qwen3-235B-A22B"
 num_nodes: 2
 npu_per_node: 16
 env_common:
@@ -16,7 +16,7 @@ deployment:
     headless: false
     env_extend:
     server_cmd: >
-        vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
+        vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 4
@@ -29,18 +29,16 @@ deployment:
         --max-num-seqs 16
         --max-model-len 8192
         --max-num-batched-tokens 8192
-        --quantization ascend
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
   -
     local_index: 1
     master_index: 0
     headless: true
     env_extend:
     server_cmd: >
-        vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
+        vllm serve "Qwen/Qwen3-235B-A22B"
         --headless
         --data-parallel-size 4
         --data-parallel-size-local 2
@@ -49,7 +47,6 @@ deployment:
         --data-parallel-rpc-port 13389
         --tensor-parallel-size 8
         --seed 1024
-        --quantization ascend
         --max-num-seqs 16
         --max-model-len 8192
         --max-num-batched-tokens 8192
@@ -57,7 +54,6 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
 benchmarks:
   perf:
     case_type: performance
