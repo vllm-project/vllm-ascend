@@ -60,7 +60,7 @@ class MultiNodeConfig:
         self.envs["MASTER_IP"] = self.cluster_ips[0]
         ascend_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages"
         self.envs[
-            "LD_LIBRARY_PATH"] = f"{ascend_path}:{self.envs['LD_LIBRARY_PATH']}"
+            "LD_LIBRARY_PATH"] = f"{ascend_path}:{self.envs.get('LD_LIBRARY_PATH', os.environ.get('LD_LIBRARY_PATH', ''))}"
 
         # keep the envs keys and values as strings
         str_envs = {k: str(v) for k, v in self.envs.items()}
