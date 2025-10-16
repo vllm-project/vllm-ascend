@@ -55,9 +55,9 @@ class AisbenchRunner:
                                                        text=True)
 
     def __init__(self,
-                 aisbench_config: dict,
-                 model_path: str,
+                 model: str,
                  port: int,
+                 aisbench_config: dict,
                  verify=True):
         self.result_line = None
         self.dataset_path = snapshot_download(aisbench_config["dataset_path"],
@@ -69,7 +69,8 @@ class AisbenchRunner:
         self.max_out_len = aisbench_config["max_out_len"]
         self.batch_size = aisbench_config["batch_size"]
         self.request_rate = aisbench_config.get("request_rate", 0)
-        self.model_path = model_path
+        self.model = model
+        self.model_path = snapshot_download(model)
         self.port = port
         self._init_dataset_conf()
         self._init_request_conf()
@@ -107,7 +108,7 @@ class AisbenchRunner:
         conf_path = os.path.join(REQUEST_CONF_DIR, f'{self.request_conf}.py')
         with open(conf_path, 'r', encoding='utf-8') as f:
             content = f.read()
-        content = re.sub(r'model=.*', f'model="{self.model_path}",', content)
+        content = re.sub(r'model=.*', f'model="{self.model}",', content)
         content = re.sub(r'host_port.*', f'host_port = {self.port},', content)
         content = re.sub(r'max_out_len.*',
                          f'max_out_len = {self.max_out_len},', content)
