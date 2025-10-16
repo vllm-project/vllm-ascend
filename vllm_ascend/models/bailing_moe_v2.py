@@ -210,20 +210,14 @@ class BailingAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        if hasattr(config, "partial_rotary_factor"):
-            self.rotary_dim = int(self.head_dim * config.partial_rotary_factor)
-        elif hasattr(config, "rotary_dim"):
-            self.rotary_dim = config.rotary_dim
-        else:
-            self.rotary_dim = self.head_dim
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.rotary_dim,
-            max_position=config.max_position_embeddings,
-            base=config.rope_theta,
-            is_neox_style=False,
-            rope_scaling=config.rope_scaling,
-        )
+        # self.rotary_emb = get_rope(
+        #     self.head_dim,
+        #     rotary_dim=self.rotary_dim,
+        #     max_position=config.max_position_embeddings,
+        #     base=config.rope_theta,
+        #     is_neox_style=False,
+        #     rope_scaling=config.rope_scaling,
+        # )
 
         self.attn = Attention(
             self.num_heads,
@@ -551,7 +545,14 @@ class BailingMoeModel(nn.Module):
         else:
             self.word_embeddings = PPMissingLayer()
 
-        self.embedding_dropout = torch.nn.Dropout(config.embedding_dropout)
+        if hasattr(config, "partial_rotary_factor"):
+            self.partial_rotary_factor = config.partial_rotary_factor
+        elif hasattr(config, "rotary_dim"):
+            self.partial_rotary_factor = config.rotary_dim / config.head_dim
+        else:
+            self.partial_rotary_factor = 1
+        setattr(config, "partial_rotary_factor", self.partial_rotary_factor)
+        
         self.rotary_emb = BailingMoeV2RotaryEmbedding(config=config)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -596,7 +597,7 @@ class BailingMoeModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-
+        
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
