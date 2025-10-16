@@ -169,6 +169,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
     "VLLM_ASCEND_ENABLE_MLAPO":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '0'))),
+    "fisrt_token_generation_in_prefill":
+    lambda: bool(int(os.getenv("fisrt_token_generation_in_prefill", '1')))
 }
 
 # end-env-vars-definition
