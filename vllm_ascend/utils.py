@@ -56,6 +56,7 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
+_ENABLE_SP = None
 
 
 def is_310p():
@@ -605,15 +606,20 @@ def dense_optim_enable() -> bool:
 
 
 def enable_sp(vllm_config=None) -> bool:
-    if vllm_config is None:
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-    return (
-        vllm_config.compilation_config.pass_config.enable_sequence_parallelism
-        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-        # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
-        # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
-        or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+    global _ENABLE_SP
+    if _ENABLE_SP is None:
+        if vllm_config is None:
+            from vllm.config import get_current_vllm_config
+            vllm_config = get_current_vllm_config()
+        _ENABLE_SP = (
+            vllm_config.compilation_config.pass_config.
+            enable_sequence_parallelism
+            or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+
+    return _ENABLE_SP
 
 
 # TODO remove it after vllm has this func
