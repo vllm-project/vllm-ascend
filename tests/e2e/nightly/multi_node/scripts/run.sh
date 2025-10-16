@@ -32,10 +32,7 @@ checkout_src() {
 
     #mooncake
     if [ ! -d "$SRC_DIR/Mooncake" ]; then
-        git clone https://github.com/kvcache-ai/Mooncake.git "$SRC_DIR/Mooncake"
-        cd "$SRC_DIR/Mooncake"
-        git checkout 06cc217504a6f1b0cdaa26b096b985651b262748
-        cd -
+        git clone -b pooling_async_memecpy_v1 https://github.com/AscendTransport/Mooncake "$SRC_DIR/Mooncake"
     fi
 }
 
@@ -62,25 +59,32 @@ install_vllm() {
 
 install_mooncake() {
     echo "====> Install mooncake"
-    apt-get update
-    apt install -y --allow-change-held-packages python3 python-is-python3
+    apt-get update -y
     apt-get install -y --no-install-recommends mpich libmpich-dev
     cd $SRC_DIR/Mooncake
-    sed -i '/option(USE_ASCEND_DIRECT)/s/OFF/ON/' mooncake-common/common.cmake
     bash dependencies.sh --yes
+    apt purge mpich libmpich-dev -y
+    apt purge openmpi-bin -y
+    apt purge openmpi-bin libopenmpi-dev -y
+    apt install mpich libmpich-dev -y
+    export CPATH=/usr/lib/aarch64-linux-gnu/mpich/include/:$CPATH
+    export CPATH=/usr/lib/aarch64-linux-gnu/openmpi/lib:$CPATH
+
     mkdir build
     cd -
     cd $SRC_DIR/Mooncake/build
     cmake ..
     make -j
     make install
+    cp mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/libascend_transport_mem.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
+    cp mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
     cd -
 }
 
 run_tests() {
     echo "====> Run tests"
     cd "$SRC_DIR/vllm-ascend"
-    pytest -sv tests/e2e/multi_node/test_multi_dp.py
+    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
 }
 
 main() {
@@ -89,7 +93,7 @@ main() {
     checkout_src
     install_sys_dependencies
     install_vllm
-    #install_mooncake
+    install_mooncake
     run_tests
 }
 

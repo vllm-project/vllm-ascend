@@ -126,7 +126,7 @@ class MultiNodeConfig:
         if not yaml_path:
             yaml_path = os.getenv(
                 "CONFIG_YAML_PATH",
-                "tests/e2e/multi_node/config/models/DeepSeek-V3.yaml")
+                "tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml")
         with open(yaml_path, 'r') as file:
             config_data = yaml.safe_load(file)
         test_name = config_data.get("test_name", "default_test")

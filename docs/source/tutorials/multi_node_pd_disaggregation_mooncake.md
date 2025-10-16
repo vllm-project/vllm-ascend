@@ -55,6 +55,7 @@ Mooncake is the serving platform for Kimi, a leading LLM service provided by Moo
 git clone -b pooling_async_memecpy_v1 https://github.com/AscendTransport/Mooncake
 ```
 
+<<<<<<< HEAD
 Update and install Python
 
 ```shell
@@ -63,19 +64,22 @@ apt-get install python3
 ```
 
 Install the relevant dependencies. The installation of Go is not required.
+=======
+Install the relevant dependencies.
+>>>>>>> c7c550b7 (upgrade run.sh)
 
 ```shell
 cd Mooncake
-bash dependencies.sh
+bash dependencies.sh -y
 ```
 
 Install mpi
 
 ```shell
-apt purge mpich libmpich-dev
-apt purge openmpi-bin
-apt purge openmpi-bin libopenmpi-dev
-apt install mpich libmpich-dev
+apt purge mpich libmpich-dev -y
+apt purge openmpi-bin -y
+apt purge openmpi-bin libopenmpi-dev -y
+apt install mpich libmpich-dev -y
 export CPATH=/usr/lib/aarch64-linux-gnu/mpich/include/:$CPATH
 export CPATH=/usr/lib/aarch64-linux-gnu/openmpi/lib:$CPATH
 ```
