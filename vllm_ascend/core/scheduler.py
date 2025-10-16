@@ -16,7 +16,7 @@
 #
 import time
 from collections import deque
-from typing import Iterable, Union
+from typing import Iterable, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
@@ -58,8 +58,7 @@ class AscendScheduler(Scheduler):
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
-        block_size:
-        int = None,  # Optional, only used for versions other than 0.11.0
+        block_size: Optional[int] = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
