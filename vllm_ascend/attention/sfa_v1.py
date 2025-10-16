@@ -516,15 +516,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.prefill_mask = None
 
         # indexer param
-        self.dim = self.indexer.dim
         self.n_heads: int = self.indexer.n_heads  # 64
         self.head_dim: int = self.indexer.head_dim  # 128
-        self.index_topk: int = self.indexer.index_topk  # 2048
         self.wq_b = self.indexer.wq_b
         self.wk = self.indexer.wk
         self.weights_proj = self.indexer.weights_proj
         self.k_norm = self.indexer.k_norm
-        self.softmax_scale = self.indexer.softmax_scale
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = vllm_config.speculative_config
@@ -946,7 +943,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
 
         # q process in new stream
-        q = self.wq_b(qr)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
+        q, _ = self.wq_b(qr)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
         q = q.view(-1, self.n_heads, self.head_dim)  # [b,s,64,128]
         q_pe, q_nope = torch.split(
             q, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
@@ -957,7 +954,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         q_pe = q_pe.squeeze(2)
         q = torch.cat([q_pe, q_nope], dim=-1)  # [b*s,64,128]
 
-        k_proj = self.wk(x)  # [b,s,7168] @ [7168,128] = [b,s,128]
+        k_proj, _ = self.wk(x)  # [b,s,7168] @ [7168,128] = [b,s,128]
         k = self.k_norm(k_proj).unsqueeze(1)
         k_pe, k_nope = torch.split(
             k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
@@ -976,7 +973,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                                              k.view(-1,
                                                     k.shape[-1]))  # b, s, n, d
 
-        weights = self.weights_proj(x)
+        weights, _ = self.weights_proj(x)
 
         topk_indices = torch.ops.custom.npu_lightning_indexer(
             query=q,

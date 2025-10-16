@@ -623,6 +623,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
         self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
+        self.indexer = kwargs['indexer']
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -634,6 +635,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         vllm_config = get_current_vllm_config()
         self.ring_mla_mask_size = 512
         self.prefill_mask = None
+
+        # indexer param
+        self.n_heads: int = self.indexer.n_heads  # 64
+        self.head_dim: int = self.indexer.head_dim  # 128
+        self.wq_b = self.indexer.wq_b
+        self.wk = self.indexer.wk
+        self.weights_proj = self.indexer.weights_proj
+        self.k_norm = self.indexer.k_norm
 
         self.speculative_config = vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
