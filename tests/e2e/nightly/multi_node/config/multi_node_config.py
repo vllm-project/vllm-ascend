@@ -107,8 +107,8 @@ class MultiNodeConfig:
 
             prefiller_ips = [o.cluster_ips[i] for i in prefiller_indices]
             decoder_ips = [o.cluster_ips[i] for i in decoder_indices]
-            prefiller_ports_list = [str(self.server_port)] * len(prefiller_ips)
-            decoder_ports_list = [str(self.server_port)] * len(decoder_ips)
+            prefiller_ports_list = [str(o.server_port)] * len(prefiller_ips)
+            decoder_ports_list = [str(o.server_port)] * len(decoder_ips)
 
             proxy_cmd = [
                 "python",
