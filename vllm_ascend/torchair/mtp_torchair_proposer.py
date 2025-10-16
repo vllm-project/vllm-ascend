@@ -511,7 +511,7 @@ class MtpTorchairProposer(MtpProposer):
             npu_backend = torchair.get_npu_backend(compiler_config=config)
             self.torchair_compiled_model = torch.compile(
                 self.model,
-                dynamic=not get_ascend_config().use_sfa,
+                dynamic=not self.use_sparse,
                 fullgraph=True,
                 backend=npu_backend)
             return self.torchair_compiled_model
@@ -534,7 +534,7 @@ class MtpTorchairProposer(MtpProposer):
             self.torchair_compiled_models[
                 batch_size] = torchair.inference.cache_compile(
                     self.model.__dict__[forward_proxy_name],
-                    dynamic=not get_ascend_config().use_sfa,
+                    dynamic=not self.use_sparse,
                     fullgraph=True,
                     cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
