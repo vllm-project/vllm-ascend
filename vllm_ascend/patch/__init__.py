@@ -56,7 +56,7 @@
 #    Future Plan:
 #       Find a better way to support tensor alignment for 310p without this patch.
 #
-# ** File: platform/patch_common/patch_multimodal_merge.py**
+# ** File: worker/patch_common/patch_multimodal_merge.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.utils._merge_multimodal_embeddings`
 #    Why:
@@ -87,6 +87,19 @@
 # ** File: worker/patch_common/patch_distributed.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
+#   (1) __init__()
+#    Why:
+#       The original GroupCoordinator initialization lacks pg_options to generate new
+#       process group with customized options.
+#    How:
+#       Inject HCCL options during process group initialization.
+#    Related PR (if no, explain why):
+#       Need a PR to vllm to support a dictionary as input while initializing distributed
+#       environment (e.g., Dict[str, torch.distributed.ProcessGroupHCCL.Options])
+#       https://github.com/vllm-project/vllm/pull/25417
+#    Future Plan:
+#       Remove this patch when vllm merges this PR.
+#   (2) all_to_all()
 #    Why:
 #       vllm doesn't support all_to_all for GroupCoordinator.
 #    How：
@@ -119,3 +132,22 @@
 #       - this is a bug by Ascend only. It can' be fixed in vLLM.
 #    Future Plan:
 #       Fix this bug in torch-npu, bump torch-npu version and remove this patch.
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.roberta.RobertaEmbedding.forward`
+#    Why:
+#       shift operation in `_encode_token_type_ids` and `_decode_token_type_ids` cannot run in ascend aclgraph mode
+#    How：
+#       Replace shift operation with multiplication and division.
+#    Related PR (if no, explain why):
+#       No, this need CANN add an aclnn shift operation
+#    Future Plan:
+#       Revert this when CANN support shift aclnn operation
+#   2. `vllm.model_executor.models.roberta.RobertaForSequenceClassification.forward `
+#    Why:
+#       shift operation in `_encode_token_type_ids` and `_decode_token_type_ids` cannot run in ascend aclgraph mode
+#    How：
+#       Replace shift operation with multiplication and division.
+#    Related PR (if no, explain why):
+#       No, this need CANN add an aclnn shift operation
+#    Future Plan:
+#       Revert this when CANN support shift aclnn operation

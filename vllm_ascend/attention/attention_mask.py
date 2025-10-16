@@ -50,6 +50,7 @@ class AttentionMaskBuilder:
         self._seq_len_cached = attn_mask.shape[0]
         self.attn_mask_cache = attn_mask
         self.device = device
+        self.pooling_mask = None
         if torch.version.cann.startswith("8.3"):
             assigned_mask_dim = 2048
             self.chunked_prefill_attn_mask = torch.triu(
@@ -74,6 +75,14 @@ class AttentionMaskBuilder:
         self._update_attn_cache(max_seq_len, dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
         ).to(device, non_blocking=True)
+
+    def get_pooling_mask(self, device):
+        if self.pooling_mask is None:
+            # the compressed attention mask for npu_fusion_attention sparse mode 4
+            self.pooling_mask = torch.triu(torch.ones(
+                2048, 2048), diagonal=1).to(torch.bool).to(device,
+                                                           non_blocking=True)
+        return self.pooling_mask
 
     def get_splitfuse_attn_mask(
         self,

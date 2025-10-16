@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
@@ -29,7 +28,9 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.torchair.ops.torchair_fused_moe import torchair_select_experts
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
-                               dispose_tensor, get_ascend_soc_version)
+                               dispose_tensor, get_ascend_soc_version,
+                               is_enable_nz,
+                               is_hierarchical_communication_enabled)
 
 
 def torchair_apply_mlp_decode(hidden_states: torch.Tensor,
@@ -220,6 +221,7 @@ def torchair_fused_experts_with_mc2(
     shared_dequant_scale: Optional[Any] = None,
     w1_scale_bias: torch.Tensor = None,
     w2_scale_bias: torch.Tensor = None,
+    dynamic_eplb: bool = False,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     assert mc2_mask is not None
     if log2phy is not None:
@@ -236,6 +238,10 @@ def torchair_fused_experts_with_mc2(
 
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
     a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
+    # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
+    # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
+    # improve communication performance.
+    need_expert_scale = is_hierarchical_communication_enabled()
 
     enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
 
@@ -270,6 +276,10 @@ def torchair_fused_experts_with_mc2(
         stage1_kwargs.update({
             "x_active_mask": mc2_mask,
         })
+    if need_expert_scale:
+        stage1_kwargs.update({
+            "expert_scales": topk_weights.to(torch.float32),
+        })
     kwargs_mc2.update(stage1_kwargs)
 
     output = torch_npu.npu_moe_distribute_dispatch_v2(
@@ -277,8 +287,8 @@ def torchair_fused_experts_with_mc2(
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_dispatch(
         **kwargs_mc2)
     # comm_stream.wait_stream(torch.npu.current_stream())
-    expand_x, dynamic_scale, assist_info_for_combine, expert_token_nums, ep_recv_counts = output[
-        0:5]
+    expand_x, dynamic_scale, assist_info_for_combine, expert_token_nums, \
+        ep_recv_counts, _, expand_scales = output[0:7]
 
     if shared_experts is not None:
         with npu_stream_switch("moe_secondary", 0):
@@ -326,6 +336,7 @@ def torchair_fused_experts_with_mc2(
         "group_ep": moe_all_to_all_group_name,
         "ep_world_size": ep_world_size,
         "ep_rank_id": ep_rank_id,
+        "expand_scales": expand_scales,
     }
     if enable_dispatch_v2:
         stage3_kwargs.update({
@@ -353,6 +364,9 @@ def torchair_fused_experts_with_mc2(
         **kwargs_mc2
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
         **kwargs_mc2)
+
+    if dynamic_eplb:
+        return (hidden_states, 1, expert_token_nums)
 
     if shared_experts is None:
         return hidden_states
@@ -816,7 +830,9 @@ class TorchairAscendW8A8DynamicLinearMethod:
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         # cast quantized weight tensors in NZ format (29) for higher inference speed
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29)
+        if is_enable_nz():
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, 29)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
@@ -832,6 +848,7 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
         self.ep_group = get_ep_group()
 
         ascend_config = get_ascend_config()
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
@@ -994,7 +1011,8 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
                 is_torchair=self.torchair_graph_enabled,
                 mc2_mask=kwargs.get("mc2_mask", None),
                 shared_gate_up=shared_gate_up,
-                shared_dequant_scale=shared_dequant_scale)
+                shared_dequant_scale=shared_dequant_scale,
+                dynamic_eplb=self.dynamic_eplb)
         elif fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
         ]:
@@ -1033,7 +1051,9 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
-        torch_npu.npu_format_cast_(layer.w2_weight, ACL_FORMAT_FRACTAL_NZ)
+        if is_enable_nz():
+            torch_npu.npu_format_cast_(layer.w13_weight, ACL_FORMAT_FRACTAL_NZ)
+            torch_npu.npu_format_cast_(layer.w2_weight, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(

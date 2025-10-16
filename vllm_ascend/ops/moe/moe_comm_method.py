@@ -88,7 +88,6 @@ class MoECommMethod(ABC):
             w2: torch.Tensor,
             topk_weights: torch.Tensor,
             topk_ids: torch.Tensor,
-            row_idx: torch.Tensor,
             activation: str = "silu",
             apply_router_weight_on_input: bool = False,
             use_int8_w8a8: bool = False,
@@ -122,7 +121,6 @@ class MoECommMethod(ABC):
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            row_idx=row_idx,
             expert_map=expert_map,
             log2phy=log2phy,
             global_redundant_expert_num=global_redundant_expert_num,
@@ -150,7 +148,8 @@ class MoECommMethod(ABC):
                                        with_quant=use_int8_w8a8
                                        or use_int4_w4a8,
                                        fusion=use_int8_w8a8,
-                                       need_trans=need_trans)
+                                       need_trans=need_trans,
+                                       dynamic_eplb=dynamic_eplb)
 
         final_hidden_states = self.token_dispatcher.token_combine(
             hidden_states=mlp_output)

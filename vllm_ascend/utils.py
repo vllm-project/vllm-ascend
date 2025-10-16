@@ -53,6 +53,9 @@ _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
+_DEFAULT_BUFFER_SIZE = 200
+_MIN_DP_BUFFER_SIZE = 50
+_IS_MOE_MODEL = None
 
 
 def is_310p():
@@ -61,6 +64,10 @@ def is_310p():
         from vllm_ascend import _build_info  # type: ignore
         _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
     return _IS_310P
+
+
+def is_enable_nz():
+    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
 
 
 def sleep_mode_enabled():
@@ -506,9 +513,11 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
+                                        AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding,
+        AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -520,8 +529,10 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "RotaryEmbedding": AscendRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
+        "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
         "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
         "QKVParallelLinear": AscendQKVParallelLinear,
+        "ReplicatedLinear": AscendReplicatedLinear,
         "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
         "VocabParallelEmbedding": AscendVocabParallelEmbedding,
         "ParallelLMHead": AscendParallelLMHead,
@@ -599,12 +610,24 @@ def enable_sp(vllm_config=None) -> bool:
         vllm_config = get_current_vllm_config()
     return (
         vllm_config.compilation_config.pass_config.enable_sequence_parallelism
-        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM)
+        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+        # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+        # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+        or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+
+
+# TODO remove it after vllm has this func
+def shared_expert_dp_enabled() -> bool:
+    return get_ascend_config().enable_shared_expert_dp or enable_sp()
 
 
 def is_moe_model(vllm_config: VllmConfig):
-    config = vllm_config.model_config.hf_config
-    return any('experts' in key.lower() for key in config.to_dict())
+    global _IS_MOE_MODEL
+    if _IS_MOE_MODEL is None:
+        config = vllm_config.model_config.hf_config
+        _IS_MOE_MODEL = any('experts' in key.lower()
+                            for key in config.to_dict())
+    return _IS_MOE_MODEL
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -646,3 +669,59 @@ def npu_stream_switch(target_stream: torch.npu.Stream,
         return nullcontext()
     assert target_stream is not None
     return torch.npu.stream(target_stream)
+
+
+def create_hccl_pg_options(group_name: str):
+    options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
+    hccl_config = get_hccl_config_for_pg_options(group_name)
+    if hccl_config is not None:
+        options.hccl_config = hccl_config
+    return options
+
+
+def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
+    """
+    Get HCCL process group options for the given communication group name.
+
+    Args:
+        group_name: Name of the communication group
+
+    Returns:
+        HCCL pg_options or None for mc2 group
+    """
+    # FIXME: Current mc2 operators only perform communication space partitioning
+    # based on HCCL_BUFFSIZE configuration. Using pg_options with mc2 group would
+    # result in memory misalignment problems.
+    if group_name and "mc2" in group_name:
+        return None
+    hccl_config_map = {
+        "dp": {
+            "hccl_buffer_size": calculate_dp_buffer_size()
+        },
+    }
+    return hccl_config_map.get(group_name, get_default_buffer_config())
+
+
+def get_default_buffer_config() -> dict:
+    return {"hccl_buffer_size": _DEFAULT_BUFFER_SIZE}
+
+
+def calculate_dp_buffer_size() -> int:
+    """
+    formula of dp buffer size:
+    dp_size + 2 (flags: with_prefill and enable_dbo)
+    """
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    dp_size = vllm_config.parallel_config.data_parallel_size
+    int32_size = torch.iinfo(torch.int32).bits // 8
+    dp_buffer_size = math.ceil((dp_size + 2) * int32_size / (1024 * 1024))
+    return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
+
+
+# Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
+# and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
+# significantly improve communication performance of MC2 ops dispatch/combine.
+def is_hierarchical_communication_enabled():
+    return (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
+            and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")

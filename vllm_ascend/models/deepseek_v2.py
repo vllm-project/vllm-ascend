@@ -31,21 +31,25 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+from vllm.distributed import (divide, get_pp_group,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
+                                               ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.deepseek_v2 import \
@@ -54,18 +58,131 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2ForCausalLM,
     DeepseekV2MLAAttention, DeepseekV2MLP, DeepseekV2Model, DeepseekV2MoE,
     get_spec_layer_idx_from_weight_name)
-from vllm.model_executor.models.utils import (PPMissingLayer,
-                                              is_pp_missing_parameter,
-                                              maybe_prefix)
+from vllm.model_executor.models.utils import (
+    PPMissingLayer, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.models.layers.sfa import (AscendSFAModules,
                                            AscendSparseFlashAttention, Indexer)
 from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+from vllm_ascend.ops.linear import AscendLinearBase
+
+
+@support_torch_compile
+class AscendDeepseekV2Model(DeepseekV2Model, nn.Module):
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        # Rewrite this init func mainly for removing cuda-hard code
+        nn.Module.__init__(self)
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+
+        self.vocab_size = config.vocab_size
+        self.is_v32 = hasattr(config, "index_topk")
+        if self.is_v32:
+            topk_tokens = config.index_topk
+            topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                topk_tokens,
+                dtype=torch.int32,
+                device=current_platform.device_type)
+        else:
+            topk_indices_buffer = None
+
+        if get_pp_group().is_first_rank:
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens")
+        else:
+            self.embed_tokens = PPMissingLayer()
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: DeepseekV2DecoderLayer(vllm_config, prefix,
+                                                  topk_indices_buffer),
+            prefix=f"{prefix}.layers")
+
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
 
 class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        input_is_parallel: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        reduce_results: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+    ):
+        # Divide the weight matrix along the first dimension.
+        self.tp_rank = (get_tensor_model_parallel_rank()
+                        if not disable_tp else 0)
+        self.tp_size = (get_tensor_model_parallel_world_size()
+                        if not disable_tp else 1)
+        self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.output_size_per_partition = output_size
+        self.output_partition_sizes = [output_size]
+
+        AscendLinearBase.__init__(self,
+                                  input_size,
+                                  output_size,
+                                  skip_bias_add,
+                                  params_dtype,
+                                  quant_config,
+                                  prefix,
+                                  return_bias=return_bias,
+                                  disable_tp=disable_tp)
+
+        self.input_is_parallel = input_is_parallel
+        self.reduce_results = reduce_results
+
+        assert self.quant_method is not None
+        self.quant_method.create_weights(
+            layer=self,
+            input_size_per_partition=self.input_size_per_partition,
+            output_partition_sizes=self.output_partition_sizes,
+            input_size=self.input_size,
+            output_size=self.output_size,
+            params_dtype=self.params_dtype,
+            weight_loader=(
+                self.weight_loader_v2 if self.quant_method.__class__.__name__
+                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
+        if not reduce_results and (bias and not skip_bias_add):
+            raise ValueError("When not reduce the results, adding bias to the "
+                             "results can lead to incorrect results")
+
+        if bias:
+            self.bias = nn.Parameter(
+                torch.empty(self.output_size, dtype=params_dtype))
+            set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "weight_loader": self.weight_loader,
+            })
+        else:
+            self.register_parameter("bias", None)
+        self.update_param_tp_status()
 
     def forward(
         self,
@@ -183,12 +300,11 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
-        self.o_proj = CustomDeepseekV2RowParallelLinear(
-            self.num_heads * self.v_head_dim,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj")
+        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
+                                        self.hidden_size,
+                                        bias=False,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.o_proj")
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -203,6 +319,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             scaling_factor = rope_scaling["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
+        self.indexer = None
 
         mla_modules = AscendMLAModules(
             q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
@@ -214,6 +331,8 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             kv_b_proj=self.kv_b_proj,
             o_proj=self.o_proj,
             rotary_emb=self.rotary_emb,
+            indexer=None,
+            is_sparse=hasattr(config, "index_topk"),
         )
 
         self.mla_attn = MultiHeadLatentAttention(
@@ -432,7 +551,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
-        ascend_config = get_ascend_config()
 
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -448,7 +566,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_rank = get_tp_group().rank_in_group
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
-            if ascend_config.use_sfa:
+            if hasattr(model_config.hf_config, "index_topk"):
                 attn_cls = CustomDeepseekV2SFAAttention
             else:
                 attn_cls = CustomDeepseekV2MLAAttention
@@ -523,8 +641,9 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                 "kv_a_proj_with_mqa",
             ]
 
-        self.model = DeepseekV2Model(vllm_config=vllm_config,
-                                     prefix=maybe_prefix(prefix, "model"))
+        self.model = AscendDeepseekV2Model(vllm_config=vllm_config,
+                                           prefix=maybe_prefix(
+                                               prefix, "model"))
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,

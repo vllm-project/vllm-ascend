@@ -12,7 +12,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
@@ -20,6 +20,7 @@ from vllm.config import CacheConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
+from vllm_ascend import ascend_config
 from vllm_ascend.models.deepseek_v2 import (CustomDeepseekV2MLAAttention,
                                             CustomDeepseekV2RowParallelLinear)
 
@@ -41,11 +42,23 @@ def test_row_parallel_linear(cls, mock_distributed):
     assert output[0].shape == (2, 4, 64)
 
 
+@patch("vllm_ascend.models.layers.mla.get_forward_context")
 @patch("torch.ops.vllm.mla_forward")
 @patch("torch_npu.npu_rms_norm")
 def test_custom_deepseek_v2_mla_attention(mock_rms_norm, mock_mla_forward,
+                                          mock_forward_context,
                                           mock_distributed, base_config):
     mock_rms_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128))
+    # Make a fake ascend config because of the AscendLinearBase
+    vllm_config = MagicMock()
+    vllm_config.additional_config = None
+    vllm_config.parallel_config.enable_expert_parallel = False
+    vllm_config.parallel_config.tensor_parallel_size = 1
+    vllm_config.kv_transfer_config = None
+    ascend_config.init_ascend_config(vllm_config)
+    dummy_forward_context = MagicMock()
+    dummy_forward_context.sp_enabled = False
+    mock_forward_context.return_value = dummy_forward_context
 
     attn = CustomDeepseekV2MLAAttention(config=base_config,
                                         hidden_size=128,
@@ -78,6 +91,7 @@ def test_custom_deepseek_v2_mla_attention(mock_rms_norm, mock_mla_forward,
                                         kv_lora_rank=16,
                                         prefix="layers.1.self_attn")
     assert hasattr(attn, "q_proj")
+    ascend_config._ASCEND_CONFIG = None
 
 
 def test_deepseek_v2_lmhead(mock_distributed, vllm_config):
@@ -89,6 +103,14 @@ def test_deepseek_v2_lmhead(mock_distributed, vllm_config):
             self.hidden_size = 128
 
     config = SimpleConfig()
+
+    # Make a fake ascend config because of the AscendLinearBase
+    vllm_config = MagicMock()
+    vllm_config.additional_config = None
+    vllm_config.parallel_config.enable_expert_parallel = False
+    vllm_config.parallel_config.tensor_parallel_size = 1
+    vllm_config.kv_transfer_config = None
+    ascend_config.init_ascend_config(vllm_config)
 
     # 直接创建lmhead和logits_processor
     lmhead = ParallelLMHead(config.vocab_size, config.hidden_size)
@@ -105,3 +127,4 @@ def test_deepseek_v2_lmhead(mock_distributed, vllm_config):
                           return_value=mock_logits):
             logits = logits_processor(lmhead, mock_output)
     assert logits.shape == (2, 4, config.vocab_size)
+    ascend_config._ASCEND_CONFIG = None
