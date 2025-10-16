@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 
@@ -7,8 +8,11 @@ import yaml
 from tests.e2e.nightly.multi_node.config.utils import (get_avaliable_port,
                                                        get_cluster_ips,
                                                        get_cur_ip,
-                                                       get_net_interface)
+                                                       get_net_interface,
+                                                       setup_logger)
 
+setup_logger()
+logger = logging.getLogger(__name__)
 DISAGGREGATED_PREFILL_PROXY_SCRIPT = "examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py"
 
 
@@ -81,6 +85,9 @@ class MultiNodeConfig:
 
     def launch_server_proxy(self):
         if not self.disaggregated_prefill or not self.is_master:
+            logger.info(
+                "Disaggregated prefill not enabled or not master node, skipping proxy launch."
+            )
             return
         prefiller_indices = self.disaggregated_prefill["prefiller_host_index"]
         decoder_indices = self.disaggregated_prefill["decoder_host_index"]
