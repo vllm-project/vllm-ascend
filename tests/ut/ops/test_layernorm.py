@@ -107,7 +107,7 @@ class TestAscendRMSNorm(PytestBase):
         mock_forward_context.num_hidden_layers = 2
         mock_forward_context.fusion_linear = "gate_up_dense"
         mocker.patch("torch.ops.vllm.maybe_chunk_residual",
-                     torch.randn(4, 8, dtype=torch.float16))
+                     lambda x, residual: residual)
 
         # Ensure fusion and layer_idx increment are handled correctly
         x = torch.randn(4, 8, dtype=torch.float16)

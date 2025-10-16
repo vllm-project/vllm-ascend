@@ -1,4 +1,3 @@
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -185,10 +184,9 @@ class TestCustomDeepSeekMTP(PytestBase):
         mtp = setup_mtp
         assert isinstance(mtp, CustomDeepSeekMTP)
 
-    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     def test_forward(self, mocker: MockerFixture, setup_mtp):
         mocker.patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
-                     return_value=torch.tensor([[1.0, 2.0, 3.0]]))
+                     lambda x: x)
         input_ids = torch.tensor([[1, 2, 3]])
         positions = torch.tensor([[0, 1, 2]])
         kv_caches = [torch.tensor([[0.1, 0.2, 0.3]])]
