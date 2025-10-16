@@ -1450,7 +1450,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 .squeeze(1)
             # Some tokens ids may need to become embeds
             if token_ids_idx.numel() > 0:
-                token_ids = self.input_ids.gpu[token_ids_idx]
+                token_ids = self.input_ids[token_ids_idx]
                 tokens_to_embeds = self.model.get_input_embeddings(
                     input_ids=token_ids)
                 self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
