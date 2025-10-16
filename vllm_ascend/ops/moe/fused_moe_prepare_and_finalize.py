@@ -26,7 +26,8 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.utils import enable_sp, flashcomm2_enable, get_rm_router_logits_state
+from vllm_ascend.utils import (enable_sp, flashcomm2_enable,
+                               get_rm_router_logits_state)
 
 
 class FusedMoEPrepareAndFinalize(ABC):

@@ -26,7 +26,6 @@ import torch
 from torch import nn
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mla import MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig

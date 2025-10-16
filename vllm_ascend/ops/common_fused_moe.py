@@ -38,9 +38,9 @@ from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p, flashcomm2_enable,
-                               is_enable_nz, npu_stream_switch,
-                               shared_expert_dp_enabled)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp,
+                               flashcomm2_enable, is_310p, is_enable_nz,
+                               npu_stream_switch, shared_expert_dp_enabled)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -304,7 +304,8 @@ class AscendFusedMoE(FusedMoE):
         hidden_states, router_logits = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            replace_allreduce=forward_context.sp_enabled or forward_context.flashcomm_v2_enabled,
+            replace_allreduce=forward_context.sp_enabled
+            or forward_context.flashcomm_v2_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp)
 
         # Matrix multiply.
