@@ -2253,18 +2253,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.finished_req_ids)
         return None, None
 
-    def _build_attention_metadata(self, create_mixed_batch, num_reqs,
-                                  num_tokens, max_query_len, force_attention):
+    def _build_dummy_attn_metadata(
+        self,
+        with_prefill: bool,
+        num_reqs: int,
+        num_tokens: int,
+        max_query_len: int,
+        aclgraph_runtime_mode: Optional[CUDAGraphMode] = None
+    ) -> Optional[dict[str, Any]]:
         attn_metadata: Optional[dict[str, Any]] = None
 
-        if force_attention:
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            assert with_prefill is False, \
+                "Full decode graph only supports uniform batch now."
+
             attn_metadata = {}
 
-            if create_mixed_batch:
-                raise NotImplementedError(
-                    "force_attention=True is not supported for mixed batches.")
-            else:
-                seq_lens = self.model_config.max_model_len
+            seq_lens = self.model_config.max_model_len
             self.seq_lens_np[:num_reqs] = seq_lens
             self.seq_lens_np[num_reqs:] = 0
 
@@ -2347,6 +2352,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
+        # TODO: force_attention is only needed for kernel_warmup, maybe remove it
         force_attention: bool = False,
         uniform_decode: bool = False,
     ) -> torch.Tensor:
@@ -2412,15 +2418,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.is_kv_producer and not self.is_kv_consumer:
             with_prefill = True
 
-        # TODO(cmq): check if with_prefill is reasonable
-        attn_metadata = self._build_attention_metadata(
-            False,
-            num_reqs=num_reqs,
-            num_tokens=num_tokens,
-            max_query_len=max_query_len,
-            force_attention=force_attention,
-        )
-
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
@@ -2466,6 +2463,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}.")
             else:
                 aclgraph_runtime_mode = _ag_mode
+
+            # TODO(Mengqing): Set create_mixed_batch to False since it's only used in FI warmup
+            # and not supported in ASCEND now. We could remove it in the future.
+            attn_metadata = self._build_dummy_attn_metadata(
+                False,
+                num_reqs=num_reqs,
+                num_tokens=num_tokens,
+                max_query_len=max_query_len,
+                aclgraph_runtime_mode=aclgraph_runtime_mode,
+            )
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())
