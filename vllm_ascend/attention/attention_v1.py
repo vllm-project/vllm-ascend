@@ -146,8 +146,8 @@ class AscendMetadata:
     # should simplified these parameters once attention schema in vLLM-Ascend
     # is unified.
     seq_lens: torch.Tensor = None
-    seq_lens_list: list = []
-    actual_seq_lengths_q: list = []
+    seq_lens_list: list[int] = []
+    actual_seq_lengths_q: list[int] = []
 
     query_start_loc: torch.Tensor = None
     query_lens: torch.Tensor = None
