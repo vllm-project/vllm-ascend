@@ -40,10 +40,10 @@ class TestAscendRMSNorm(PytestBase):
                      side_effect=lambda x: None)
 
     # Test case for the most common and basic scenario
-    @patch("torch.ops.vllm.maybe_chunk_residual")
     @pytest.mark.parametrize(
         "residual", [None, torch.randn(4, 8, dtype=torch.float16)])
-    def test_forward_oot_basic(self, residual, mock_maybe_chunk_residual):
+    @patch("torch.ops.vllm.maybe_chunk_residual")
+    def test_forward_oot_basic(self, mock_maybe_chunk_residual, residual):
         mock_maybe_chunk_residual.side_effect = lambda x, residual: x
         layer = RMSNorm(hidden_size=8, eps=1e-05)
         x = torch.randn(4, 8, dtype=torch.float16)
