@@ -143,6 +143,7 @@ class AscendRMSNorm(RMSNorm):
             forward_context.fusion_linear = "gate_moe"
         elif fusion_linear == "gate_moe":
             forward_context.fusion_linear = "qkv_moe"
+            forward_context.layer_idx += 1
         from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
         if next_linear is not None and \
             not isinstance(next_linear.quant_method.quant_method, AscendW8A8LinearMethod):

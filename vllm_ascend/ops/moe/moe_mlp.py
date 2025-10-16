@@ -177,7 +177,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
-    get_forward_context().layer_idx += 1
     return hidden_states
 
 

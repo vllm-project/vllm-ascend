@@ -7,6 +7,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import WeightPrefetchConfig
 from vllm_ascend.ops.linear import (AscendQKVParallelLinear,
                                     AscendRowParallelLinear)
+from vllm_ascend.utils import version_check
 
 SUPPORTED_MODULES = ["attn", "mlp", "moe"]
 MOE_PREFETCH_TOKEN_THRESHOLD = 96
@@ -82,8 +83,10 @@ class WeightPrefetchMethod:
         if not self.moe.is_active_this_forward:
             return
         forward_context = get_forward_context()
+        if not version_check():
+            forward_context.layer_idx += 1
         weight = forward_context.model_instance.model.layers[
-            forward_context.layer_idx].mlp.experts.w13_weight
+            forward_context.layer_idx - 1].mlp.experts.w13_weight
         weight_size = weight.data.element_size() * weight.data.numel(
         ) * self.moe.prefetch_ratio.get(prefix, 0)
         torch.ops.vllm.prefetch_preprocess(weight=weight,
