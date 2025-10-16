@@ -37,7 +37,7 @@ class BudgetRefiner:
     in the chunked prefill scheduling startegy."""
     
     def __init__(self, default_budget, slo_limit=-1) -> None:
-        self.enabled = slo_limit!=-1
+        self.enabled = slo_limit>0
         if not self.enabled:
             return
         logger.info("Dynamic batch is enabled with SLO limit: {}, and chunked prefill is forced to be activated because dynamic batch relies on it".format(str(slo_limit)))
