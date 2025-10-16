@@ -142,8 +142,8 @@ class AscendMetadata:
     # tokens + new tokens (is None if it is a decoding).
     # (batch_size,)
     seq_lens: torch.Tensor = None
-    seq_lens_list: List = None
-    actual_seq_lengths_q: List = None
+    seq_lens_list: list = []
+    actual_seq_lengths_q: list = []
 
     query_start_loc: torch.Tensor = None
     query_lens: torch.Tensor = None
