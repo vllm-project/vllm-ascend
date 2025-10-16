@@ -263,7 +263,7 @@ class ModelNetLoaderElastic(BaseModelLoader):
         )
 
         if need_process_weights_after_loading:
-            process_weights_after_loading(model, model_config, 
+            process_weights_after_loading(model, model_config,
                                           torch.device(device_config.device))
 
         if model is None:
