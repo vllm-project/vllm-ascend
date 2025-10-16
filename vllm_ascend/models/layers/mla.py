@@ -130,10 +130,12 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
             else:
                 need_gather_q_kv = False
         except AssertionError:
+            sp_enabled = False
             need_gather_q_kv = False
-        if self.debug_layer_idx < self.layers:
+        if not sp_enabled or self.debug_layer_idx < self.layers:
             output_shape = hidden_states.shape
         else:
+            # used in deepseek mtp layer
             output_shape = torch.chunk(hidden_states, self.tp_size,
                                        dim=0)[0].shape
         # FIXME: This does not seem right, should make sure the buffer is fixed
