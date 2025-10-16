@@ -53,6 +53,8 @@ class MtpProposer(Proposer):
                                    1,
                                    device=self.runner.device,
                                    dtype=torch.int32)
+        self.use_sparse = hasattr(vllm_config.model_config.hf_config,
+                                  "index_topk")
 
     def load_model(self, model) -> None:
         loader = get_model_loader(self.vllm_config.load_config)

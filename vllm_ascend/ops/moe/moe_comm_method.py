@@ -57,31 +57,28 @@ class MoECommMethod(ABC):
         self.model_type = get_current_vllm_config(
         ).model_config.hf_config.model_type
         self.moe_config = moe_config
+        self.mc2_mask = None
 
         self.token_dispatcher = self._get_token_dispatcher()
         self.fused_moe_prepare_finalize = self._get_fused_moe_prepare_finalize(
         )
 
-    def prepare(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False,
-        gate=None
-    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
-        hidden_states, router_logits, mc2_mask, context_metadata = self.fused_moe_prepare_finalize.prepare(
+    def prepare(self,
+                hidden_states: torch.Tensor,
+                router_logits: torch.Tensor,
+                enable_shared_expert_dp: bool = False,
+                replace_allreduce: bool = False,
+                gate=None) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states, router_logits, mc2_mask = self.fused_moe_prepare_finalize.prepare(
             hidden_states, router_logits, enable_shared_expert_dp,
             replace_allreduce, gate)
-        return hidden_states, router_logits, mc2_mask, context_metadata
+        self.mc2_mask = mc2_mask
+        return hidden_states, router_logits
 
-    def finalize(self,
-                 hidden_states: torch.Tensor,
-                 reduce_results: bool,
-                 context_metadata: Optional[dict] = None) -> torch.Tensor:
+    def finalize(self, hidden_states: torch.Tensor,
+                 reduce_results: bool) -> torch.Tensor:
         hidden_states = self.fused_moe_prepare_finalize.finalize(
-            hidden_states, reduce_results, context_metadata)
+            hidden_states, reduce_results)
         return hidden_states
 
     def fused_experts(
@@ -111,8 +108,7 @@ class MoECommMethod(ABC):
             log2phy: torch.Tensor = None,
             global_redundant_expert_num: int = 0,
             need_trans: bool = False,
-            dynamic_eplb: bool = False,
-            mc2_mask: torch.Tensor = None):
+            dynamic_eplb: bool = False):
         # Check constraints
         assert hidden_states.dtype in [
             torch.float32, torch.float16, torch.bfloat16
@@ -131,12 +127,12 @@ class MoECommMethod(ABC):
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
-            mc2_mask=mc2_mask,
+            mc2_mask=self.mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
             with_quant=use_int8_w8a8 or use_int4_w4a8)
 
-        permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, context_metadata = \
-            results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("context_metadata")
+        permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales = \
+            results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales")
 
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
                                        w1=w1,
@@ -156,7 +152,7 @@ class MoECommMethod(ABC):
                                        dynamic_eplb=dynamic_eplb)
 
         final_hidden_states = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output, context_metadata=context_metadata)
+            hidden_states=mlp_output)
 
         if dynamic_eplb:
             return (final_hidden_states, group_list_type, expert_tokens)
