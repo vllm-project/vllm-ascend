@@ -96,7 +96,7 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Install aisbench
+      - name: Checkout aisbench repo and Install aisbench
         run: |
           git clone https://gitee.com/aisbench/benchmark.git
           cd benchmark

@@ -18,7 +18,6 @@ from typing import Any
 
 import openai
 import pytest
-from modelscope import snapshot_download  # type: ignore
 from vllm.utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
@@ -64,7 +63,6 @@ aisbench_cases = [{
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 async def test_models(model: str, tp_size: int) -> None:
-    model_path = snapshot_download(model)
     port = get_open_port()
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
@@ -98,4 +96,4 @@ async def test_models(model: str, tp_size: int) -> None:
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
         # aisbench test
-        run_aisbench_cases(model_path, port, aisbench_cases)
+        run_aisbench_cases(model, port, aisbench_cases)
