@@ -19,7 +19,9 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         split_decodes_and_prefills)
+                                         maybe_save_kv_layer_to_connector,
+                                         split_decodes_and_prefills,
+                                         wait_for_kv_layer_from_connector)
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
@@ -1093,6 +1095,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         output: Optional[torch.Tensor] = None,
         enable_multistream_mla: bool = False,
         ckq: Optional[torch.Tensor] = None,
+        layer_name: str = "",
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
@@ -1116,6 +1119,8 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
+        if has_prefill:
+            wait_for_kv_layer_from_connector(layer_name)
         if not self.running_in_graph:
             # Inputs and outputs may be padded for CUDA graphs
             output_padded = output
@@ -1300,4 +1305,6 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                     is_force_scatter=self.enable_shared_expert_dp)[0]
                 current_ms_metadata.after_comm_event.record()
         del o_proj_input
+        if has_prefill:
+            maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
         return output_padded
