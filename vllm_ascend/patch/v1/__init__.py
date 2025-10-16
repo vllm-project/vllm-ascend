@@ -15,4 +15,4 @@
 # limitations under the License.
 #
 
-from vllm_ascend.patch.v1 import patch_executor # noqa: F401
+from vllm_ascend.patch.v1 import patch_executor  # noqa: F401

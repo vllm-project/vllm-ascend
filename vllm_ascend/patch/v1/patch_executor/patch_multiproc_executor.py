@@ -1,17 +1,20 @@
 import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
+from multiprocessing.synchronize import Lock as LockType
 
 import vllm.v1.executor.multiproc_executor
 
+from vllm import  envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
-from vllm.utils import get_mp_context, get_distributed_init_method, get_loopback_ip, get_open_port
+from vllm.utils import (get_distributed_init_method, get_loopback_ip,
+                        get_mp_context, get_open_port)
 from vllm.v1.executor.abstract import FailureCallback
-from vllm.v1.executor.multiproc_executor import WorkerProc, UnreadyWorkerProcHandle
-from vllm import  envs
-from vllm.v1.executor.multiproc_executor import MultiprocExecutor, set_multiprocessing_worker_envs
-from multiprocessing.synchronize import Lock as LockType
+from vllm.v1.executor.multiproc_executor import (
+    MultiprocExecutor, UnreadyWorkerProcHandle, WorkerProc,
+    set_multiprocessing_worker_envs)
+
 
 class AscendMultiprocExecutor(MultiprocExecutor):
     supports_pp: bool = True
@@ -31,8 +34,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         assert self.world_size == tensor_parallel_size * pp_parallel_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
-            f"_parallel_size ({pp_parallel_size}). "
-        )
+            f"_parallel_size ({pp_parallel_size}). ")
 
         # Set multiprocessing envs
         set_multiprocessing_worker_envs()
@@ -41,15 +43,14 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         # Since it only works for single node, we can use the loopback address
         # get_loopback_ip() for communication.
         distributed_init_method = get_distributed_init_method(
-            get_loopback_ip(), get_open_port()
-        )
+            get_loopback_ip(), get_open_port())
 
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
         max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
-        self.rpc_broadcast_mq = MessageQueue(
-            self.world_size, self.world_size, max_chunk_bytes=max_chunk_bytes
-        )
+        self.rpc_broadcast_mq = MessageQueue(self.world_size,
+                                             self.world_size,
+                                             max_chunk_bytes=max_chunk_bytes)
         scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
 
         # Create workers
@@ -67,8 +68,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                         distributed_init_method=distributed_init_method,
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
-                    )
-                )
+                    ))
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -89,7 +89,8 @@ class AscendMultiprocExecutor(MultiprocExecutor):
                 for uw in unready_workers:
                     if uw.death_writer is not None:
                         uw.death_writer.close()
-                self._ensure_worker_termination([uw.proc for uw in unready_workers])
+                self._ensure_worker_termination(
+                    [uw.proc for uw in unready_workers])
 
         # For pipeline parallel, we use a thread pool for asynchronous
         # execute_model.
@@ -98,8 +99,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
             # from the response queue
             # _async_aggregate_workers_output also assumes a single IO thread
             self.io_thread_pool = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="mp_exec_io"
-            )
+                max_workers=1, thread_name_prefix="mp_exec_io")
 
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
@@ -144,6 +144,5 @@ class AscendWorkerProc(WorkerProc):
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
         return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
-
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor

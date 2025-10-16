@@ -15,4 +15,4 @@
 # limitations under the License.
 #
 
-import vllm_ascend.patch.v1.patch_executor.patch_multiproc_executor # noqa
+import vllm_ascend.patch.v1.patch_executor.patch_multiproc_executor  # noqa
