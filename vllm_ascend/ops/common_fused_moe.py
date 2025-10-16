@@ -44,7 +44,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
 if vllm_version_is("0.11.0"):
     from vllm.config import CompilationLevel
     from vllm.model_executor.layers.shared_fused_moe import \
-        SharedFusedMoE  # type: ignore[import]
+        SharedFusedMoE  # type: ignore[name-defined] # noqa: F821
 else:
     from vllm.config import CompilationMode
     from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
