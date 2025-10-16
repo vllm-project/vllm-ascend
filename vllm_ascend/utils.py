@@ -613,7 +613,8 @@ def enable_sp(vllm_config=None) -> bool:
         or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
         # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
         # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
-        or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+        or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))) or
+        get_ascend_config().enable_shared_expert_dp)
 
 
 # TODO remove it after vllm has this func

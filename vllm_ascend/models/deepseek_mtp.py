@@ -21,10 +21,14 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers import PretrainedConfig
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -76,6 +80,8 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
                                                        prefix, "shared_head"))
         self.mtp_block = DeepseekV2DecoderLayer(vllm_config=vllm_config,
                                                 prefix=prefix)
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
 
     def forward(
         self,
@@ -88,6 +94,13 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
+        forward_context = get_forward_context()
+        if forward_context.sp_enabled:
+            pad_size = forward_context.pad_size
+            if pad_size > 0:
+                positions = F.pad(positions, (0, pad_size))
+            positions = torch.chunk(positions, self.tp_size,
+                                    dim=0)[self.tp_rank]
         # masking inputs at position 0, as not needed by MTP
         inputs_embeds = torch.where((positions == 0).unsqueeze(-1),
                                     torch.zeros_like(inputs_embeds),
@@ -95,6 +108,8 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
+        inputs_embeds = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            inputs_embeds, True)
         hidden_states = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
