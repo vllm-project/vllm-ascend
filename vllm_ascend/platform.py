@@ -292,18 +292,20 @@ class NPUPlatform(Platform):
         if not is_310p():
             compilation_config.custom_ops = ["all"]
 
+        # If ascend_scheduler_config is enabled,
+        # extents original scheduler_config to use AscendScheduler.
+        if ascend_config.ascend_scheduler_config.enabled:
+            from vllm_ascend.core.schedule_config import AscendSchedulerConfig
+            ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
+                vllm_config.scheduler_config,
+                ascend_config.ascend_scheduler_config)
+            vllm_config.scheduler_config = ascend_scheduler_config
+
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
             vllm_config.scheduler_config.scheduler_cls=("vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch")
             vllm_config.scheduler_config.chunked_prefill_enabled=True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
-
-        # If both ascend_scheduler_config and 
-        # dynamic batch feature are enabled, extents 
-        # original ascend_scheduler_config to use  
-        # AscendSchedulerDynamicBatch.
-        if ascend_config.ascend_scheduler_config.SLO_limits_for_dynamic_batch != -1:
-            vllm_config.scheduler_config.scheduler_cls=("vllm_ascend.core.scheduler_dynamic_batch.AscendSchedulerDynamicBatch")
 
     @classmethod
     def get_attn_backend_cls(
