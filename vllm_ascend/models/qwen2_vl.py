@@ -314,6 +314,7 @@ class AscendQwen2VisionTransformer(Qwen2VisionTransformer):
         x: torch.Tensor,
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
+        grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
         # compute cu_seqlens and avoid cumsum to fit operator unpadFA
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
                                              grid_thw[:,

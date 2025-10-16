@@ -99,8 +99,11 @@ class AscendW8A8LinearMethod:
     ) -> torch.Tensor:
         if x.dtype != torch.int8:
             layer_cls_name = layer.__class__.__name__
-            weight_prefetch_method = get_forward_context(
-            ).weight_prefetch_method
+            try:
+                weight_prefetch_method = get_forward_context(
+                ).weight_prefetch_method
+            except AssertionError:
+                weight_prefetch_method = None
 
             # prefetch qkvo_proj.weight preprocess
             if weight_prefetch_method:
