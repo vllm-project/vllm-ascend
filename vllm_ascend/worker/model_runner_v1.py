@@ -67,9 +67,8 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LazyLoader, cdiv, get_dtype_size,
-                        is_pin_memory_available)
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
+                        get_dtype_size, is_pin_memory_available)
 from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -134,8 +133,11 @@ from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if vllm_version_is("0.11.0"):
     from vllm.config import CompilationLevel
+    from vllm.utils import LazyLoader
+
 else:
     from vllm.config import CompilationMode
+    from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]

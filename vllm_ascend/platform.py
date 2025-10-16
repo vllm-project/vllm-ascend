@@ -17,13 +17,10 @@
 
 import gc
 import os
-from datetime import timedelta
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import vllm.envs as envs_vllm
-from torch.distributed import ProcessGroup
-from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -433,42 +430,6 @@ class NPUPlatform(Platform):
         Get piecewise backend class for piecewise graph.
         """
         return "vllm_ascend.compilation.acl_graph.ACLGraphWrapper"  # noqa
-
-    @classmethod
-    def stateless_init_device_torch_dist_pg(
-        cls,
-        backend: str,
-        prefix_store: PrefixStore,
-        group_rank: int,
-        group_size: int,
-        timeout: timedelta,
-    ) -> ProcessGroup:
-        from torch.distributed import is_hccl_available
-        from torch_npu._C._distributed_c10d import ProcessGroupHCCL
-
-        assert is_hccl_available()
-
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
-
-        backend_options = ProcessGroupHCCL.Options()
-        backend_options._timeout = timeout
-
-        backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size,
-                                         backend_options)
-        device = torch.device("npu")
-        # TODO(Yizhou): Like we mentioned above, _set_default_backend is not
-        # implemented in the 2.5.1 version of PyTorch. But we need to set it
-        # after the latest version is released.
-        # pg._set_default_backend(backend_type)
-        backend_class._set_sequence_number_for_group()
-        backend_type = ProcessGroup.BackendType.CUSTOM
-
-        pg._register_backend(device, backend_type, backend_class)
-        return pg
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:

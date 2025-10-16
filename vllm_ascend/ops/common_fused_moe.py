@@ -43,7 +43,8 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
 
 if vllm_version_is("0.11.0"):
     from vllm.config import CompilationLevel
-    from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE # type: ignore # isort:skip
+
+    from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE  # type: ignore # isort:skip
 else:
     from vllm.config import CompilationMode
     from vllm.model_executor.layers.fused_moe.shared_fused_moe import \
@@ -230,8 +231,12 @@ class AscendFusedMoE(FusedMoE):
                     get_compressed_expert_map(self.expert_map))
         else:
             # init moe.
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size, self.ep_rank, self.global_num_experts)
+            if vllm_version_is("0.11.0"):
+                self.local_num_experts, self.expert_map = determine_expert_map(
+                    self.ep_size, self.ep_rank, self.global_num_experts)
+            else:
+                self.local_num_experts, self.expert_map, _ = determine_expert_map(
+                    self.ep_size, self.ep_rank, self.global_num_experts)
             # dynamic eplb initializing with not expert_map_path
             if self.dynamic_eplb:
                 self.global_redundant_expert_num = ascend_config.init_redundancy_expert
