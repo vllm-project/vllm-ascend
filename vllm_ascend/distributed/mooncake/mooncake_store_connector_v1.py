@@ -130,7 +130,8 @@ class MooncakeConnectorV1(KVConnectorBase_V1):
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         meta = self._get_connector_metadata()
-        done_sending, done_recving = self.connector_worker.get_finished()
+        done_sending, done_recving = self.connector_worker.get_finished(
+            finished_req_ids)
         sended_and_finished: set[str] = set()
         for item in list(self.sended_but_unfinished_reqs):
             if item not in meta.unfinished_request_ids:
@@ -208,6 +209,7 @@ class MooncakeStoreConnectorV1Scheduler:
             token_ids = torch.tensor(request.prompt_token_ids)
 
         # decode阶段由于wordsize不一样查询不到，返回值为0
+        # TODO: decode和prefill save不同会导致decode save的结果prefill同样查询不到
         num_external_hit_tokens = self.client.lookup(token_ids)
 
         if num_external_hit_tokens == request.num_tokens:
@@ -341,7 +343,7 @@ class MooncakeStoreConnectorV1Scheduler:
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
-        elif not force_skip_save:
+        else:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 request_tracker = self._request_trackers[req_id]
                 num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -355,14 +357,13 @@ class MooncakeStoreConnectorV1Scheduler:
                     raise ValueError(
                         f"Request {req_id} is not in _unfinished_requests, "
                         f"but it is scheduled to be cached")
+                request_tracker.token_ids.extend(new_token_ids)
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if not new_block_ids:
-                    continue
-                request_tracker.update(new_token_ids, new_block_ids)
-                # decode not save
-                if len(request_tracker.token_ids) > len(
-                        request.prompt_token_ids):
-                    continue
+                    if not is_consumer:
+                        continue
+                else:
+                    request_tracker.update(new_block_ids)
 
                 last_chunk_tokens_num = ((len(request.prompt_token_ids) //
                                           self._block_size * self._block_size)
@@ -374,7 +375,7 @@ class MooncakeStoreConnectorV1Scheduler:
                     load_spec=None,
                     skip_save=is_consumer,
                     is_last_chunk=len(request_tracker.token_ids)
-                    >= last_chunk_tokens_num,
+                    >= last_chunk_tokens_num if is_consumer else None,
                     discard_partial_chunks=self._discard_partial_chunks,
                 )
                 if req_meta is not None:

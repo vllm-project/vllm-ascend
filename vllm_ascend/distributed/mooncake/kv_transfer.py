@@ -1,5 +1,6 @@
 import queue
 import threading
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
 
@@ -34,6 +35,7 @@ class KVTransferThread(threading.Thread):
         # TODO(jianzs): make this configurable
         self.executor = ThreadPoolExecutor(max_workers=32)
         self.finished_requests: set[str] = set()
+        self.stored_requests = defaultdict[str, int](int)
 
     def prepare_value(self, start: int, end: int, block_ids: list[int]):
         addr_list = []
@@ -85,6 +87,7 @@ class KVTransferThread(threading.Thread):
             "mask": mask,
             "is_last_chunk": is_last_chunk,
         })
+        self.stored_requests[req_id] += 1
         self.request_queue.put(req)
 
     def get_and_clear_finished_requests(self) -> set[str]:
@@ -165,6 +168,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.m_store.put(key, addr, size)
         if is_last_chunk:
             self.set_finished_request(req_id)
+        self.stored_requests[req_id] -= 1
         self.request_queue.task_done()
 
 

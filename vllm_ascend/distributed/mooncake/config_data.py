@@ -285,14 +285,13 @@ class RequestTracker:
 
     def update(
         self,
-        new_token_ids: list[int],
         new_block_ids: Union[tuple[list[int], ...], list[int]],
     ) -> None:
         """Update the request tracker when a running request is
         scheduled again
         """
 
-        self.token_ids.extend(new_token_ids)
+        # self.token_ids.extend(new_token_ids)
 
         if len(new_block_ids) == 0:
             new_block_ids = []
@@ -362,20 +361,21 @@ class ReqMeta:
                               if discard_partial_chunks else input_token_len)
 
         if is_consumer:
-            prefill_saved_tokens = (input_token_len - 1) if envs.fisrt_token_generation_in_prefill else input_token_len
-            skip_leading_tokens = prefill_saved_tokens // block_size * block_size
-            tracker.num_saved_tokens = skip_leading_tokens
-            if first_scheduled and skip_leading_tokens == prefill_saved_tokens:
-                return None
-            if input_token_len % 128 != 0:
+            if first_scheduled:
+                prefill_saved_tokens = (
+                    input_token_len - 1
+                ) if envs.fisrt_token_generation_in_prefill else input_token_len
+                skip_leading_tokens = prefill_saved_tokens // block_size * block_size
+                tracker.num_saved_tokens = skip_leading_tokens
+                if not envs.fisrt_token_generation_in_prefill:
+                    return None
+            if num_tokens_to_save <= skip_leading_tokens:
                 return None
             skip_save = False
         else:
             skip_save = is_consumer or num_tokens_to_save < chunk_boundary
             if skip_save and load_spec is None:
                 return None
-            if not skip_save:
-                tracker.num_saved_tokens = num_tokens_to_save
 
         # If we need to save, update the number of saved tokens
         if not skip_save:
