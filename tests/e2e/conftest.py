@@ -112,8 +112,6 @@ class RemoteOpenAIServer:
                  *,
                  server_host: str = "0.0.0.0",
                  server_port: int = 8080,
-                 disaggregated_prefill: Optional[dict] = None,
-                 cluster_ips: Optional[List[str]] = None,
                  env_dict: Optional[dict[str, str]] = None,
                  seed: Optional[int] = None,
                  auto_port: bool = True,
@@ -123,7 +121,6 @@ class RemoteOpenAIServer:
             vllm_serve_args = shlex.split(vllm_serve_args)
         else:
             vllm_serve_args = ["vllm", "serve", model, *vllm_serve_args]
-        self.disaggregated_prefill = disaggregated_prefill
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
                 raise ValueError("You have manually specified the port "

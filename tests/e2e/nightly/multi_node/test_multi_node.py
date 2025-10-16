@@ -8,14 +8,12 @@ def test_multi_node() -> None:
     env_dict = config.envs
     # perf_cmd = config.perf_cmd
     # acc_cmd = config.acc_cmd
-    server_port = config.server_port
+    server_port = config.server_port if not config.disaggregated_prefill else config.proxy_port
     server_host = config.cluster_ips[0]
     with config.launch_server_proxy(DISAGGREGATED_PREFILL_PROXY_SCRIPT):
         with RemoteOpenAIServer(
                 model=config.model,
                 vllm_serve_args=config.server_cmd,
-                disaggregated_prefill=config.disaggregated_prefill,
-                cluster_ips=config.cluster_ips,
                 server_port=server_port,
                 server_host=server_host,
                 env_dict=env_dict,
