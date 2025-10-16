@@ -5,14 +5,11 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Type, TypeVar, Union
 
+from tests.e2e.multi_node.config.common import CONFIG_PATH
 from tests.e2e.multi_node.config.utils import (get_avaliable_port,
-                                               get_leader_ip,
-                                               get_net_interface)
+                                               get_cluster_ips, get_cur_ip)
 
 LOG = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
-
-CONFIG_PATH = Path("tests/e2e/multi_node/config/config.json")
 
 T = TypeVar("T", bound="BaseConfig")
 
@@ -87,19 +84,21 @@ class ServerConfig(BaseConfig):
         world_size: int,
     ) -> None:
         """Initialize distributed parallel parameters."""
-        iface = get_net_interface()
-        if iface is None:
-            raise RuntimeError("No available network interface found")
-        self.data_parallel_address = iface[0]
+        ips = get_cluster_ips(world_size)
+        cur_ip = get_cur_ip()
+        if cur_ip is None:
+            raise RuntimeError("No available addr found")
+        self.data_parallel_address = cur_ip
 
         if is_disaggregate_prefill:
             self.data_parallel_start_rank = 0
             return
 
+        # for none disaggregate prefill, leader and worker have different dp rank
         if not is_leader:
             self.headless = True
             self.data_parallel_start_rank = dp_size // world_size
-            self.data_parallel_address = get_leader_ip()
+            self.data_parallel_address = ips[0]  # leader ip
 
 
 @dataclass
@@ -120,6 +119,13 @@ class AccuracyConfig:
 class MultiNodeConfig:
     test_name: str = "Unnamed Test"
     disaggregate_prefill: bool = False
+
+    # disaggregate prefill specific
+    num_prefillers: int = 1
+    num_prefiller_nodes: int = 1
+    num_decoders: int = 1
+    num_decoder_nodes: int = 1
+
     enable_multithread_load: bool = True
     world_size: int = 2
     server_host: str = "0.0.0.0"
@@ -131,7 +137,7 @@ class MultiNodeConfig:
     @classmethod
     def from_config(cls, cfg: Dict[str, Any]) -> "MultiNodeConfig":
         """Create a MultiNodeConfig from raw dict."""
-        num_nodes = cfg.get("num_nodes", 2)
+        num_nodes = int(os.getenv("WORLD_SIZE", 2))
         is_disaggregate_prefill = cfg.get("disaggregate_prefill", False)
         node_index = int(os.getenv("LWS_WORKER_INDEX", 0))
         is_leader = node_index == 0
@@ -140,6 +146,9 @@ class MultiNodeConfig:
         server_cfg_data = cfg.get("server_parameters", {})
         if not server_cfg_data:
             raise ValueError("Missing required key: 'server_parameters'")
+        # each node should have one server config
+        assert len(server_cfg_data) == num_nodes, \
+            (f"num server instance miss match num of nodes, expect server config num is: {num_nodes}, got {len(server_cfg_data)}")
 
         role_key = "leader_config" if is_leader else "worker_config"
         server_cfg_dict = server_cfg_data.get(role_key, {})
@@ -165,7 +174,7 @@ class MultiNodeConfig:
 
         # network info
         leader_cfg = server_cfg_data.get("leader_config", {})
-        server_host = get_leader_ip()
+        server_host = get_cluster_ips()[0]
         server_port = (get_avaliable_port() if is_disaggregate_prefill else
                        leader_cfg.get("port", 8080))
 
