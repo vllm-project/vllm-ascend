@@ -62,10 +62,7 @@ class TestAscendRMSNorm(PytestBase):
             assert torch.allclose(x_out, x_out_expected)
 
     # Test case for addrmsnorm + w8a8 quant fusion
-    @patch("torch.ops.vllm.maybe_chunk_residual")
-    def test_forward_oot_with_quant_fusion(self, mocker: MockerFixture,
-                                           mock_maybe_chunk_residual):
-        mock_maybe_chunk_residual.side_effect = lambda x, residual: residual
+    def test_forward_oot_with_quant_fusion(self, mocker: MockerFixture):
         mock_is_310p = mocker.patch("vllm_ascend.utils.is_310p")
         mock_is_310p.return_value = False
         mock_get_forward_context = mocker.patch(
@@ -109,6 +106,8 @@ class TestAscendRMSNorm(PytestBase):
         mock_forward_context.layer_idx = 0
         mock_forward_context.num_hidden_layers = 2
         mock_forward_context.fusion_linear = "gate_up_dense"
+        mocker.patch("torch.ops.vllm.maybe_chunk_residual",
+                     torch.randn(4, 8, dtype=torch.float16))
 
         # Ensure fusion and layer_idx increment are handled correctly
         x = torch.randn(4, 8, dtype=torch.float16)
