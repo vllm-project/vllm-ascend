@@ -32,10 +32,7 @@ class AisbenchRunner:
         "performance": "Performance Result files locate in ",
         "accuracy": "write csv to "
     }
-    DATASET_RENAME = {
-        "aime2024": "aime",
-        "gsm8k-lite": "gsm8k"
-    }
+    DATASET_RENAME = {"aime2024": "aime", "gsm8k-lite": "gsm8k"}
 
     def _run_aisbench_task(self):
         dataset_conf = self.dataset_conf.split('/')[-1]
@@ -129,7 +126,9 @@ class AisbenchRunner:
                 "temperature = 0,\n            ignore_eos = True,", content)
             content = content.replace("top_p", "#top_p")
         if self.task_type == "accuracy":
-            content = re.sub(r"temperature.*", "temperature = 0.6,", content)
+            content = re.sub(
+                r"temperature.*",
+                "temperature = 0.6,\n            ignore_eos = False,", content)
         conf_path_new = os.path.join(REQUEST_CONF_DIR,
                                      f'{self.request_conf}_custom.py')
         with open(conf_path_new, 'w', encoding='utf-8') as f:
