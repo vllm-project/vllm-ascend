@@ -65,7 +65,7 @@ class AscendSchedulerConfig(SchedulerConfig):
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
         self.chunked_prefill_enabled = self.enable_chunked_prefill
-        self.dynamic_batch=self.SLO_limits_for_dynamic_batch!=-1
+        self.dynamic_batch = self.SLO_limits_for_dynamic_batch != -1
         if (self.max_num_batched_tokens < self.max_model_len
                 and not self.chunked_prefill_enabled):
             raise ValueError(
