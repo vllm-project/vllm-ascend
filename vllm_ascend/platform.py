@@ -25,7 +25,7 @@ import vllm.envs as envs_vllm
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
-from vllm.platforms import Platform, PlatformEnum
+from vllm.platforms import Platform, PlatformEnum, _Backend
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
@@ -342,6 +342,11 @@ class NPUPlatform(Platform):
             "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend",
         }
         return backend_map[(use_mla, use_sparse, use_torchair)]
+
+    @classmethod
+    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+        # Use torch SDPA for NPU platforms.
+        return _Backend.TORCH_SDPA
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
