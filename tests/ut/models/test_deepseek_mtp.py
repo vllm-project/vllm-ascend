@@ -48,8 +48,11 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
         mtp_layer = setup_mtp_layer
         assert isinstance(mtp_layer, CustomDeepSeekMultiTokenPredictorLayer)
 
-    def test_forward(self, mocker: MockerFixture, setup_mtp_layer):
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
+    def test_forward(self, mocker: MockerFixture, setup_mtp_layer,
+                     mock_maybe_all_gather_and_maybe_unpad):
         mtp_layer = setup_mtp_layer
+        mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")

@@ -41,7 +41,9 @@ class TestAscendRMSNorm(PytestBase):
     # Test case for the most common and basic scenario
     @pytest.mark.parametrize(
         "residual", [None, torch.randn(4, 8, dtype=torch.float16)])
-    def test_forward_oot_basic(self, residual):
+    @patch("torch.ops.vllm.maybe_chunk_residual")
+    def test_forward_oot_basic(self, residual, mock_maybe_chunk_residual):
+        mock_maybe_chunk_residual.side_effect = lambda x, residual: x
         layer = RMSNorm(hidden_size=8, eps=1e-05)
         x = torch.randn(4, 8, dtype=torch.float16)
         if residual is not None:
@@ -59,7 +61,10 @@ class TestAscendRMSNorm(PytestBase):
             assert torch.allclose(x_out, x_out_expected)
 
     # Test case for addrmsnorm + w8a8 quant fusion
-    def test_forward_oot_with_quant_fusion(self, mocker: MockerFixture):
+    @patch("torch.ops.vllm.maybe_chunk_residual")
+    def test_forward_oot_with_quant_fusion(self, mocker: MockerFixture,
+                                           mock_maybe_chunk_residual):
+        mock_maybe_chunk_residual.side_effect = lambda x, residual: x
         mock_is_310p = mocker.patch("vllm_ascend.utils.is_310p")
         mock_is_310p.return_value = False
         mock_get_forward_context = mocker.patch(
