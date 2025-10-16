@@ -83,51 +83,65 @@ class MultiNodeConfig:
 
         return pattern.sub(replace_var, cmd)
 
-    def launch_server_proxy(self):
-        if not self.disaggregated_prefill or not self.is_master:
-            logger.info(
-                "Disaggregated prefill not enabled or not master node, skipping proxy launch."
-            )
-            return
-        prefiller_indices = self.disaggregated_prefill["prefiller_host_index"]
-        decoder_indices = self.disaggregated_prefill["decoder_host_index"]
+    class _ProxyContext:
+        def __init__(self, outer, proxy_script):
+            self.outer = outer
+            self.proxy_script = proxy_script
+            self.process = None
 
-        common_indices = set(prefiller_indices) & set(decoder_indices)
-        assert len(common_indices) == 0, \
-            f"prefiller_host_index and decoder_host_index must not share common indices. Common indices: {common_indices}"
+        def __enter__(self):
+            o = self.outer
+            if not o.disaggregated_prefill or not o.is_master:
+                logger.info("Disaggregated prefill not enabled or not master node, skipping proxy launch.")
+                return self
 
-        # Launch the proxy server only on the master node
-        assert self.proxy_port is not None, "proxy_port must be set for disaggregated prefill"
+            prefiller_indices = o.disaggregated_prefill["prefiller_host_index"]
+            decoder_indices = o.disaggregated_prefill["decoder_host_index"]
 
-        prefiller_ips, decoder_ips = [], []
-        for index, ip in enumerate(self.cluster_ips):
-            if index in prefiller_indices:
-                prefiller_ips.append(ip)
-            if index in decoder_indices:
-                decoder_ips.append(ip)
+            common_indices = set(prefiller_indices) & set(decoder_indices)
+            assert not common_indices, f"Common indices found: {common_indices}"
+            assert o.proxy_port is not None, "proxy_port must be set"
 
-        assert len(prefiller_ips) == len(prefiller_indices), \
-            f"Missing prefiller IPs. Expected {len(prefiller_indices)}, found {len(prefiller_ips)}"
-        assert len(decoder_ips) == len(decoder_indices), \
-            f"Missing decoder IPs. Expected {len(decoder_indices)}, found {len(decoder_ips)}"
+            prefiller_ips = [o.cluster_ips[i] for i in prefiller_indices]
+            decoder_ips = [o.cluster_ips[i] for i in decoder_indices]
+            prefiller_ips_str = " ".join(prefiller_ips)
+            decoder_ips_str = " ".join(decoder_ips)
+            prefiller_ports = " ".join([str(o.server_port)] * len(prefiller_ips))
+            decoder_ports = " ".join([str(o.server_port)] * len(decoder_ips))
 
-        prefiller_ips_str = " ".join(prefiller_ips)
-        decoder_ips_str = " ".join(decoder_ips)
-        prefiller_ports = " ".join([str(self.server_port)] *
-                                   len(prefiller_ips))
-        decoder_ports = " ".join([str(self.server_port)] * len(decoder_ips))
+            proxy_cmd = [
+                "python", self.proxy_script,
+                "--host", o.cur_ip,
+                "--port", str(o.proxy_port),
+                "--prefiller-hosts", prefiller_ips_str,
+                "--prefiller-ports", prefiller_ports,
+                "--decoder-hosts", decoder_ips_str,
+                "--decoder-ports", decoder_ports,
+            ]
 
-        proxy_cmd = [
-            "python", DISAGGREGATED_PREFILL_PROXY_SCRIPT, "--host",
-            self.cur_ip, "--port",
-            str(self.proxy_port), "--prefiller-hosts", prefiller_ips_str,
-            "--prefiller-ports", prefiller_ports, "--decoder-hosts",
-            decoder_ips_str, "--decoder-ports", decoder_ports
-        ]
+            env = os.environ.copy()
+            env.update(o.envs)
+            logger.info(f"Launching proxy: {' '.join(proxy_cmd)}")
 
-        env = os.environ.copy()
-        env.update(self.envs or {})
-        subprocess.Popen(proxy_cmd, env=env)
+            self.process = subprocess.Popen(proxy_cmd, env=env)
+            o.proxy_process = self.process
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            if self.process:
+                logger.info("Terminating proxy server process...")
+                try:
+                    self.process.terminate()
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    logger.warning("Proxy process did not terminate, killing it...")
+                    self.process.kill()
+                logger.info("Proxy server process terminated.")
+
+
+    def launch_server_proxy(self, proxy_script: str):
+        """Return a context manager that launches the proxy server if disaggregated prefill is enabled."""
+        return self._ProxyContext(self, proxy_script)
 
     @classmethod
     def from_yaml(cls, yaml_path: str = None):
@@ -190,4 +204,9 @@ if __name__ == '__main__':
     print(config.server_cmd)
     print(config.perf_cmd)
     print(config.acc_cmd)
-    config.launch_server_proxy()
+    with config.launch_server_proxy(
+            DISAGGREGATED_PREFILL_PROXY_SCRIPT):
+        if config.is_master:
+            input("Press Enter to exit...\n")
+            import time
+            time.sleep(10)
