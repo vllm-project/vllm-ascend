@@ -139,7 +139,7 @@ class AscendConfig:
             )
             if self.oproj_tensor_parallel_size is not None:
                 raise AssertionError(
-                    f"flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
+                    "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
                 )
             if global_tp_size <= self.flashcomm2_oproj_tensor_parallel_size:
                 raise AssertionError(
