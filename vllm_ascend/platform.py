@@ -306,8 +306,7 @@ class NPUPlatform(Platform):
         # original ascend_scheduler_config to use  
         # AscendSchedulerDynamicBatch.
         if ascend_config.ascend_scheduler_config.SLO_limits_for_dynamic_batch != -1:
-            vllm_config.scheduler_config.scheduler_cls=(
-        "vllm_ascend.core.scheduler_dynamic_batch.AscendSchedulerDynamicBatch")
+            vllm_config.scheduler_config.scheduler_cls=("vllm_ascend.core.scheduler_dynamic_batch.AscendSchedulerDynamicBatch")
 
     @classmethod
     def get_attn_backend_cls(

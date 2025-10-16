@@ -54,7 +54,11 @@ class BudgetRefiner:
         try:
             df = pd.read_csv(table_file_path)
         except FileNotFoundError:
-            print("The Dynamic Batch feature requires a look-up table, please download the corresponding table files according to the instruction.")        
+            logger.error(
+                "The dynamic batching feature requires the lookup table "
+                "'profile_table.csv', but it was not found at '%s'. "
+                "Please download the corresponding table file.", table_file_path)
+            raise     
         grouped = df.groupby(['ctx_len', 'd_num'])
         for (ctx_len, d_num), group in grouped:
             valid = group[group['cost'] <= slo_limit]
@@ -73,9 +77,9 @@ class BudgetRefiner:
                 return k
         return None
     
-    def _get_max_budget(self, num_deocde_tokens, num_decode):
+    def _get_max_budget(self, num_decode_tokens, num_decode):
         """Get the maximum budget according to the number of decoding tokens and the decoding requests."""
-        aligned_ctx  = self._align_key(num_deocde_tokens, self.context_keys)
+        aligned_ctx  = self._align_key(num_decode_tokens, self.context_keys)
         aligned_dnum = self._align_key(num_decode, self.dnum_keys)
         if aligned_ctx is None or aligned_dnum is None:
             return self.default_budget
@@ -84,7 +88,7 @@ class BudgetRefiner:
             logger.warn(f"Table miss for ctx,dnum{aligned_ctx, aligned_dnum}")
             budget = self.default_budget
         # For debug.
-        # logger.info(f"budget {budget}, ctx,dnum {aligned_ctx, aligned_dnum}, raw ctx,dnum {num_deocde_tokens, num_decode}")
+        # logger.info(f"budget {budget}, ctx,dnum {aligned_ctx, aligned_dnum}, raw ctx,dnum {num_decode_tokens, num_decode}")
         return budget
 
     def refine_budget(self, running_request, budget):
@@ -99,8 +103,8 @@ class BudgetRefiner:
         num_decode = len(num_decode_token_lst)
         if num_decode <= 0:
             return budget
-        num_deocde_tokens = sum(num_decode_token_lst) / num_decode
-        return self._get_max_budget(num_deocde_tokens, num_decode)
+        num_decode_tokens = sum(num_decode_token_lst) / num_decode
+        return self._get_max_budget(num_decode_tokens, num_decode)
 
 class AscendSchedulerDynamicBatch(Scheduler):
     """This Scheduler extends vllm's original v1 scheduler
