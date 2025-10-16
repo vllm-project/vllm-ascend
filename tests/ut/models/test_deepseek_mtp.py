@@ -186,7 +186,10 @@ class TestCustomDeepSeekMTP(PytestBase):
         mtp = setup_mtp
         assert isinstance(mtp, CustomDeepSeekMTP)
 
-    def test_forward(self, mocker: MockerFixture, setup_mtp):
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
+    def test_forward(self, mocker: MockerFixture, setup_mtp,
+                     mock_maybe_all_gather_and_maybe_unpad):
+        mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
         input_ids = torch.tensor([[1, 2, 3]])
         positions = torch.tensor([[0, 1, 2]])
         kv_caches = [torch.tensor([[0.1, 0.2, 0.3]])]

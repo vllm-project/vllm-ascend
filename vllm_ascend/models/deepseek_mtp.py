@@ -202,4 +202,6 @@ class CustomDeepSeekMTP(DeepSeekMTP):
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, previous_hidden_states,
                                    inputs_embeds, spec_step_idx)
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            hidden_states, True)
         return hidden_states
