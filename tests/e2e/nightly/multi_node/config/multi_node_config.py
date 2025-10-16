@@ -80,46 +80,47 @@ class MultiNodeConfig:
         return pattern.sub(replace_var, cmd)
 
     def launch_server_proxy(self):
+        if not self.disaggregated_prefill or not self.is_master:
+            return
         prefiller_indices = self.disaggregated_prefill["prefiller_host_index"]
         decoder_indices = self.disaggregated_prefill["decoder_host_index"]
 
         common_indices = set(prefiller_indices) & set(decoder_indices)
         assert len(common_indices) == 0, \
             f"prefiller_host_index and decoder_host_index must not share common indices. Common indices: {common_indices}"
-        if self.disaggregated_prefill and self.is_master:
-            # Launch the proxy server only on the master node
-            assert self.proxy_port is not None, "proxy_port must be set for disaggregated prefill"
 
-            prefiller_ips, decoder_ips = [], []
-            for index, ip in enumerate(self.cluster_ips):
-                if index in prefiller_indices:
-                    prefiller_ips.append(ip)
-                if index in decoder_indices:
-                    decoder_ips.append(ip)
+        # Launch the proxy server only on the master node
+        assert self.proxy_port is not None, "proxy_port must be set for disaggregated prefill"
 
-            assert len(prefiller_ips) == len(prefiller_indices), \
-                f"Missing prefiller IPs. Expected {len(prefiller_indices)}, found {len(prefiller_ips)}"
-            assert len(decoder_ips) == len(decoder_indices), \
-                f"Missing decoder IPs. Expected {len(decoder_indices)}, found {len(decoder_ips)}"
+        prefiller_ips, decoder_ips = [], []
+        for index, ip in enumerate(self.cluster_ips):
+            if index in prefiller_indices:
+                prefiller_ips.append(ip)
+            if index in decoder_indices:
+                decoder_ips.append(ip)
 
-            prefiller_ips_str = " ".join(prefiller_ips)
-            decoder_ips_str = " ".join(decoder_ips)
-            prefiller_ports = " ".join([str(self.server_port)] *
-                                       len(prefiller_ips))
-            decoder_ports = " ".join([str(self.server_port)] *
-                                     len(decoder_ips))
+        assert len(prefiller_ips) == len(prefiller_indices), \
+            f"Missing prefiller IPs. Expected {len(prefiller_indices)}, found {len(prefiller_ips)}"
+        assert len(decoder_ips) == len(decoder_indices), \
+            f"Missing decoder IPs. Expected {len(decoder_indices)}, found {len(decoder_ips)}"
 
-            proxy_cmd = [
-                "python", DISAGGREGATED_PREFILL_PROXY_SCRIPT, "--host",
-                self.cur_ip, "--port",
-                str(self.proxy_port), "--prefiller-hosts", prefiller_ips_str,
-                "--prefiller-ports", prefiller_ports, "--decoder-hosts",
-                decoder_ips_str, "--decoder-ports", decoder_ports
-            ]
+        prefiller_ips_str = " ".join(prefiller_ips)
+        decoder_ips_str = " ".join(decoder_ips)
+        prefiller_ports = " ".join([str(self.server_port)] *
+                                   len(prefiller_ips))
+        decoder_ports = " ".join([str(self.server_port)] * len(decoder_ips))
 
-            env = os.environ.copy()
-            env.update(self.envs or {})
-            subprocess.Popen(proxy_cmd, env=env)
+        proxy_cmd = [
+            "python", DISAGGREGATED_PREFILL_PROXY_SCRIPT, "--host",
+            self.cur_ip, "--port",
+            str(self.proxy_port), "--prefiller-hosts", prefiller_ips_str,
+            "--prefiller-ports", prefiller_ports, "--decoder-hosts",
+            decoder_ips_str, "--decoder-ports", decoder_ports
+        ]
+
+        env = os.environ.copy()
+        env.update(self.envs or {})
+        subprocess.Popen(proxy_cmd, env=env)
 
     @classmethod
     def from_yaml(cls, yaml_path: str = None):
