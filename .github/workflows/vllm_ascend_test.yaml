@@ -42,7 +42,7 @@ jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
     with:
-      vllm: v0.11.1
+      vllm: releases/v0.11.1
 
   changes:
     runs-on: ubuntu-latest
