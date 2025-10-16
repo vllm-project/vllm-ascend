@@ -88,7 +88,7 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        if inputs_embeds.shape[0] != previous_hidden_states.shape[0]:
+        if inputs_embeds.shape[0] != positions.shape[0]:
             inputs_embeds = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 inputs_embeds, True)
         # masking inputs at position 0, as not needed by MTP
