@@ -174,3 +174,12 @@ class MultiNodeConfig:
     @property
     def is_master(self):
         return int(self.cur_index) == 0
+
+
+if __name__ == '__main__':
+    config = MultiNodeConfig.from_yaml()
+    print(config.envs)
+    print(config.server_cmd)
+    print(config.perf_cmd)
+    print(config.acc_cmd)
+    config.launch_server_proxy()
