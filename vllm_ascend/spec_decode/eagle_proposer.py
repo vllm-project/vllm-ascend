@@ -5,8 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from vllm.attention.layer import Attention
-from vllm.config import (CompilationMode, VllmConfig,
-                         get_layers_from_vllm_config)
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import logger
 from vllm.model_executor.model_loader import get_model
@@ -21,6 +20,12 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.config import CompilationLevel
+else:
+    from vllm.config import CompilationMode
 
 PADDING_SLOT_ID = -1
 
@@ -43,9 +48,17 @@ class EagleProposer(Proposer):
         self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size(
         )
 
-        self.use_cuda_graph = (self.vllm_config.compilation_config.level
-                               == CompilationMode.VLLM_COMPILE and
-                               not self.vllm_config.model_config.enforce_eager)
+        if vllm_version_is("0.11.0"):
+            self.use_cuda_graph = (
+                self.vllm_config.compilation_config.level
+                == CompilationLevel.PIECEWISE
+                and not self.vllm_config.model_config.enforce_eager)
+        else:
+            self.use_cuda_graph = (
+                self.vllm_config.compilation_config.level
+                == CompilationMode.VLLM_COMPILE
+                and not self.vllm_config.model_config.enforce_eager)
+
         self.cudagraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))

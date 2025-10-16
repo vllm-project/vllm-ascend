@@ -188,7 +188,7 @@ class TestACLGraphWrapper(TestBase):
         mock_envs.VLLM_LOGGING_LEVEL = "INFO"
         mock_current_platform.get_global_graph_pool.return_value = self.mock_graph_pool
         mock_get_forward_context.return_value = self.mock_forward_context
-        self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.VLLM_COMPILE  # Different from FULL
+        self.mock_forward_context.cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE  # Different from FULL
 
         wrapper = ACLGraphWrapper(
             runnable=self.mock_runnable,
