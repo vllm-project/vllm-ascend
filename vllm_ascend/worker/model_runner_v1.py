@@ -20,6 +20,7 @@
 import copy
 import gc
 import itertools
+import math
 import re
 import time
 from collections import defaultdict
@@ -129,8 +130,8 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
-                               get_ascend_soc_version, is_310p, is_enable_nz,
-                               lmhead_tp_enable)
+                               enable_sp, get_ascend_soc_version, is_310p,
+                               is_enable_nz, lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -315,13 +316,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                               dtype=torch.bool)
 
         # Set up Attention
-        self.attn_backend = get_attn_backend(
-            0,
-            self.dtype,
-            None,
-            self.block_size,
-            use_mla=self.model_config.use_mla,
-            use_sfa=self.ascend_config.use_sfa)
+        self.use_sparse = hasattr(self.vllm_config.model_config.hf_config,
+                                  "index_topk")
+        self.attn_backend = get_attn_backend(0,
+                                             self.dtype,
+                                             None,
+                                             self.block_size,
+                                             use_mla=self.model_config.use_mla,
+                                             use_sparse=self.use_sparse)
         if torch.version.cann.startswith("8.3"):
             self.attn_mask_builder = AttentionMaskBuilder(
                 self.scheduler_config.max_num_batched_tokens, self.dtype,
@@ -878,7 +880,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
         # Chunk Prefill situation.
-        elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.ascend_config.use_sfa:
+        elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
             if torch.version.cann.startswith("8.3"):
                 return self.attn_mask_builder.get_splitfuse_attn_mask()
             else:
@@ -1224,6 +1226,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 total_num_scheduled_tokens)
+        elif self.use_aclgraph and enable_sp(self.vllm_config):
+            # When using aclgraph, if total_num_scheduled_tokens exceeds the maximum graph size,
+            # the model will fall back to running its FX graph in eager mode.
+            # In this case, when sequence parallelism is enabled, we need to pad tokens to align
+            # with tp_size because pad_size cannot be captured by the FX graph
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            num_input_tokens = math.ceil(
+                total_num_scheduled_tokens / tp_size) * tp_size
         else:
             # Eager mode.
             num_input_tokens = total_num_scheduled_tokens
@@ -1422,6 +1432,31 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 inputs_embeds)
             inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
             input_ids = None
+        elif self.enable_prompt_embeds and get_pp_group().is_first_rank:
+            # Get the input embeddings for the tokens that are not input embeds,
+            # then put them into the appropriate positions.
+            # TODO(qthequartermasterman): Since even when prompt embeds are
+            # enabled, (a) not all requests will use prompt embeds, and (b)
+            # after the initial prompt is processed, the rest of the generated
+            # tokens will be token ids, it is not desirable to have the
+            # embedding layer outside of the acl graph all the time. The v0
+            # engine avoids this by "double compiling" the acl graph, once
+            # with input_ids and again with inputs_embeds, for all num_tokens.
+            # If a batch only has token ids, then including the embedding layer
+            # in the acl graph will be more performant (like in the else case
+            # below).
+            token_ids_idx = self.is_token_ids.gpu[:num_scheduled_tokens] \
+                .nonzero(as_tuple=False) \
+                .squeeze(1)
+            # Some tokens ids may need to become embeds
+            if token_ids_idx.numel() > 0:
+                token_ids = self.input_ids.gpu[token_ids_idx]
+                tokens_to_embeds = self.model.get_input_embeddings(
+                    input_ids=token_ids)
+                self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
+
+            inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
+            input_ids = None
         else:
             # For text-only models, we use token ids as input.
             # While it is possible to use embeddings as input just like the
@@ -1568,7 +1603,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         model=self.get_model(),
                         **extra_attn_metadata_args)
 
-                if self.vllm_config.model_config.use_mla or self.ascend_config.use_sfa:
+                if self.vllm_config.model_config.use_mla or self.use_sparse:
                     attn_metadata_i.num_input_tokens = num_input_tokens
                 for layer_name in attn_group.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
@@ -1910,7 +1945,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
         if moe_comm_type == MoECommType.ALLGATHER and with_prefill:
-            moe_comm_type = MoECommType.NAIVE_MULTICAST
+            if enable_sp():
+                moe_comm_type = MoECommType.ALLGATHER
+            else:
+                moe_comm_type = MoECommType.NAIVE_MULTICAST
 
         # PanguProMoE only supports allgather
         if model_type == "PanguProMoE":
@@ -2376,6 +2414,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
 
+        # In multi-DP scenarios, there may be situations where all DP groups are executing dummy runs.
+        # If sequence parallelism is enabled, it is essential to ensure that num_tokens is divisible by tp_size.
+        if self.use_aclgraph and enable_sp(self.vllm_config):
+            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+            num_tokens = math.ceil(num_tokens / tp_size) * tp_size
+
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self._sync_metadata_across_dp(num_tokens, with_prefill, False)
@@ -2441,7 +2485,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
-            if self.is_multimodal_model or self.enable_prompt_embeds:
+            if self.is_multimodal_model:
+                input_ids = None
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
+            elif self.enable_prompt_embeds:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
             else:
@@ -2718,7 +2765,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.initialize_attn_backend(kv_cache_config)
 
-        if self.ascend_config.is_deepseek_sfa:
+        if self.use_sparse:
             kv_caches = self.initialize_kv_cache_tensors_deepseek_sfa(
                 kv_cache_config)
         elif self.model_config.is_deepseek_mla:
@@ -2762,7 +2809,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                 elif hasattr(
                         attn_backend, "get_supported_block_size"
-                ) and not self.model_config.is_deepseek_mla and not self.ascend_config.is_deepseek_sfa:
+                ) and not self.model_config.is_deepseek_mla and not self.use_sparse:
                     block_size = attn_backend.get_supported_block_size()[0]
                     block_size_chunk = kv_cache_spec.block_size // block_size
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
@@ -3308,7 +3355,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
-        use_sfa = self.ascend_config.use_sfa
+        use_sparse = self.use_sparse
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for layer_name, attn_module in attn_layers.items():
@@ -3330,7 +3377,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # TODO(lucas): move the attention specs into the model layers like
             # the attention backends
             if attn_module.attn_type == AttentionType.DECODER:
-                if use_mla and not use_sfa:
+                if use_mla and not use_sparse:
                     kv_cache_spec[layer_name] = MLAAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
