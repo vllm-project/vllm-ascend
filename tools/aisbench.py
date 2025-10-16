@@ -32,7 +32,10 @@ class AisbenchRunner:
         "performance": "Performance Result files locate in ",
         "accuracy": "write csv to "
     }
-    DATASET_RENAME = {"aime2024": "aime"}
+    DATASET_RENAME = {
+        "aime2024": "aime",
+        "gsm8k-lite": "gsm8k"
+    }
 
     def _run_aisbench_task(self):
         dataset_conf = self.dataset_conf.split('/')[-1]
