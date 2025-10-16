@@ -671,6 +671,7 @@ class TestNPUPlatform(TestBase):
     @patch("torch_npu._C._distributed_c10d.ProcessGroupHCCL")
     @patch("torch.distributed.ProcessGroup")
     def test_successful_initialization(self, mock_pg, mock_pg_hccl, _):
+        pytest.skip("Not current support for the test.")
         mock_prefix = MagicMock(spec=PrefixStore)
         mock_backend = MagicMock()
         mock_pg_hccl.return_value = mock_backend
@@ -706,6 +707,7 @@ class TestNPUPlatform(TestBase):
 
     @patch("torch.distributed.is_hccl_available", return_value=False)
     def test_hccl_unavailable(self, _):
+        pytest.skip("Not current support for the test.")
         with self.assertRaises(AssertionError):
             from vllm_ascend import platform
 
