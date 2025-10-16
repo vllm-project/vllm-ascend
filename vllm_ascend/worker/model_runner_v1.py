@@ -141,7 +141,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                enable_sp, get_ascend_soc_version, is_310p,
                                is_enable_nz, is_moe_model, lmhead_tp_enable,
                                prefill_context_parallel_enable,
-                               vllm_version_is)
+                               vllm_version_is, flashcomm2_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if prefill_context_parallel_enable():
@@ -1911,7 +1911,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     update_attn_params(self.update_stream, forward_context,
                                        maybe_padded_num_tokens)
 
-        if get_forward_context().sp_enabled:
+        if get_forward_context().sp_enabled or get_forward_context().flashcomm_v2_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             pad_size = get_forward_context().pad_size
             if pad_size > 0:
@@ -2252,7 +2252,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
         if moe_comm_type == MoECommType.ALLGATHER and with_prefill:
-            if enable_sp():
+            if enable_sp() or flashcomm2_enable():
                 moe_comm_type = MoECommType.ALLGATHER
             else:
                 moe_comm_type = MoECommType.NAIVE_MULTICAST

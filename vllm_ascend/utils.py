@@ -664,7 +664,7 @@ def enable_sp(vllm_config=None) -> bool:
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp or enable_sp()
+    return get_ascend_config().enable_shared_expert_dp or enable_sp() or flashcomm2_enable()
 
 
 def prefill_context_parallel_enable() -> bool:
@@ -803,3 +803,25 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
         _HAS_LAYER_IDX = hasattr(model_instance, "model") and \
             hasattr(model_instance.model, "start_layer")
     return _HAS_LAYER_IDX
+
+
+def flashcomm2_enable() -> bool:
+    return get_ascend_config().flashcomm2_oproj_tensor_parallel_size is not None
+
+
+def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
+    # Reorganize batch_ids so that, after the all2all and reduce-scatter operation, each batch_id corresponds to the rank_id within the DP domain. 
+    # For example, when DP = [0, 1, 2, ..., 15] and flashcomm2_oproj_tensor_parallel_size = 2, 
+    # the reorganized batch_ids will be [[batch0, batch8], [batch1, batch9], ..., [batch7, batch15]].
+    flashcomm2_otp_size = get_ascend_config().flashcomm2_oproj_tensor_parallel_size
+    num_oproj_tensor_parallel_groups: int = (global_tp_size // flashcomm2_otp_size)
+
+    reorgnized_batch_ids = []
+    for i in range(num_oproj_tensor_parallel_groups):
+        ranks = []
+        for j in range(flashcomm2_otp_size):
+            rank_idx = i + j * num_oproj_tensor_parallel_groups
+            ranks.append(rank_idx)
+        reorgnized_batch_ids.append(ranks)
+
+    return reorgnized_batch_ids

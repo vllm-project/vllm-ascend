@@ -186,7 +186,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             hidden_states: torch.Tensor,
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        need_gather_q_kv = get_forward_context().sp_enabled
+        need_gather_q_kv = get_forward_context().sp_enabled or get_forward_context().flashcomm_v2_enabled
         output_shape = hidden_states.shape
         # FIXME: This does not seem right, should make sure the buffer is fixed
         output = torch.empty(output_shape,
