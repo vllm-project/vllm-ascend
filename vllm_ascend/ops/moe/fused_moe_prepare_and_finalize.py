@@ -26,7 +26,7 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.utils import enable_sp, get_rm_router_logits_state
+from vllm_ascend.utils import enable_sp, flashcomm2_enable, get_rm_router_logits_state
 
 
 class FusedMoEPrepareAndFinalize(ABC):
@@ -320,7 +320,7 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
         Returns:
             Tuple of (global_hidden_states, global_router_logits, None)
         """
-        if enable_sp():
+        if enable_sp() or flashcomm2_enable():
             return self._prepare_with_ep_group(hidden_states, router_logits)
 
         return self._prepare_with_dp_group(hidden_states, router_logits,
@@ -389,7 +389,7 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
         Returns:
             Tensor with shape [local_num_tokens, hidden_size]
         """
-        if enable_sp():
+        if enable_sp() or flashcomm2_enable():
             return self._finalize_with_ep_group(hidden_states)
 
         return self._finalize_with_dp_group(hidden_states, reduce_results)

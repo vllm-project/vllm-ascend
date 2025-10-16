@@ -26,6 +26,7 @@ import torch
 from torch import nn
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mla import MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -124,10 +125,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         forward_context = get_forward_context()
         sp_enabled = forward_context.sp_enabled
+        flashcomm_v2_enabled = forward_context.flashcomm_v2_enabled
         need_gather_q_kv = False
-        if sp_enabled and self.debug_layer_idx < self.layers:
+        if (sp_enabled or flashcomm_v2_enabled) and self.debug_layer_idx < self.layers:
             need_gather_q_kv = True
-        if not sp_enabled or self.debug_layer_idx < self.layers:
+        if not (sp_enabled or flashcomm_v2_enabled) or self.debug_layer_idx < self.layers:
             output_shape = hidden_states.shape
         else:
             # used in deepseek mtp layer
