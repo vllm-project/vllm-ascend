@@ -49,7 +49,7 @@ from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.utils import (dense_optim_enable, enable_sp,
                                matmul_allreduce_enable, mlp_tp_enable,
-                               oproj_tp_enable)
+                               oproj_tp_enable, shared_expert_dp_enabled)
 
 
 class CustomLinearOp:
@@ -418,7 +418,8 @@ def _get_row_parallel_op(
 
 
 def get_parallel_op(disable_tp, prefix, layer, direct):
-    if disable_tp or ("shared_experts" in prefix and enable_sp()):
+    if disable_tp or ("shared_experts" in prefix
+                      and shared_expert_dp_enabled()):
         return None, 0, 1
     custom_op: Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp,
                               MLPRowParallelOp, OProjRowParallelOp,
