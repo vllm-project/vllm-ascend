@@ -50,11 +50,8 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
         mtp_layer = setup_mtp_layer
         assert isinstance(mtp_layer, CustomDeepSeekMultiTokenPredictorLayer)
 
-    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    def test_forward(self, mocker: MockerFixture, setup_mtp_layer,
-                     mock_maybe_all_gather_and_maybe_unpad):
+    def test_forward(self, mocker: MockerFixture, setup_mtp_layer):
         mtp_layer = setup_mtp_layer
-        mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
@@ -62,6 +59,8 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
                             'eh_proj',
                             return_value=torch.randn(2, 3, 768))
         mocker.patch("torch.cat", return_value=torch.randn(2, 3, 768))
+        mocker.patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                     return_value=torch.randn(2, 3, 768))
         mtp_layer.mtp_block.return_value = (torch.randn(2, 3, 768),
                                             torch.randn(2, 3, 768))
 
@@ -187,9 +186,9 @@ class TestCustomDeepSeekMTP(PytestBase):
         assert isinstance(mtp, CustomDeepSeekMTP)
 
     @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
-    def test_forward(self, mocker: MockerFixture, setup_mtp,
-                     mock_maybe_all_gather_and_maybe_unpad):
-        mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
+    def test_forward(self, mocker: MockerFixture, setup_mtp):
+        mocker.patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                     return_value=torch.tensor([[1.0, 2.0, 3.0]]))
         input_ids = torch.tensor([[1, 2, 3]])
         positions = torch.tensor([[0, 1, 2]])
         kv_caches = [torch.tensor([[0.1, 0.2, 0.3]])]
