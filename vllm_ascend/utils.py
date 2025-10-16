@@ -258,6 +258,10 @@ def prefetch_stream() -> torch.npu.Stream:
 
 
 def adapt_patch(is_global_patch: bool = False):
+    ascend_config = get_ascend_config()
+    dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+    if dynamic_eplb:
+        from vllm_ascend.patch import v1  # noqa: F401
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
     else:
