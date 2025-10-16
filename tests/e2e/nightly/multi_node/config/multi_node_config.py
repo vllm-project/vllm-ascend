@@ -1,6 +1,7 @@
 import logging
 import os
 import subprocess
+from typing import Optional
 
 import regex as re
 import yaml
@@ -25,11 +26,11 @@ class MultiNodeConfig:
                  npu_per_node: int = 16,
                  server_port: int = 8080,
                  headless: bool = False,
-                 disaggregated_prefill: dict = None,
-                 envs: dict = None,
+                 disaggregated_prefill: Optional[dict] = None,
+                 envs: Optional[dict] = None,
                  server_cmd: str = "",
-                 perf_cmd: dict = None,
-                 acc_cmd: dict = None):
+                 perf_cmd: Optional[str] = None,
+                 acc_cmd: Optional[str] = None):
         self.test_name = test_name
         self.model = model
         self.num_nodes = num_nodes
@@ -152,7 +153,7 @@ class MultiNodeConfig:
         return self._ProxyContext(self, proxy_script)
 
     @classmethod
-    def from_yaml(cls, yaml_path: str = None):
+    def from_yaml(cls, yaml_path: Optional[str] = None):
         if not yaml_path:
             yaml_path = os.getenv(
                 "CONFIG_YAML_PATH",
@@ -173,7 +174,7 @@ class MultiNodeConfig:
             f"Number of deployments ({len(deployments)}) must match num_nodes ({num_nodes})"
         for deployment in deployments:
             if deployment.get("local_index") == int(
-                    os.getenv("LWS_WORKER_INDEX")):
+                    os.getenv("LWS_WORKER_INDEX", 0)):
                 envs_extend = deployment.get("env_extend", {})
                 if envs_extend:
                     envs.update(envs_extend)
