@@ -84,6 +84,7 @@ class MultiNodeConfig:
         return pattern.sub(replace_var, cmd)
 
     class _ProxyContext:
+
         def __init__(self, outer, proxy_script):
             self.outer = outer
             self.proxy_script = proxy_script
@@ -92,7 +93,9 @@ class MultiNodeConfig:
         def __enter__(self):
             o = self.outer
             if not o.disaggregated_prefill or not o.is_master:
-                logger.info("Disaggregated prefill not enabled or not master node, skipping proxy launch.")
+                logger.info(
+                    "Disaggregated prefill not enabled or not master node, skipping proxy launch."
+                )
                 return self
 
             prefiller_indices = o.disaggregated_prefill["prefiller_host_index"]
@@ -104,19 +107,24 @@ class MultiNodeConfig:
 
             prefiller_ips = [o.cluster_ips[i] for i in prefiller_indices]
             decoder_ips = [o.cluster_ips[i] for i in decoder_indices]
-            prefiller_ips_str = " ".join(prefiller_ips)
-            decoder_ips_str = " ".join(decoder_ips)
-            prefiller_ports = " ".join([str(o.server_port)] * len(prefiller_ips))
-            decoder_ports = " ".join([str(o.server_port)] * len(decoder_ips))
+            prefiller_ports_list = [str(self.server_port)] * len(prefiller_ips)
+            decoder_ports_list = [str(self.server_port)] * len(decoder_ips)
 
             proxy_cmd = [
-                "python", self.proxy_script,
-                "--host", o.cur_ip,
-                "--port", str(o.proxy_port),
-                "--prefiller-hosts", prefiller_ips_str,
-                "--prefiller-ports", prefiller_ports,
-                "--decoder-hosts", decoder_ips_str,
-                "--decoder-ports", decoder_ports,
+                "python",
+                self.proxy_script,
+                "--host",
+                o.cur_ip,
+                "--port",
+                str(o.proxy_port),
+                "--prefiller-hosts",
+                *prefiller_ips,
+                "--prefiller-ports",
+                *prefiller_ports_list,
+                "--decoder-hosts",
+                *decoder_ips,
+                "--decoder-ports",
+                *decoder_ports_list,
             ]
 
             env = os.environ.copy()
@@ -134,10 +142,10 @@ class MultiNodeConfig:
                     self.process.terminate()
                     self.process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    logger.warning("Proxy process did not terminate, killing it...")
+                    logger.warning(
+                        "Proxy process did not terminate, killing it...")
                     self.process.kill()
                 logger.info("Proxy server process terminated.")
-
 
     def launch_server_proxy(self, proxy_script: str):
         """Return a context manager that launches the proxy server if disaggregated prefill is enabled."""
@@ -200,12 +208,10 @@ class MultiNodeConfig:
 
 if __name__ == '__main__':
     config = MultiNodeConfig.from_yaml()
-    print(config.envs)
     print(config.server_cmd)
     print(config.perf_cmd)
     print(config.acc_cmd)
-    with config.launch_server_proxy(
-            DISAGGREGATED_PREFILL_PROXY_SCRIPT):
+    with config.launch_server_proxy(DISAGGREGATED_PREFILL_PROXY_SCRIPT):
         if config.is_master:
             input("Press Enter to exit...\n")
             import time
