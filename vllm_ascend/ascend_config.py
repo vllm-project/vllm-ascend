@@ -124,7 +124,7 @@ class AscendConfig:
             if self.pd_tp_ratio == 0:
                 raise AssertionError(
                     "Only support P node tp size lagger then D node tp size")
-
+        self.SLO_limits_for_dynamic_batch = additional_config.get("SLO_limits_for_dynamic_batch", -1)
 
 class TorchairGraphConfig:
     """
