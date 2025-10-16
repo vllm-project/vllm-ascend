@@ -47,7 +47,6 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --additional-config '{"ascend_scheduler_config":{"enabled":true}}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnector",
         "kv_role": "kv_producer",
@@ -87,7 +86,7 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
+        --additional-config '{"torchair_graph_config":{"enabled":true}}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnector",
         "kv_role": "kv_consumer",
