@@ -501,7 +501,7 @@ class LLMDataDistCMgrConnectorWorker():
         self.use_mla: bool = first_kv_cache_tuple[0].size(
             -1) != first_kv_cache_tuple[1].size(-1) and len(
                 first_kv_cache_tuple) == 2
-        self.use_sfa: bool = len(first_kv_cache_tuple) == 3
+        self.use_sparse: bool = len(first_kv_cache_tuple) == 3
         # MLA case. [2 (k_normed, k_pe), num_blocks, ...]
         # SFA case. [3 (k_normed, k_pe, k_idx), num_blocks, ...]
         # MHA case. [2 (k and v), num_blocks, ...]
@@ -549,7 +549,7 @@ class LLMDataDistCMgrConnectorWorker():
                 raise RuntimeError(
                     f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to register_block_cache, receiving [cache_desc: {self.cache_desc}, cache_addr: {self.cache_addr}, cache_key: {self.cache_key}]"
                 )
-        elif self.use_sfa:
+        elif self.use_sparse:
             cache_k_normed_addr_list = []
             cache_k_pe_addr_list = []
             cache_k_idx_addr_list = []
@@ -887,7 +887,7 @@ class LLMDataDistCMgrConnectorWorker():
                 raise RuntimeError(
                     "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
                 )
-        elif self.use_sfa:
+        elif self.use_sparse:
             remote_cache_key_k_normed = BlocksCacheKey(
                 cluster_id=remote_cluster_id, model_id=0)
             remote_cache_key_k_pe = BlocksCacheKey(
