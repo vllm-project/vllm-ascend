@@ -1445,7 +1445,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # If a batch only has token ids, then including the embedding layer
             # in the acl graph will be more performant (like in the else case
             # below).
-            token_ids_idx = self.is_token_ids.gpu[:num_scheduled_tokens] \
+            token_ids_idx = self.is_token_ids.gpu[:total_num_scheduled_tokens] \
                 .nonzero(as_tuple=False) \
                 .squeeze(1)
             # Some tokens ids may need to become embeds
