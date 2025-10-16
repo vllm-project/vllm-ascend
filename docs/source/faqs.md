@@ -15,7 +15,7 @@ Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b)，Atlas A3 series(
 - Atlas 800I A2 Inference series (Atlas 800I A2)
 - Atlas A3 Training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 Inference series (Atlas 800I A3)
-- [Experimental] Atlas 300I Inference series (Atlas 300I Duo)
+- [Experimental] Atlas 300I Inference series (Atlas 300I Duo). Currently for 310I Duo the stable version is vllm-ascend v0.10.0rc1.
 
 Below series are NOT supported yet:
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet
