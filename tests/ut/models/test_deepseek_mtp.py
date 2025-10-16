@@ -1,4 +1,3 @@
-
 import pytest
 import torch
 from pytest_mock import MockerFixture
@@ -59,7 +58,7 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
                             return_value=torch.randn(2, 3, 768))
         mocker.patch("torch.cat", return_value=torch.randn(2, 3, 768))
         mocker.patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
-                     return_value=torch.randn(2, 3, 768))
+                     lambda x: x)
         mtp_layer.mtp_block.return_value = (torch.randn(2, 3, 768),
                                             torch.randn(2, 3, 768))
 
