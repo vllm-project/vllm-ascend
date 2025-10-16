@@ -52,6 +52,8 @@ if prefill_context_parallel_enable():
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
+MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
+
 
 class AscendMLABackend(AttentionBackend):
 
@@ -177,6 +179,7 @@ class AscendMLAMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
     query_lens: Optional[list[int]] = None
+    query_lens_tensor: Optional[torch.Tensor] = None
     # The dimension of the attention heads
     head_dim: Optional[int] = None
     attn_mask: torch.Tensor = None
@@ -185,6 +188,9 @@ class AscendMLAMetadata:
 
     decode: Optional[AscendMLADecodeMetadata] = None
     prefill: Optional[AscendMLAPrefillMetadata] = None
+    input_positions: Optional[torch.Tensor] = None
+    sin: Optional[torch.Tensor] = None
+    cos: Optional[torch.Tensor] = None
 
     def __post_init__(self):
         pass
@@ -577,6 +583,11 @@ class AscendMLAMetadataBuilder:
                                      seq_mask_dcp_shape[1]],
                     cp_seq_len=cp_seq_len)
 
+        total_cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
+            1).unsqueeze(2)
+        total_sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
+            1).unsqueeze(2)
+
         return self.metadata_cls(  # type: ignore
             num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
             num_input_tokens=common_attn_metadata.num_input_tokens,
@@ -594,6 +605,9 @@ class AscendMLAMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
+            query_lens_tensor=query_lens,
+            sin=total_sin,
+            cos=total_cos,
         )
 
     def build_for_graph_capture(
@@ -626,6 +640,7 @@ class DecodeMLAPreprocessResult(NamedTuple):
     k_nope: Optional[torch.Tensor] = None
     k_pe: Optional[torch.Tensor] = None
     decode_q_wo_k_up: Optional[torch.Tensor] = None
+    topk_indices: Optional[torch.Tensor] = None
 
 
 class PrefillMLAPreprocessResult(NamedTuple):
@@ -634,6 +649,7 @@ class PrefillMLAPreprocessResult(NamedTuple):
     k_nope: Optional[torch.Tensor] = None
     k_pe: Optional[torch.Tensor] = None
     value: Optional[torch.Tensor] = None
+    topk_indices: Optional[torch.Tensor] = None
 
 
 class AscendMLAImpl(MLAAttentionImpl):
@@ -678,6 +694,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
         self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
+        self.indexer = kwargs.get('indexer', None)
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -689,6 +706,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         vllm_config = get_current_vllm_config()
         self.ring_mla_mask_size = 512
         self.prefill_mask = None
+
+        # indexer param
+        if self.indexer is not None:
+            self.n_head: int = self.indexer.n_head  # 64
+            self.head_dim: int = self.indexer.head_dim  # 128
+            self.wq_b = self.indexer.wq_b
+            self.wk = self.indexer.wk
+            self.weights_proj = self.indexer.weights_proj
+            self.k_norm = self.indexer.k_norm
 
         self.speculative_config = vllm_config.speculative_config
         self.enable_mlapo = envs.VLLM_ASCEND_ENABLE_MLAPO
@@ -808,16 +834,17 @@ class AscendMLAImpl(MLAAttentionImpl):
         # self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)
         # self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
 
-        # Currently mlapo only supports W8A8 quantization in MLA scenario
-        # TODO(whx): modify this limitation when mlapo supports floating point
-        if self.fused_qkv_a_proj is None or not isinstance(
-                getattr(self.fused_qkv_a_proj.quant_method, 'quant_method',
-                        None), AscendW8A8LinearMethod):
-            self.enable_mlapo = False
-            logger.warning_once(
-                "Currently mlapo only supports W8A8 quantization in MLA scenario."
-                "Some layers in your model are not quantized with W8A8,"
-                "thus mlapo is disabled for these layers.")
+        if self.enable_mlapo:
+            # Currently mlapo only supports W8A8 quantization in MLA scenario
+            # TODO(whx): modify this limitation when mlapo supports floating point
+            if self.fused_qkv_a_proj is None or not isinstance(
+                    getattr(self.fused_qkv_a_proj.quant_method, 'quant_method',
+                            None), AscendW8A8LinearMethod):
+                self.enable_mlapo = False
+                logger.warning_once(
+                    "Currently mlapo only supports W8A8 quantization in MLA scenario."
+                    "Some layers in your model are not quantized with W8A8,"
+                    "thus mlapo is disabled for these layers.")
         if self.enable_mlapo:
             self._process_weights_for_fused_mlapo(act_dtype)
 
@@ -1282,12 +1309,13 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _mla_preprocess(self, layer_name, hidden_states, kv_cache,
                         attn_metadata, need_gather_q_kv):
         # MLA Preprocess:
-        # 1. Perform q_a_proj and q_a_layernorm to obtain q_c
-        # 2. Perform kv_a_proj_with_mqa to obtain kv_no_split
-        # 3. If need_gather_q_kv, perform all_gather.
-        # 4. Preprocess decode tokens, write kv cache and get:
+        # 1. Perform fused_qkv_a_proj and q_a_layernorm to obtain q_c and kv_no_split
+        # or
+        #    Perform kv_a_proj_with_mqa to obtain kv_no_split
+        # 2. If need_gather_q_kv, perform all_gather.
+        # 3. Preprocess decode tokens, write kv cache and get:
         # decode_ql_nope, decode_q_pe, decode_k_pe, decode_k_nope
-        # 5. Preprocess prefill tokens, write kv cache and get:
+        # 4. Preprocess prefill tokens, write kv cache and get:
         # prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
@@ -1432,6 +1460,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
+        # Deepseek v3.2 DSA path
+        if self.indexer is not None:
+            return self.forward_dsa(layer_name, hidden_states, kv_cache,
+                                    attn_metadata, need_gather_q_kv, output)
         if self.pcp_size > 1:
             num_actual_tokens = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
         else:
@@ -1510,6 +1542,82 @@ class AscendMLAImpl(MLAAttentionImpl):
         has_prefill = attn_metadata.num_prefills > 0
         if has_prefill:
             maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
+        return output_padded
+
+    def forward_dsa(
+        self,
+        layer_name,
+        hidden_states: torch.Tensor,  # query in unified attn
+        kv_cache: Tuple[torch.Tensor],
+        attn_metadata: M,
+        need_gather_q_kv: bool = False,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert self.dcp_size == 1, "Currently DSA does not support DCP."
+        assert self.pcp_size == 1, "Currently DSA does not support PCP."
+        has_prefill = attn_metadata.num_prefills > 0
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        hidden_states = hidden_states[:num_actual_tokens]
+        # Inputs and outputs may be padded for CUDA graphs
+        output_padded = output
+        output = output[:num_actual_tokens]
+        assert self.fused_qkv_a_proj is not None, "q lora is required for DSA."
+        maybe_npu_prefetch(inputs=self.fused_qkv_a_proj.weight,
+                           dependency=hidden_states,
+                           enabled=self.enable_prefetch)
+        qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+        q_c, kv_no_split = qkv_lora.split(
+            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+            dim=-1,
+        )
+        q_c = self.q_a_layernorm(q_c)
+
+        # Process for Flash Comm V1
+        q_c = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            q_c.contiguous(), need_gather_q_kv)
+        kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            kv_no_split.contiguous(), need_gather_q_kv)
+
+        if has_prefill:
+            wait_for_kv_layer_from_connector(layer_name)
+
+        slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
+        ql_nope, q_pe = \
+            self._q_proj_and_k_up_proj(q_c)
+        q_pe = self.rope_single(q_pe, attn_metadata.cos, attn_metadata.sin)
+        k_pe, k_nope = self.exec_kv_decode(kv_no_split, attn_metadata.cos,
+                                           attn_metadata.sin, kv_cache,
+                                           slot_mapping)
+
+        topk_indices = self.indexer_select(x=hidden_states,
+                                           qr=q_c,
+                                           kv_cache=kv_cache,
+                                           attn_metadata=attn_metadata,
+                                           need_gather_q_kv=need_gather_q_kv)
+        attn_output = torch.ops.custom.npu_sparse_flash_attention(
+            query=ql_nope,
+            key=k_nope,
+            value=k_nope,
+            sparse_indices=topk_indices,
+            scale_value=self.scale,
+            sparse_block_size=1,
+            block_table=attn_metadata.block_tables,
+            actual_seq_lengths_query=attn_metadata.query_lens,
+            actual_seq_lengths_kv=attn_metadata.seq_lens,
+            query_rope=q_pe,
+            key_rope=k_pe,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=3,
+        )
+        attn_output = attn_output.transpose(0, 1)
+        attn_output = self._v_up_proj(attn_output)
+        global MAX_O_PROJ_PREFETCH_SIZE
+        maybe_npu_prefetch(inputs=self.o_proj.weight,
+                           dependency=attn_output,
+                           max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                           enabled=self.enable_prefetch)
+        output[...] = self.o_proj(attn_output)
         return output_padded
 
     def _forward_prefill_cp(
@@ -1809,3 +1917,76 @@ class AscendMLAImpl(MLAAttentionImpl):
             out = torch.where(out_mask, out, out_without_update)
             lse = torch.where(lse_mask, lse, lse_without_update)
         return out, lse
+
+    def indexer_select(
+        self,
+        x: torch.Tensor,
+        qr: torch.Tensor,
+        kv_cache: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        attn_metadata: M,
+        need_gather_q_kv: bool = False,
+    ):
+        cos = attn_metadata.cos
+        sin = attn_metadata.sin
+
+        cos_q, sin_q = cos, sin
+        cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
+        sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
+
+        # q process in new stream
+        q, _ = self.wq_b(qr)  # [b,s,1536] @ [1536,64*128] = [b,s,64*128]
+        q = q.view(-1, self.n_head, self.head_dim)  # [b,s,64,128]
+        q_pe, q_nope = torch.split(
+            q, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
+            dim=-1)  # [b,s,64,64+64]
+
+        q_pe = q_pe.unsqueeze(2)
+        q_pe = torch_npu.npu_interleave_rope(q_pe, cos_q, sin_q)
+        q_pe = q_pe.squeeze(2)
+        q = torch.cat([q_pe, q_nope], dim=-1)  # [b*s,64,128]
+
+        k_proj, _ = self.wk(x)  # [b,s,7168] @ [7168,128] = [b,s,128]
+        if need_gather_q_kv:
+            k_proj = get_tp_group().all_gather(
+                k_proj, 0)[attn_metadata.num_decode_tokens:attn_metadata.
+                           num_actual_tokens]
+        k = self.k_norm(k_proj).unsqueeze(1)
+        k_pe, k_nope = torch.split(
+            k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim],
+            dim=-1)  # [b,s,64+64]
+
+        k_pe = k_pe.unsqueeze(2)
+        k_pe = torch_npu.npu_interleave_rope(k_pe, cos, sin)
+        k_pe = k_pe.squeeze(2)
+
+        k = torch.cat([k_pe, k_nope], dim=-1)  # [b*s,128]
+
+        if kv_cache is not None:
+            torch_npu.npu_scatter_nd_update_(kv_cache[2].view(-1, k.shape[-1]),
+                                             attn_metadata.slot_mapping.view(
+                                                 -1, 1),
+                                             k.view(-1,
+                                                    k.shape[-1]))  # b, s, n, d
+
+        weights, _ = self.weights_proj(x)
+        if need_gather_q_kv:
+            weights = get_tp_group().all_gather(
+                weights, 0)[attn_metadata.num_decode_tokens:attn_metadata.
+                            num_actual_tokens]
+
+        block_table = attn_metadata.block_tables
+        seq_lens = attn_metadata.seq_lens
+        query_lens = attn_metadata.query_lens
+
+        topk_indices = torch.ops.custom.npu_lightning_indexer(
+            query=q,
+            key=kv_cache[2],
+            weights=weights,
+            actual_seq_lengths_query=query_lens,
+            actual_seq_lengths_key=seq_lens,
+            block_table=block_table,
+            layout_query="TND",
+            layout_key="PA_BSND",
+            sparse_count=2048,
+            sparse_mode=3)
+        return topk_indices

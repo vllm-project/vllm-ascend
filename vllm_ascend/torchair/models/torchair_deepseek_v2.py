@@ -69,7 +69,6 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.models.layers.sfa import Indexer
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
@@ -82,6 +81,56 @@ if vllm_version_is("0.11.0"):
 else:
     from vllm.attention.layer import MLAAttention
 
+
+class Indexer(nn.Module):
+
+    def __init__(self,
+                 config,
+                 dim: int = 7168,
+                 n_heads: int = 64,
+                 head_dim: int = 128,
+                 index_topk: int = 2048,
+                 q_lora_rank: int = 1536,
+                 rope_head_dim: int = 64,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: Optional[str] = ""):
+        super().__init__()
+
+        self.dim: int = dim  # 7168
+        self.n_heads: int = n_heads  # 64
+        self.head_dim: int = head_dim  # 128
+        self.rope_head_dim: int = rope_head_dim  # 64
+        self.index_topk: int = index_topk  # 2048
+        self.q_lora_rank: int = q_lora_rank  # 1536
+        self.wq_b = ReplicatedLinear(
+            self.q_lora_rank,
+            self.n_heads * self.head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wq_b",
+            return_bias=False,
+        )
+        self.wk = ReplicatedLinear(
+            self.dim,
+            self.head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wk",
+            return_bias=False,
+        )
+        self.weights_proj = ReplicatedLinear(
+            self.dim,
+            self.n_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.weights_proj",
+            return_bias=False,
+        )
+        self.k_norm = nn.LayerNorm(self.head_dim)
+        self.softmax_scale = self.head_dim**-0.5
+
+    def forward(self):
+        return
 
 class TorchairDeepseekV2SiluAndMul(SiluAndMul):
 
