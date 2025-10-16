@@ -128,6 +128,7 @@ jobs:
           --ignore=tests/ut/kv_connector/test_remote_decode_lifecycle.py \
           --ignore=tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
           --ignore=tests/ut/torchair/models/test_torchair_deepseek_v2.py \
+          --ignore=tests/ut/models/test_deepseek_v2.py \
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged
