@@ -73,7 +73,8 @@ deployment:
     env_extend:
     server_cmd: >
         vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
-        --headless
+        --host 0.0.0.0
+        --port $SERVER_PORT
         --data-parallel-size 2
         --data-parallel-size-local 2
         --tensor-parallel-size 8

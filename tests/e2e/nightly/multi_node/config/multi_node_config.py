@@ -204,15 +204,3 @@ class MultiNodeConfig:
     @property
     def is_master(self):
         return int(self.cur_index) == 0
-
-
-if __name__ == '__main__':
-    config = MultiNodeConfig.from_yaml()
-    print(config.server_cmd)
-    print(config.perf_cmd)
-    print(config.acc_cmd)
-    with config.launch_server_proxy(DISAGGREGATED_PREFILL_PROXY_SCRIPT):
-        if config.is_master:
-            input("Press Enter to exit...\n")
-            import time
-            time.sleep(10)
