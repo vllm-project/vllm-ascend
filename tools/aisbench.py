@@ -182,11 +182,11 @@ class AisbenchRunner:
         assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, f"Accuracy verification failed. The accuracy of {self.dataset_path} if not within {self.threshold} relative to baseline {self.baseline}."
 
 
-def run_aisbench_cases(model_path, port, aisbench_cases):
+def run_aisbench_cases(model, port, aisbench_cases):
     aisbench_errors = []
     for aisbench_case in aisbench_cases:
         try:
-            with AisbenchRunner(aisbench_case, model_path, port):
+            with AisbenchRunner(model, port, aisbench_case):
                 pass
         except Exception as e:
             aisbench_errors.append([aisbench_case, e])
