@@ -6,8 +6,8 @@ from tests.e2e.nightly.multi_node.config.multi_node_config import (
 def test_multi_node() -> None:
     config = MultiNodeConfig.from_yaml()
     env_dict = config.envs
-    perf_cmd = config.perf_cmd
-    acc_cmd = config.acc_cmd
+    # perf_cmd = config.perf_cmd
+    # acc_cmd = config.acc_cmd
     server_port = config.server_port if not config.disaggregated_prefill else config.proxy_port
 
     with config.launch_server_proxy(DISAGGREGATED_PREFILL_PROXY_SCRIPT):
@@ -19,7 +19,7 @@ def test_multi_node() -> None:
                 auto_port=False,
                 max_wait_seconds=1000,
         ) as remote_server:
-            base_url = remote_server.url_root
+            # base_url = remote_server.url_root
             if config.is_master:
                 pass
                 # TODO: enable perf and acc test
