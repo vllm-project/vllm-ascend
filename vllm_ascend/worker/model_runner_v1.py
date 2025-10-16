@@ -1462,6 +1462,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     slot_mapping[:total_num_scheduled_tokens],
                     non_blocking=True,
                 )
+                self.slot_mapping[total_num_scheduled_tokens:].fill_(0)
 
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
