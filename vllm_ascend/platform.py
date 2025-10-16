@@ -344,7 +344,8 @@ class NPUPlatform(Platform):
         return backend_map[(use_mla, use_sparse, use_torchair)]
 
     @classmethod
-    def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+    def get_vit_attn_backend(cls, head_size: int,
+                             dtype: torch.dtype) -> "_Backend":
         # Use torch SDPA for NPU platforms.
         return _Backend.TORCH_SDPA
 
