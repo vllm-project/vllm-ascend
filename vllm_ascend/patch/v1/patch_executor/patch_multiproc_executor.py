@@ -104,7 +104,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         self.has_connector = self.vllm_config.kv_transfer_config is not None
 
 class AscendWorkerProc(WorkerProc):
-    
+
     @staticmethod
     def make_worker_process(
         vllm_config: VllmConfig,
