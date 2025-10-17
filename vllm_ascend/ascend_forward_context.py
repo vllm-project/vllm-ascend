@@ -108,17 +108,16 @@ def set_ascend_forward_context(
         # due to multiple warmups before actual capturing
         forward_context.capturing = False
 
-        # set for sequence parallelism, 1000 is the batch size concurrency threshold for enabling the flashcomm_v1 or sequence_parallelism feature.
-        # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
-        # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
-        # the performance may degrade due to the switching of communication methods.
-        if is_moe_model(vllm_config):
-            sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and num_tokens is not None
-        else:
-            sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and \
-                num_tokens is not None and num_tokens > 1000
+        # set for sequence parallelism, 1000 is the batch size concurrency
+        # threshold for enabling the flashcomm_v1 or sequence_parallelism
+        # feature. Currently, it is an empirical value. In normal scenarios, if
+        # the concurrency exceeds this threshold, the performance benefits can
+        # be maximized. Conversely, if the concurrency is below the threshold,
+        # the performance may degrade due to the switching of communication
+        # methods.
+        sp_enabled = (enable_sp(vllm_config) and tp_world_size > 1 and
+                      num_tokens is not None) and (is_moe_model(vllm_config)
+                                                   or num_tokens > 1000)
 
         if sp_enabled:
             pad_size = (tp_world_size -
