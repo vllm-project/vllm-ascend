@@ -37,6 +37,8 @@ class AscendCommonAttentionMetadata:
     """Number of requests"""
     num_actual_tokens: int
     """Total number of tokens in batch"""
+    num_input_tokens: int
+    """Total number of tokens in batch, including padding tokens"""
 
     max_query_len: int
     """Max token number of request in batch"""

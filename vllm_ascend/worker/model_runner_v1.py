@@ -1472,6 +1472,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 seq_lens=self.seq_lens_cpu[:num_reqs],
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
+                num_input_tokens=num_input_tokens,
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
                 # TODO: change this to the right block table for linear attn
                 block_table_tensor=blk_table_tensor[:num_reqs],
@@ -1518,8 +1519,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         model=self.get_model(),
                         **extra_attn_metadata_args)
 
-                if self.vllm_config.model_config.use_mla or self.use_sparse:
-                    attn_metadata_i.num_input_tokens = num_input_tokens
                 for layer_name in attn_group.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 
@@ -1593,10 +1592,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return attn_state
 
     def _update_graph_pad_size(self, with_prefill, graph_pad_size):
-        if not with_prefill:
-            self.graph_pad_size = graph_pad_size
-        else:
-            self.graph_pad_size = -1
+        self.graph_pad_size = -1
 
     def _update_input_ids_and_positions(self, input_ids, positions,
                                         num_input_tokens, with_prefill,
