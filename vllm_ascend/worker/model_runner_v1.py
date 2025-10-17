@@ -2232,7 +2232,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return None, None
 
     def _build_attention_metadata(self, create_mixed_batch, num_reqs,
-                                  num_tokens, max_query_len, force_attention):
+                                  num_tokens, max_query_len, force_attention,
+                                  num_scheduled_tokens):
         attn_metadata: Optional[dict[str, Any]] = None
 
         if force_attention:
@@ -2246,8 +2247,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.seq_lens_np[:num_reqs] = seq_lens
             self.seq_lens_np[num_reqs:] = 0
 
-            self.query_start_loc[:num_reqs + 1] = torch.arange(num_reqs + 1)
-            self.query_start_loc_cpu[:num_reqs + 1] = torch.arange(num_reqs + 1)
+            cu_num_tokens, arange = self._get_cumsum_and_arange(num_scheduled_tokens)
+
+            self.query_start_loc[1:num_reqs + 1] = torch.Tensor(cu_num_tokens)
+            self.query_start_loc_cpu[1:num_reqs + 1] = torch.Tensor(cu_num_tokens)
 
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
@@ -2393,6 +2396,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_tokens=num_tokens,
             max_query_len=max_query_len,
             force_attention=force_attention,
+            num_scheduled_tokens=num_scheduled_tokens,
         )
 
         if not self.in_profile_run and self.dynamic_eplb:
