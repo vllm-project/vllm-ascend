@@ -361,9 +361,10 @@ class NPUWorker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         force_attention = self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
-        self.model_runner._dummy_run(num_tokens=1,
-                                     uniform_decode=True,
-                                     force_attention=force_attention)
+        self.model_runner._dummy_run(
+            num_tokens=self.model_runner.decode_token_per_req,
+            uniform_decode=True,
+            force_attention=force_attention)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
