@@ -404,7 +404,10 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"
+        if vllm_version_is("0.11.0"):
+            return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU0110"
+        else:
+            return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"
 
     @classmethod
     def get_current_memory_usage(cls,
