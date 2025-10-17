@@ -2,6 +2,7 @@ import threading
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.synchronize import Lock as LockType
+from typing import Optional
 
 import vllm.v1.executor.multiproc_executor
 from vllm import envs
@@ -24,8 +25,8 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
         self.shutdown_event = threading.Event()
-        self.failure_callback: FailureCallback | None = None
-        self.io_thread_pool: ThreadPoolExecutor | None = None
+        self.failure_callback: Optional[FailureCallback] = None
+        self.io_thread_pool: Optional[ThreadPoolExecutor] = None
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
