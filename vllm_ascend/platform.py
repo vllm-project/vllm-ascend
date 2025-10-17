@@ -245,6 +245,18 @@ class NPUPlatform(Platform):
                 "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
             ])
             update_aclgraph_sizes(vllm_config)
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+            logger.info(
+                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
+                "using only ACL Graph mode")
+            assert compilation_config.level == CompilationLevel.PIECEWISE, \
+                "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
+            compilation_config.set_splitting_ops_for_v1()
+            compilation_config.use_inductor = False
+            compilation_config.splitting_ops.extend([
+                "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
+            ])
+            update_aclgraph_sizes(vllm_config)
         elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
             logger.info(
                 "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
