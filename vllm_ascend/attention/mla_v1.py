@@ -960,8 +960,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Use TND layout for pure SpecDecoding and SpecDecoding in ChunkedPrefill
             input_layout = "TND"
             # [bs * q_seq_len, num_heads_per_rank, dim]
-            q_nope = q_nope.view(num_tokens, self.num_heads,
-                                 -1).contiguous()
+            q_nope = q_nope.view(num_tokens, self.num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
             sparse_mode = 3
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
