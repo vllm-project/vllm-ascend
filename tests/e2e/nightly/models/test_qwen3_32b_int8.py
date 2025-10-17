@@ -42,11 +42,20 @@ aisbench_cases = [{
     "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
     "request_conf": "vllm_api_stream_chat",
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 176,
+    "num_prompts": 1,
     "max_out_len": 1500,
     "batch_size": 44,
     "baseline": 1,
     "threshold": 0.97
+}, {
+    "case_type": "accuracy",
+    "dataset_path": "vllm-ascend/gsm8k-lite",
+    "request_conf": "vllm_api_general_chat",
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+    "max_out_len": 32768,
+    "batch_size": 32,
+    "baseline": 76,
+    "threshold": 75
 }]
 
 

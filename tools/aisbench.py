@@ -195,6 +195,8 @@ def run_aisbench_cases(model, port, aisbench_cases):
         except Exception as e:
             aisbench_errors.append([aisbench_case, e])
             print(e)
+    command = ["cp", "-r", "outputs", "/root/.cache/aisbench_outputs"]
+    subprocess.call(command)
     for failed_case, error_info in aisbench_errors:
         print(
             f"The following aisbench case failed: {failed_case}, reason is {error_info}."
