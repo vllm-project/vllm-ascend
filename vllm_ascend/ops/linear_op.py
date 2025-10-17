@@ -366,10 +366,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                                              input_parallel,
                                              bias=bias_)
         else:
-            output_parallel = self.quant_method.apply(self.layer,
-                                                      input_parallel,
-                                                      bias=bias_)
-            output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+            output = torch.ops.vllm.apply_matmul_and_reduce(self.prefix, input_parallel)
 
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
