@@ -64,6 +64,10 @@ class AscendCommonAttentionMetadata:
 
     graph_pad_size: int = -1
 
+    # num_input_tokens refers to total number of tokens including
+    # padding tokens. It is used to handle some padding operations.
+    num_input_tokens: int = 0
+
     # NOTE: This is a temporary solution for rotary embedding in MLA
     cos: torch.Tensor = None
     sin: torch.Tensor = None
