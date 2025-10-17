@@ -58,9 +58,14 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.interfaces import supports_transcription
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.model_executor.models.interfaces import (SupportsMultiModal,
+                                                   supports_mrope,
+                                                   supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.pooling_params import PoolingParams
@@ -130,9 +135,13 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_enable_nz, lmhead_tp_enable, vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
+# yapf: enable
+
+
 if vllm_version_is("0.11.0"):
     from vllm.attention.layer import Attention
     from vllm.config import CompilationLevel
+    from vllm.utils import LazyLoader
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
 else:
@@ -534,6 +543,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                      dtype=torch.int64)
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs,
                                                   dtype=torch.int32)
+        # Only relevant for multimodal models
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
+            self.model_config)
+        if self.supports_mm_inputs:
+            self.is_mm_embed = self._make_buffer(self.max_num_tokens,
+                                                 dtype=torch.bool)
+        # TODO: EVS Support (Video tokens pruning) (see vllm#22980)
+        self.is_multimodal_pruning_enabled = False
 
     def _may_pad_kv_consumer_num_seq(self):
         # For Full Graph + MTP in a PD (Prefill/Decode) disaggregation scenario,
@@ -788,16 +806,40 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if mm_input.get("use_audio_in_video") is True:
                 use_audio_in_video = True
 
-        req_state.mrope_positions, req_state.mrope_position_delta = \
-            MRotaryEmbedding.get_input_positions_tensor(
-                req_state.prompt_token_ids,
-                hf_config=self.model_config.hf_config,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-                audio_feature_lengths=audio_feature_lengths,
-                use_audio_in_video=use_audio_in_video,
-            )
+        if vllm_version_is("0.11.0"):
+            if supports_mrope(self.model):
+                req_state.mrope_positions, req_state.mrope_position_delta = \
+                    self.model.get_mrope_input_positions(
+                        req_state.prompt_token_ids,
+                        hf_config=self.model_config.hf_config,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                        audio_feature_lengths=audio_feature_lengths,
+                        use_audio_in_video=use_audio_in_video,
+                    )
+            else:
+                req_state.mrope_positions, req_state.mrope_position_delta = \
+                    MRotaryEmbedding.get_input_positions_tensor(
+                        req_state.prompt_token_ids,
+                        hf_config=self.model_config.hf_config,
+                        image_grid_thw=image_grid_thw,
+                        video_grid_thw=video_grid_thw,
+                        second_per_grid_ts=second_per_grid_ts,
+                        audio_feature_lengths=audio_feature_lengths,
+                        use_audio_in_video=use_audio_in_video,
+                    )
+        else:
+            req_state.mrope_positions, req_state.mrope_position_delta = \
+                self.model.get_mrope_input_positions(
+                    req_state.prompt_token_ids,
+                    hf_config=self.model_config.hf_config,
+                    image_grid_thw=image_grid_thw,
+                    video_grid_thw=video_grid_thw,
+                    second_per_grid_ts=second_per_grid_ts,
+                    audio_feature_lengths=audio_feature_lengths,
+                    use_audio_in_video=use_audio_in_video,
+                )
 
     def _sync_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
@@ -983,11 +1025,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             scheduler_output)
         encoder_outputs = []
 
-        for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
+        if vllm_version_is("0.11.0"):
+            mm_inputs = group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
-                pin_memory=True,
-        ):
+                pin_memory=self.pin_memory,
+            )
+        else:
+            model = cast(SupportsMultiModal, self.model)
+            mm_inputs = group_mm_kwargs_by_modality(
+                mm_kwargs,
+                device=self.device,
+                pin_memory=self.pin_memory,
+                merge_by_field_config=model.merge_by_field_config,
+            )
+        for modality, num_items, mm_kwargs_group in mm_inputs:
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
             # 1. A tensor of shape (num_items, feature_size, hidden_size)
@@ -1045,7 +1097,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return mm_kwargs, mm_hashes_pos
 
-    def _gather_mm_embeddings(
+    def _gather_mm_embeddings_0110(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> list[torch.Tensor]:
@@ -1094,6 +1146,77 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 )
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
+
+    def _gather_mm_embeddings(
+        self,
+        scheduler_output: "SchedulerOutput",
+        shift_computed_tokens: int = 0,
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        mm_embeds = list[torch.Tensor]()
+        is_mm_embed = self.is_mm_embed.cpu
+        is_mm_embed[:total_num_scheduled_tokens] = False
+
+        req_start_idx = 0
+
+        for req_id in self.input_batch.req_ids:
+            mm_embeds_req: list[torch.Tensor] = []
+
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
+            req_state = self.requests[req_id]
+            num_computed_tokens = \
+                req_state.num_computed_tokens + shift_computed_tokens
+
+            for mm_feature in req_state.mm_features:
+                pos_info = mm_feature.mm_position
+                start_pos = pos_info.offset
+                num_encoder_tokens = pos_info.length
+
+                # The encoder output is needed if the two ranges overlap:
+                # [num_computed_tokens,
+                #  num_computed_tokens + num_scheduled_tokens) and
+                # [start_pos, start_pos + num_encoder_tokens)
+                if start_pos >= num_computed_tokens + num_scheduled_tokens:
+                    # The encoder output is not needed in this step.
+                    break
+                if start_pos + num_encoder_tokens <= num_computed_tokens:
+                    # The encoder output is already processed and stored
+                    # in the decoder's KV cache.
+                    continue
+
+                start_idx = max(num_computed_tokens - start_pos, 0)
+                end_idx = min(
+                    num_computed_tokens - start_pos + num_scheduled_tokens,
+                    num_encoder_tokens,
+                )
+                assert start_idx < end_idx
+
+                mm_hash = mm_feature.identifier
+                encoder_output = self.encoder_cache.get(mm_hash, None)
+                assert encoder_output is not None,\
+                    f"Encoder cache miss for {mm_hash}."
+
+                if (is_embed := pos_info.is_embed) is not None:
+                    is_embed = is_embed[start_idx:end_idx]
+
+                req_start_pos = req_start_idx + start_pos - num_computed_tokens
+                is_mm_embed[req_start_pos+start_idx:req_start_pos + end_idx] \
+                    = True if is_embed is None else is_embed
+
+                mm_embeds_item = gather_mm_placeholders(
+                    encoder_output[start_idx:end_idx],
+                    is_embed=is_embed,
+                )
+                mm_embeds_req.append(mm_embeds_item)
+
+            mm_embeds.extend(mm_embeds_req)
+            req_start_idx += num_scheduled_tokens
+
+        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
+
+        return mm_embeds, is_mm_embed
 
     def _get_cumsum_and_arange(
         self,
@@ -1388,17 +1511,28 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:total_num_scheduled_tokens]
-            if mm_embeds:
-                inputs_embeds = self.model.get_input_embeddings(
-                    input_ids, mm_embeds)
+            if vllm_version_is("0.11.0"):
+                mm_embeds = self._gather_mm_embeddings_0110(scheduler_output)
+                if mm_embeds:
+                    inputs_embeds = self.model.get_input_embeddings(
+                        input_ids, mm_embeds)
+                else:
+                    inputs_embeds = self.model.get_input_embeddings(input_ids)
             else:
-                inputs_embeds = self.model.get_input_embeddings(input_ids)
+                mm_embeds, is_mm_embed = self._gather_mm_embeddings(
+                    scheduler_output)
+
+                inputs_embeds = self.model.get_input_embeddings(
+                    input_ids,
+                    multimodal_embeddings=mm_embeds,
+                    is_multimodal=is_mm_embed,
+                )
+
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds[:total_num_scheduled_tokens].copy_(
                 inputs_embeds)
@@ -1744,17 +1878,33 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                        shape=(logits.shape[0],
                                               grammar_bitmask.shape[1]))
         cumulative_index = 0
-        seq = sorted(scheduler_output.structured_output_request_ids.items(),
-                     key=lambda x: x[1])
-        for req_id, _ in seq:
-            logit_index = struct_out_req_batch_indices[req_id]
-            num_spec_tokens = len(
-                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
-            for i in range(1 + num_spec_tokens):
-                sorted_bitmask[logit_index + i] = \
-                    grammar_bitmask[cumulative_index + i]
-                out_indices.append(logit_index + i)
-            cumulative_index += 1 + num_spec_tokens
+        if vllm_version_is("0.11.0"):
+            seq = sorted(
+                scheduler_output.structured_output_request_ids.items(),
+                key=lambda x: x[1])
+            for req_id, _ in seq:
+                logit_index = struct_out_req_batch_indices[req_id]
+                num_spec_tokens = len(
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, []))
+                for i in range(1 + num_spec_tokens):
+                    sorted_bitmask[logit_index + i] = \
+                        grammar_bitmask[cumulative_index + i]
+                    out_indices.append(logit_index + i)
+                cumulative_index += 1 + num_spec_tokens
+        else:
+            for req_id in scheduler_output.structured_output_request_ids:
+                num_spec_tokens = len(
+                    scheduler_output.scheduled_spec_decode_tokens.get(
+                        req_id, []))
+                if req_id in struct_out_req_batch_indices:
+                    logit_index = struct_out_req_batch_indices[req_id]
+                    for i in range(1 + num_spec_tokens):
+                        sorted_bitmask[logit_index +
+                                       i] = grammar_bitmask[cumulative_index +
+                                                            i]
+                        out_indices.append(logit_index + i)
+                cumulative_index += 1 + num_spec_tokens
         grammar_bitmask = sorted_bitmask
 
         # Serialization of np.ndarray is much more efficient than a tensor,
@@ -2021,8 +2171,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logits = model_output_broadcast_data["logits"]
 
             # Apply structured output bitmasks if present
-            if scheduler_output.grammar_bitmask is not None:
-                logits = self.apply_grammar_bitmask(scheduler_output, logits)
+            if vllm_version_is("0.11.0"):
+                if scheduler_output.grammar_bitmask is not None:
+                    logits = self.apply_grammar_bitmask(
+                        scheduler_output, logits)
+            else:
+                if scheduler_output.structured_output_request_ids:
+                    logits = self.apply_grammar_bitmask(
+                        scheduler_output, logits)
 
             # Sample the next token and get logprobs if needed.
             sampling_metadata = self.input_batch.sampling_metadata
