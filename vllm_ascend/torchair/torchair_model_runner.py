@@ -84,7 +84,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
     def _may_pad_kv_consumer_num_seq(self):
         # pd disaggregation scenario need redundant_batch_sizes to avoid each batch's seq_len exceed 16 tokens
-        # self.max_num_reqs here is greather than the actual maximum request number
+        # self.max_num_reqs here is greater than the actual maximum request number
         if self.is_kv_consumer:
             FIA_SEQ_LEN_LIMIT = 16
             new_max_num_reqs = self.max_num_reqs + math.ceil(
@@ -104,7 +104,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         tp_size = self.parallel_config.tensor_parallel_size
         # Use integer arithmetic for ceiling division.
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        # maintain the same calculation logic as the funciton _align_graph_size_divisible_by_tp_size()
+        # maintain the same calculation logic as the function _align_graph_size_divisible_by_tp_size()
         self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
     def _sync_metadata_across_dp(

@@ -524,7 +524,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _may_pad_kv_consumer_num_seq(self):
         # For Full Graph + MTP in a PD (Prefill/Decode) disaggregation scenario,
         # we may want to pad self.max_num_seqs in kv_consumer nodes to avoid
-        # exceeding a sequence length limit (16 tokens) in npu_fused_infer_attention_score opertion
+        # exceeding a sequence length limit (16 tokens) in npu_fused_infer_attention_score operation
         pass
 
     def _init_mc2_tokens_capacity(self):
