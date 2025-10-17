@@ -72,11 +72,10 @@ def roberta_embedding_forward(
     input_ids: torch.Tensor,
     position_ids: torch.Tensor,
     inputs_embeds: torch.Tensor | None = None,
-    
 ) -> torch.Tensor:
 
     token_type_ids = _decode_token_type_ids(input_ids)
-    
+
     if inputs_embeds is None:
         inputs_embeds = self.word_embeddings(input_ids)
 
