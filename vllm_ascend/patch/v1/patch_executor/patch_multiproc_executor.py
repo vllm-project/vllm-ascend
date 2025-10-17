@@ -146,4 +146,5 @@ class AscendWorkerProc(WorkerProc):
         # death_reader in child will get EOFError
         return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
 
+
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
