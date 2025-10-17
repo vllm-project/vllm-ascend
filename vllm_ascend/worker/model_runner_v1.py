@@ -2652,7 +2652,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
-            self.update_stream = torch.npu.Stream()
+            self.update_stream: torch.npu.Stream = torch.npu.Stream()
             set_graph_params(self.compilation_config.cudagraph_capture_sizes)
             self.model = ACLGraphWrapper(self.model,
                                          self.vllm_config,
