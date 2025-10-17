@@ -20,6 +20,8 @@ import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
 
+from vllm_ascend.ascend_config import get_ascend_config
+
 
 def select_experts(hidden_states: torch.Tensor,
                    router_logits: torch.Tensor,
@@ -176,7 +178,8 @@ def _select_experts_with_fusion_ops(
 
     topk_weights, topk_ids = None, None
     # NOTE: now npu_moe_gating_top_k can only support 'group_count=256' pattern
-    is_deepseek_v3_r1 = global_num_experts == 256
+    global_redundant_expert_num = get_ascend_config().init_redundancy_expert
+    is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256
     if is_deepseek_v3_r1:
         topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
             router_logits,
