@@ -770,7 +770,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 use_audio_in_video = True
 
         req_state.mrope_positions, req_state.mrope_position_delta = \
-            MRotaryEmbedding.get_input_positions_tensor(
+            self.model.get_mrope_input_positions(
                 req_state.prompt_token_ids,
                 hf_config=self.model_config.hf_config,
                 image_grid_thw=image_grid_thw,
