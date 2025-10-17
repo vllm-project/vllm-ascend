@@ -37,6 +37,8 @@ from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
+from vllm_ascend.quantization.w8a8_dynamic import \
+    AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
                                shared_expert_dp_enabled,
@@ -291,6 +293,9 @@ class AscendFusedMoE(FusedMoE):
 
         setup_moe_comm_method(self.moe_config)
 
+        self.is_w8a8_dynamic = hasattr(self.quant_method, "quant_method") and \
+                isinstance(self.quant_method.quant_method, AscendW8A8DynamicFusedMoEMethod)
+
     def update_expert_map(self, new_expert_map):
         self.expert_map = new_expert_map
 
@@ -330,17 +335,25 @@ class AscendFusedMoE(FusedMoE):
         enable_force_load_balance = forward_context.in_profile_run
 
         forward_context = get_forward_context()
+        if forward_context.moe_comm_type == MoECommType.ALLGATHER:
+            forward_context.moe_comm_method.is_w8a8_dynamic = self.is_w8a8_dynamic
         hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=forward_context.sp_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp)
 
+        if isinstance(hidden_states, tuple):
+            hidden_states, pertoken_scale = hidden_states
+        else:
+            pertoken_scale = None
+
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
+            pertoken_scale=pertoken_scale,
             top_k=self.top_k,
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
