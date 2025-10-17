@@ -34,7 +34,7 @@ MODELS_FOR_ACLGRAPH = [
 
 MODELS_FOR_ACLGRAPH_FULL_DECODE_ONLY = [
     "Qwen/Qwen3-0.6B",
-    "deepseek-ai/DeepSeek-V2-Lite-Chat",
+    "deepseek-ai/DeepSeek-V2-Lite",
 ]
 
 
