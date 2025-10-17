@@ -307,9 +307,9 @@ class AscendSFAMetadataBuilder:
 
         if self.cos_cache is None:
             self.cos_cache = model.model.layers[
-                0].self_attn.rotary_emb.cos_cached
+                model.model.start_layer].self_attn.rotary_emb.cos_cached
             self.sin_cache = model.model.layers[
-                0].self_attn.rotary_emb.sin_cached
+                model.model.start_layer].self_attn.rotary_emb.sin_cached
         if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
             self.cos_cache = self.cos_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
@@ -510,7 +510,6 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-        self.enable_prefetch = ascend_config.enable_prefetch
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
 
         vllm_config = get_current_vllm_config()
@@ -690,6 +689,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_indices = self.indexer_select(hidden_states_decode,
                                                decode_q_c,
                                                attn_metadata=attn_metadata,
+                                               cos=cos,
+                                               sin=sin,
                                                kv_cache=kv_cache)
 
             query_states = (decode_q_nope, decode_q_pe)
@@ -778,6 +779,8 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_indices = self.indexer_select(x=hidden_states_prefill,
                                                qr=prefill_qr,
                                                kv_cache=kv_cache,
+                                               cos=cos,
+                                               sin=sin,
                                                attn_metadata=attn_metadata)
             query_states = (prefill_q_nope, prefill_q_pe)
             key_states = (prefill_k_nope, prefill_k_pe)
@@ -920,17 +923,15 @@ class AscendSFAImpl(MLAAttentionImpl):
         x: torch.Tensor,
         qr: torch.Tensor,
         kv_cache: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        cos,
+        sin,
         attn_metadata: M,
     ):
         if attn_metadata.prefill is not None:
-            cos = attn_metadata.prefill.cos
-            sin = attn_metadata.prefill.sin
             actual_seq_lengths_query = attn_metadata.prefill.query_lens
             actual_seq_lengths_key = attn_metadata.prefill.seq_lens
             block_table = attn_metadata.prefill.block_table
         elif attn_metadata.decode is not None:
-            cos = attn_metadata.decode.cos
-            sin = attn_metadata.decode.sin
             actual_seq_lengths_query = attn_metadata.decode.actual_seq_lengths_q
             actual_seq_lengths_key = attn_metadata.decode.seq_lens
             block_table = attn_metadata.decode.block_table

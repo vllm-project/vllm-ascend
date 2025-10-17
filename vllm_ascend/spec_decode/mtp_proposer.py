@@ -67,6 +67,8 @@ class MtpProposer(Proposer):
                                    1,
                                    device=self.runner.device,
                                    dtype=torch.int32)
+        self.use_sparse = hasattr(vllm_config.model_config.hf_config,
+                                  "index_topk")
 
     def load_model(self, model) -> None:
         loader = get_model_loader(self.vllm_config.load_config)
@@ -80,9 +82,7 @@ class MtpProposer(Proposer):
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            if self.torchair_graph_enabled or (
-                    self.enable_shared_expert_dp
-                    and self.vllm_config.model_config.use_mla):
+            if self.torchair_graph_enabled:
                 self.model = TorchairDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
             else:
@@ -613,7 +613,7 @@ class MtpProposer(Proposer):
             npu_backend = torchair.get_npu_backend(compiler_config=config)
             self.torchair_compiled_model = torch.compile(
                 self.model,
-                dynamic=not get_ascend_config().use_sfa,
+                dynamic=not self.use_sparse,
                 fullgraph=True,
                 backend=npu_backend)
             return self.torchair_compiled_model
@@ -636,7 +636,7 @@ class MtpProposer(Proposer):
             self.torchair_compiled_models[
                 batch_size] = torchair.inference.cache_compile(
                     self.model.__dict__[forward_proxy_name],
-                    dynamic=not get_ascend_config().use_sfa,
+                    dynamic=not self.use_sparse,
                     fullgraph=True,
                     cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
