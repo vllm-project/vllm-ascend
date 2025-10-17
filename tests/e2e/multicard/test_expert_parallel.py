@@ -21,7 +21,7 @@ def test_e2e_ep_correctness(model_name):
             additional_config={"ascend_scheduler_config": {
                 "enabled": True
             }},
-            enforce_eager=True) as vllm_model:
+            enforce_eager=False) as vllm_model:
         tp_output = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     with VllmRunner(
@@ -31,7 +31,7 @@ def test_e2e_ep_correctness(model_name):
             additional_config={"ascend_scheduler_config": {
                 "enabled": True
             }},
-            enforce_eager=True) as vllm_model:
+            enforce_eager=False) as vllm_model:
         ep_output = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(
