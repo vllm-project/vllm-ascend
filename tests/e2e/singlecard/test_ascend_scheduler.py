@@ -9,7 +9,8 @@ from tests.e2e.model_utils import check_outputs_equal
 MODEL = "Qwen/Qwen3-0.6B"
 
 
-def test_concurrent_partial_prefill():
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_concurrent_partial_prefill(enforce_eager):
     with VllmRunner(MODEL,
                     additional_config={
                         'ascend_scheduler_config': {
@@ -18,7 +19,7 @@ def test_concurrent_partial_prefill():
                     },
                     max_num_seqs=3,
                     max_num_batched_tokens=2048,
-                    enforce_eager=True,
+                    enforce_eager=enforce_eager,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
         outputs = vllm_model.model.generate(["Hello my name is Robert and I"] *
@@ -28,7 +29,8 @@ def test_concurrent_partial_prefill():
             assert len(output.outputs) == 1
 
 
-def test_prefix_cache_stats_is_recorded():
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_prefix_cache_stats_is_recorded(enforce_eager):
     with VllmRunner(MODEL,
                     additional_config={
                         'ascend_scheduler_config': {
@@ -37,7 +39,7 @@ def test_prefix_cache_stats_is_recorded():
                     },
                     max_num_seqs=3,
                     max_num_batched_tokens=2048,
-                    enforce_eager=True,
+                    enforce_eager=enforce_eager,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
         # 17 tokens will make sure first 16 tokens are cached in a block
