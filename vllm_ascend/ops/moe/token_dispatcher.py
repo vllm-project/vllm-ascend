@@ -123,10 +123,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
     ):
         if self.with_quant:
             quant_mode = 2
-            if (expert_map is not None):
-                moe_expert_num = len(expert_map) + global_redundant_expert_num
-            else:
-                moe_expert_num = global_redundant_expert_num
+            moe_expert_num = len(expert_map)
         else:
             quant_mode = 0
             moe_expert_num = len(expert_map)
