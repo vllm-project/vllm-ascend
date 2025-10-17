@@ -51,7 +51,7 @@ def test_ilama_lora(ilama_lora_files):
                     max_loras=4,
                     max_model_len=1024,
                     max_num_seqs=16,
-                    enforce_eager=True) as vllm_model:
+                    enforce_eager=False) as vllm_model:
 
         output1 = do_sample(vllm_model.model, ilama_lora_files, lora_id=1)
         for i in range(len(EXPECTED_LORA_OUTPUT)):
