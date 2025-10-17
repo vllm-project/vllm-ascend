@@ -189,6 +189,25 @@ def test_sp_for_qwen3_moe() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
+def test_models_distributed_deepseek_v2_lite_with_flashcomm_v1() -> None:
+    example_prompts = [
+        "test" * 1001,
+    ]
+    sampling_params = SamplingParams(max_tokens=5,
+                                     temperature=0.0,
+                                     top_k=50,
+                                     top_p=0.9)
+    with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V2-Lite-W8A8"),
+                    dtype="auto",
+                    tensor_parallel_size=2,
+                    distributed_executor_backend="mp",
+                    enable_expert_parallel=True,
+                    enforce_eager=True,
+                    quantization="ascend") as vllm_model:
+        vllm_model.generate(example_prompts, sampling_params)
+
+
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})

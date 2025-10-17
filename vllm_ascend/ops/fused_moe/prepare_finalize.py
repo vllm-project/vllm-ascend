@@ -20,6 +20,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch_npu
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_dp_group, get_tensor_model_parallel_rank,
@@ -288,6 +289,10 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     TP AG → Attn → TP RS → EP AG → MoE → EP RS
     """
 
+    def __init__(self, moe_config: FusedMoEConfig):
+        super().__init__(moe_config)
+        self.is_w8a8_dynamic = None
+
     def prepare(
         self,
         hidden_states: torch.Tensor,
@@ -316,10 +321,18 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
+        if self.is_w8a8_dynamic:
+            hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
+                hidden_states)
+            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                pertoken_scale, True, True)
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             hidden_states, True, True)
         router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             router_logits, True, True)
+
+        if pertoken_scale is not None:
+            return (hidden_states, pertoken_scale), router_logits, None, None
 
         return hidden_states, router_logits, None, None
 
