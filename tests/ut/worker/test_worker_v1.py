@@ -448,6 +448,7 @@ class TestNPUWorker(TestBase):
             worker.compilation_config = MagicMock()
             worker.compilation_config.cudagraph_mode = MagicMock()
             mock_model_runner = MagicMock()
+            mock_decode_token_per_req = mock_model_runner.decode_token_per_req
             worker.model_runner = mock_model_runner
 
             # Test execute_dummy_batch
@@ -455,7 +456,9 @@ class TestNPUWorker(TestBase):
 
             # Verify call
             mock_model_runner._dummy_run.assert_called_once_with(
-                num_tokens=1, uniform_decode=True, force_attention=False)
+                num_tokens=mock_decode_token_per_req,
+                uniform_decode=True,
+                force_attention=False)
 
     @patch("vllm_ascend.worker.worker_v1.envs_vllm")
     @patch("vllm_ascend.worker.worker_v1.logger")
