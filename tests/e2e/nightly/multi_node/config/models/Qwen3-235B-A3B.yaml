@@ -1,0 +1,76 @@
+test_name: "test Qwen3-235B-A22B multi-dp"
+model: "Qwen/Qwen3-235B-A22B"
+num_nodes: 2
+npu_per_node: 16
+env_common:
+  VLLM_USE_MODELSCOPE: true
+  OMP_PROC_BIND: false
+  OMP_NUM_THREADS: 100
+  HCCL_BUFFSIZE: 1024
+  SERVER_PORT: 8080
+
+deployment:
+  -
+    local_index: 0
+    master_index: 0
+    headless: false
+    env_extend:
+    server_cmd: >
+        vllm serve "Qwen/Qwen3-235B-A22B"
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --data-parallel-size 4
+        --data-parallel-size-local 2
+        --data-parallel-address $LOCAL_IP
+        --data-parallel-rpc-port 13389
+        --tensor-parallel-size 8
+        --seed 1024
+        --enable-expert-parallel
+        --max-num-seqs 16
+        --max-model-len 8192
+        --max-num-batched-tokens 8192
+        --trust-remote-code
+        --no-enable-prefix-caching
+        --gpu-memory-utilization 0.9
+  -
+    local_index: 1
+    master_index: 0
+    headless: true
+    env_extend:
+    server_cmd: >
+        vllm serve "Qwen/Qwen3-235B-A22B"
+        --headless
+        --data-parallel-size 4
+        --data-parallel-size-local 2
+        --data-parallel-start-rank 2
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389
+        --tensor-parallel-size 8
+        --seed 1024
+        --max-num-seqs 16
+        --max-model-len 8192
+        --max-num-batched-tokens 8192
+        --enable-expert-parallel
+        --trust-remote-code
+        --no-enable-prefix-caching
+        --gpu-memory-utilization 0.9
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs400
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 2
+    batch_size: 1
+    baseline: 5
+    threshold: 0.97
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/AIME2024
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime2024/aime2024_gen_0_shot_chat_prompt
+    max_out_len: 10
+    batch_size: 32
+    baseline: 1
+    threshold: 1

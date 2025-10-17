@@ -102,6 +102,15 @@ jobs:
             wait $LOG_PID || true
             kill $MONITOR_PID || true
 
+        - name: Generate summary
+          if: always()
+          run: |
+            if [ -f "/root/.cache/test_summary.md" ]; then
+              cat /root/.cache/test_summary.md >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "No summary file found." >> "$GITHUB_STEP_SUMMARY"
+            fi
+
         - name: Post process
           if: always()
           run: |
