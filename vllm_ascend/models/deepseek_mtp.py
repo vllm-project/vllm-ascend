@@ -88,6 +88,8 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
+        inputs_embeds = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            inputs_embeds, True)
         # masking inputs at position 0, as not needed by MTP
         inputs_embeds = torch.where((positions == 0).unsqueeze(-1),
                                     torch.zeros_like(inputs_embeds),
@@ -200,4 +202,6 @@ class CustomDeepSeekMTP(DeepSeekMTP):
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, previous_hidden_states,
                                    inputs_embeds, spec_step_idx)
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+            hidden_states, True)
         return hidden_states

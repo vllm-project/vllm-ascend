@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -53,7 +54,9 @@ class TestAscendRMSNorm(PytestBase):
     # Test case for the most common and basic scenario
     @pytest.mark.parametrize(
         "residual", [None, torch.randn(4, 8, dtype=torch.float16)])
-    def test_forward_oot_basic(self, residual):
+    @patch("torch.ops.vllm.maybe_chunk_residual")
+    def test_forward_oot_basic(self, mock_maybe_chunk_residual, residual):
+        mock_maybe_chunk_residual.side_effect = lambda x, residual: residual
         layer = RMSNorm(hidden_size=8, eps=1e-05)
         x = torch.randn(4, 8, dtype=torch.float16)
         if residual is not None:
@@ -117,6 +120,8 @@ class TestAscendRMSNorm(PytestBase):
         mock_forward_context.layer_idx = 0
         mock_forward_context.num_hidden_layers = num_hidden_layers
         mock_forward_context.fusion_linear = "gate_up_dense"
+        mocker.patch("torch.ops.vllm.maybe_chunk_residual",
+                     lambda x, residual: residual)
 
         # Ensure fusion and layer_idx increment are handled correctly
         x = torch.randn(4, 8, dtype=torch.float16)
