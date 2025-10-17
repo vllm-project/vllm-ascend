@@ -200,6 +200,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         shared_experts: Optional[Any] = None,
         quantized_x_for_share: Optional[Any] = None,
         dynamic_scale_for_share: Optional[Any] = None,
+        pertoken_scale: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -228,6 +229,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             moe_comm_method = get_forward_context().moe_comm_method
             return moe_comm_method.fused_experts(
                 hidden_states=x,
+                pertoken_scale=pertoken_scale,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
@@ -240,11 +242,13 @@ class AscendW8A8DynamicFusedMoEMethod:
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num)
 
-        topk_weights = topk_weights.to(x.dtype)
+        # TODO: get dtype from config/forward_context
+        topk_weights = topk_weights.to(router_logits.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
         return moe_comm_method.fused_experts(
             hidden_states=x,
+            pertoken_scale=pertoken_scale,
             w1=layer.w13_weight,
             w1_scale=layer.w13_weight_scale_fp32,
             w2=layer.w2_weight,
