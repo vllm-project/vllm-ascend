@@ -37,8 +37,6 @@ class AscendCommonAttentionMetadata:
     """Number of requests"""
     num_actual_tokens: int
     """Total number of tokens in batch"""
-    num_input_tokens: int
-    """Total number of tokens in batch, including padding tokens"""
 
     max_query_len: int
     """Max token number of request in batch"""
@@ -65,6 +63,10 @@ class AscendCommonAttentionMetadata:
     is_only_prefill: bool = False
 
     graph_pad_size: int = -1
+
+    # num_input_tokens refers to total number of tokens including
+    # padding tokens. It is used to handle some padding operations.
+    num_input_tokens: int = 0
 
     # NOTE: This is a temporary solution for rotary embedding in MLA
     cos: torch.Tensor = None

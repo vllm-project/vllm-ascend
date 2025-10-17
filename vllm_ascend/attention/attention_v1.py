@@ -217,7 +217,8 @@ class AscendAttentionMetadataBuilder:
                                                                        num_reqs
                                                                        + 1]
 
-        if attn_state == AscendAttentionState.DecodeOnly:
+        if attn_state == AscendAttentionState.DecodeOnly and \
+            common_attn_metadata.num_input_tokens > num_actual_tokens:
             padded_num_tokens = common_attn_metadata.num_input_tokens - num_actual_tokens
             seq_lens = torch.cat([
                 seq_lens,

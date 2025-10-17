@@ -2261,7 +2261,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     seq_lens=self.seq_lens_cpu[:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
-                    num_input_tokens=num_tokens,
                     actual_seq_lengths_q=self.actual_seq_lengths_q,
                     block_table_tensor=block_table_tensor[:num_reqs],
                     slot_mapping=self.slot_mapping,
