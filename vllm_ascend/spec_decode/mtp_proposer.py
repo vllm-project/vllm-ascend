@@ -82,9 +82,7 @@ class MtpProposer(Proposer):
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            if self.torchair_graph_enabled or (
-                    self.enable_shared_expert_dp
-                    and self.vllm_config.model_config.use_mla):
+            if self.torchair_graph_enabled:
                 self.model = TorchairDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
             else:
