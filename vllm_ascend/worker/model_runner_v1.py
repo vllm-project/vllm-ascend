@@ -2922,22 +2922,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 layer_name = kv_cache_tensor.shared_by[idx]
                 if "linear_attn" in layer_name:
                     # for mamba linear attention
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        if ("attn" in layer_name_inner and "linear_attn" not in layer_name_inner) or \
-                            layer_name_inner in kv_cache_raw_tensors.keys():
-                            continue
-                        if self.vllm_config.kv_transfer_config is None:
-                            tensor = torch.zeros(kv_cache_tensor.size,
-                                                 dtype=torch.int8,
-                                                 device=self.device)
-                        else:
-                            cache_size_aligned = kv_cache_tensor.size + alignment
-                            tensor = torch.zeros(cache_size_aligned,
-                                                 dtype=torch.int8,
-                                                 device=self.device)
-                            tensor = self._align_memory(
-                                tensor, alignment)[:kv_cache_tensor.size]
-                        kv_cache_raw_tensors[layer_name_inner] = tensor
+                    if self.vllm_config.kv_transfer_config is None:
+                        tensor = torch.zeros(kv_cache_tensor.size,
+                                                dtype=torch.int8,
+                                                device=self.device)
+                    else:
+                        cache_size_aligned = kv_cache_tensor.size + alignment
+                        tensor = torch.zeros(cache_size_aligned,
+                                                dtype=torch.int8,
+                                                device=self.device)
+                        tensor = self._align_memory(
+                            tensor, alignment)[:kv_cache_tensor.size]
+                    kv_cache_raw_tensors[layer_name] = tensor
                 elif "attn" in layer_name:
                     # for other attentions, e.g., self_attn, sliding window attn
                     if self.vllm_config.kv_transfer_config is None:
@@ -2961,6 +2957,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         v_tensor = self._align_memory(v_tensor,
                                                       alignment)[:cache_size]
                     kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
+                    for layer_name_inner in kv_cache_tensor.shared_by:
+                        if ("attn" in layer_name_inner and "linear_attn" not in layer_name_inner) and \
+                            layer_name_inner not in kv_cache_raw_tensors.keys():
+                            kv_cache_raw_tensors[layer_name_inner] = tensor
+                    break
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
