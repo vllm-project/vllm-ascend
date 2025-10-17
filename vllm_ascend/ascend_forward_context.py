@@ -114,7 +114,7 @@ def set_ascend_forward_context(
         # the performance may degrade due to the switching of communication methods.
         if is_moe_model(vllm_config):
             sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1
+                tp_world_size > 1 and num_tokens is not None
         else:
             sp_enabled = enable_sp(vllm_config) and \
                 tp_world_size > 1 and \

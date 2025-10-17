@@ -815,7 +815,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Create a tensor for num_tokens_after_padding
         num_tokens_after_padding = torch.tensor([max_tokens_across_dp] *
                                                 self.dp_size,
-                                                device="npu",
+                                                device="cpu",
                                                 dtype=torch.int32)
 
         return max_tokens_across_dp, num_tokens_after_padding, global_with_prefill, global_enable_dbo
