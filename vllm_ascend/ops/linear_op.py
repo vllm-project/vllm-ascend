@@ -49,7 +49,7 @@ from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.utils import (dense_optim_enable, enable_sp,
                                matmul_allreduce_enable, mlp_tp_enable,
-                               oproj_tp_enable)
+                               oproj_tp_enable, shared_expert_dp_enabled)
 
 
 class CustomLinearOp:
@@ -366,7 +366,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                                              input_parallel,
                                              bias=bias_)
         else:
-            output = torch.ops.vllm.apply_matmul_and_reduce(self.prefix, input_parallel)
+            output = torch.ops.vllm.apply_matmul_and_reduce(
+                self.prefix, input_parallel)
 
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
@@ -415,7 +416,8 @@ def _get_row_parallel_op(
 
 
 def get_parallel_op(disable_tp, prefix, layer, direct):
-    if disable_tp:
+    if disable_tp or ("shared_experts" in prefix
+                      and shared_expert_dp_enabled()):
         return None, 0, 1
     custom_op: Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp,
                               MLPRowParallelOp, OProjRowParallelOp,

@@ -59,7 +59,7 @@ node0
 ```shell
 #!/bin/sh
 # this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip
+# nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
 local_ip="xxxx"
 
@@ -97,8 +97,12 @@ node1
 ```shell
 #!/bin/sh
 
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
 local_ip="xxxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxxx"
 
 export HCCL_IF_IP=$local_ip

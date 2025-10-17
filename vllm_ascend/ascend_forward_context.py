@@ -11,7 +11,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, is_moe_model, version_check
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
@@ -112,15 +112,20 @@ def set_ascend_forward_context(
         # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
-        sp_enabled = enable_sp(vllm_config) and \
-            tp_world_size > 1 and \
-            num_tokens is not None and num_tokens > 1000
+        if is_moe_model(vllm_config):
+            sp_enabled = enable_sp(vllm_config) and \
+                tp_world_size > 1
+        else:
+            sp_enabled = enable_sp(vllm_config) and \
+                tp_world_size > 1 and \
+                num_tokens is not None and num_tokens > 1000
 
         if sp_enabled:
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
         forward_context.sp_enabled = sp_enabled
+        forward_context.num_tokens = num_tokens
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
@@ -155,13 +160,18 @@ def set_ascend_forward_context(
         # this optim now just support dense models due to the specific operators used.
         # Once the necessary conditions are met, support for MOE models will also be added.
         from vllm_ascend.quantization.quant_config import AscendQuantConfig
+        model_type_scope = ["llama", "qwen2", "qwen3"]
+        if version_check():
+            model_type_scope.append("qwen3_moe")
         addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
-            vllm_config.model_config.hf_config.model_type in ["llama", "qwen2", "qwen3"] and \
+            vllm_config.model_config.hf_config.model_type in model_type_scope and \
             forward_context.layer_idx is not None
         if addrmsnorm_quant_fusion_enabled:
             forward_context.model_instance = model_instance
             forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
             forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
+            if vllm_config.model_config.hf_config.model_type == "qwen3_moe":
+                forward_context.fusion_linear = "gate_moe" if forward_context.layer_idx == 0 else "qkv_moe"
         forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
 
         if num_tokens is None and attn_metadata is not None:
@@ -169,8 +179,14 @@ def set_ascend_forward_context(
 
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
-            max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
-            )
+            max_tokens_across_dp = \
+                forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
+            if sp_enabled:
+                padded_length = (max_tokens_across_dp + tp_world_size -
+                                 1) // tp_world_size * tp_world_size
+                pad_size = padded_length - num_tokens
+                forward_context.padded_length = padded_length
+                forward_context.pad_size = pad_size
         else:
             max_tokens_across_dp = num_tokens
 
