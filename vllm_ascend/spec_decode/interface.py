@@ -2,7 +2,7 @@ import enum
 from typing import Optional
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -33,7 +33,9 @@ class Proposer:
                   with_prefill: bool = False,
                   skip_attn: bool = False,
                   num_reqs: int = 0,
-                  num_tokens_across_dp: Optional[torch.Tensor] = None):
+                  num_tokens_across_dp: Optional[torch.Tensor] = None,
+                  aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+                  batch_descriptor=None):
         """Called by dummy_run in modle_runner"""
         raise NotImplementedError
 
