@@ -78,6 +78,10 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
     bias1, bias2 = None, None
     _output_dtype = w2_scale.dtype
 
+    weight_prefetch_method = get_forward_context().weight_prefetch_method
+    if weight_prefetch_method:
+        weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(
+            hidden_states)
     is_mc2 = get_forward_context().moe_comm_type == MoECommType.MC2
     if w1_scale_bias is None and is_mc2:
         if fusion and not dynamic_eplb:
@@ -173,7 +177,6 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             group_type=0,
             group_list=group_list,
             output_dtype=_output_dtype)[0]
-
     return hidden_states
 
 

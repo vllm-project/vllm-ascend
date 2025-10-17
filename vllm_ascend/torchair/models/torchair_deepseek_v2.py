@@ -791,7 +791,7 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_mla=True,
-            use_sfa=True,
+            use_sparse=True,
             # SFA Args
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
@@ -879,12 +879,12 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
         self.use_mla = False
-        self.use_sfa = False
+        self.use_sparse = False
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
-            if ascend_config.use_sfa:
+            if hasattr(model_config.hf_config, "index_topk"):
                 attn_cls = TorchairDeepseekV2SFAAttention
-                self.use_sfa = True
+                self.use_sparse = True
             else:
                 attn_cls = TorchairDeepseekV2MLAAttention  # type: ignore[assignment]
             self.use_mla = True
@@ -950,7 +950,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         forward_context = get_forward_context()
         if attn_metadata is not None:
             decoding_condition_met = (
-                not attn_metadata.is_prefill if self.use_sfa else
+                not attn_metadata.is_prefill if self.use_sparse else
                 not forward_context.with_prefill if self.use_mla else False)
             mla_moe_communication = decoding_condition_met and self.mla_moe_communication and replace_allreduce
         else:
@@ -975,7 +975,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 # to save npu memory because they're no longer used.
                 dispose_tensor(previous_hidden_states)
                 dispose_tensor(previous_residual)
-        if mla_moe_communication and self.layer_idx > self.first_k_dense_replace:
+        if mla_moe_communication and self.layer_idx > self.first_k_dense_replace and self.layer_idx < self.layers:
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
 
@@ -1034,7 +1034,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             # The scaling of DeepseekV2MOE output would be done in the forward
             # of DeepseekV2MOE
             hidden_states *= 1. / self.routed_scaling_factor
-        if mla_moe_communication and self.layer_idx == self.layers - 1:
+        if mla_moe_communication and self.layer_idx >= self.layers - 1:
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
             residual = tensor_model_parallel_all_gather(residual, dim=0)
