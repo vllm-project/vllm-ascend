@@ -17,14 +17,8 @@ spec:
           - name: vllm-leader
             image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
             env:
-              - name: VLLM_USE_MODELSCOPE
-                value: "true"
               - name: WORKSPACE
                 value: "/root/workspace"
-              - name: WORLD_SIZE
-                value: "2"
-              - name: NPU_PER_NODE
-                value: "16"
               # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
               - name: VLLM_VERSION
                 value: "v0.11.0"
@@ -37,6 +31,7 @@ spec:
               - -c
               - |
                 bash /root/.cache/tests/run.sh
+                tail -f /dev/null
             resources:
               limits:
                 huawei.com/ascend-1980: "16"
@@ -77,14 +72,8 @@ spec:
           - name: vllm-worker
             image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
             env:
-              - name: VLLM_USE_MODELSCOPE
-                value: "true"
               - name: WORKSPACE
                 value: "/root/workspace"
-              - name: WORLD_SIZE
-                value: "2"
-              - name: NPU_PER_NODE
-                value: "16"
               # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
               - name: VLLM_VERSION
                 value: "v0.11.0"
@@ -97,6 +86,7 @@ spec:
               - -c
               - |
                 bash /root/.cache/tests/run.sh
+                tail -f /dev/null
             resources:
               limits:
                 huawei.com/ascend-1980: "16"

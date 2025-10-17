@@ -21,6 +21,10 @@ parser.add_argument("--local-device-ids",
                     type=str,
                     required=False,
                     help="local device ids")
+parser.add_argument("--ranktable-path",
+                    type=str,
+                    default="./ranktable.json",
+                    help="output rank table path")
 args = parser.parse_args()
 local_host = args.local_host
 prefill_device_cnt = args.prefill_device_cnt
@@ -130,7 +134,8 @@ ranktable = {
 }
 
 if local_rank == '0':
-    with open("ranktable.json", "w") as f:
+    os.makedirs(os.path.dirname(args.ranktable_path), exist_ok=True)
+    with open(args.ranktable_path, "w") as f:
         json.dump(ranktable, f, indent=4)
 
     print("gen ranktable.json done")
