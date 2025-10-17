@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.synchronize import Lock as LockType
 
 import vllm.v1.executor.multiproc_executor
-
 from vllm import  envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
@@ -105,6 +104,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         self.has_connector = self.vllm_config.kv_transfer_config is not None
 
 class AscendWorkerProc(WorkerProc):
+    
     @staticmethod
     def make_worker_process(
         vllm_config: VllmConfig,
