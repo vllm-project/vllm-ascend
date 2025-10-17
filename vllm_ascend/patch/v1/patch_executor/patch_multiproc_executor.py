@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.synchronize import Lock as LockType
 
 import vllm.v1.executor.multiproc_executor
-from vllm import  envs
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.utils import (get_distributed_init_method, get_loopback_ip,
@@ -103,6 +103,7 @@ class AscendMultiprocExecutor(MultiprocExecutor):
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
 
+
 class AscendWorkerProc(WorkerProc):
 
     @staticmethod
@@ -144,5 +145,6 @@ class AscendWorkerProc(WorkerProc):
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
         return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
+    
 
 vllm.v1.executor.multiproc_executor.MultiprocExecutor = AscendMultiprocExecutor
