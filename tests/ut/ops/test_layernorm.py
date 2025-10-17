@@ -120,6 +120,7 @@ class TestAscendRMSNorm(PytestBase):
         mock_forward_context.layer_idx = 0
         mock_forward_context.num_hidden_layers = num_hidden_layers
         mock_forward_context.fusion_linear = "gate_up_dense"
+        mock_forward_context.weight_prefetch_method = None
         mocker.patch("torch.ops.vllm.maybe_chunk_residual",
                      lambda x, residual: residual)
 
