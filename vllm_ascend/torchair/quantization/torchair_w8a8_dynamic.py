@@ -221,7 +221,7 @@ def torchair_fused_experts_with_mc2(
     w1_scale_bias: torch.Tensor = None,
     w2_scale_bias: torch.Tensor = None,
     dynamic_eplb: bool = False,
-):
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     assert mc2_mask is not None
     if log2phy is not None:
         topk_ids = log2phy[topk_ids]
