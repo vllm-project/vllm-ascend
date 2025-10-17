@@ -34,8 +34,6 @@ class AscendConfig:
 
     def __init__(self, vllm_config):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-        self.is_deepseek_sfa = vllm_config.model_config is not None and vllm_config.model_config.is_deepseek_mla and vllm_config.model_config.hf_text_config.model_type == "deepseek_v32"
-        self.use_sfa = self.is_deepseek_sfa
 
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
@@ -53,6 +51,7 @@ class AscendConfig:
 
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
         self.expert_map_path = additional_config.get("expert_map_path", None)
+        self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
         self.expert_map_record_path = additional_config.get(
             "expert_map_record_path",
             None)  # Provide path to export expert map
@@ -101,7 +100,7 @@ class AscendConfig:
                 )
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
-        self.num_head_replica = 0
+        self.num_head_replica = 1
         if vllm_config.kv_transfer_config is not None and not vllm_config.model_config.is_deepseek_mla:
             prefill_tp_size = vllm_config.kv_transfer_config.get_from_extra_config(
                 "prefill", {"tp_size": 1})["tp_size"]
@@ -114,7 +113,7 @@ class AscendConfig:
                     # only support Qwen model now
                     # TODO: use a more robust method to get kv_head_num
                     num_kv_head = vllm_config.model_config.hf_config.num_key_value_heads
-                    self.num_head_replica = prefill_tp_size // num_kv_head
+                    self.num_head_replica = prefill_tp_size // num_kv_head if prefill_tp_size >= num_kv_head else 1
                     prefill_tp_size = min(prefill_tp_size, num_kv_head)
                     decode_tp_size = min(decode_tp_size, num_kv_head)
                     self.pd_head_ratio = prefill_tp_size // decode_tp_size
@@ -215,6 +214,9 @@ class WeightPrefetchConfig:
             "qkv": 1.0,
             "o": 1.0,
         },
+        "moe": {
+            "gate_up": 0.8
+        }
     }
 
     def __init__(self, weight_prefetch_config: dict):

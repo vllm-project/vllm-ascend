@@ -21,6 +21,7 @@ import contextlib
 import gc
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -40,14 +41,11 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
 from vllm.config.model import TaskOption, _get_and_verify_dtype
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.inputs import TextPrompt
-from vllm.model_executor.model_loader import get_model_loader
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import FlexibleArgumentParser, get_open_port
+from vllm.utils import get_open_port
 
 from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
@@ -91,7 +89,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
-    def _start_server(self, model: str, vllm_serve_args: list[str],
+    def _start_server(self, model: str, server_cmd: list[str],
                       env_dict: Optional[dict[str, str]]) -> None:
         """Subclasses override this method to customize server process launch
         """
@@ -102,7 +100,7 @@ class RemoteOpenAIServer:
         if env_dict is not None:
             env.update(env_dict)
         self.proc: subprocess.Popen = subprocess.Popen(
-            ["vllm", "serve", model, *vllm_serve_args],
+            server_cmd,
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
@@ -110,15 +108,19 @@ class RemoteOpenAIServer:
 
     def __init__(self,
                  model: str,
-                 server_host: str,
-                 server_port: int,
-                 vllm_serve_args: list[str],
+                 vllm_serve_args: Union[list[str], str],
                  *,
+                 server_host: str = "0.0.0.0",
+                 server_port: int = 8080,
                  env_dict: Optional[dict[str, str]] = None,
-                 seed: Optional[int] = 0,
+                 seed: Optional[int] = None,
                  auto_port: bool = True,
                  max_wait_seconds: Optional[float] = None,
                  override_hf_configs: Optional[dict[str, Any]] = None) -> None:
+        if isinstance(vllm_serve_args, str):
+            vllm_serve_args = shlex.split(vllm_serve_args)
+        else:
+            vllm_serve_args = ["vllm", "serve", model, *vllm_serve_args]
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
                 raise ValueError("You have manually specified the port "
@@ -142,32 +144,8 @@ class RemoteOpenAIServer:
                 "--hf-overrides",
                 json.dumps(override_hf_configs)
             ]
-
-        parser = FlexibleArgumentParser(
-            description="vLLM's remote OpenAI server.")
-        subparsers = parser.add_subparsers(required=False, dest="subparser")
-        parser = ServeSubcommand().subparser_init(subparsers)
-        args = parser.parse_args([*vllm_serve_args])
-        self.uds = args.uds
-        if args.uds:
-            self.host = None
-            self.port = None
-        else:
-            self.host = str(server_host)
-            self.port = int(server_port)
-
-        self.show_hidden_metrics = \
-            args.show_hidden_metrics_for_version is not None
-
-        # download the model before starting the server to avoid timeout
-        is_local = os.path.isdir(model)
-        if not is_local:
-            engine_args = AsyncEngineArgs.from_cli_args(args)
-            model_config = engine_args.create_model_config()
-            load_config = engine_args.create_load_config()
-
-            model_loader = get_model_loader(load_config)
-            model_loader.download_model(model_config)
+        self.host = str(server_host)
+        self.port = int(server_port)
 
         self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 7200
@@ -195,11 +173,7 @@ class RemoteOpenAIServer:
         This is for headless mode, where the api server
         process only exists in the leader node.
         """
-        if self.uds:
-            client = httpx.Client(transport=httpx.HTTPTransport(uds=self.uds))
-        else:
-            client = requests
-
+        client = requests
         try:
             while True:
                 try:
@@ -216,8 +190,7 @@ class RemoteOpenAIServer:
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
         start = time.time()
-        client = (httpx.Client(transport=httpx.HTTPTransport(
-            uds=self.uds)) if self.uds else requests)
+        client = requests
         while True:
             try:
                 if client.get(url).status_code == 200:
@@ -231,15 +204,14 @@ class RemoteOpenAIServer:
                 if result is not None and result != 0:
                     raise RuntimeError("Server exited unexpectedly.") from None
 
-                time.sleep(1)
+                time.sleep(5)
                 if time.time() - start > timeout:
                     raise RuntimeError(
                         "Server failed to start in time.") from None
 
     @property
     def url_root(self) -> str:
-        return (f"http://{self.uds.split('/')[-1]}"
-                if self.uds else f"http://{self.host}:{self.port}")
+        return f"http://{self.host}:{self.port}"
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)

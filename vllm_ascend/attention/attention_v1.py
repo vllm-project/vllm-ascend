@@ -34,10 +34,11 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          maybe_save_kv_layer_to_connector,
                                          wait_for_kv_layer_from_connector)
-from vllm_ascend.compilation.acl_graph import get_graph_params
+from vllm_ascend.compilation.acl_graph import (get_graph_params,
+                                               update_graph_params_workspaces)
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d, nd_to_nz_spec)
+                               nd_to_nz_2d, nd_to_nz_spec, version_check)
 
 from ..utils import weak_ref_tensors
 
@@ -139,7 +140,13 @@ class AscendMetadata:
     # The sequence length per sequence. Sequence length means the computed
     # tokens + new tokens (is None if it is a decoding).
     # (batch_size,)
+    # TODO(Angazenn): The following parameters are quite redundant and
+    # contains similar information (such as seq_lens seq_lens_list). We
+    # should simplified these parameters once attention schema in vLLM-Ascend
+    # is unified.
     seq_lens: torch.Tensor = None
+    seq_lens_list: List[int] = None  # type: ignore
+    actual_seq_lengths_q: List[int] = None  # type: ignore
 
     query_start_loc: torch.Tensor = None
     query_lens: torch.Tensor = None
@@ -228,7 +235,9 @@ class AscendAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
+            seq_lens_list=seq_lens.tolist(),
             max_query_len=common_attn_metadata.max_query_len,
+            actual_seq_lengths_q=query_start_loc_cpu[1:].tolist(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
@@ -289,6 +298,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+        self.torch_npu_check = version_check()
 
     def _forward_prefill_no_cache(
         self,
@@ -396,13 +406,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
             forward_context: ForwardContext = get_forward_context()
             num_tokens = query.shape[0]
             if forward_context.capturing:
+                if self.torch_npu_check:
+                    # Get workspace from cache or calculate it if not present.
+                    workspace = graph_params.workspaces.get(num_tokens)
+                    if workspace is None:
+                        workspace = torch_npu._npu_paged_attention_get_workspace(
+                            query=query,
+                            key_cache=self.key_cache,
+                            value_cache=self.value_cache,
+                            num_kv_heads=self.num_kv_heads,
+                            num_heads=self.num_heads,
+                            scale_value=self.scale,
+                            block_table=attn_metadata.block_tables,
+                            context_lens=attn_metadata.seq_lens,
+                            out=output)
+                        update_graph_params_workspaces(num_tokens, workspace)
+
+                # Handle graph capturing mode
                 stream = torch_npu.npu.current_stream()
 
                 event = torch.npu.ExternalEvent()
                 event.wait(stream)
                 event.reset(stream)
                 graph_params.events[num_tokens].append(event)
-
                 graph_params.attn_params[num_tokens].append((
                     weak_ref_tensors(query),
                     weak_ref_tensors(self.key_cache),
@@ -416,16 +442,30 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 ))
 
                 torch.npu.graph_task_group_begin(stream)
-                torch_npu._npu_paged_attention(
-                    query=query,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    num_kv_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    scale_value=self.scale,
-                    block_table=attn_metadata.block_tables,
-                    context_lens=attn_metadata.seq_lens,
-                    out=output)
+
+                if self.torch_npu_check:
+                    torch_npu._npu_paged_attention(
+                        query=query,
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        num_kv_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        scale_value=self.scale,
+                        block_table=attn_metadata.block_tables,
+                        context_lens=attn_metadata.seq_lens,
+                        out=output,
+                        workspace=workspace)
+                else:
+                    torch_npu._npu_paged_attention(
+                        query=query,
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        num_kv_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        scale_value=self.scale,
+                        block_table=attn_metadata.block_tables,
+                        context_lens=attn_metadata.seq_lens,
+                        out=output)
                 handle = torch.npu.graph_task_group_end(stream)
                 graph_params.handles[num_tokens].append(handle)
             else:
@@ -496,8 +536,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_table=attn_metadata.block_tables,
                 input_layout="TND",
                 block_size=block_size,
-                actual_seq_lengths=attn_metadata.query_start_loc[1:],
-                actual_seq_lengths_kv=attn_metadata.seq_lens,
+                actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                actual_seq_lengths_kv=attn_metadata.seq_lens_list,
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale=self.scale,
@@ -573,9 +613,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             num_actual_tokens = attn_metadata.num_actual_tokens
             assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
             attn_type = self.attn_type
-            if attn_type != AttentionType.DECODER:
-                raise NotImplementedError("Encoder self-attention and "
-                                          "encoder/decoder cross-attention "
+            if attn_type != AttentionType.DECODER and attn_type != AttentionType.ENCODER_ONLY:
+                raise NotImplementedError("Encoder/decoder cross-attention "
                                           "are not implemented for "
                                           "PallasAttentionBackendImpl")
             # View q k v to BSH.
@@ -595,9 +634,25 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
                     slot_indices=slots)
-
+            if attn_type == AttentionType.ENCODER_ONLY:
+                cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
+                attn_out = torch_npu.npu_fusion_attention(
+                    query,
+                    key,
+                    value,
+                    head_num=self.num_heads,
+                    input_layout="TND",
+                    scale=self.scale,
+                    sparse_mode=4,
+                    atten_mask=attn_metadata.attn_mask,
+                    pre_tockens=attn_metadata.max_query_len,
+                    next_tockens=attn_metadata.max_query_len,
+                    actual_seq_qlen=cum_seq_len,
+                    actual_seq_kvlen=cum_seq_len,
+                )
+                output = attn_out[0]
             # V0-Style scheduler situation.
-            if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 output = self._forward_prefill_no_cache(
                     query, key, value, attn_metadata, output, num_tokens)
             elif attn_metadata.attn_state == \

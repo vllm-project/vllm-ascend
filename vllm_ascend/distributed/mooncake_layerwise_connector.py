@@ -360,7 +360,7 @@ class SendingLayerThread(threading.Thread):
         remote_kv_base_addrs = req_meta.kv_caches_base_addr
 
         remote_block_ids = req_meta.block_ids
-        if self.num_head_replica >= 1 and self.tp_rank % self.num_head_replica != 0:
+        if self.tp_rank % self.num_head_replica != 0:
             pass
         elif self.pd_head_ratio == 1:
             layer_local_kv_base_addr = [

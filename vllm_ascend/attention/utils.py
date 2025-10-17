@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Any, List
 
 import torch
+import torch.nn.functional as F
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
@@ -101,8 +102,6 @@ def split_decodes_and_prefills(
         return num_reqs, 0, num_tokens, 0
 
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    assert torch.all(query_lens[first_prefill:] > decode_threshold)
-    assert torch.all(query_lens[:first_prefill] <= decode_threshold)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
     num_decode_tokens = query_start_loc[first_prefill].item()
@@ -139,3 +138,39 @@ def maybe_save_kv_layer_to_connector(
         return
     # TODO: assert ascendMetadata
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
+
+
+def round_up(val: int, align: int) -> int:
+    if align == 0:
+        return 0
+    return -(val // -align) * align
+
+
+def trans_rope_weight(weight, rope_dim):
+    if rope_dim == 0:
+        return weight.contiguous()
+    nope_part = weight[..., :-rope_dim, :]
+    rope_part = weight[..., -rope_dim:, :]
+    reordered_rope_part = torch.cat(
+        (rope_part[..., ::2, :], rope_part[..., 1::2, :]), dim=-2)
+    return torch.cat((nope_part, reordered_rope_part), dim=-2).contiguous()
+
+
+def transdata(nd_mat, block_size: tuple = (16, 16)):
+    r = round_up(nd_mat.shape[0], block_size[0])
+    c = round_up(nd_mat.shape[1], block_size[1])
+    r_pad = r - nd_mat.shape[0]
+    c_pad = c - nd_mat.shape[1]
+    nd_mat = F.pad(nd_mat, (0, r_pad, 0, c_pad))
+    nz_mat = torch.permute(
+        torch.reshape(
+            nd_mat,
+            (r // block_size[0], block_size[0], c // block_size[1],
+             block_size[1]),
+        ),
+        [2, 0, 1, 3],
+    )
+    nz_mat = torch.reshape(
+        nz_mat,
+        (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3]))
+    return nz_mat

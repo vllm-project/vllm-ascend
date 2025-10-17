@@ -376,7 +376,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(q_pe.shape[1], self.impl.num_heads)
         self.assertEqual(q_pe.shape[2], self.impl.qk_rope_head_dim)
 
-    def test_process_weights_after_loading(self):
+    @patch('torch_npu.npu_format_cast')
+    def test_process_weights_after_loading(self, mock_format_cast):
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
         quant_method = MagicMock()
@@ -389,6 +390,7 @@ class TestAscendMLAImpl(TestBase):
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
         apply.return_value = layer.weight.T
+        mock_format_cast.return_value = layer.weight
         self.impl.process_weights_after_loading(torch.bfloat16)
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
@@ -498,9 +500,12 @@ class TestAscendMLAImpl(TestBase):
         mock_up_proj.assert_called_once()
         mock_npu_fused_infer_attention_score.assert_called_once()
 
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
     @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
-    def test_mla_preprocess(self, magic_npu_fetch):
+    def test_mla_preprocess(self, magic_npu_fetch,
+                            mock_maybe_all_gather_and_maybe_unpad):
         magic_npu_fetch.return_value = MagicMock()
+        mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
         batch_size = 4
         seq_len = 8
         hidden_size = 1024

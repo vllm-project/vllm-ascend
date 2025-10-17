@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
@@ -15,29 +15,10 @@ from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.utils import npu_stream_switch, prefetch_stream
 
 
-def _maybe_chunk_residual_impl(x: torch.Tensor,
-                               residual: torch.Tensor) -> torch.Tensor:
-    try:
-        forward_context = get_forward_context()
-    except AssertionError:
-        return residual
-
-    if x.size(0) != residual.size(0):
-        sp_enabled = forward_context.sp_enabled
-        assert sp_enabled is True, ("Currently, this situation only occurs "
-                                    "when sp is enabled")
-        pad_size = forward_context.pad_size
-        if pad_size > 0:
-            residual = F.pad(residual, (0, 0, 0, pad_size))
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
-
-    return residual
-
-
-def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
-                                           label: bool) -> torch.Tensor:
+def _maybe_all_gather_and_maybe_unpad_impl(
+        x: torch.Tensor,
+        label: bool,
+        is_ep_comm: bool = False) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
@@ -45,27 +26,66 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor,
 
     sp_enabled = forward_context.sp_enabled
     if sp_enabled and label:
-        x = tensor_model_parallel_all_gather(x, 0)
-        pad_size = forward_context.pad_size
-        if pad_size > 0:
-            x = x[:-pad_size, :]
+        dp_metadata = forward_context.dp_metadata
+        if dp_metadata is None or not is_ep_comm:
+            x = tensor_model_parallel_all_gather(x, 0)
+            pad_size = forward_context.pad_size
+            if pad_size > 0:
+                x = x[:-pad_size, :]
+        else:
+            x = get_ep_group().all_gather(x, 0)
+            # unpad
+            num_tokens_across_dp_cpu = dp_metadata.num_tokens_across_dp_cpu
+            result = torch.empty(
+                (num_tokens_across_dp_cpu.sum(), *x.shape[1:]),
+                device=x.device,
+                dtype=x.dtype)
+            dp_size = get_dp_group().world_size
+            x = x.view(dp_size, forward_context.padded_length, *x.shape[1:])
+            offset = 0
+            for idx in range(dp_size):
+                num_tokens_dp = num_tokens_across_dp_cpu[idx]
+                result[offset:offset +
+                       num_tokens_dp, :] = x[idx, :num_tokens_dp, :]
+                offset += num_tokens_dp
+            x = result
+
     return x
 
 
-def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
+def _maybe_pad_and_reduce_impl(x: torch.Tensor,
+                               is_ep_comm: bool = False) -> torch.Tensor:
     try:
         forward_context = get_forward_context()
     except AssertionError:
         return tensor_model_parallel_all_reduce(x)
 
-    sp_enabled = forward_context.sp_enabled
-    if sp_enabled:
+    if not forward_context.sp_enabled:
+        return tensor_model_parallel_all_reduce(x)
+
+    dp_metadata = forward_context.dp_metadata
+    if dp_metadata is None or not is_ep_comm:
         pad_size = forward_context.pad_size
         if pad_size > 0:
             x = F.pad(x, (0, 0, 0, pad_size))
         return tensor_model_parallel_reduce_scatter(x, 0)
     else:
-        return tensor_model_parallel_all_reduce(x)
+        # padding
+        dp_size = get_dp_group().world_size
+        num_tokens_across_dp_cpu = \
+            get_forward_context().dp_metadata.num_tokens_across_dp_cpu
+        padded_x = torch.empty(
+            (dp_size, forward_context.padded_length, *x.shape[1:]),
+            device=x.device,
+            dtype=x.dtype)
+        offset = 0
+        for idx in range(dp_size):
+            num_tokens_dp = num_tokens_across_dp_cpu[idx]
+            padded_x[idx, :num_tokens_dp] = x[offset:offset + num_tokens_dp]
+            offset += num_tokens_dp
+
+        return get_ep_group().reduce_scatter(padded_x.view(-1, *x.shape[1:]),
+                                             0)
 
 
 def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
@@ -92,6 +112,33 @@ def _maybe_prefetch_mlp_gate_up_proj_impl(x_dependency: torch.Tensor,
             torch_npu.npu_prefetch(model_instance.model.layers[layer_idx].mlp.gate_up_proj.weight, \
                                 x_dependency, mlp_gate_up_prefetch_size)
     return
+
+
+def _maybe_all_gather_and_maybe_unpad_fake(
+        x: torch.Tensor,
+        label: bool,
+        is_ep_comm: bool = False) -> torch.Tensor:
+
+    if get_forward_context().sp_enabled and label:
+        return torch.empty(
+            (x.shape[0] * get_tensor_model_parallel_world_size(),
+             *x.shape[1:]),
+            device=x.device,
+            dtype=x.dtype)
+
+    return x
+
+
+def _maybe_pad_and_reduce_fake(x: torch.Tensor,
+                               is_ep_comm: bool = False) -> torch.Tensor:
+    if get_forward_context().sp_enabled:
+        return torch.empty(
+            (x.shape[0] // get_tensor_model_parallel_world_size(),
+             *x.shape[1:]),
+            device=x.device,
+            dtype=x.dtype)
+
+    return x
 
 
 def _maybe_prefetch_mlp_gate_up_proj_impl_fake(x_dependency: torch.Tensor,
@@ -181,27 +228,22 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
         final_hidden_states: torch.Tensor) -> torch.Tensor:
     forward_context = get_forward_context()
     moe_comm_type = forward_context.moe_comm_type
-    if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
+    if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2
+                         } or forward_context.sp_enabled:
         return final_hidden_states
     else:
         return tensor_model_parallel_all_reduce(final_hidden_states)
 
 
-direct_register_custom_op(op_name="maybe_chunk_residual",
-                          op_func=_maybe_chunk_residual_impl,
-                          fake_impl=lambda x, residual: residual,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
-
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,
-                          fake_impl=lambda x, label: x,
+                          fake_impl=_maybe_all_gather_and_maybe_unpad_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
 direct_register_custom_op(op_name="maybe_pad_and_reduce",
                           op_func=_maybe_pad_and_reduce_impl,
-                          fake_impl=lambda x: x,
+                          fake_impl=_maybe_pad_and_reduce_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
 
