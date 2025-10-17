@@ -49,6 +49,7 @@ class AisbenchRunner:
             ]
             if self.num_prompts:
                 aisbench_cmd.extend(['--num-prompts', str(self.num_prompts)])
+        print(f"running aisbench cmd: {' '.join(aisbench_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(aisbench_cmd,
                                                        stdout=subprocess.PIPE,
                                                        stderr=subprocess.PIPE,
@@ -133,6 +134,7 @@ class AisbenchRunner:
                                      f'{self.request_conf}_custom.py')
         with open(conf_path_new, 'w', encoding='utf-8') as f:
             f.write(content)
+        print(f"The request config is\n {content}")
 
     def __enter__(self):
         return self
