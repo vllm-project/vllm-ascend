@@ -281,6 +281,12 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config,
                 ascend_config.ascend_scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
+        elif ascend_config.recompute_scheduler_enable:
+            from vllm_ascend.core.recompute_schedule_config import \
+                RecomputeSchedulerConfig
+            recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
+                vllm_config.scheduler_config)
+            vllm_config.scheduler_config = recompute_scheduler_config
 
     @classmethod
     def get_attn_backend_cls(cls,
