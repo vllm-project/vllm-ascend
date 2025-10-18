@@ -82,36 +82,38 @@ class MoECommMethod(ABC):
         return hidden_states
 
     def fused_experts(
-            self,
-            hidden_states: torch.Tensor,
-            w1: torch.Tensor,
-            w2: torch.Tensor,
-            topk_weights: torch.Tensor,
-            topk_ids: torch.Tensor,
-            activation: str = "silu",
-            apply_router_weight_on_input: bool = False,
-            use_int8_w8a8: bool = False,
-            use_int4_w4a8: bool = False,
-            global_num_experts: Optional[int] = None,
-            expert_map: Optional[torch.Tensor] = None,
-            w1_scale: Optional[torch.Tensor] = None,
-            w2_scale: Optional[torch.Tensor] = None,
-            w1_scale_bias: torch.Tensor = None,
-            w2_scale_bias: torch.Tensor = None,
-            # For TorchAir graph
-            is_torchair: bool = False,
-            # For Cube/Vector parallel
-            shared_experts: Optional[Any] = None,
-            quantized_x_for_share: Optional[Any] = None,
-            dynamic_scale_for_share: Optional[Any] = None,
-            # For load balance
-            log2phy: torch.Tensor = None,
-            global_redundant_expert_num: int = 0,
-            need_trans: bool = False,
-            dynamic_eplb: bool = False):
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str = "silu",
+        apply_router_weight_on_input: bool = False,
+        use_int8_w8a8: bool = False,
+        use_int4_w4a8: bool = False,
+        global_num_experts: Optional[int] = None,
+        expert_map: Optional[torch.Tensor] = None,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        w1_scale_bias: torch.Tensor = None,
+        w2_scale_bias: torch.Tensor = None,
+        # For TorchAir graph
+        is_torchair: bool = False,
+        # For Cube/Vector parallel
+        shared_experts: Optional[Any] = None,
+        quantized_x_for_share: Optional[Any] = None,
+        dynamic_scale_for_share: Optional[Any] = None,
+        # For load balance
+        log2phy: torch.Tensor = None,
+        global_redundant_expert_num: int = 0,
+        need_trans: bool = False,
+        dynamic_eplb: bool = False,
+        pertoken_scale: Optional[torch.Tensor] = None,
+    ):
         # Check constraints
         assert hidden_states.dtype in [
-            torch.float32, torch.float16, torch.bfloat16
+            torch.float32, torch.float16, torch.bfloat16, torch.int8
         ]
 
         moe_comm_method = get_forward_context().moe_comm_method
@@ -129,7 +131,9 @@ class MoECommMethod(ABC):
             dynamic_scale_for_share=dynamic_scale_for_share,
             mc2_mask=self.mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            with_quant=use_int8_w8a8 or use_int4_w4a8)
+            with_quant=use_int8_w8a8 or use_int4_w4a8,
+            pertoken_scale=pertoken_scale,
+        )
 
         permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales = \
             results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales")
