@@ -1089,7 +1089,8 @@ class TorchairAscendFusedMoE(FusedMoE):
         local_num_experts = (torch.sum(self.expert_map != -1)
                              if self.expert_map is not None else num_experts)
         if self.dynamic_eplb:
-            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64).npu()
+            self.moe_load = torch.zeros(local_num_experts,
+                                        dtype=torch.int64).npu()
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.multistream_overlap_shared_expert = \
@@ -1311,13 +1312,14 @@ class TorchairAscendFusedMoE(FusedMoE):
                           tuple) and len(e_hidden_states) == 2:
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
-        if isinstance(e_hidden_states, tuple
-                      ) and len(e_hidden_states) == 4:
+        if isinstance(e_hidden_states, tuple) and len(e_hidden_states) == 4:
             e_hidden_states, shared_hidden_states, group_list_type, expert_tokens = e_hidden_states
-            if self.dynamic_eplb: self.moe_load += expert_tokens if group_list_type else \
+            if self.dynamic_eplb:
+                self.moe_load += expert_tokens if group_list_type else \
                 torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
-        if shared_experts is None and isinstance( e_hidden_states, tuple) and len(e_hidden_states) == 3:
+        if shared_experts is None and isinstance(
+                e_hidden_states, tuple) and len(e_hidden_states) == 3:
             e_hidden_states, group_list_type, expert_tokens = e_hidden_states
             if self.dynamic_eplb:
                 self.moe_load += expert_tokens if group_list_type else \

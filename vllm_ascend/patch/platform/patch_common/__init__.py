@@ -25,12 +25,15 @@ import vllm_ascend.patch.platform.patch_common.patch_mamba_config  # noqa
 
 def patch_v1_executor():
     try:
-        dynamic_eplb = os.getenv("DYNAMIC_EPLB", False) or os.getenv("EXPERT_MAP_RECORD", False)
+        dynamic_eplb = os.getenv("DYNAMIC_EPLB", False) or os.getenv(
+            "EXPERT_MAP_RECORD", False)
         if dynamic_eplb:
             import vllm_ascend.patch.platform.patch_common.patch_multiproc_executor  # noqa
         else:
-            logger.warning(f"Do not patch v1 executor.")
+            logger.warning("Do not patch v1 executor.")
     except RuntimeError as e:
-        logger.warning(f"Fail to patch v1 executor, please add environment params DYNAMIC_EPLB or EXPERT_MAP_RECORD : {e}")
+        logger.warning(
+            f"Fail to patch v1 executor, please add environment params DYNAMIC_EPLB or EXPERT_MAP_RECORD : {e}"
+        )
 
 patch_v1_executor()
