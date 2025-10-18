@@ -649,17 +649,21 @@ class AscendMLAImpl(MLAAttentionImpl):
             self._process_weights_for_fused_mlapo(act_dtype)
 
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
-        kv_a_proj_wt = self.kv_a_proj_with_mqa.weight.data
-        kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
+        # TODO(whx): Maybe we need to explicitly free original weights here
+        # to avoid redundant memory cost.
+        kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank:].contiguous()
+        q_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., :self.q_lora_rank].contiguous()
+        kv_a_proj_wt = kv_a_proj_wt.contiguous()
         kv_a_proj_wt = trans_rope_weight(kv_a_proj_wt, self.qk_rope_head_dim)
-        kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
-        wd_qkv = torch.cat((kv_a_proj_wt, self.q_a_proj.weight.data), dim=-1)
+        kv_a_proj_wt = kv_a_proj_wt.contiguous()
+        wd_qkv = torch.cat((kv_a_proj_wt, q_a_proj_wt), dim=-1)
         wd_qkv = wd_qkv.t().contiguous()
         wd_qkv = transdata(wd_qkv,
                            block_size=(16, 32)).unsqueeze(0).contiguous()
         self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
 
-        kv_a_proj_deq_scl = self.kv_a_proj_with_mqa.deq_scale
+        kv_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[self.q_lora_rank:].contiguous()
+        q_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[:self.q_lora_rank].contiguous()
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(
             self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
         kv_a_proj_deq_scl = trans_rope_weight(kv_a_proj_deq_scl,
@@ -667,9 +671,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.view(
             self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
         self.deq_scale_qkv = torch.cat(
-            (kv_a_proj_deq_scl, self.q_a_proj.deq_scale), dim=-1).contiguous()
+            (kv_a_proj_deq_scl, q_a_proj_deq_scl), dim=-1).contiguous()
 
-        kv_a_proj_qt_bias = self.kv_a_proj_with_mqa.quant_bias
+        kv_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[self.q_lora_rank:].contiguous()
+        q_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[:self.q_lora_rank].contiguous()
         kv_a_proj_qt_bias = kv_a_proj_qt_bias.reshape(
             self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
         kv_a_proj_qt_bias = trans_rope_weight(kv_a_proj_qt_bias,
@@ -677,7 +682,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_a_proj_qt_bias = kv_a_proj_qt_bias.view(
             self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
         self.quant_bias_qkv = torch.cat(
-            (kv_a_proj_qt_bias, self.q_a_proj.quant_bias),
+            (kv_a_proj_qt_bias, q_a_proj_qt_bias),
             dim=-1).contiguous()
 
         wu_q = self.q_proj.weight.data
@@ -705,22 +710,22 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.qb_qt_bias = qb_qt_bias.reshape(
             self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
 
-        device = self.q_a_proj.weight.device
+        device = self.q_proj.weight.device
         self.gamma0 = torch.ones(
-            [self.q_a_proj.weight.shape[-1]],
+            [self.fused_qkv_a_proj.weight.shape[-1]],
             dtype=act_dtype,
             device=device,
         )
         self.beta0 = torch.zeros(
-            [self.q_a_proj.weight.shape[-1]],
+            [self.fused_qkv_a_proj.weight.shape[-1]],
             dtype=act_dtype,
             device=device,
         )
         self.gamma1 = self.q_a_layernorm.weight.data
         self.beta1 = self.q_a_layernorm.bias.data
         self.gamma2 = self.kv_a_layernorm.weight.data
-        self.quant_scale0 = self.q_a_proj.input_scale.data
-        self.quant_offset0 = self.q_a_proj.input_offset.data
+        self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
+        self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
         self.quant_scale1 = self.q_proj.input_scale.data
         self.quant_offset1 = self.q_proj.input_offset.data
         self.ctkv_scale = torch.tensor([1], dtype=act_dtype, device=device)
