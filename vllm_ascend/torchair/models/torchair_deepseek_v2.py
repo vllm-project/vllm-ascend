@@ -70,11 +70,12 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.sfa import Indexer
+from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
 from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import \
     TorchairAscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import dispose_tensor, npu_prefetch, oproj_tp_enable
+from vllm_ascend.utils import dispose_tensor, oproj_tp_enable
 
 
 class TorchairDeepseekV2SiluAndMul(SiluAndMul):
@@ -161,12 +162,13 @@ class TorchairDeepseekV2RowParallelLinearReplaceAllreduce(RowParallelLinear):
         output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
                                                   bias=bias_)
+        forward_context = get_forward_context()
         if self.reduce_results and self.tp_size > 1:
             num_tokens = output_parallel.shape[0]
             if is_force_scatter and num_tokens % self.tp_size:
                 output_parallel = nn.functional.pad(
                     output_parallel, (0, 0, 0, -num_tokens % self.tp_size))
-            if is_force_scatter or (not is_prefill
+            if is_force_scatter or (not forward_context.with_prefill
                                     and output_parallel.shape[0] % self.tp_size
                                     == 0):
                 output = tensor_model_parallel_reduce_scatter(output_parallel,
@@ -588,9 +590,9 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                   and attn_metadata.num_decodes > 0)
         forward_kwargs = {"enable_multistream_mla": enable_multistream_mla}
         if self.q_lora_rank is not None:
-            npu_prefetch(self.q_a_proj.weight,
-                         hidden_states,
-                         enabled=enable_multistream_mla)
+            maybe_npu_prefetch(self.q_a_proj.weight,
+                               hidden_states,
+                               enabled=enable_multistream_mla)
             ckq = self.q_a_proj(hidden_states)[0]
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
             forward_kwargs['ckq'] = ckq
@@ -789,7 +791,7 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_mla=True,
-            use_sfa=True,
+            use_sparse=True,
             # SFA Args
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
@@ -877,12 +879,12 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
         self.use_mla = False
-        self.use_sfa = False
+        self.use_sparse = False
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
-            if ascend_config.use_sfa:
+            if hasattr(model_config.hf_config, "index_topk"):
                 attn_cls = TorchairDeepseekV2SFAAttention
-                self.use_sfa = True
+                self.use_sparse = True
             else:
                 attn_cls = TorchairDeepseekV2MLAAttention  # type: ignore[assignment]
             self.use_mla = True
@@ -945,15 +947,15 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         replace_allreduce: bool = False,
     ) -> torch.Tensor:
         # Self Attention
+        forward_context = get_forward_context()
         if attn_metadata is not None:
             decoding_condition_met = (
-                not attn_metadata.is_prefill if self.use_sfa else
-                attn_metadata.num_decodes > 0 if self.use_mla else False)
+                not attn_metadata.is_prefill if self.use_sparse else
+                not forward_context.with_prefill if self.use_mla else False)
             mla_moe_communication = decoding_condition_met and self.mla_moe_communication and replace_allreduce
         else:
             mla_moe_communication = False
 
-        forward_context = get_forward_context()
         if (envs.VLLM_ASCEND_ENABLE_MLAPO
                 and isinstance(self.self_attn, TorchairDeepseekV2SFAAttention)
                 and attn_metadata is not None
@@ -973,7 +975,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 # to save npu memory because they're no longer used.
                 dispose_tensor(previous_hidden_states)
                 dispose_tensor(previous_residual)
-        if mla_moe_communication and self.layer_idx > self.first_k_dense_replace:
+        if mla_moe_communication and self.layer_idx > self.first_k_dense_replace and self.layer_idx < self.layers:
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
 
@@ -1032,7 +1034,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             # The scaling of DeepseekV2MOE output would be done in the forward
             # of DeepseekV2MOE
             hidden_states *= 1. / self.routed_scaling_factor
-        if mla_moe_communication and self.layer_idx == self.layers - 1:
+        if mla_moe_communication and self.layer_idx >= self.layers - 1:
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
             residual = tensor_model_parallel_all_gather(residual, dim=0)

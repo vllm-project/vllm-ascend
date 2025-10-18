@@ -13,7 +13,7 @@ This document describes how to install vllm-ascend manually.
     |---------------|----------------------------------|-------------------------------------------|
     | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/releasenote/releasenote_0000.html) | Required for CANN |
     | CANN          | >= 8.2.RC1                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | >= 2.7.1.dev20250919             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch-npu     | >= 2.7.1.dev20250724             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | >= 2.7.1                         | Required for torch-npu and vllm           |
 
 You have 2 way to install:
@@ -141,8 +141,12 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 ```{code-block} bash
    :substitutions:
 
-# Install vllm-project/vllm from pypi
-pip install vllm==|pip_vllm_version|
+# Install vllm-project/vllm. The newest supported version is |vllm_version|.
+# Because the version |vllm_version| has not been archived in pypi, so you need to install from source.
+git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
+cd vllm
+VLLM_TARGET_DEVICE=empty pip install -v -e .
+cd ..
 
 # Install vllm-project/vllm-ascend from pypi.
 pip install vllm-ascend==|pip_vllm_ascend_version|

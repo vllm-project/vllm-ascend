@@ -31,7 +31,7 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, is_310p,
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
                                update_aclgraph_sizes)
 
 if TYPE_CHECKING:
@@ -134,7 +134,8 @@ class NPUPlatform(Platform):
         structured_outputs_config = vllm_config.structured_outputs_config
 
         if (model_config is not None and not model_config.use_mla
-                and not scheduler_config.async_scheduling):
+                and not scheduler_config.async_scheduling
+                and model_config.runner_type != "pooling"):
             logger.info(
                 "Non-MLA LLMs forcibly disable the chunked prefill feature,"
                 "as the performance of operators supporting this feature "
@@ -163,6 +164,9 @@ class NPUPlatform(Platform):
             "kv_cache_dtype", None)
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
+        elif model_config and hasattr(model_config.hf_config, "index_topk"):
+            vllm_config.cache_config.cache_dtype = str(
+                model_config.dtype).replace("torch.", "")
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
@@ -207,6 +211,21 @@ class NPUPlatform(Platform):
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
+        # TODO delete graph size update here when compilation_config.pass_config.enable_sequence_parallelism
+        # is supported by vllm-ascend.
+        if vllm_config.parallel_config.tensor_parallel_size > 1 and not vllm_config.model_config.enforce_eager and \
+                enable_sp(vllm_config):
+            original_sizes = compilation_config.cudagraph_capture_sizes
+            sp_aclgraph_sizes = \
+                vllm_config.update_sizes_for_sequence_parallelism(original_sizes)
+            assert sp_aclgraph_sizes, (
+                f"cudagraph_capture_sizes {original_sizes} does not contain"
+                f"values that are multiples of tp_size "
+                f"{vllm_config.parallel_config.tensor_parallel_size}")
+            if len(sp_aclgraph_sizes) != len(original_sizes):
+                compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
+                vllm_config.compilation_config.init_with_cudagraph_sizes(
+                    sp_aclgraph_sizes)
 
         # TODO: Full graph is fully supported later, and the default value will be set to full graph.
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
@@ -214,12 +233,7 @@ class NPUPlatform(Platform):
 
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             compilation_config.level = CompilationLevel.NO_COMPILATION
-        # TODO: Currently MLA does not support FULL_DECODE_ONLY, remove the second condition
-        # after MLA being supported
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE or (
-                compilation_config.cudagraph_mode
-                == CUDAGraphMode.FULL_DECODE_ONLY and model_config is not None
-                and model_config.use_mla):
+        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
@@ -259,7 +273,7 @@ class NPUPlatform(Platform):
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             os.environ["VLLM_ALL2ALL_BACKEND"] = "flashinfer_all2allv"
-            if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
+            if ascend_config.torchair_graph_config.enabled:
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
@@ -286,27 +300,33 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config,
                 ascend_config.ascend_scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
+        elif ascend_config.recompute_scheduler_enable:
+            from vllm_ascend.core.recompute_schedule_config import \
+                RecomputeSchedulerConfig
+            recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
+                vllm_config.scheduler_config)
+            vllm_config.scheduler_config = recompute_scheduler_config
 
     @classmethod
-    def get_attn_backend_cls(cls,
-                             selected_backend,
-                             head_size,
-                             dtype,
-                             kv_cache_dtype,
-                             block_size,
-                             use_v1,
-                             use_mla,
-                             use_sfa,
-                             has_sink=False):
+    def get_attn_backend_cls(
+        cls,
+        selected_backend,
+        head_size,
+        dtype,
+        kv_cache_dtype,
+        block_size,
+        use_v1,
+        use_mla,
+        has_sink=False,
+        use_sparse=False,
+    ):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
 
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:
-            if use_mla and not use_sfa:
-                return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
-            if use_mla and use_sfa:
+            if use_mla and use_sparse:
                 return "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend"
 
         use_torchair = ascend_config.torchair_graph_config.enabled
@@ -325,7 +345,7 @@ class NPUPlatform(Platform):
             (True, True, True):
             "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend",
         }
-        return backend_map[(use_mla, use_sfa, use_torchair)]
+        return backend_map[(use_mla, use_sparse, use_torchair)]
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

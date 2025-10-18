@@ -14,4 +14,4 @@ gpu_memory_utilization: 0.7
 apply_chat_template: False
 fewshot_as_multiturn: False
 trust_remote_code: True
-enforce_eager: True
+enforce_eager: False

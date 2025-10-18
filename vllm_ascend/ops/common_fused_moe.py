@@ -23,9 +23,11 @@ from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group, get_tp_group,
                               tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
+    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map,
+    get_compressed_expert_map)
 from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -36,7 +38,9 @@ from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, npu_stream_switch
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
+                               is_enable_nz, npu_stream_switch,
+                               shared_expert_dp_enabled)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -82,7 +86,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2_data = self._maybe_pad_weight(layer.w2_weight.data)
             layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        if not is_310p():
+        if not is_310p() and is_enable_nz():
             layer.w13_weight.data = torch_npu.npu_format_cast(
                 layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(
@@ -108,7 +112,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               shared_experts: Optional[Any] = None,
               **kwargs) -> torch.Tensor:
 
-        topk_weights, topk_ids, row_idx = select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=top_k,
@@ -136,7 +140,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            row_idx=row_idx,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
             shared_experts=shared_experts,
@@ -175,7 +178,7 @@ class AscendFusedMoE(FusedMoE):
         self.moe_config.ep_group = get_ep_group()
         self.moe_config.mc2_group = get_mc2_group()
         ascend_config = get_ascend_config()
-        self.dynamic_eplb = ascend_config.dynamic_eplb
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.expert_map_path = ascend_config.expert_map_path
         self.global_redundant_expert_num = ascend_config.init_redundancy_expert
         self.global_num_experts = num_experts + self.global_redundant_expert_num
@@ -185,13 +188,31 @@ class AscendFusedMoE(FusedMoE):
                                                     os.R_OK):
             self.expert_load_balancer = ExpertLoadBalancer(
                 self.expert_map_path, self.global_num_experts)
-            self.local_num_experts, self.expert_map = (
-                self.expert_load_balancer.get_rank_placement_map(
-                    self.moe_instance_id, self.ep_rank))
-            self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id, self.ep_rank).npu()
             self.global_redundant_expert_num = (
                 self.expert_load_balancer.get_global_redundant_expert_num())
+            try:
+                self.local_num_experts, self.expert_map = (
+                    self.expert_load_balancer.get_rank_placement_map(
+                        self.moe_instance_id, self.ep_rank))
+                self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
+                    self.moe_instance_id, self.ep_rank).npu()
+            except Exception as e:
+                logger.warning(
+                    f"Init expert map of mtp/eagle when using sample.{e}")
+                self.local_num_experts, self.expert_map = determine_default_expert_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank,
+                    self.global_redundant_expert_num)
+                self.log2phy = determine_default_log2phy_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank,
+                    self.global_redundant_expert_num).npu()
+            if self.expert_map is not None and isinstance(
+                    self.expert_map, torch.Tensor):
+                logger.info_once(
+                    "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                    " number of experts: %s/%s. Experts local to global index map:"
+                    " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                    self.global_num_experts,
+                    get_compressed_expert_map(self.expert_map))
         else:
             # init moe.
             self.local_num_experts, self.expert_map = determine_expert_map(
@@ -204,7 +225,15 @@ class AscendFusedMoE(FusedMoE):
                     self.global_redundant_expert_num)
                 self.log2phy = determine_default_log2phy_map(
                     self.global_num_experts, self.ep_size, self.ep_rank,
-                    self.global_redundant_expert_num)
+                    self.global_redundant_expert_num).npu()
+            if self.expert_map is not None and isinstance(
+                    self.expert_map, torch.Tensor):
+                logger.info_once(
+                    "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                    " number of experts: %s/%s. Experts local to global index map:"
+                    " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                    self.global_num_experts,
+                    get_compressed_expert_map(self.expert_map))
         local_num_experts = (torch.sum(
             self.expert_map != -1) if self.expert_map is not None else
                              self.global_num_experts)
@@ -227,6 +256,7 @@ class AscendFusedMoE(FusedMoE):
         if (self.quant_method.__class__.__name__
                 in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
             moe_quant_params["intermediate_size_full"] = intermediate_size
+        self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
@@ -264,6 +294,10 @@ class AscendFusedMoE(FusedMoE):
         quantized_x_for_share, dynamic_scale_for_share = None, None
 
         forward_context = get_forward_context()
+
+        # Load balancing for token distribution among experts in dummy_run
+        # TODO: The community only considers load balancing when DP > 1.
+        # This approach may overlook some extreme scenarios.
         enable_force_load_balance = forward_context.in_profile_run
 
         forward_context = get_forward_context()
@@ -382,6 +416,10 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert
         if self.multistream_overlap_shared_expert:
             self.shared_expert_stream = torch.npu.Stream()
+        if enable_sp():
+            logger.info_once(
+                "Sequence parallelism is enabled, shared experts are replicated for best performance."
+            )
 
     def forward(
         self,
@@ -409,7 +447,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
             forward_context = get_forward_context()
             moe_comm_type = forward_context.moe_comm_type
-            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
+            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2} \
+                    and not shared_expert_dp_enabled():
                 shared_out = tensor_model_parallel_all_reduce(shared_out)
         fused_output = AscendFusedMoE.forward_impl(
             self,

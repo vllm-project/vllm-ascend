@@ -92,14 +92,16 @@ def mock_dist_env(mocker: MockerFixture):
 
     mock_moe_comm_method.finalize.side_effect = mock_finalize
     dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
-    mock_forward_context_obj = MagicMock(moe_comm_method=mock_moe_comm_method,
-                                         moe_comm_type=MoECommType.MC2,
-                                         max_tokens_across_dp=10,
-                                         dp_metadata=dp_metadata,
-                                         mc2_mask=torch.zeros(
-                                             16, dtype=torch.bool),
-                                         padded_num_tokens=16,
-                                         with_quant=False)
+    mock_weight_prefetch_method = MagicMock()
+    mock_forward_context_obj = MagicMock(
+        moe_comm_method=mock_moe_comm_method,
+        moe_comm_type=MoECommType.MC2,
+        max_tokens_across_dp=10,
+        dp_metadata=dp_metadata,
+        mc2_mask=torch.zeros(16, dtype=torch.bool),
+        padded_num_tokens=16,
+        with_quant=False,
+        weight_prefetch_method=mock_weight_prefetch_method)
 
     with patch('torch.distributed.get_rank', return_value=0), \
         patch('torch.distributed.get_world_size', return_value=4), \
@@ -132,7 +134,9 @@ def mock_dist_env(mocker: MockerFixture):
         patch('vllm_ascend.ops.moe.moe_comm_method.AlltoAllCommImpl._get_token_dispatcher',
               return_value=None), \
         patch('vllm_ascend.ops.moe.moe_comm_method.AllGatherCommImpl._get_token_dispatcher',
-              return_value=None):
+              return_value=None), \
+        patch('vllm_ascend.ops.moe.experts_selector.get_forward_context',
+              return_value=mock_forward_context_obj):
 
         yield {
             'mock_forward_context_obj': mock_forward_context_obj,
@@ -253,13 +257,13 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
 
 class TestExpertsSelector:
 
-    @pytest.mark.parametrize("global_num_experts", [[256], [128]])
+    @pytest.mark.parametrize("global_num_experts", [256, 128])
     def test_select_experts(self, mock_dist_env, mock_moe_env,
                             global_num_experts):
 
         x = torch.randn(8, 2)
         router_logits = torch.randn(8, 2)
-        topk_weights, topk_ids, _ = select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=2,

@@ -57,6 +57,8 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
                             'eh_proj',
                             return_value=torch.randn(2, 3, 768))
         mocker.patch("torch.cat", return_value=torch.randn(2, 3, 768))
+        mocker.patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                     lambda x, label: x)
         mtp_layer.mtp_block.return_value = (torch.randn(2, 3, 768),
                                             torch.randn(2, 3, 768))
 
@@ -182,6 +184,8 @@ class TestCustomDeepSeekMTP(PytestBase):
         assert isinstance(mtp, CustomDeepSeekMTP)
 
     def test_forward(self, mocker: MockerFixture, setup_mtp):
+        mocker.patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad",
+                     lambda x, label: x)
         input_ids = torch.tensor([[1, 2, 3]])
         positions = torch.tensor([[0, 1, 2]])
         kv_caches = [torch.tensor([[0.1, 0.2, 0.3]])]
