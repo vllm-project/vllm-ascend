@@ -45,7 +45,7 @@ class TestMoECommMethod(TestBase):
         # Mock prepare finalize
         mock_pf_instance = MagicMock()
         mock_pf_instance.prepare.return_value = (torch.randn(4, 8),
-                                                 torch.randn(4, 2), None)
+                                                 torch.randn(4, 2), None, None)
         mock_pf_instance.finalize.return_value = torch.randn(4, 8)
         mock_prepare_finalize.return_value = mock_pf_instance
 
@@ -59,15 +59,18 @@ class TestMoECommMethod(TestBase):
         # Test prepare method
         hidden_states = torch.randn(3, 8)
         router_logits = torch.randn(3, 2)
-        h_out, r_out = comm_impl.prepare(hidden_states, router_logits)
+        h_out, r_out, mc2_mask, context_metadata = comm_impl.prepare(
+            hidden_states, router_logits)
 
         # Verify prepare was called with correct arguments
         mock_pf_instance.prepare.assert_called_once_with(
             hidden_states, router_logits, False, False, None)
 
         # Test finalize method
-        comm_impl.finalize(h_out, reduce_results=True)
-        mock_pf_instance.finalize.assert_called_once_with(h_out, True)
+        comm_impl.finalize(h_out,
+                           reduce_results=True,
+                           context_metadata=context_metadata)
+        mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
 
     @patch("vllm_ascend.ops.moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.moe.moe_comm_method.get_forward_context")
@@ -90,7 +93,8 @@ class TestMoECommMethod(TestBase):
         mock_pf_instance = MagicMock()
         mock_pf_instance.prepare.return_value = (torch.randn(4, 8),
                                                  torch.randn(4, 2),
-                                                 torch.tensor([1, 0, 1, 0]))
+                                                 torch.tensor([1, 0, 1,
+                                                               0]), None)
         mock_pf_instance.finalize.return_value = torch.randn(4, 8)
         mock_prepare_finalize.return_value = mock_pf_instance
 
@@ -104,15 +108,18 @@ class TestMoECommMethod(TestBase):
         # Test prepare method
         hidden_states = torch.randn(3, 8)
         router_logits = torch.randn(3, 2)
-        h_out, r_out = comm_impl.prepare(hidden_states, router_logits)
+        h_out, r_out, mc2_mask, context_metadata = comm_impl.prepare(
+            hidden_states, router_logits)
 
         # Verify prepare was called with correct arguments
         mock_pf_instance.prepare.assert_called_once_with(
             hidden_states, router_logits, False, False, None)
 
         # Test finalize method
-        comm_impl.finalize(h_out, reduce_results=True)
-        mock_pf_instance.finalize.assert_called_once_with(h_out, True)
+        comm_impl.finalize(h_out,
+                           reduce_results=True,
+                           context_metadata=context_metadata)
+        mock_pf_instance.finalize.assert_called_once_with(h_out, True, None)
 
     @patch("vllm_ascend.ops.moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.moe.moe_comm_method.get_forward_context")
@@ -135,7 +142,7 @@ class TestMoECommMethod(TestBase):
         # Mock prepare finalize
         mock_pf_instance = MagicMock()
         mock_pf_instance.prepare.return_value = (torch.randn(4, 8),
-                                                 torch.randn(4, 2), None)
+                                                 torch.randn(4, 2), None, None)
         mock_pf_instance.finalize.return_value = torch.randn(4, 8)
         mock_prepare_finalize.return_value = mock_pf_instance
 
@@ -149,7 +156,8 @@ class TestMoECommMethod(TestBase):
         # Test prepare method
         hidden_states = torch.randn(3, 8)
         router_logits = torch.randn(3, 2)
-        h_out, r_out = comm_impl.prepare(hidden_states, router_logits)
+        h_out, r_out, mc2_mask, context_metadata = comm_impl.prepare(
+            hidden_states, router_logits)
 
         # Verify prepare was called with correct arguments
         mock_pf_instance.prepare.assert_called_once_with(
