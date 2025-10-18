@@ -9,9 +9,9 @@ import unittest
 from collections import defaultdict, deque
 from typing import Any, Dict, OrderedDict
 from unittest.mock import MagicMock, patch
-import pytest
 
 import msgspec
+import pytest
 import zmq
 from vllm.utils import make_zmq_path
 

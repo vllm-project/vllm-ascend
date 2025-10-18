@@ -1166,7 +1166,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_computed_tokens = \
                 req_state.num_computed_tokens + shift_computed_tokens
 
-            for mm_feature in req_state.mm_features:
+            for mm_feature in req_state.mm_features:  # type: ignore
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
