@@ -261,6 +261,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.enable_expert_parallel = False
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
+        vllm_config.scheduler_config = MagicMock()
 
         # Use importlib.reload to reload the platform module, ensuring the mocked init_ascend_config method is used.
         # Without this reload, when calling self.platform.check_and_update_config,
@@ -289,6 +290,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.model_config = None
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
+        vllm_config.scheduler_config = MagicMock()
 
         with self.assertLogs(logger="vllm", level="WARNING") as cm:
             from vllm_ascend import platform
@@ -312,6 +314,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.model_config.enforce_eager = True
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
+        vllm_config.scheduler_config = MagicMock()
 
         with self.assertLogs(logger="vllm", level="INFO") as cm:
             from vllm_ascend import platform
@@ -352,6 +355,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.model_config.enforce_eager = False
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
+        vllm_config.scheduler_config = MagicMock()
 
         if vllm_version_is("0.11.0"):
             vllm_config.compilation_config.level = CompilationLevel.DYNAMO_ONCE
@@ -426,6 +430,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.model_config.enforce_eager = False
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
+        vllm_config.scheduler_config = MagicMock()
 
         if vllm_version_is("0.11.0"):
             vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
@@ -470,6 +475,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.cache_config.enable_prefix_caching = True
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
+        vllm_config.scheduler_config = MagicMock()
 
         from vllm_ascend import platform
 
@@ -494,6 +500,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.worker_cls = "auto"
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
+        vllm_config.scheduler_config = MagicMock()
 
         from vllm_ascend import platform
 
@@ -531,6 +538,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
 
+        vllm_config.scheduler_config = MagicMock()
         from vllm_ascend import platform
 
         importlib.reload(platform)
@@ -651,8 +659,12 @@ class TestNPUPlatform(TestBase):
 
     def test_get_punica_wrapper(self):
         result = self.platform.get_punica_wrapper()
-        self.assertEqual(result,
-                         "vllm_ascend.lora.punica_npu.PunicaWrapperNPU")
+        if vllm_version_is("0.11.0"):
+            self.assertEqual(
+                result, "vllm_ascend.lora.punica_npu.PunicaWrapperNPU0110")
+        else:
+            self.assertEqual(result,
+                             "vllm_ascend.lora.punica_npu.PunicaWrapperNPU")
 
     @patch("torch.npu.reset_peak_memory_stats")
     @patch("torch.npu.max_memory_allocated")
