@@ -419,6 +419,7 @@ class AscendSFAMetadataBuilder:
                 cos=cos)
 
         return self.metadata_cls(  # type: ignore
+            num_input_tokens=common_attn_metadata.num_input_tokens,
             num_actual_tokens=num_actual_tokens,
             query_lens=query_lens.tolist(),
             slot_mapping=slot_mapping,
