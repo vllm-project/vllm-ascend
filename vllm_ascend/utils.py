@@ -517,8 +517,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding,
-        AscendYaRNRotaryEmbedding)
+        AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
+        AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -528,6 +528,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
+        "MRotaryEmbedding": AscendMRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
         "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
