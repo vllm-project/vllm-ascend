@@ -126,9 +126,11 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttention):
         sp_enabled = forward_context.sp_enabled
         flashcomm_v2_enabled = forward_context.flashcomm_v2_enabled
         need_gather_q_kv = False
-        if (sp_enabled or flashcomm_v2_enabled) and self.debug_layer_idx < self.layers:
+        if (sp_enabled or
+                flashcomm_v2_enabled) and self.debug_layer_idx < self.layers:
             need_gather_q_kv = True
-        if not (sp_enabled or flashcomm_v2_enabled) or self.debug_layer_idx < self.layers:
+        if not (sp_enabled
+                or flashcomm_v2_enabled) or self.debug_layer_idx < self.layers:
             output_shape = hidden_states.shape
         else:
             # used in deepseek mtp layer

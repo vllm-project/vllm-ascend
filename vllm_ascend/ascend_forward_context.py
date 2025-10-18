@@ -11,7 +11,8 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import enable_sp, is_moe_model, version_check, flashcomm2_enable
+from vllm_ascend.utils import (enable_sp, flashcomm2_enable, is_moe_model,
+                               version_check)
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
