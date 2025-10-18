@@ -30,8 +30,7 @@ from vllm.config import (
 from vllm.logger import init_logger
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.utils import (
-    is_pin_memory_available,
-)
+    is_pin_memory_available, )
 import numpy as np
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -79,55 +78,53 @@ class MtpProposer(Proposer):
         if compilation_config.mode == CompilationMode.VLLM_COMPILE:
             cudagraph_mode = compilation_config.cudagraph_mode
             if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
-                CUDAGraphMode.PIECEWISE
-            ):
+                    CUDAGraphMode.PIECEWISE):
                 logger.warning(
                     "Currently the eagle proposer only supports cudagraph_mode "
                     "PIECEWISE, if you want the drafter to use cuda graphs, "
                     "please set compilation_config.cudagraph_mode to PIECEWISE "
-                    "or FULL_AND_PIECEWISE"
-                )
-            self.use_aclgraph = (
-                cudagraph_mode.has_mode(CUDAGraphMode.PIECEWISE)
-                and not self.speculative_config.enforce_eager
-            )
+                    "or FULL_AND_PIECEWISE")
+            self.use_aclgraph = (cudagraph_mode.has_mode(
+                CUDAGraphMode.PIECEWISE)
+                                 and not self.speculative_config.enforce_eager)
 
-        self.cudagraph_batch_sizes = (
-            list(reversed(self.vllm_config.compilation_config.cudagraph_capture_sizes))
-            if self.use_aclgraph
-            else []
-        )
+        self.cudagraph_batch_sizes = (list(
+            reversed(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+                                      if self.use_aclgraph else [])
 
         # persistent buffers for aclgraph graph
-        self.input_ids = torch.zeros(
-            self.max_num_tokens, dtype=torch.int32, device=device
-        )
+        self.input_ids = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=device)
         self.uses_mrope = self.vllm_config.model_config.uses_mrope
         if self.uses_mrope:
             # M-RoPE need (3, max_num_tokens)
-            self.mrope_positions = torch.zeros(
-                (3, self.max_num_tokens), dtype=torch.int64, device=device
-            )
+            self.mrope_positions = torch.zeros((3, self.max_num_tokens),
+                                               dtype=torch.int64,
+                                               device=device)
         else:
             # RoPE need (max_num_tokens,)
-            self.positions = torch.zeros(
-                self.max_num_tokens, dtype=torch.int64, device=device
-            )
+            self.positions = torch.zeros(self.max_num_tokens,
+                                         dtype=torch.int64,
+                                         device=device)
         self.hidden_states = torch.zeros(
-            (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
-        )
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=device)
 
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         max_num_slots_for_arange = max(max_batch_size + 1, self.max_num_tokens)
-        self.arange = torch.arange(
-            max_num_slots_for_arange, device=device, dtype=torch.int32
-        )
+        self.arange = torch.arange(max_num_slots_for_arange,
+                                   device=device,
+                                   dtype=torch.int32)
 
         self.inputs_embeds = torch.zeros(
-            (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
-        )
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=device)
 
         self.backup_next_token_ids = CpuGpuBuffer(
             max_batch_size,
@@ -221,8 +218,8 @@ class MtpProposer(Proposer):
                            hidden_states: torch.Tensor = None,
                            attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None,
-                           common_attn_metadata: AscendCommonAttentionMetadata = None
-                           ):
+                           common_attn_metadata: AscendCommonAttentionMetadata
+                           | None = None):
         if attn_metadata is not None and isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         next_token_ids: list[int] = []
@@ -299,12 +296,12 @@ class MtpProposer(Proposer):
             #     common_attn_metadata
             # )
             if self.speculative_config.disable_padded_drafter_batch:
-                    token_indices_to_sample = None
-                    common_attn_metadata, token_indices =\
-                        self._prepare_inputs(
-                            common_attn_metadata,
-                            sampled_token_ids,
-                            spec_decode_metadata.num_draft_tokens)
+                token_indices_to_sample = None
+                common_attn_metadata, token_indices =\
+                    self._prepare_inputs(
+                        common_attn_metadata,
+                        sampled_token_ids,
+                        spec_decode_metadata.num_draft_tokens)
             else:
                 common_attn_metadata, token_indices, \
                     token_indices_to_sample =\
@@ -317,15 +314,15 @@ class MtpProposer(Proposer):
             target_hidden_states = hidden_states[:token_indices]
 
         draft_token_ids = self._propose(
-                target_token_ids=target_token_ids,
-                target_positions=target_positions,
-                target_hidden_states=target_hidden_states,
-                next_token_ids=next_token_ids,
-                last_token_indices=token_indices_to_sample,
-                common_attn_metadata=common_attn_metadata,
-                sampling_metadata=sampling_metadata,
-            )
-        
+            target_token_ids=target_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            next_token_ids=next_token_ids,
+            last_token_indices=token_indices_to_sample,
+            common_attn_metadata=common_attn_metadata,
+            sampling_metadata=sampling_metadata,
+        )
+
         return draft_token_ids
 
     def _prepare_inputs(
@@ -360,14 +357,16 @@ class MtpProposer(Proposer):
             n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
             for i, n in enumerate(num_draft_tokens)
         ]
-        num_rejected_tokens = torch.tensor(num_rejected_tokens, dtype=torch.int32)
+        num_rejected_tokens = torch.tensor(num_rejected_tokens,
+                                           dtype=torch.int32)
 
         device = common_attn_metadata.query_start_loc.device
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         new_seq_lens_cpu = common_attn_metadata.seq_lens_cpu - num_rejected_tokens
 
         # [0, q1, q1 + q2, q1 + q2 + q3] -> [q1, q2, q3]
-        new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        new_query_len_per_req = query_start_loc_cpu[
+            1:] - query_start_loc_cpu[:-1]
         # [q1, q2, q3] -> [q1 - n1, q2 - n2, q3 - n3]
         new_num_tokens_per_req = new_query_len_per_req - num_rejected_tokens
         new_num_tokens_per_req_np = new_num_tokens_per_req.numpy()
@@ -388,36 +387,36 @@ class MtpProposer(Proposer):
         # [0, 2, 6, 9] ->
         # [0, 0, 2, 2, 2, 2, 6, 6, 6]
         #  _r1_  ____r2____  ___r3__
-        new_query_start_locs_expanded = np.repeat(
-            new_query_start_loc_np[:-1], new_num_tokens_per_req_np
-        )
+        new_query_start_locs_expanded = np.repeat(new_query_start_loc_np[:-1],
+                                                  new_num_tokens_per_req_np)
         # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
         # [0, 1, 0, 1, 2, 3, 0, 1, 2]
         #  _r1_  ____r2____  ___r3__
-        token_offests = (
-            self.token_arange_np[:total_num_tokens] - new_query_start_locs_expanded
-        )
+        token_offests = (self.token_arange_np[:total_num_tokens] -
+                         new_query_start_locs_expanded)
 
         # Expand starting positions to match token pattern
         # [0, q1, q1 + q2] ->
         # [0, 0, q1, q1, q1, q1, q1 + q2, q1 + q2, q1 + q2]
         #  _r1_  _____r2_______  ___________r3____________
         old_query_start_locs_expanded = np.repeat(
-            query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np
-        )
+            query_start_loc_cpu[:-1].numpy(), new_num_tokens_per_req_np)
         # Final token indices are:
         # [0, 1,                                // req 1
         #  q1 + 0, q1 + 1, q1 + 2, q1 + 3,       // req 2
         #  q1 + q2 + 0, q1 + q2 + 1, q1 + q2 + 2] // req 3
         token_indices_np = token_offests + old_query_start_locs_expanded
-        token_indices = torch.from_numpy(token_indices_np).to(device, non_blocking=True)
+        token_indices = torch.from_numpy(token_indices_np).to(
+            device, non_blocking=True)
 
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
-            query_start_loc=new_query_start_loc_cpu.to(device, non_blocking=True),
+            query_start_loc=new_query_start_loc_cpu.to(device,
+                                                       non_blocking=True),
             query_start_loc_cpu=new_query_start_loc_cpu,
             seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
             seq_lens_cpu=new_seq_lens_cpu,
-            num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+            num_computed_tokens_cpu=common_attn_metadata.
+            num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
@@ -432,9 +431,6 @@ class MtpProposer(Proposer):
             decode_token_per_req=self.runner.decode_token_per_req,
         )
         return spec_common_attn_metadata, token_indices
-    
-
-    
 
     def _propose(
         self,
@@ -460,8 +456,7 @@ class MtpProposer(Proposer):
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
-                target_hidden_states
-            )
+                target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
         # Shift the input ids by one token.
@@ -506,10 +501,9 @@ class MtpProposer(Proposer):
         if aclgraph_runtime_mode != CUDAGraphMode.NONE:
             # Fallback to piecewise graph, when acl full graph is enabled
             logger.warning(
-                    f"Currently the eagle proposer only supports cudagraph_mode "
-                    "PIECEWISE, and is forced to set graph mode from {aclgraph_runtime_mode} "
-                    "to CUDAGraphMode.PIECEWISE"
-                )
+                f"Currently the eagle proposer only supports cudagraph_mode "
+                "PIECEWISE, and is forced to set graph mode from {aclgraph_runtime_mode} "
+                "to CUDAGraphMode.PIECEWISE")
             aclgraph_runtime_mode = CUDAGraphMode.PIECEWISE
 
         for step in range(self.num_speculative_tokens):
@@ -692,14 +686,15 @@ class MtpProposer(Proposer):
                 # Get the next token id from the request state.
                 req_id = req_ids[i]
                 req_state = requests[req_id]
-                seq_len = req_state.num_computed_tokens + num_scheduled_tokens[req_id]
+                seq_len = req_state.num_computed_tokens + num_scheduled_tokens[
+                    req_id]
                 next_token_id = req_state.get_token_id(seq_len)
             next_token_ids.append(next_token_id)
-        next_token_ids = torch.tensor(
-            next_token_ids, dtype=torch.int32, device=self.input_ids.device
-        )
+        next_token_ids = torch.tensor(next_token_ids,
+                                      dtype=torch.int32,
+                                      device=self.input_ids.device)
         return next_token_ids
-    
+
     def prepare_next_token_ids_padded(
         self,
         common_attn_metadata: CommonAttentionMetadata,
@@ -722,30 +717,24 @@ class MtpProposer(Proposer):
 
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
-        self.backup_next_token_ids.np[:num_reqs] = np.array(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(
-                    common_attn_metadata.seq_lens_cpu[i].item()
-                )
-                for i in range(num_reqs)
-            ]
-        )
+        self.backup_next_token_ids.np[:num_reqs] = np.array([
+            requests[gpu_input_batch.req_ids[i]].get_token_id(
+                common_attn_metadata.seq_lens_cpu[i].item())
+            for i in range(num_reqs)
+        ])
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
 
         # Mask out the sampled tokens indices that should not be sampled.
-        discard_sampled_tokens_req_indices = discard_request_indices[
-            :num_discarded_requests
-        ]
+        discard_sampled_tokens_req_indices = discard_request_indices[:
+                                                                     num_discarded_requests]
 
         valid_sampled_token_ids_gpu = sampled_token_ids.clone()
         valid_sampled_token_ids_gpu.index_fill_(
-            0, discard_sampled_tokens_req_indices, -1
-        )
+            0, discard_sampled_tokens_req_indices, -1)
 
         # Generate a mask for all valid tokens within those requests
         valid_mask = (valid_sampled_token_ids_gpu != -1) & (
-            valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size
-        )
+            valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size)
 
         # Count the number of valid tokens in each request
         valid_sampled_tokens_count = valid_mask.sum(dim=1)
@@ -757,8 +746,8 @@ class MtpProposer(Proposer):
         # Get last valid token from each row
         # (assume undefined state where there is no valid token)
         selected_tokens = torch.gather(
-            valid_sampled_token_ids_gpu, 1, last_valid_indices_safe.unsqueeze(1)
-        ).squeeze(1)
+            valid_sampled_token_ids_gpu, 1,
+            last_valid_indices_safe.unsqueeze(1)).squeeze(1)
 
         # Use last token if valid, pre-computed backup if not
         batch_size = valid_sampled_token_ids_gpu.shape[0]
@@ -769,7 +758,7 @@ class MtpProposer(Proposer):
         )
 
         return next_token_ids, valid_sampled_tokens_count
-    
+
     def prepare_inputs_padded(
         self,
         common_attn_metadata: CommonAttentionMetadata,
@@ -784,13 +773,11 @@ class MtpProposer(Proposer):
         used as padding and filtered out later by `token_indices_to_sample`.
         No blocking CPU operations should be introduced in this function.
         """
-        num_draft_tokens_gpu = torch.cat(
-            [
-                spec_decode_metadata.cu_num_draft_tokens[0:1],
-                spec_decode_metadata.cu_num_draft_tokens[1:]
-                - spec_decode_metadata.cu_num_draft_tokens[:-1],
-            ]
-        )
+        num_draft_tokens_gpu = torch.cat([
+            spec_decode_metadata.cu_num_draft_tokens[0:1],
+            spec_decode_metadata.cu_num_draft_tokens[1:] -
+            spec_decode_metadata.cu_num_draft_tokens[:-1],
+        ])
 
         num_rejected_tokens_gpu = torch.where(
             num_draft_tokens_gpu > 0,
@@ -800,7 +787,8 @@ class MtpProposer(Proposer):
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
-        new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        new_query_len_per_req = query_start_loc_cpu[
+            1:] - query_start_loc_cpu[:-1]
 
         total_num_tokens = query_start_loc_cpu[-1].item()
         token_indices = self.arange[:total_num_tokens]
@@ -821,11 +809,11 @@ class MtpProposer(Proposer):
             attn_state=self.runner.attn_state,
             graph_pad_size=self.runner.graph_pad_size,
             decode_token_per_req=self.runner.decode_token_per_req,
-            num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+            num_computed_tokens_cpu=common_attn_metadata.
+            num_computed_tokens_cpu,
             seq_lens=common_attn_metadata.seq_lens)
 
-        token_indices_to_sample = (
-            common_attn_metadata.query_start_loc[1:] - 1 - num_rejected_tokens_gpu
-        )
+        token_indices_to_sample = (common_attn_metadata.query_start_loc[1:] -
+                                   1 - num_rejected_tokens_gpu)
 
         return spec_common_attn_metadata, token_indices, token_indices_to_sample

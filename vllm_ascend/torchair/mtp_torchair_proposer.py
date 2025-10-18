@@ -151,7 +151,9 @@ class MtpTorchairProposer(MtpProposer):
                            num_scheduled_tokens: int = 0,
                            hidden_states: torch.Tensor = None,
                            attn_metadata=None,
-                           aux_hidden_states: torch.Tensor = None):
+                           aux_hidden_states: torch.Tensor = None,
+                           common_attn_metadata: AscendCommonAttentionMetadata
+                           | None = None):
         if attn_metadata is not None and isinstance(attn_metadata, dict):
             attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
         next_token_ids: list[int] = []
@@ -192,7 +194,7 @@ class MtpTorchairProposer(MtpProposer):
                 device=self.device,
             )
             cu_num_tokens, accepted_token_indices, target_token_ids, \
-                target_positions, target_hidden_states, target_slot_mapping = self._prepare_inputs(
+                target_positions, target_hidden_states, target_slot_mapping = self._torchair_prepare_inputs(
                 attn_metadata.query_start_loc,
                 num_rejected_tokens,
                 self.runner.input_ids[:num_scheduled_tokens],
@@ -214,7 +216,7 @@ class MtpTorchairProposer(MtpProposer):
         spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
 
-    def _prepare_inputs(
+    def _torchair_prepare_inputs(
         self,
         # [batch_size + 1]
         cu_target_query_lens: torch.Tensor,
