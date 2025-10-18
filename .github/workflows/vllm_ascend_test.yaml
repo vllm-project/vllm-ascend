@@ -121,7 +121,6 @@ jobs:
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
           --ignore=tests/ut/test_platform.py \
-          --ignore=tests/ut/patch/worker/patch_common/test_patch_minicpm.py \
           --ignore=tests/ut/core/test_scheduler.py \
           --ignore=tests/ut/kv_connector/test_llmdatadist_connector.py \
           --ignore=tests/ut/kv_connector/test_mooncake_connector.py \
