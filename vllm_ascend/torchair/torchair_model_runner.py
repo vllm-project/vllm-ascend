@@ -85,7 +85,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
     def _may_pad_kv_consumer_num_seq(self):
         # pd disaggregation scenario need redundant_batch_sizes to avoid each batch's seq_len exceed 16 tokens
         # self.max_num_reqs here is greater than the actual maximum request number
-        if self.is_kv_consumer:
+        if self.decode_token_per_req > 1 and self.is_kv_consumer:
+            # applied only when speculative decoding is active
             FIA_SEQ_LEN_LIMIT = 16
             new_max_num_reqs = self.max_num_reqs + math.ceil(
                 self.max_num_reqs / FIA_SEQ_LEN_LIMIT) + math.ceil(
