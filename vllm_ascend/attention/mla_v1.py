@@ -651,8 +651,10 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
         # TODO(whx): Maybe we need to explicitly free original weights here
         # to avoid redundant memory cost.
-        kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., self.q_lora_rank:].contiguous()
-        q_a_proj_wt = self.fused_qkv_a_proj.weight.data[..., :self.q_lora_rank].contiguous()
+        kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[
+            ..., self.q_lora_rank:].contiguous()
+        q_a_proj_wt = self.fused_qkv_a_proj.weight.data[
+            ..., :self.q_lora_rank].contiguous()
         kv_a_proj_wt = kv_a_proj_wt.contiguous()
         kv_a_proj_wt = trans_rope_weight(kv_a_proj_wt, self.qk_rope_head_dim)
         kv_a_proj_wt = kv_a_proj_wt.contiguous()
@@ -662,28 +664,33 @@ class AscendMLAImpl(MLAAttentionImpl):
                            block_size=(16, 32)).unsqueeze(0).contiguous()
         self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
 
-        kv_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[self.q_lora_rank:].contiguous()
-        q_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[:self.q_lora_rank].contiguous()
+        kv_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[
+            self.q_lora_rank:].contiguous()
+        q_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[:self.
+                                                           q_lora_rank].contiguous(
+                                                           )
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(
             self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
         kv_a_proj_deq_scl = trans_rope_weight(kv_a_proj_deq_scl,
                                               self.qk_rope_head_dim)
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.view(
             self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.deq_scale_qkv = torch.cat(
-            (kv_a_proj_deq_scl, q_a_proj_deq_scl), dim=-1).contiguous()
+        self.deq_scale_qkv = torch.cat((kv_a_proj_deq_scl, q_a_proj_deq_scl),
+                                       dim=-1).contiguous()
 
-        kv_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[self.q_lora_rank:].contiguous()
-        q_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[:self.q_lora_rank].contiguous()
+        kv_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[
+            self.q_lora_rank:].contiguous()
+        q_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[:self.
+                                                            q_lora_rank].contiguous(
+                                                            )
         kv_a_proj_qt_bias = kv_a_proj_qt_bias.reshape(
             self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
         kv_a_proj_qt_bias = trans_rope_weight(kv_a_proj_qt_bias,
                                               self.qk_rope_head_dim)
         kv_a_proj_qt_bias = kv_a_proj_qt_bias.view(
             self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.quant_bias_qkv = torch.cat(
-            (kv_a_proj_qt_bias, q_a_proj_qt_bias),
-            dim=-1).contiguous()
+        self.quant_bias_qkv = torch.cat((kv_a_proj_qt_bias, q_a_proj_qt_bias),
+                                        dim=-1).contiguous()
 
         wu_q = self.q_proj.weight.data
         wu_q = wu_q.t().reshape(self.num_heads,
@@ -1281,9 +1288,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             with torch.npu.stream(current_ms_metadata.comm_stream):
                 maybe_npu_prefetch(inputs=self.o_proj.weight,
-                                  dependency=o_proj_input,
-                                  max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                                  enabled=self.enable_prefetch)
+                                   dependency=o_proj_input,
+                                   max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                                   enabled=self.enable_prefetch)
                 output[...] = self.o_proj(o_proj_input,
                                           is_prefill=prefill_preprocess_res
                                           is not None)[0]

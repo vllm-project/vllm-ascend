@@ -28,11 +28,13 @@ from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
+from vllm.model_executor.layers.mla import (MLAModules,
+                                            MultiHeadLatentAttentionWrapper)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils import direct_register_custom_op
 
 from vllm_ascend.ascend_config import get_ascend_config
+
 
 # TODO(whx): adapt v0.11.0 and DSA
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
