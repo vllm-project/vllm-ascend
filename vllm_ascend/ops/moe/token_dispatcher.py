@@ -121,15 +121,16 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         expert_map: torch.Tensor,
         global_redundant_expert_num: int = 0,
     ):
+        moe_expert_num = len(expert_map)
         if self.with_quant:
             quant_mode = 2
-            if (expert_map is not None):
-                moe_expert_num = len(expert_map) + global_redundant_expert_num
-            else:
-                moe_expert_num = global_redundant_expert_num
+            # if (expert_map is not None):
+            #     moe_expert_num = len(expert_map) + global_redundant_expert_num
+            # else:
+            #     moe_expert_num = global_redundant_expert_num
         else:
             quant_mode = 0
-            moe_expert_num = len(expert_map)
+            # moe_expert_num = len(expert_map)
         kwargs_mc2 = {
             "x": hidden_states,
             "expert_ids": topk_ids,

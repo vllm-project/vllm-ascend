@@ -244,11 +244,11 @@ def torchair_fused_experts_with_mc2(
     need_expert_scale = is_hierarchical_communication_enabled()
 
     enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
-
-    if (expert_map is not None):
-        moe_expert_num = len(expert_map) + global_redundant_expert_num
-    else:
-        moe_expert_num = global_redundant_expert_num
+    moe_expert_num = len(expert_map)
+    # if (expert_map is not None):
+    #     moe_expert_num = len(expert_map) + global_redundant_expert_num
+    # else:
+    #     moe_expert_num = global_redundant_expert_num
     # hidden_states = hidden_states.bfloat16()
     kwargs_mc2 = {
         "x": hidden_states,
@@ -365,17 +365,21 @@ def torchair_fused_experts_with_mc2(
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
         **kwargs_mc2)
 
-    if dynamic_eplb:
-        return (hidden_states, 1, expert_token_nums)
+    # if dynamic_eplb:
+    #     return (hidden_states, 1, expert_token_nums)
 
     if shared_experts is None:
+        if dynamic_eplb:
+            return (hidden_states, 1, expert_token_nums)
         return hidden_states
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
             shared_output, _ = shared_experts.down_proj(
                 (shared_act, swiglu_out_scale))
-        return hidden_states, shared_output
+        if dynamic_eplb:
+            return (hidden_states, shared_output, 1, expert_token_nums)
+        return (hidden_states, shared_output)
 
 
 def torchair_init_routing_quant(hidden_states, top_k, topk_ids,
@@ -929,9 +933,9 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
-            1] == global_num_experts, "Number of global experts mismatch"
+            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
-        is_deepseek_v3_r1 = global_num_experts == 256
+        is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256
 
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
         if is_deepseek_v3_r1:
