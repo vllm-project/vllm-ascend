@@ -4,7 +4,8 @@
 :caption: Deployment
 :maxdepth: 1
 single_npu
-single_npu_multimodal
+single_npu_qwen2.5-vl_7B
+single_npu_qwen3-vl_8B
 single_npu_audio
 single_npu_qwen3_embedding
 single_npu_qwen3_quantization
