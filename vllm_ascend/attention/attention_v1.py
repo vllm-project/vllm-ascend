@@ -265,9 +265,7 @@ class AscendAttentionMetadataBuilder:
             attn_mask=attn_mask,
             attn_state=attn_state,
             enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp)
-
         return attn_metadata
-
 
     def build_for_graph_capture(
         self,
@@ -350,12 +348,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
 
+        num_tokens = query.shape[0]
         if torch.version.cann.startswith("8.3") and self.head_size != 256:
-            output, _ = torch_npu.npu_fused_infer_attention_score(
+            query_start_loc = attn_metadata.actual_seq_lengths_q
+            num_tokens = query_start_loc[-1]
+            softmax_lse = torch.empty(num_tokens,
+                                      dtype=query.dtype,
+                                      device=query.device)
+            workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                 query=query,
                 key=key,
                 value=value,
-                atten_mask=mask,
+                atten_mask=attn_metadata.attn_mask,
                 input_layout="TND",
                 actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
                 actual_seq_lengths_kv=attn_metadata.actual_seq_lengths_q,
@@ -363,6 +367,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 num_heads=self.num_heads,
                 scale=self.scale,
                 sparse_mode=3)
+            torch_npu.npu_fused_infer_attention_score.out(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=attn_metadata.attn_mask,
+                input_layout="TND",
+                actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                actual_seq_lengths_kv=attn_metadata.actual_seq_lengths_q,
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                sparse_mode=3,
+                workspace=workspace,
+                out=[output, softmax_lse])
+
         else:
             torch_npu._npu_flash_attention(query=query,
                                            key=key,
