@@ -20,7 +20,7 @@
 #include <torch/library.h>
 
 #include <vector>
-#include "kernels/types.h"
+#include "utils/types.h"
 #include "torch_npu/csrc/aten/common/from_blob.h"
 
 namespace vllm_ascend {

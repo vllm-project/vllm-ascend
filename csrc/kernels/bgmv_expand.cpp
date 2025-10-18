@@ -15,7 +15,7 @@
  */
 
 #include "kernel_operator.h"
-#include "types.h"
+#include "../utils/types.h"
 
 template <typename scalar_t>
 class BGMVExpand {
