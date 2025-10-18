@@ -52,8 +52,8 @@ def test_data_parallel_inference(model, max_tokens):
         "--node-rank",
         "0",
         "--trust-remote-code",
-        "--enforce-eager",
     ]
+
     if model == "Qwen/Qwen3-30B-A3B":
         cmd.append("--enable-expert-parallel")
 
