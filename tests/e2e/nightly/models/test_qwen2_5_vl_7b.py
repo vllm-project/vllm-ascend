@@ -22,9 +22,10 @@ from vllm.utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
+from tools.send_mm_request import send_image_request
 
 MODELS = [
-    "vllm-ascend/Qwen3-32B-W8A8",
+    "Qwen/Qwen2.5-VL-7B-Instruct",
 ]
 
 TENSOR_PARALLELS = [4]
@@ -38,15 +39,14 @@ api_keyword_args = {
 }
 
 aisbench_cases = [{
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+    "case_type": "accuracy",
+    "dataset_path": "vllm-ascend/textvqa-lite",
     "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 1,
-    "max_out_len": 1500,
-    "batch_size": 44,
-    "baseline": 1,
-    "threshold": 0.97
+    "dataset_conf": "textvqa/textvqa_gen_base64.py",
+    "max_out_len": 2048,
+    "batch_size": 128,
+    "baseline": 81,
+    "threshold": 5
 }]
 
 
@@ -57,18 +57,25 @@ async def test_models(model: str, tp_size: int) -> None:
     port = get_open_port()
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
-        "OMP_PROC_BIND": "false",
-        "HCCL_OP_EXPANSION_MODE": "AIV",
-        "PAGED_ATTENTION_MASK_LEN": "5500"
+        "VLLM_ASCEND_ENABLE_NZ": "0",
+        "HCCL_OP_EXPANSION_MODE": "AIV"
     }
     server_args = [
-        "--quantization", "ascend", "--no-enable-prefix-caching",
+        "--no-enable-prefix-caching",
+        "--disable-mm-preprocessor-cache",
         "--tensor-parallel-size",
-        str(tp_size), "--port",
-        str(port), "--max-model-len", "36864", "--max-num-batched-tokens",
-        "36864", "--block-size", "128", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.9", "--additional-config",
-        '{"enable_weight_nz_layout":true}'
+        str(tp_size),
+        "--port",
+        str(port),
+        "--max-model-len",
+        "30000",
+        "--max-num-batched-tokens",
+        "40000",
+        "--max-num-seqs",
+        "400",
+        "--trust-remote-code",
+        "--gpu-memory-utilization",
+        "0.8",
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
@@ -86,5 +93,7 @@ async def test_models(model: str, tp_size: int) -> None:
         )
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
+        print(choices)
+        send_image_request(model, server)
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)

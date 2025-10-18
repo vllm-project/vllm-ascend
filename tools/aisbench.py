@@ -32,7 +32,11 @@ class AisbenchRunner:
         "performance": "Performance Result files locate in ",
         "accuracy": "write csv to "
     }
-    DATASET_RENAME = {"aime2024": "aime", "gsm8k-lite": "gsm8k"}
+    DATASET_RENAME = {
+        "aime2024": "aime",
+        "gsm8k-lite": "gsm8k",
+        "textvqa-lite": "textvqa"
+    }
 
     def _run_aisbench_task(self):
         dataset_conf = self.dataset_conf.split('/')[-1]
@@ -73,6 +77,7 @@ class AisbenchRunner:
         self.model = model
         self.model_path = snapshot_download(model)
         self.port = port
+        self.exp_folder = None
         self._init_dataset_conf()
         self._init_request_conf()
         self._run_aisbench_task()
@@ -147,7 +152,20 @@ class AisbenchRunner:
             # force kill if needed
             self.proc.kill()
 
+    def _wait_for_exp_folder(self):
+        while True:
+            line = self.proc.stdout.readline().strip()
+            print(line)
+            if "Current exp folder: " in line:
+                self.exp_folder = re.search(r'Current exp folder: (.*)',
+                                            line).group(1)
+                return
+            if "ERROR" in line:
+                raise RuntimeError(
+                    "Some errors happen to Aisbench task.") from None
+
     def _wait_for_task(self):
+        self._wait_for_exp_folder()
         result_msg = self.RESULT_MSG[self.task_type]
         while True:
             line = self.proc.stdout.readline().strip()
@@ -195,8 +213,6 @@ def run_aisbench_cases(model, port, aisbench_cases):
         except Exception as e:
             aisbench_errors.append([aisbench_case, e])
             print(e)
-    command = ["cp", "-r", "outputs", "/root/.cache/aisbench_outputs"]
-    subprocess.call(command)
     for failed_case, error_info in aisbench_errors:
         print(
             f"The following aisbench case failed: {failed_case}, reason is {error_info}."
