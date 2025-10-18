@@ -856,7 +856,6 @@ class TorchairAscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         shared_experts: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
-
         global_redundant_expert_num = get_ascend_config(
         ).init_redundancy_expert
         is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256

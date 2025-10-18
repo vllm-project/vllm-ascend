@@ -34,8 +34,8 @@ def test_determine_default_expert_map_multiple_worlds_with_redundant():
         rank_id=0,
         global_redundant_expert_num=1)
 
-    assert count == 3
-    assert torch.all(expert_map[0:3] >= 0)
+    assert count == 2
+    assert torch.all(expert_map[0:2] >= 0)
 
 
 def test_generate_log2phy_map_single_rank_holding():

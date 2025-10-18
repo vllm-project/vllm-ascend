@@ -244,11 +244,11 @@ def torchair_fused_experts_with_mc2(
     need_expert_scale = is_hierarchical_communication_enabled()
 
     enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
-    moe_expert_num = len(expert_map)
-    # if (expert_map is not None):
-    #     moe_expert_num = len(expert_map) + global_redundant_expert_num
-    # else:
-    #     moe_expert_num = global_redundant_expert_num
+
+    if (expert_map is not None):
+        moe_expert_num = len(expert_map)
+    else:
+        moe_expert_num = global_redundant_expert_num
     # hidden_states = hidden_states.bfloat16()
     kwargs_mc2 = {
         "x": hidden_states,
@@ -365,9 +365,6 @@ def torchair_fused_experts_with_mc2(
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
         **kwargs_mc2)
 
-    # if dynamic_eplb:
-    #     return (hidden_states, 1, expert_token_nums)
-
     if shared_experts is None:
         if dynamic_eplb:
             return (hidden_states, 1, expert_token_nums)
@@ -435,7 +432,7 @@ def torchair_fused_experts_with_all2all(
 
     if expert_map is not None:
         assert ep_group is not None, "ep_group must be provided when expert_map is given"
-        global_num_experts = len(expert_map) + global_redundant_expert_num
+        global_num_experts = len(expert_map)
         if hasattr(torch_npu, "npu_moe_init_routing_quant"):
             quantized_tokens, expanded_row_idx, global_expert_tokens, _, token_scales = torch_npu.npu_moe_init_routing_quant(
                 hidden_states,

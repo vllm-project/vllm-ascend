@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from vllm.attention.layer import Attention
-from vllm.config import (CompilationLevel, VllmConfig,
+from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import logger
@@ -114,7 +114,9 @@ class EagleProposer(Proposer):
                   with_prefill: bool = False,
                   skip_attn: bool = False,
                   num_reqs: int = 0,
-                  num_tokens_across_dp: Optional[torch.Tensor] = None):
+                  num_tokens_across_dp: Optional[torch.Tensor] = None,
+                  aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+                  batch_descriptor=None):
         moe_comm_type = self.runner._select_moe_comm_method(
             num_tokens, with_prefill)
         with set_ascend_forward_context(None,

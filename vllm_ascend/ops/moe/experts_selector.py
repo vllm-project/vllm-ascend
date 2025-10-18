@@ -21,6 +21,8 @@ import torch_npu
 from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 
+from vllm_ascend.ascend_config import get_ascend_config
+
 
 def select_experts(hidden_states: torch.Tensor,
                    router_logits: torch.Tensor,
