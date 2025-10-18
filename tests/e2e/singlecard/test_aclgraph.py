@@ -30,6 +30,7 @@ from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
     "Qwen/Qwen3-0.6B",
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8",
 ]
 
 
@@ -45,20 +46,40 @@ def test_models_with_aclgraph(
     ]
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-    with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=False,
-    ) as runner:
-        vllm_aclgraph_outputs = runner.model.generate(prompts, sampling_params)
+    if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=False,
+                quantization="ascend",
+        ) as runner:
+            vllm_aclgraph_outputs = runner.model.generate(
+                prompts, sampling_params)
 
-    with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=True,
-    ) as runner:
-        vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=True,
+                quantization="ascend",
+        ) as runner:
+            vllm_eager_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
+    else:
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=False,
+        ) as runner:
+            vllm_aclgraph_outputs = runner.model.generate(
+                prompts, sampling_params)
 
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=True,
+        ) as runner:
+            vllm_eager_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
     vllm_aclgraph_outputs_list = []
     for output in vllm_aclgraph_outputs:
         vllm_aclgraph_outputs_list.append(
@@ -117,20 +138,42 @@ def test_models_with_aclgraph_full_decode_only(
                                      temperature=0.0,
                                      top_p=1.0,
                                      top_k=1)
-    with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=False,
-            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
-    ) as runner:
-        vllm_aclgraph_outputs = runner.model.generate(prompts, sampling_params)
+    if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=False,
+                compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+                quantization="ascend",
+        ) as runner:
+            vllm_aclgraph_outputs = runner.model.generate(
+                prompts, sampling_params)
 
-    with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=True,
-    ) as runner:
-        vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=True,
+                quantization="ascend",
+        ) as runner:
+            vllm_eager_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
+    else:
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=False,
+                compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+        ) as runner:
+            vllm_aclgraph_outputs = runner.model.generate(
+                prompts, sampling_params)
+
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=True,
+        ) as runner:
+            vllm_eager_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
 
     vllm_aclgraph_outputs_list = []
     for output in vllm_aclgraph_outputs:
