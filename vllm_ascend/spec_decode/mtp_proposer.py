@@ -4,10 +4,10 @@ import torch
 import torch.nn as nn
 import torchair
 from torchair import patch_for_hcom
-from vllm.attention.layer import Attention
 from vllm.config import (CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
@@ -74,7 +74,8 @@ class MtpProposer(Proposer):
         loader = get_model_loader(self.vllm_config.load_config)
 
         target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
+            get_layers_from_vllm_config(self.vllm_config,
+                                        AttentionLayerBase).keys())
         draft_model_config = \
             self.vllm_config.speculative_config.draft_model_config
         target_device = self.vllm_config.device_config.device
@@ -89,9 +90,9 @@ class MtpProposer(Proposer):
                 self.model = CustomDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
 
-        draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
-            target_attn_layer_names)
+        draft_attn_layer_names = (get_layers_from_vllm_config(
+            self.vllm_config, AttentionLayerBase).keys() -
+                                  target_attn_layer_names)
 
         assert len(draft_attn_layer_names) == 1
         self.attn_layer_name = list(draft_attn_layer_names)

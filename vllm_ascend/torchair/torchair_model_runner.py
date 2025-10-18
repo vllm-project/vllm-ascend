@@ -57,6 +57,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                       self.decode_token_per_req))
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             None, None, vllm_config, device)
+        self.use_sparse = hasattr(self.model_config.hf_config, "index_topk")
 
         register_torchair_model()
         torchair_ops_patch()
