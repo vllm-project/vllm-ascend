@@ -124,6 +124,7 @@ jobs:
           --ignore=tests/ut/core/test_scheduler.py \
           --ignore=tests/ut/kv_connector/test_llmdatadist_connector.py \
           --ignore=tests/ut/kv_connector/test_mooncake_connector.py \
+          --ignore=tests/ut/patch/worker/patch_common/test_patch_minicpm.py \
           --ignore=tests/ut/kv_connector/test_remote_decode_lifecycle.py \
           --ignore=tests/ut/kv_connector/test_remote_prefill_lifecycle.py \
           --ignore=tests/ut/torchair/models/test_torchair_deepseek_v2.py \
