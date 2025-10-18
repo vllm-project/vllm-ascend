@@ -163,7 +163,7 @@ def test_sp_for_qwen3_moe() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@pytest.skip("TODO: revert this skip")
+@pytest.mark.skip("TODO: revert this skip")
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
