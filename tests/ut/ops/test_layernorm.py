@@ -120,6 +120,7 @@ class TestAscendRMSNorm(PytestBase):
         mock_forward_context.layer_idx = 0
         mock_forward_context.num_hidden_layers = num_hidden_layers
         mock_forward_context.fusion_linear = "gate_up_dense"
+        mock_forward_context.weight_prefetch_method = None
         mocker.patch("torch.ops.vllm.maybe_chunk_residual",
                      lambda x, residual: residual)
 
@@ -130,13 +131,13 @@ class TestAscendRMSNorm(PytestBase):
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 1
+        assert mock_get_forward_context.call_count == 2
         assert mock_forward_context.fusion_linear == "qkv_dense"
         assert mock_forward_context.layer_idx == 1
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 2
+        assert mock_get_forward_context.call_count == 4
         assert mock_forward_context.fusion_linear == "gate_up_dense"
         assert mock_forward_context.layer_idx == 1
 
@@ -144,14 +145,14 @@ class TestAscendRMSNorm(PytestBase):
             mock_forward_context.fusion_linear = "gate_moe"
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 3
+        assert mock_get_forward_context.call_count == 5
         fusion_linear_expected = "qkv_moe" if torch_npu_check else "qkv_dense"
         assert mock_forward_context.fusion_linear == fusion_linear_expected
         assert mock_forward_context.layer_idx == 2
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 4
+        assert mock_get_forward_context.call_count == 6
         fusion_linear_expected = "gate_moe" if torch_npu_check else "qkv_dense"
         assert mock_forward_context.fusion_linear == fusion_linear_expected
         assert mock_forward_context.layer_idx == 2
@@ -161,13 +162,13 @@ class TestAscendRMSNorm(PytestBase):
         # last layer returned directly
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 5
+        assert mock_get_forward_context.call_count == 7
         assert mock_forward_context.fusion_linear == "qkv_moe"
         assert mock_forward_context.layer_idx == 3
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 6
+        assert mock_get_forward_context.call_count == 8
         assert mock_forward_context.fusion_linear == "qkv_moe"
         assert mock_forward_context.layer_idx == 3
 
