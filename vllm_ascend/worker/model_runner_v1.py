@@ -2823,7 +2823,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         v_tensor = self._align_memory(
                             v_tensor, alignment)[:v_tensor_size]
                         #### k cache: for deepseek sparse attention
-                        if dsa_k_cache_factor is not None:
+                        if dsa_k_cache_factor is not None and dsa_k_cache_size is not None:
                             k_cache_tensor = torch.zeros(dsa_k_cache_size +
                                                          alignment,
                                                          dtype=torch.int8,
@@ -2847,6 +2847,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 layer_names.add(layer_name)
         assert layer_names == set(kv_cache_raw_tensors.keys(
         )), "Some layers are not correctly initialized"
+
+        return kv_cache_raw_tensors
 
     def _reshape_kv_cache_tensors(
         self,
@@ -2926,7 +2928,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     k_cache = self._convert_torch_format(k_cache)
                     v_cache = raw_v_tensor.view(dtype).view(kv_cache_shape[1:])
                     v_cache = self._convert_torch_format(v_cache)
-                    if self.use_sparse:
+                    if self.use_sparse and raw_dsa_k_cache is not None:
                         dsa_k_cache_shape = (num_blocks, block_size, 1, 128)
                         dsa_k_cache = raw_dsa_k_cache.view(dtype).view(
                             dsa_k_cache_shape)
