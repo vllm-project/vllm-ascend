@@ -604,6 +604,7 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                  dtype=hidden_states_or_q_c.dtype,
                                  device=hidden_states_or_q_c.device)
             forward_kwargs['output'] = output
+            forward_kwargs['layer_name'] = self.prefix
             output = self.mla_attn.impl.forward(self.mla_attn,
                                                 hidden_states_or_q_c,
                                                 hidden_states, None, kv_cache,
