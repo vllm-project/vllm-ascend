@@ -310,8 +310,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if self.cache_config.cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
-        elif isinstance(self.cache_config.cache_dtype, torch.dtype):
-            self.kv_cache_dtype = self.cache_config.cache_dtype
         else:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
