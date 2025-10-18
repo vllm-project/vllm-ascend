@@ -125,6 +125,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             and not vllm_config.model_config.enforce_eager
             and not ascend_config.torchair_graph_config.enabled)
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+        self.in_dtype = vllm_config.model_config.dtype
 
         try:
             device_group = get_mc2_group().device_group
@@ -242,8 +243,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num)
 
-        # TODO: get dtype from config/forward_context
-        topk_weights = topk_weights.to(router_logits.dtype)
+        topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
         return moe_comm_method.fused_experts(
