@@ -127,6 +127,7 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
+from vllm_ascend.torchair.mtp_torchair_proposer import MtpTorchairProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                enable_sp, get_ascend_soc_version, is_310p,
@@ -286,6 +287,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.runner_only_attn_layers: set[str] = set()
 
         self.ascend_config = get_ascend_config()
+        is_torchair_graph = self.ascend_config.torchair_graph_config.enabled
         if self.ascend_config.ascend_scheduler_config.enabled:
             self.chunked_prefill_enabled = self.scheduler_config.chunked_prefill_enabled
         else:
@@ -328,8 +330,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Set up speculative decoding.
         self.spec_attn_mask = None
-        self.drafter: Optional[Union[NgramProposer, EagleProposer,
-                                     MtpProposer]] = None
+        self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
+                                     MtpTorchairProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -343,7 +345,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if get_pp_group().is_last_rank:
                 self.drafter = get_spec_decode_method(
                     self.speculative_config.method, self.vllm_config,
-                    self.device, self)
+                    self.device, self, is_torchair_graph)
                 self.rejection_sampler = AscendRejectionSampler()
             self.actual_seq_lengths_q = list(
                 range(self.decode_token_per_req, self.max_num_tokens + 1,
@@ -357,6 +359,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
         self._may_pad_kv_consumer_num_seq()
+
+            self.discard_request_indices = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int64
+            )
+        self.num_discarded_requests = 0
 
         # Persistent batch.
         self.input_ids = torch.zeros(self.max_num_tokens,
@@ -1169,6 +1176,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                 index=input_ids_index_tensor,
                                 src=self.input_batch.prev_sampled_token_ids[
                                     prev_common_req_indices_tensor, 0])
+        if self.speculative_config:
+            num_tokens = [
+                self.requests[r].num_tokens for r in self.input_batch.req_ids
+            ]
+            num_tokens_np = np.array(num_tokens, dtype=np.int32)
+
+            # Record the index of requests that should not be sampled,
+            # so that we could clear the sampled tokens before returning
+            num_reqs = self.input_batch.num_reqs
+            discard_requests_mask = self.seq_lens.np[:num_reqs] < num_tokens_np
+            discard_request_indices = np.nonzero(discard_requests_mask)[0]
+            self.num_discarded_requests = len(discard_request_indices)
+            self.discard_request_indices.np[:self.num_discarded_requests] = (
+                discard_request_indices)
+
+            self.discard_request_indices.copy_to_gpu(self.num_discarded_requests)
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -1444,7 +1467,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
         num_computed_tokens_cpu = (
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
-        spec_decode_common_attn_metadata = None
+        self.spec_decode_common_attn_metadata = None
         if use_spec_decode and self.need_accepted_tokens:
             self.num_accepted_tokens.np[:num_reqs] = (
                 self.input_batch.num_accepted_tokens_cpu[:num_reqs])
@@ -1508,8 +1531,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             )
 
             if self.speculative_config and \
-                spec_decode_common_attn_metadata is None:
-                spec_decode_common_attn_metadata = common_attn_metadata
+                self.spec_decode_common_attn_metadata is None:
+                self.spec_decode_common_attn_metadata = common_attn_metadata
 
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 common_prefix_len = 0
@@ -1759,7 +1782,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def propose_draft_token_ids(
         self,
-        valid_sampled_token_ids: list[list[int]],
+        valid_sampled_token_ids: Union[torch.Tensor, list[list[int]]],
         sampling_metadata: SamplingMetadata,
         scheduler_output: "SchedulerOutput",
         spec_decode_metadata: SpecDecodeMetadata,
@@ -1776,7 +1799,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             draft_token_ids = self.drafter.generate_token_ids(
                 valid_sampled_token_ids, sampling_metadata, scheduler_output,
                 spec_decode_metadata, positions, num_scheduled_tokens,
-                hidden_states, attn_metadata, aux_hidden_states)
+                hidden_states, attn_metadata, aux_hidden_states,
+                self.spec_decode_common_attn_metadata)
         return draft_token_ids
 
     def _pool(
@@ -2007,6 +2031,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if scheduler_output.grammar_bitmask is not None:
                 logits = self.apply_grammar_bitmask(scheduler_output, logits)
 
+        with ProfileExecuteDuration().capture_async("Sample"):
             # Sample the next token and get logprobs if needed.
             sampling_metadata = self.input_batch.sampling_metadata
             if spec_decode_metadata is None:
@@ -2048,21 +2073,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.need_accepted_tokens:
                     self._update_states_after_model_execute(output_token_ids)
 
-            discard_sampled_tokens_req_indices: list[int] = []
-            # TODO(woosuk): The following loop can be slow since it iterates over
-            # the requests one by one. Optimize.
-            discard_sampled_tokens_req_indices = []
-            for i, req_id in enumerate(self.input_batch.req_ids):
-                req_state = self.requests[req_id]
-                seq_len = (req_state.num_computed_tokens +
-                           scheduler_output.num_scheduled_tokens[req_id])
-                if seq_len < req_state.num_tokens:
-                    # Ignore the sampled token.
-                    # Rewind the generator state as if the token was not sampled.
-                    generator = self.input_batch.generators.get(i)
-                    if generator is not None:
-                        generator.set_offset(generator.get_offset() - 4)
-                    discard_sampled_tokens_req_indices.append(i)
+            # discard_sampled_tokens_req_indices: list[int] = []
+            # # TODO(woosuk): The following loop can be slow since it iterates over
+            # # the requests one by one. Optimize.
+            # discard_sampled_tokens_req_indices = []
+            # for i, req_id in enumerate(self.input_batch.req_ids):
+            #     req_state = self.requests[req_id]
+            #     seq_len = (req_state.num_computed_tokens +
+            #                scheduler_output.num_scheduled_tokens[req_id])
+            #     if seq_len < req_state.num_tokens:
+            #         # Ignore the sampled token.
+            #         # Rewind the generator state as if the token was not sampled.
+            #         generator = self.input_batch.generators.get(i)
+            #         if generator is not None:
+            #             generator.set_offset(generator.get_offset() - 4)
+            #         discard_sampled_tokens_req_indices.append(i)
+            discard_sampled_tokens_req_indices = \
+                self.discard_request_indices.np[:self.num_discarded_requests]
+            for i in discard_sampled_tokens_req_indices:
+                gen = self.input_batch.generators.get(int(i))
+                if gen is not None:
+                    gen.set_offset(gen.get_offset() - 4)
 
             # Copy some objects so they don't get modified after returning.
             # This is important when using async scheduling.
@@ -2098,10 +2129,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     )
                 # Mask out the sampled tokens that should not be sampled.
                 for i in discard_sampled_tokens_req_indices:
-                    valid_sampled_token_ids[i].clear()
+                    valid_sampled_token_ids[int(i)].clear()
             else:
                 valid_sampled_token_ids = []
-                invalid_req_indices = list(discard_sampled_tokens_req_indices)
+                invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
                 invalid_req_indices_set = set(invalid_req_indices)
                 assert sampled_token_ids.shape[-1] == 1
 
@@ -2145,9 +2176,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 req_id = self.input_batch.req_ids[req_idx]
                 req_state = self.requests[req_id]
                 req_state.output_token_ids.extend(sampled_ids)
-
-            if self.speculative_config:
-                self._draft_token_ids = self.propose_draft_token_ids(
+        
+        def propose_draft_token_ids(sampled_token_ids):
+            assert self.spec_decode_common_attn_metadata is not None
+            self._draft_token_ids = self.propose_draft_token_ids(
                     valid_sampled_token_ids,
                     sampling_metadata,
                     scheduler_output,
@@ -2158,6 +2190,32 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata,
                     aux_hidden_states,
                 )
+
+        with ProfileExecuteDuration().capture_async("Draft"):
+            if self.speculative_config:
+                use_padded_batch_for_eagle = self.speculative_config and \
+                    self.speculative_config.use_eagle() and \
+                    not self.speculative_config.disable_padded_drafter_batch
+                if use_padded_batch_for_eagle:
+                    # EAGLE speculative decoding can use the GPU sampled tokens
+                    # as inputs, and does not need to wait for bookkeeping to finish.
+                    propose_draft_token_ids(sampler_output.sampled_token_ids)
+                if self.speculative_config and not use_padded_batch_for_eagle:
+                    # ngram and other speculative decoding methods use the sampled
+                    # tokens on the CPU, so they are run after bookkeeping.
+                    propose_draft_token_ids(valid_sampled_token_ids)
+            # if self.speculative_config:
+            #     self._draft_token_ids = self.propose_draft_token_ids(
+            #         valid_sampled_token_ids,
+            #         sampling_metadata,
+            #         scheduler_output,
+            #         spec_decode_metadata,
+            #         positions,
+            #         scheduler_output.total_num_scheduled_tokens,
+            #         hidden_states,
+            #         attn_metadata,
+            #         aux_hidden_states,
+            #     )
 
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()

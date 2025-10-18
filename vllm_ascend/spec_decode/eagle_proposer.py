@@ -32,16 +32,28 @@ class EagleProposer(Proposer):
                  device: torch.device,
                  runner=None):
         self.name = SpecDcodeType.EAGLE if vllm_config.speculative_config.method == "eagle" else SpecDcodeType.EAGLE3
-        self.vllm_config = vllm_config
         self.device = device
+        self.vllm_config = vllm_config
+        self.speculative_config = vllm_config.speculative_config
+        self.draft_model_config = self.speculative_config.draft_model_config
+        self.method = self.speculative_config.method
+
         self.runner = runner
+        self.dtype = vllm_config.model_config.dtype
+        self.max_model_len = vllm_config.model_config.max_model_len
+        self.block_size = vllm_config.cache_config.block_size
+        self.num_speculative_tokens = (
+            self.speculative_config.num_speculative_tokens)
+        self.max_num_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens)
+        self.token_arange_np = np.arange(self.max_num_tokens)
 
         self.block_size = vllm_config.cache_config.block_size
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
-        self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size(
-        )
+        self.hidden_size = self.draft_model_config.get_hidden_size()
+
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
@@ -52,17 +64,16 @@ class EagleProposer(Proposer):
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
-            self.vllm_config.scheduler_config.max_num_batched_tokens,
+            self.max_num_tokens,
             dtype=torch.int32,
             device=device)
         self.positions = torch.zeros(
-            self.vllm_config.scheduler_config.max_num_batched_tokens,
+            self.max_num_tokens,
             dtype=torch.int64,
             device=device)
         self.hidden_states = torch.zeros(
-            (self.vllm_config.scheduler_config.max_num_batched_tokens,
-             self.hidden_size),
-            dtype=self.vllm_config.model_config.dtype,
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
             device=device)
         # We need +1 here because the arange is used to set query_start_loc,
         # which has one more element than batch_size.
@@ -398,14 +409,18 @@ class EagleProposer(Proposer):
         # [batch_size, max_num_blocks_per_req]
         block_table: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        last_token_indices: Optional[torch.Tensor],
+
     ) -> torch.Tensor:
         device = cu_num_tokens.device
         cu_num_tokens = cu_num_tokens.cpu()
         block_table = block_table.cpu()
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
-        last_token_indices = cu_num_tokens[1:] - 1
+        if last_token_indices is None:
+            last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
         target_positions = target_positions.cpu()
+        
         if self.name == SpecDcodeType.EAGLE3:
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
