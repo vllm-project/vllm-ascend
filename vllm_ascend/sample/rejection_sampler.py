@@ -3,10 +3,8 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import vllm.v1.sample.rejection_sampler as rs
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import (RejectionSampler, compute_probs,
-                                              generate_uniform_probs)
+from vllm.v1.sample.rejection_sampler import RejectionSampler, compute_probs
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 PLACEHOLDER_TOKEN_ID = -1
@@ -458,6 +456,56 @@ def expand_pytorch(
         output_ptr[output_slice] = src_val
 
 
+def generate_uniform_probs(
+    num_tokens: int,
+    num_draft_tokens: list[int],
+    generators: dict[int, torch.Generator],
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    Generates a batch of uniform random samples, with optional seeding
+    if available.
+
+    This method creates a tensor of shape `(num_tokens, )` filled
+    with uniform random values in the range [0, 1). If `generators` is provided,
+    the requests with their own seeds will use the provided `torch.Generator`
+    for reproducibility. The samples for the other requests will be generated
+    without a seed.
+
+    Args:
+        num_tokens : int
+            Total number of tokens.
+        num_draft_tokens : List[List[int]]
+            Number of draft tokens per request.
+        generators : Optional[Dict[int, torch.Generator]]
+            A dictionary mapping indices in the batch to
+            `torch.Generator` objects.
+        device : torch.device
+            The device on which to allocate the tensor.
+    Returns:
+        uniform_rand : torch.Tensor
+            A tensor of shape `(num_tokens, )` containing uniform
+            random values in the range [0, 1).
+    """
+    uniform_probs = torch.rand(
+        (num_tokens, ),
+        dtype=torch.float32,
+        device=device,
+    )
+    start_idx = 0
+    for req_idx, n in enumerate(num_draft_tokens):
+        # Do not generate random numbers for requests with no draft tokens.
+        # This can be important for reproducibility.
+        if n == 0:
+            continue
+        end_idx = start_idx + n
+        generator = generators.get(req_idx)
+        if generator is not None:
+            uniform_probs[start_idx:end_idx].uniform_(generator=generator)
+        start_idx = end_idx
+    return uniform_probs
+
+
 def sample_recovered_tokens_pytorch(
     output_token_ids,  # [num_tokens]
     cu_num_draft_tokens,  # [batch_size]
@@ -468,37 +516,33 @@ def sample_recovered_tokens_pytorch(
     vocab_size,
     IS_NGRAM=False,
 ):
-    batch_size = len(cu_num_draft_tokens)
+    num_tokens = len(draft_token_ids)
+    device = output_token_ids.device
 
-    for req_idx in range(batch_size):
-        start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx - 1]
-        end_idx = cu_num_draft_tokens[req_idx]
-        num_draft_tokens = end_idx - start_idx
+    diff = torch.diff(cu_num_draft_tokens,
+                      prepend=torch.tensor([0], device=device))
+    q_value_new = torch.repeat_interleave(q, diff, dim=0)
 
-        for pos in range(num_draft_tokens):
-            token_idx = start_idx + pos
+    token_positions = torch.arange(num_tokens, device=device)
 
-            if IS_NGRAM:
-                draft_token_id = draft_token_ids[token_idx]
-                orig_prob = target_probs[token_idx, draft_token_id].item()
-                target_probs[token_idx, draft_token_id] = 0
-                prob = target_probs[token_idx].clone()
-            else:
-                draft_p = draft_probs[token_idx].clone()
-                target_p = target_probs[token_idx].clone()
-                prob = torch.maximum(target_p - draft_p,
-                                     torch.tensor(0.0, device=target_p.device))
+    if IS_NGRAM:
+        orig_prob = target_probs[token_positions, draft_token_ids]
+        target_probs[token_positions, draft_token_ids] = 0
+        prob = target_probs[token_positions].clone()
+    else:
+        draft_p = draft_probs[token_positions].clone()
+        target_p = target_probs[token_positions].clone()
+        prob = torch.maximum(target_p - draft_p,
+                             torch.tensor(0.0, device=target_p.device))
 
-            q_values = torch.full((vocab_size, ),
-                                  float('-inf'),
-                                  device=q.device)
-            q_values[:vocab_size] = q[req_idx, :vocab_size]
+    q_values = torch.full((num_tokens, vocab_size),
+                          float('-inf'),
+                          device=q.device)
+    q_values[:vocab_size] = q_value_new[token_positions, :vocab_size]
 
-            recovered_id = torch.argmax(prob / q_values).item()
-            output_token_ids[token_idx] = recovered_id
+    recovered_id = torch.argmax(prob / q_values, dim=-1)
+    output_token_ids[token_positions] = recovered_id.to(
+        dtype=output_token_ids.dtype)
 
-            if IS_NGRAM:
-                target_probs[token_idx, draft_token_id] = orig_prob
-
-
-rs.expand_batch_to_tokens = expand_batch_to_tokens
+    if IS_NGRAM:
+        target_probs[token_positions, draft_token_ids] = orig_prob
