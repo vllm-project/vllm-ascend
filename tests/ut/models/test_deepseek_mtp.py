@@ -96,8 +96,11 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
         mocker.patch(
             "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
             return_value=None)
+        ascend_config = mocker.Mock()
+        ascend_config.max_num_batched_tokens = 2048
+        ascend_config.max_model_len = 1024
         mocker.patch("vllm_ascend.utils.get_ascend_config",
-                     return_value=mocker.Mock())
+                     return_value=ascend_config)
 
         predictor = CustomDeepSeekMultiTokenPredictor(
             vllm_config=mock_vllm_config)
@@ -173,8 +176,11 @@ class TestCustomDeepSeekMTP(PytestBase):
         mocker.patch(
             "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
             return_value=None)
+        ascend_config = mocker.Mock()
+        ascend_config.max_num_batched_tokens = 2048
+        ascend_config.max_model_len = 1024
         mocker.patch("vllm_ascend.utils.get_ascend_config",
-                     return_value=mocker.Mock())
+                     return_value=ascend_config)
 
         mtp = CustomDeepSeekMTP(vllm_config=vllm_config)
         return mtp

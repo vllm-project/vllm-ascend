@@ -22,7 +22,7 @@ import torch_npu
 from pytest_mock import MockerFixture
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
-from vllm_ascend.ascend_config import get_ascend_config
+import vllm_ascend
 from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
@@ -77,7 +77,8 @@ def mock_dist_env(mocker: MockerFixture):
                    torchair_graph_config=MagicMock(enabled=False),
                    enable_multistream_moe=False,
                    enable_shared_expert_dp=False,
-                   expert_map_path=None
+                   expert_map_path=None,
+                   init_redundancy_expert=2,
                )), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.determine_expert_map',
                return_value=(3, torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]))), \
@@ -356,7 +357,7 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
         """
         global_num_experts, ep_size = others_param
         is_prefill = False
-        global_redundant_expert_num = get_ascend_config(
+        global_redundant_expert_num = vllm_ascend.torchair.ops.torchair_fused_moe.get_ascend_config(
         ).init_redundancy_expert
         is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256
         forward_context = MagicMock(fused_moe_state=_get_fused_moe_state(
