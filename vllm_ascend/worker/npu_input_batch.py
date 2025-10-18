@@ -106,7 +106,9 @@ class InputBatch:
             is_spec_decode: bool = False,
             is_pooling_model: bool = False,
             num_speculative_tokens: int = 0,
-            kernel_block_sizes: Optional[list[list[int]]] = None):
+            kernel_block_sizes: Optional[list[list[int]]] = None,
+            cp_kv_cache_interleave_size: int = 1,
+        ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
@@ -151,7 +153,9 @@ class InputBatch:
             device=device,
             block_sizes=block_sizes,
             num_speculative_tokens=num_speculative_tokens,
-            kernel_sizes=kernel_block_sizes)
+            kernel_sizes=kernel_block_sizes,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        )
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ),
