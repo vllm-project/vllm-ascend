@@ -528,6 +528,7 @@ class TestNPUPlatform(TestBase):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.tensor_parallel_size = 1
         vllm_config.compilation_config.custom_ops = []
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()

@@ -494,14 +494,14 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     return False
 
 
-def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
+def register_ascend_customop(vllm_config: Optional[VllmConfig] = None, refresh=False):
     """Register Ascend CustomOP
 
     NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
     and ensure this will execute after model config is initilazed.
     """
     global _ASCEND_CUSTOMOP_IS_REIGISTERED
-    if _ASCEND_CUSTOMOP_IS_REIGISTERED:
+    if _ASCEND_CUSTOMOP_IS_REIGISTERED and not refresh:
         return
     from vllm.model_executor.custom_op import CustomOp
 
