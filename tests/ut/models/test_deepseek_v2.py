@@ -23,7 +23,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm_ascend import ascend_config
 from vllm_ascend.models.deepseek_v2 import (CustomDeepseekV2MLAAttention,
                                             CustomDeepseekV2RowParallelLinear)
-from vllm_ascend.utils import register_ascend_customop
 
 
 @pytest.mark.parametrize("cls", [CustomDeepseekV2RowParallelLinear])
