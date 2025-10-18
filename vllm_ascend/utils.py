@@ -494,14 +494,14 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     return False
 
 
-def register_ascend_customop(vllm_config: Optional[VllmConfig] = None, refresh=False):
+def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
     NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`,
     and ensure this will execute after model config is initilazed.
     """
     global _ASCEND_CUSTOMOP_IS_REIGISTERED
-    if _ASCEND_CUSTOMOP_IS_REIGISTERED and not refresh:
+    if _ASCEND_CUSTOMOP_IS_REIGISTERED:
         return
     from vllm.model_executor.custom_op import CustomOp
 
@@ -745,7 +745,7 @@ def is_hierarchical_communication_enabled():
 @functools.cache
 def version_check():
     """check if torch_npu version >= dev20250919"""
-    import re
+    import regex as re
     torch_npu_version = torch_npu.version.__version__
     date_pattern = r'dev(\d{8})'
 
