@@ -21,12 +21,11 @@ if HAS_TRITON:
     import vllm_ascend.patch.worker.patch_common.patch_triton
 
 # isort: off
-import vllm_ascend.patch.worker.patch_common.patch_attention_selector  # noqa
-import vllm_ascend.patch.worker.patch_common.patch_attentionspec  # noqa
-import vllm_ascend.patch.worker.patch_common.patch_attention_layer  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_logits  # noqa
+import vllm_ascend.patch.worker.patch_common.patch_roberta  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_weight_loader  # noqa
+import vllm_ascend.patch.worker.patch_common.patch_multimodal_merge  # noqa
 
 # TODO: revert me when triton import is fixed
 # import vllm_ascend.patch.worker.patch_common.patch_minicpm  # noqa

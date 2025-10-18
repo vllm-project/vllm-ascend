@@ -27,7 +27,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 
 class AscendW4A8DynamicLinearMethod:
@@ -140,7 +140,8 @@ class AscendW4A8DynamicFusedMoEMethod:
         # NOTE: new quantize weights: 2 int4 pack into int8
         self.new_quant_version = quant_version == "1.0.0"
         self.tp_size = 1 if vllm_config.parallel_config.enable_expert_parallel else self.ep_group.world_size
-        self.dynamic_eplb = get_ascend_config().dynamic_eplb
+        ascend_config = get_ascend_config()
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         if self.new_quant_version and self.tp_size > 16:
             raise ValueError(
                 "The current weight does not support moe part tp>16.")
@@ -262,10 +263,10 @@ class AscendW4A8DynamicFusedMoEMethod:
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
-            1] == global_num_experts, "Number of global experts mismatch"
+            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-        topk_weights, topk_ids, row_idx = select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=top_k,
@@ -297,7 +298,6 @@ class AscendW4A8DynamicFusedMoEMethod:
             w2_scale_bias=layer.w2_scale_bias,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            row_idx=row_idx,
             use_int4_w4a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
@@ -393,9 +393,10 @@ class AscendW4A8DynamicFusedMoEMethod:
 
         self.update_bias(layer, w13_bias, w2_bias)
 
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        if is_enable_nz():
+            layer.w13_weight.data = torch_npu.npu_format_cast(
+                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(
+                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight.data = self.pack_to_int32(layer.w13_weight.data)
         layer.w2_weight.data = self.pack_to_int32(layer.w2_weight.data)

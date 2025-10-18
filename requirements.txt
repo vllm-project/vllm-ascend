@@ -24,4 +24,4 @@ numba
 # Install torch_npu
 --pre
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
-torch-npu==2.7.1.dev20250919
+torch-npu==2.7.1.dev20250724

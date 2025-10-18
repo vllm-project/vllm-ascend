@@ -137,7 +137,8 @@ class EplbUpdator:
             self.compute_and_set_moe_load(is_clear=True)
             self.wakeup_eplb_worker()
 
-        if self.update_expert_weight_flag():
+        if self.update_expert_weight_flag(
+        ) and self.expert_map_record_path is None:
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
         self.update_iteration()

@@ -134,6 +134,7 @@ class TorchairAscendW4A8DynamicFusedMoEMethod:
         self.ep_group = get_ep_group()
 
         ascend_config = get_ascend_config()
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
         vllm_config = get_current_vllm_config()
@@ -268,7 +269,7 @@ class TorchairAscendW4A8DynamicFusedMoEMethod:
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
-            1] == global_num_experts, "Number of global experts mismatch"
+            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
         if global_num_experts == 256:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
@@ -336,7 +337,8 @@ class TorchairAscendW4A8DynamicFusedMoEMethod:
                 is_torchair=self.torchair_graph_enabled,
                 quantized_x_for_share=shared_gate_up,
                 dynamic_scale_for_share=shared_dequant_scale,
-                mc2_mask=kwargs.get("mc2_mask", None))
+                mc2_mask=kwargs.get("mc2_mask", None),
+                dynamic_eplb=self.dynamic_eplb)
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into layers module.

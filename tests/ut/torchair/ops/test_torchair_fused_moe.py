@@ -22,6 +22,7 @@ import torch_npu
 from pytest_mock import MockerFixture
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
@@ -56,7 +57,8 @@ def mock_dist_env(mocker: MockerFixture):
     # init dist env patch
     dp_metadata = MagicMock(num_tokens_across_dp_cpu=[5, 5])
 
-    with patch('torch.distributed.get_rank', return_value=0), \
+    with patch('torch.npu.is_available', return_value=True), \
+         patch('torch.distributed.get_rank', return_value=0), \
          patch('torch.distributed.get_world_size', return_value=4), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
          patch('vllm_ascend.torchair.ops.torchair_fused_moe.get_mc2_group', return_value=mock_ep_and_mc2_group(mocker)), \
@@ -208,6 +210,7 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
 
 class TestTorchairAscendFusedMoe:
 
+    @pytest.fixture
     def test_init_no_quant(self, mock_dist_env, default_moe_config):
         layer = TorchairAscendFusedMoE(**default_moe_config)
 
@@ -237,6 +240,7 @@ class TestTorchairAscendFusedMoe:
             error_config['scoring_func'] = "random"
             layer = TorchairAscendFusedMoE(**error_config)
 
+    @pytest.fixture
     def test_init_with_quant(self, mock_dist_env, default_moe_config):
         mock_quant_config = MagicMock()
         mock_quant_method = MockFusedMoEMethod()
@@ -248,6 +252,7 @@ class TestTorchairAscendFusedMoe:
             assert moe.quant_method is not None
             assert isinstance(moe.quant_method, AscendFusedMoEMethod)
 
+    @pytest.fixture
     def test_init_with_mixed_quant(self, mock_dist_env, default_moe_config):
         mock_quant_config = MagicMock()
         mock_quant_method = MockFusedMoEMethod()
@@ -261,6 +266,7 @@ class TestTorchairAscendFusedMoe:
         assert isinstance(moe.quant_method,
                           TorchairAscendUnquantizedFusedMoEMethod)
 
+    @pytest.fixture
     @pytest.mark.parametrize(
         "others_param",
         [[None,
@@ -306,6 +312,7 @@ class TestTorchairAscendFusedMoe:
         else:
             assert output.shape == (num_tokens, 32)
 
+    @pytest.fixture
     def test_forward_ms_fused_moe_comp(self, mock_dist_env,
                                        default_moe_config):
         inputs = torch.randn(5, 32)
@@ -349,7 +356,9 @@ class TestTorchairAscendUnquantizedFusedMoEMethod:
         """
         global_num_experts, ep_size = others_param
         is_prefill = False
-        is_deepseek_v3_r1 = global_num_experts == 256
+        global_redundant_expert_num = get_ascend_config(
+        ).init_redundancy_expert
+        is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256
         forward_context = MagicMock(fused_moe_state=_get_fused_moe_state(
             ep_size, is_prefill, is_deepseek_v3_r1))
         with patch(

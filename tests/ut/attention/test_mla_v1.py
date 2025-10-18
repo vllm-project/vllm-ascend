@@ -376,7 +376,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(q_pe.shape[1], self.impl.num_heads)
         self.assertEqual(q_pe.shape[2], self.impl.qk_rope_head_dim)
 
-    def test_process_weights_after_loading(self):
+    @patch('torch_npu.npu_format_cast')
+    def test_process_weights_after_loading(self, mock_format_cast):
         layer = MagicMock(spec=LinearBase)
         layer.input_size_per_partition = 10
         quant_method = MagicMock()
@@ -389,6 +390,7 @@ class TestAscendMLAImpl(TestBase):
         layer.weight = torch.randn(shape_0, shape_1)
         self.impl.kv_b_proj = layer
         apply.return_value = layer.weight.T
+        mock_format_cast.return_value = layer.weight
         self.impl.process_weights_after_loading(torch.bfloat16)
 
         self.assertEqual(self.impl.W_UK_T.shape[0], self.impl.num_heads)
@@ -461,11 +463,13 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(out.shape, prefix_out.shape)
         self.assertEqual(lse.shape, prefix_lse.shape)
 
+    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
     @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._v_up_proj")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode_without_graph(self,
                                           mock_npu_fused_infer_attention_score,
-                                          mock_up_proj):
+                                          mock_up_proj,
+                                          mock_get_forward_context):
         num_tokens = 100
         block_size = 4
         q_nope = torch.randn(num_tokens, self.impl.num_heads,
@@ -487,6 +491,7 @@ class TestAscendMLAImpl(TestBase):
         mock_up_proj.return_value = torch.randn(num_tokens,
                                                 self.impl.num_heads,
                                                 self.impl.v_head_dim)
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe,
                                            block_size, metadata)
         self.assertEqual(result.shape[0], num_tokens)
@@ -495,9 +500,12 @@ class TestAscendMLAImpl(TestBase):
         mock_up_proj.assert_called_once()
         mock_npu_fused_infer_attention_score.assert_called_once()
 
-    @patch("vllm_ascend.attention.mla_v1.npu_prefetch")
-    def test_mla_preprocess(self, magic_npu_fetch):
+    @patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad")
+    @patch("vllm_ascend.attention.mla_v1.maybe_npu_prefetch")
+    def test_mla_preprocess(self, magic_npu_fetch,
+                            mock_maybe_all_gather_and_maybe_unpad):
         magic_npu_fetch.return_value = MagicMock()
+        mock_maybe_all_gather_and_maybe_unpad.side_effect = lambda x, label: x
         batch_size = 4
         seq_len = 8
         hidden_size = 1024
@@ -614,12 +622,13 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_pe.shape[-1], self.impl.qk_rope_head_dim)
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
+    @patch('vllm_ascend.attention.mla_v1.get_forward_context')
     @patch("torch.npu.stream")
     @patch("vllm_ascend.attention.mla_v1.get_multistream_comm_context")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode(self, mock_npu_fused_infer_attention_score,
-                            mock_get_multistream_comm_context,
-                            mock_npu_stream):
+                            mock_get_multistream_comm_context, mock_npu_stream,
+                            mock_get_forward_context):
         B = 2
         N = self.impl.num_kv_heads
         BS = 100
@@ -644,6 +653,7 @@ class TestAscendMLAImpl(TestBase):
         ]
         mock_get_multistream_comm_context.return_value = None
 
+        mock_get_forward_context.return_value = MagicMock(capturing=False)
         result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
                                            attn_metadata)
 

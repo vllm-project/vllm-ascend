@@ -74,7 +74,7 @@ def test_end_to_end():
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
 
     with VllmRunner("Qwen/Qwen3-0.6B",
-                    enforce_eager=True,
+                    enforce_eager=False,
                     enable_sleep_mode=True) as runner:
 
         output = runner.model.generate(prompt, sampling_params)
