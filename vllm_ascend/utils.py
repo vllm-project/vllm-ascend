@@ -745,7 +745,7 @@ def is_hierarchical_communication_enabled():
 @functools.cache
 def version_check():
     """check if torch_npu version >= dev20250919"""
-    import regex as re
+    import re  # noqa
     torch_npu_version = torch_npu.version.__version__
     date_pattern = r'dev(\d{8})'
 

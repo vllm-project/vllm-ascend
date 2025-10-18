@@ -128,13 +128,6 @@ repos:
     language: system
     always_run: true
     pass_filenames: false
-  - id: enforce-import-regex-instead-of-re
-    name: Enforce import regex as re
-    entry: python tools/enforce_regex_import.py
-    language: python
-    types: [python]
-    pass_filenames: false
-    additional_dependencies: [regex]
   - id: python-init
     name: Enforce __init__.py in Python packages
     entry: python tools/check_python_src_init.py
