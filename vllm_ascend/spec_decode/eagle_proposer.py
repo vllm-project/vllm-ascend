@@ -8,6 +8,7 @@ from vllm.attention.layer import Attention
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
@@ -93,9 +94,9 @@ class EagleProposer(Proposer):
         self.model = get_model(vllm_config=self.vllm_config,
                                model_config=self.vllm_config.
                                speculative_config.draft_model_config)
-        draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
-            target_attn_layer_names)
+        draft_attn_layer_names = (get_layers_from_vllm_config(
+            self.vllm_config, AttentionLayerBase).keys() -
+                                  target_attn_layer_names)
         self.attn_layer_name = next(iter(draft_attn_layer_names))
 
         # share embed_tokens with the target model if needed

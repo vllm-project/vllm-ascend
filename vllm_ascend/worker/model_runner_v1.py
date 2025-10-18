@@ -137,7 +137,6 @@ from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 # yapf: enable
 
-
 if vllm_version_is("0.11.0"):
     from vllm.attention.layer import Attention
     from vllm.config import CompilationLevel
