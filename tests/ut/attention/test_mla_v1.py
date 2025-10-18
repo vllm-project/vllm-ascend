@@ -294,13 +294,11 @@ class TestAscendMLAImpl(TestBase):
         kv_a_layernorm.weight = torch.randn(96)
         kv_a_layernorm.variance_epsilon = 1e-6
         kwargs = {
-            "q_lora_rank": 64,
             "kv_lora_rank": 32,
             "qk_nope_head_dim": 64,
             "qk_rope_head_dim": 32,
             "qk_head_dim": 96,
             "v_head_dim": 128,
-            "rotary_emb": MagicMock(),
             "q_proj": MagicMock(),
             "q_b_proj": MagicMock(),
             "kv_b_proj": MagicMock(),
@@ -328,13 +326,11 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.scale, 0.1)
         self.assertEqual(self.impl.num_kv_heads, 8)
         self.assertEqual(self.impl.kv_cache_dtype, "auto")
-        self.assertEqual(self.impl.q_lora_rank, 64)
         self.assertEqual(self.impl.kv_lora_rank, 32)
         self.assertEqual(self.impl.qk_nope_head_dim, 64)
         self.assertEqual(self.impl.qk_rope_head_dim, 32)
         self.assertEqual(self.impl.qk_head_dim, 96)
         self.assertEqual(self.impl.v_head_dim, 128)
-        self.assertIsNotNone(self.impl.rotary_emb)
         self.assertIsNotNone(self.impl.q_proj)
         self.assertIsNotNone(self.impl.kv_b_proj)
         self.assertIsNotNone(self.impl.o_proj)

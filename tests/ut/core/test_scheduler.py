@@ -21,6 +21,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.base import TestBase
 from vllm_ascend.core.scheduler import AscendScheduler
+from vllm_ascend.utils import vllm_version_is
 
 EOS_TOKEN_ID = 50256
 MODEL = "Qwen3-0.6B"
@@ -175,12 +176,21 @@ class TestAscendScheduler(TestBase):
         )
         cache_config.num_gpu_blocks = 10000
 
-        scheduler = AscendScheduler(
-            vllm_config=vllm_config,
-            kv_cache_config=kv_cache_config,
-            log_stats=True,
-            structured_output_manager=MagicMock(spec=StructuredOutputManager),
-        )
+        if vllm_version_is("0.11.0"):
+            scheduler = AscendScheduler(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                log_stats=True,
+                structured_output_manager=MagicMock(spec=StructuredOutputManager),
+            )
+        else:
+            scheduler = AscendScheduler(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+                log_stats=True,
+                block_size=block_size,
+                structured_output_manager=MagicMock(spec=StructuredOutputManager),
+            )
 
         should_advance = MagicMock()
         should_advance.return_value = False
