@@ -1096,7 +1096,7 @@ class TorchairAscendFusedMoE(FusedMoE):
         self.multistream_overlap_shared_expert = \
             ascend_config.multistream_overlap_shared_expert and \
             self.torchair_graph_enabled
-        self.enable_super_kernel = ascend_config.torchair_graph_config.enable_super_kernel and self.multistream_overlap_shared_expert and tp_size == 1
+        self.enable_super_kernel = ascend_config.torchair_graph_config.enable_super_kernel
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:

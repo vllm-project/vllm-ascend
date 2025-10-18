@@ -328,7 +328,7 @@ class TorchairDeepseekV2MoE(nn.Module):
             ascend_config.multistream_overlap_shared_expert and \
             self.torchair_graph_enabled
 
-        self.enable_super_kernel = ascend_config.torchair_graph_config.enable_super_kernel and self.multistream_overlap_shared_expert and self.tp_size == 1
+        self.enable_super_kernel = ascend_config.torchair_graph_config.enable_super_kernel
         self.params_dtype = torch.float32 if self.enable_super_kernel else \
             torch.get_default_dtype()
         # Converting gate weight to fp32 is to adapt to the super kernel feature.
