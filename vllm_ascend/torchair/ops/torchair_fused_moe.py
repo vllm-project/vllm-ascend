@@ -856,8 +856,9 @@ class TorchairAscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         shared_experts: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
-
-        is_deepseek_v3_r1 = global_num_experts == 256
+        global_redundant_expert_num = get_ascend_config(
+        ).init_redundancy_expert
+        is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
         if is_deepseek_v3_r1:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(

@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 from vllm.attention.layer import Attention
-from vllm.config import (VllmConfig, get_layers_from_vllm_config,
-                         set_current_vllm_config)
-from vllm.forward_context import BatchDescriptor
+from vllm.config import (CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
+from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)

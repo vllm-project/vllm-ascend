@@ -33,47 +33,7 @@ DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 
 
 @pytest.mark.parametrize("model", MOE_MODELS)
-def test_external_launcher_eager(model):
-    script = script = "/usr/local/python3.11.13/bin/python3.11/__w/vllm-ascend/tests/examples/test_weight_loader.py"
-    env = os.environ.copy()
-    # TODO: Change to 2 when ci machine has 4 cards
-    cmd = [
-        sys.executable,
-        str(script),
-        "--model",
-        model,
-        "--tp-size",
-        "2",
-        "--proc-per-node",
-        "2",
-        "--trust-remote-code",
-        "--enforce-eager",
-        "--enable-expert-parallel",
-        "--enable-sleep-mode",
-        "--model-weight-gib",
-        "20",
-    ]
-
-    print(f"Running subprocess: {' '.join(cmd)}")
-    proc = subprocess.run(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=600,
-    )
-    output = proc.stdout.decode()
-
-    print(output)
-
-    assert "TP RANKS: [0]" in output
-    assert "TP RANKS: [1]" in output
-    assert "Generated text:" in output
-    assert proc.returncode == 0
-
-
-@pytest.mark.parametrize("model", MOE_MODELS)
-def test_external_launcher_aclgraph(model):
+def test_external_launcher(model):
     script = "/usr/local/python3.11.13/bin/python3.11/__w/vllm-ascend/tests/examples/test_weight_loader.py"
     env = os.environ.copy()
     # TODO: Change to 2 when ci machine has 4 cards
@@ -126,45 +86,6 @@ def test_external_launcher_dense(model):
         "--proc-per-node",
         "2",
         "--trust-remote-code",
-        "--enable-sleep-mode",
-        "--model-weight-gib",
-        "20",
-    ]
-
-    print(f"Running subprocess: {' '.join(cmd)}")
-    proc = subprocess.run(
-        cmd,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=600,
-    )
-    output = proc.stdout.decode()
-
-    print(output)
-
-    assert "TP RANKS: [0]" in output
-    assert "TP RANKS: [1]" in output
-    assert "Generated text:" in output
-    assert proc.returncode == 0
-
-
-@pytest.mark.parametrize("model", MODELS)
-def test_external_launcher_dense_eager(model):
-    script = "/usr/local/python3.11.13/bin/python3.11/__w/vllm-ascend/tests/examples/test_weight_loader.py"
-    env = os.environ.copy()
-    # TODO: Change to 2 when ci machine has 4 cards
-    cmd = [
-        sys.executable,
-        str(script),
-        "--model",
-        model,
-        "--tp-size",
-        "2",
-        "--proc-per-node",
-        "2",
-        "--trust-remote-code",
-        "--enforce-eager",
         "--enable-sleep-mode",
         "--model-weight-gib",
         "20",

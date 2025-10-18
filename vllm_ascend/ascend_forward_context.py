@@ -11,7 +11,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import enable_sp, is_moe_model
+from vllm_ascend.utils import enable_sp, is_moe_model, version_check
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
@@ -114,7 +114,7 @@ def set_ascend_forward_context(
         # the performance may degrade due to the switching of communication methods.
         if is_moe_model(vllm_config):
             sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1
+                tp_world_size > 1 and num_tokens is not None
         else:
             sp_enabled = enable_sp(vllm_config) and \
                 tp_world_size > 1 and \
@@ -160,13 +160,18 @@ def set_ascend_forward_context(
         # this optim now just support dense models due to the specific operators used.
         # Once the necessary conditions are met, support for MOE models will also be added.
         from vllm_ascend.quantization.quant_config import AscendQuantConfig
+        model_type_scope = ["llama", "qwen2", "qwen3"]
+        if version_check():
+            model_type_scope.append("qwen3_moe")
         addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
-            vllm_config.model_config.hf_config.model_type in ["llama", "qwen2", "qwen3"] and \
+            vllm_config.model_config.hf_config.model_type in model_type_scope and \
             forward_context.layer_idx is not None
         if addrmsnorm_quant_fusion_enabled:
             forward_context.model_instance = model_instance
             forward_context.num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
             forward_context.fusion_linear = "gate_up_dense" if forward_context.layer_idx == 0 else "qkv_dense"
+            if vllm_config.model_config.hf_config.model_type == "qwen3_moe":
+                forward_context.fusion_linear = "gate_moe" if forward_context.layer_idx == 0 else "qkv_moe"
         forward_context.addrmsnorm_quant_fusion_enabled = addrmsnorm_quant_fusion_enabled
 
         if num_tokens is None and attn_metadata is not None:
