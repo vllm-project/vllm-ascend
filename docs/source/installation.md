@@ -18,7 +18,7 @@ This document describes how to install vllm-ascend manually.
 
 You have 2 way to install:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
-    - **Warning**：Before installing, make sure that the old versions of "vllm" and "vllm_ascend" have been completely uninstalled through the "pip uninstall" command. Incomplete uninstallation may result in abnormal operation.
+    - **Warning**: Before installing, ensure that any old versions of `vllm` and `vllm_ascend` are completely uninstalled using the `pip uninstall` command. Incomplete uninstallation can cause operational issues.
 - **Using docker**: use the `vllm-ascend` pre-built docker image directly.
 
 ## Configure a new environment
