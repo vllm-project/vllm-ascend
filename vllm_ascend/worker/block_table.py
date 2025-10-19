@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
@@ -321,27 +321,88 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.commit_slot_mapping(num_tokens)
 
-    def get_split_computed_tokens(self, num_computed_tokens: np.ndarray) -> list[list[list[int]]]:
-        "Splits computed token counts across dcp and sp dimensions for distributed allocation."
+    def get_split_computed_tokens(self, num_computed_tokens: np.ndarray,
+                                  request_ids: Optional[List[str]] = None,
+                                  request_start_rank_dict: Optional[Dict[str, tuple[int, int]]] = None,
+                                  # tuple: start_rank, tokens_blank_in_this_block
+                                  cp_kv_cache_interleave_size: int = 1) -> list[list[list[int]]]:
+        """Splits computed token counts across dcp and sp dimensions for distributed allocation.
+
+        Args:
+            num_computed_tokens: Number of tokens for each request (current chunk, not cumulative)
+            request_ids: Request IDs to track state
+            request_start_rank_dict: Dict mapping req_id to the starting rank for this chunk.
+                                    Will be updated with next starting rank after distribution.
+
+        Returns:
+            List of [cp_size][dcp_size] distribution for each request
+        """
         self.cp_world_size = get_cp_group().world_size if context_parallel_enable() else 1
         self.dcp_world_size = get_dcp_group().world_size
         num_requests = len(num_computed_tokens)
+        if request_ids is None:
+            request_ids = [f"req_{i}" for i in range(num_requests)]
+        else:
+            assert len(request_ids) == num_requests
         num_computed_tokens_of_cp_dcp = [[
             [0] * self.dcp_world_size for _ in range(self.cp_world_size)
         ] for _ in range(num_requests)]
         total_ranks = self.cp_world_size * self.dcp_world_size
-        for req_idx in range(num_requests):
-            total_tokens = num_computed_tokens[req_idx]
+
+        for req_idx, (req_id, total_tokens) in enumerate(zip(request_ids, num_computed_tokens)):
             if total_tokens <= 0:
                 continue
-            base = int(total_tokens) // total_ranks
-            remainder = int(total_tokens) % total_ranks
+
+            # Get starting rank for this chunk
+            if request_start_rank_dict is not None:
+                start_rank, tokens_blank = request_start_rank_dict.get(req_id, 0)
+            else:
+                start_rank = 0
+                tokens_blank = 0
+
+            if tokens_blank > 0:  # need to continue writing in the last block of previous chunk
+                consumed_tokens = min(tokens_blank, total_tokens)
+                total_tokens -= consumed_tokens
+                tokens_blank -= consumed_tokens
+                if tokens_blank == 0:
+                    start_rank = (start_rank + 1) % total_ranks
+                else:
+                    cp_idx = start_rank // self.dcp_world_size
+                    sp_idx = start_rank % self.dcp_world_size
+                    num_computed_tokens_of_cp_dcp[req_idx][cp_idx][sp_idx] += consumed_tokens
+                    request_start_rank_dict[req_id] = (start_rank, tokens_blank)
+                    return num_computed_tokens_of_cp_dcp
+
+            virtual_size = total_ranks * cp_kv_cache_interleave_size
+            base = int(total_tokens) // virtual_size
+            remainder = int(total_tokens) % virtual_size
+            remain_blocks = cdiv(remainder, cp_kv_cache_interleave_size)
+
+            # Distribute base tokens to all ranks
             for rank_idx in range(total_ranks):
                 cp_idx = rank_idx // self.dcp_world_size
                 sp_idx = rank_idx % self.dcp_world_size
-                num_computed_tokens_of_cp_dcp[req_idx][cp_idx][sp_idx] = base
-                if rank_idx < remainder:
-                    num_computed_tokens_of_cp_dcp[req_idx][cp_idx][sp_idx] += 1
+                num_computed_tokens_of_cp_dcp[req_idx][cp_idx][sp_idx] = base * cp_kv_cache_interleave_size
+
+            # Distribute remainder tokens starting from start_rank
+            for i in range(remain_blocks):
+                rank = (start_rank + i) % total_ranks
+                cp_idx = rank // self.dcp_world_size
+                sp_idx = rank % self.dcp_world_size
+                if i < remain_blocks - 1 or remainder % cp_kv_cache_interleave_size == 0:  # not last block or divisible
+                    num_computed_tokens_of_cp_dcp[req_idx][cp_idx][sp_idx] += 1 * cp_kv_cache_interleave_size
+                    tokens_blank = 0
+                else:  # if last block and undivisible
+                    num_computed_tokens_of_cp_dcp[req_idx][cp_idx][sp_idx] += remainder % cp_kv_cache_interleave_size
+                    tokens_blank = cp_kv_cache_interleave_size - (remainder % cp_kv_cache_interleave_size)
+            start_rank = (start_rank + remain_blocks) % total_ranks
+            if tokens_blank == 0:
+                start_rank = (start_rank + 1) % total_ranks
+
+            # Update next starting rank for this request
+            if request_start_rank_dict is not None:
+                request_start_rank_dict[req_id] = (start_rank, tokens_blank)
+
         return num_computed_tokens_of_cp_dcp
 
     def clear(self) -> None:

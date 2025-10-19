@@ -16,6 +16,12 @@ class AscendCommonLongSequenceMetadata:
     num_computed_tokens_of_cp_sp: Optional[list[Optional[list[Optional[
         list[int]]]]]] = None
 
+    num_computed_tokens_of_cp_sp_single: list[list[list[int]]] = None
+
+    num_computed_tokens_of_cp_sp_current: list[list[list[int]]] = None
+
+    num_computed_tokens_of_cp_sp_accum: list[list[list[int]]] = None
+
     q_head_idx_tensor: torch.Tensor = None
 
     q_tail_idx_tensor: torch.Tensor = None
@@ -44,7 +50,7 @@ class AscendCommonAttentionMetadata:
     """
     Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
-    
+
     For many of the tensors we keep both GPU and CPU versions.
     """
 
@@ -98,8 +104,8 @@ class AscendCommonAttentionMetadata:
 
 
 def split_decodes_and_prefills(
-    common_attn_metadata: AscendCommonAttentionMetadata,
-    decode_threshold: int = 1,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        decode_threshold: int = 1,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -154,8 +160,8 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
 
 def maybe_save_kv_layer_to_connector(
-    layer_name: str,
-    kv_cache_layer: List[torch.Tensor],
+        layer_name: str,
+        kv_cache_layer: List[torch.Tensor],
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return

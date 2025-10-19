@@ -82,8 +82,7 @@ from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         UniformTypeKVCacheSpecs)
 # yapf: enable
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
-                             DraftTokenIds, LogprobsTensors, ModelRunnerOutput,
-                             PoolerOutput)
+                             DraftTokenIds, LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -609,7 +608,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             backward_kwargs = {}
             backward_kwargs["mm_features"] = new_req_data.mm_features
 
-            self.requests[req_id] = CachedRequestState(
+            # Create request state - CP/DCP tracking will be computed below
+            req_state = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
                 sampling_params=sampling_params,
@@ -619,8 +619,47 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                num_computed_tokens_of_cp_sp=None,
+                num_computed_tokens_of_cp_sp_single=None,
+                num_computed_tokens_of_cp_sp_current=None,
+                num_computed_tokens_of_cp_sp_accum=None,
                 **backward_kwargs,
             )
+
+            # Compute CP/DCP tracking fields for chunked prefill
+            if self.cp_size * self.dcp_size > 1:
+                num_computed_tokens = new_req_data.num_computed_tokens
+                if num_computed_tokens > 0:
+                    # Initialize with starting rank 0
+                    temp_start_rank_dict = {req_id: (0, 0)}
+
+                    # Compute token distribution for initial tokens
+                    current_distribution = self.input_batch.block_table.get_split_computed_tokens(
+                        np.array([num_computed_tokens]),
+                        request_ids=[req_id],
+                        request_start_rank_dict=temp_start_rank_dict,
+                        cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                    )[0]
+
+                    # Update next_cp_dcp_start_rank
+                    req_state.next_cp_dcp_start_rank = temp_start_rank_dict[req_id][0]
+                    req_state.token_blank_in_last_blk = temp_start_rank_dict[req_id][1]
+
+                    # req_state.num_computed_tokens_of_cp_sp = current_distribution
+                    req_state.num_computed_tokens_of_cp_sp_current = current_distribution
+                    req_state.num_computed_tokens_of_cp_sp_single = [
+                        [current_distribution[cp][dcp] for dcp in range(self.dcp_size)]
+                        for cp in range(self.cp_size)
+                    ]
+                    req_state.num_computed_tokens_of_cp_sp_accum = [
+                        copy.deepcopy(current_distribution)
+                    ]
+                else:
+                    # No computed tokens yet
+                    req_state.num_computed_tokens_of_cp_sp_single = [[0] * self.dcp_size for _ in range(self.cp_size)]
+                    req_state.num_computed_tokens_of_cp_sp_accum = []
+
+            self.requests[req_id] = req_state
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
@@ -638,7 +677,52 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
+            prev_num_computed_tokens = req_state.num_computed_tokens
             req_state.num_computed_tokens = num_computed_tokens
+
+            # Compute CP/DCP tracking fields for chunked prefill
+            if self.cp_size * self.dcp_size > 1:
+                # If this is the first chunk, initialize tracking fields
+                if req_state.num_computed_tokens_of_cp_sp_single is None:
+                    req_state.num_computed_tokens_of_cp_sp_single = [[0] * self.dcp_size for _ in range(self.cp_size)]
+                    req_state.num_computed_tokens_of_cp_sp_accum = []
+
+                # Compute tokens added in this chunk (not cumulative)
+                chunk_tokens = num_computed_tokens - prev_num_computed_tokens
+
+                if chunk_tokens > 0:
+                    # Create a temporary dict with this request's starting rank
+                    temp_start_rank_dict = {
+                        req_id: (req_state.next_cp_dcp_start_rank, req_state.token_blank_in_last_blk)}
+
+                    # Compute distribution for this chunk only
+                    chunk_distribution = self.input_batch.block_table.get_split_computed_tokens(
+                        np.array([chunk_tokens]),
+                        request_ids=[req_id],
+                        request_start_rank_dict=temp_start_rank_dict,
+                        cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+                    )[0]
+
+                    # Update next_cp_dcp_start_rank for this request
+                    req_state.next_cp_dcp_start_rank = temp_start_rank_dict[req_id][0]
+                    req_state.token_blank_in_last_blk = temp_start_rank_dict[req_id][1]
+
+                    # Save as current chunk distribution
+                    req_state.num_computed_tokens_of_cp_sp_current = chunk_distribution
+
+                    # Accumulate per-rank totals
+                    for cp in range(self.cp_size):
+                        for dcp in range(self.dcp_size):
+                            req_state.num_computed_tokens_of_cp_sp_single[cp][dcp] += \
+                                chunk_distribution[cp][dcp]
+
+                    # Append this chunk's distribution to accumulation list
+                    req_state.num_computed_tokens_of_cp_sp_accum.append(
+                        copy.deepcopy(chunk_distribution)
+                    )
+
+                # Compute cumulative distribution (for compatibility, if needed)
+                # req_state.num_computed_tokens_of_cp_sp = req_state.num_computed_tokens_of_cp_sp_single
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -684,6 +768,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.input_batch.block_table.append_row(
                     new_block_ids, req_index)
 
+            # Update CP/DCP tracking fields in input_batch
+            self.input_batch.num_computed_tokens_of_cp_sp[req_index] = req_state.num_computed_tokens_of_cp_sp
+            self.input_batch.num_computed_tokens_of_cp_sp_single[
+                req_index] = req_state.num_computed_tokens_of_cp_sp_single
+            self.input_batch.num_computed_tokens_of_cp_sp_current[
+                req_index] = req_state.num_computed_tokens_of_cp_sp_current
+            self.input_batch.num_computed_tokens_of_cp_sp_accum[
+                req_index] = req_state.num_computed_tokens_of_cp_sp_accum
+            # logger.info(f"===============>{req_state.num_computed_tokens_of_cp_sp=} \n {req_state.num_computed_tokens_of_cp_sp_single=} \n {req_state.num_computed_tokens_of_cp_sp_current=} \n {req_state.num_computed_tokens_of_cp_sp_accum=}")
+
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
             if not is_last_rank:
@@ -691,8 +785,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 start_token_index = num_computed_tokens
                 end_token_index = num_computed_tokens + len(new_token_ids)
                 self.input_batch.token_ids_cpu[
-                    req_index,
-                    start_token_index:end_token_index] = new_token_ids
+                req_index,
+                start_token_index:end_token_index] = new_token_ids
                 self.input_batch.num_tokens_no_spec[
                     req_index] = end_token_index
                 self.input_batch.num_tokens[req_index] = end_token_index
@@ -705,7 +799,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 start_index = self.input_batch.num_tokens_no_spec[req_index]
                 end_token_index = start_index + num_spec_tokens
                 self.input_batch.token_ids_cpu[
-                    req_index, start_index:end_token_index] = spec_token_ids
+                req_index, start_index:end_token_index] = spec_token_ids
                 # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] += num_spec_tokens
 
@@ -1172,6 +1266,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[dict[str, Any], torch.Tensor, np.ndarray, int, torch.Tensor,
     int, torch.Tensor, SpecDecodeMetadata, Optional[torch.Tensor],
     Optional[torch.Tensor], Optional[torch.Tensor], int]:
+        self.slot_mapping.fill_(0)
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -1331,8 +1426,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
 
         self.attn_mask = self._make_attention_mask(seq_lens=seq_lens_cpu,
-                                                    position=positions_cpu,
-                                                    attn_state=attn_state)
+                                                   position=positions_cpu,
+                                                   attn_state=attn_state)
         self.attn_state = attn_state  # type: ignore
 
         self.with_prefill = with_prefill
@@ -1440,7 +1535,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.num_accepted_tokens.copy_to_gpu()
 
         # prepare cp meta data
-        long_seq_metadata = self._generate_cp_metadata(total_num_scheduled_tokens, seq_lens_cpu)
+        # For chunked prefill, use num_scheduled_tokens instead of cumulative seq_lens
+        # to correctly calculate chunk_len in _generate_cp_metadata
+        if self.vllm_config.scheduler_config.chunked_prefill_enabled and self.cp_size > 1:
+            # In chunked prefill, seq_lens_for_chunk should be the current chunk size
+            seq_lens_for_chunk = torch.from_numpy(num_scheduled_tokens[:num_reqs])
+        else:
+            # Normal mode: use cumulative sequence lengths
+            seq_lens_for_chunk = seq_lens_cpu
+        long_seq_metadata = self._generate_cp_metadata(total_num_scheduled_tokens, seq_lens_for_chunk, seq_lens_cpu)
         original_total_num_scheduled_tokens = sum(original_num_scheduled_tokens[:num_reqs])
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
@@ -2468,8 +2571,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def profile_run(self) -> None:
         # Trigger compilation for general shape.
         with self.set_in_profile_run():
-            hidden_states = self._dummy_run(self.max_num_tokens // self.cp_size if self.cp_size> 1 else self.max_num_tokens,
-                                            with_prefill=True)
+            hidden_states = self._dummy_run(self.max_num_tokens // self.cp_size if self.cp_size > 1 else self.max_num_tokens,
+                with_prefill=True)
             # MC2 will consume additional NPU memory.
             # Therefore, we need to run the MC2 path once here to complete its initialization,
             # allowing vLLM to correctly estimate the maximum memory required.
@@ -2507,7 +2610,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self,
         hidden_states: torch.Tensor,
         task: PoolingTask,
-    ) -> PoolerOutput:
+    ):
         num_tokens = hidden_states.shape[0]
         max_num_reqs = self.scheduler_config.max_num_seqs
         num_reqs = min(num_tokens, max_num_reqs)
@@ -2558,7 +2661,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_pooler_run(
         self,
         hidden_states: torch.Tensor,
-    ) -> PoolerOutput:
+    ):
         # Find the task that has the largest output for subsequent steps
         output_size = dict[PoolingTask, float]()
         for task in self.get_supported_pooling_tasks():
@@ -2606,7 +2709,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.model = self.load_lora_model(self.model, self.vllm_config,
                                                   self.device)
         logger.info("Loading model weights took %.4f GB",
-                    m.consumed_memory / float(2**30))
+                    m.consumed_memory / float(2 ** 30))
 
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -3569,7 +3672,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _num_scheduled_tokens_prefill_cp(self, num_tokens,
                                          num_computed_tokens,
                                          cp_kv_recover_idx):
-        num_scheduled_tokens = num_tokens - num_computed_tokens
+        # IMPORTANT: num_tokens from scheduler_output.num_scheduled_tokens is already
+        # the number of NEW tokens to schedule in this chunk (not cumulative).
+        # In chunked prefill, it's the chunk size, NOT total tokens.
+        num_scheduled_tokens = num_tokens
         num_cp_padded_scheduled_tokens = cdiv(
             num_scheduled_tokens, 2 * self.cp_size) * (2 * self.cp_size
                                                        )
@@ -3590,7 +3696,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                     self.cp_rank * chunk_size])
 
         # used to recover kv order in cp prefill (after all-gather kv and before storing kv_cache)
-        num_added_recover_tokens = len(cp_kv_recover_idx[0]) * self.cp_size
+        # For chunked prefill: use batch-level accumulated offset from cp_kv_recover_idx
+        # PLUS request-level offset from num_computed_tokens (tokens already processed in previous chunks)
+        num_added_recover_tokens = len(cp_kv_recover_idx[0]) * self.cp_size + num_computed_tokens
         for rank in range(self.cp_size):
             cp_kv_recover_idx[rank].extend(
                 full_indices[rank * chunk_size +
@@ -3663,7 +3771,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         cp_tokens[:num_decode_reqs] = 1
         return cp_tokens, positions, cp_kv_recover_idx, unpad_mask
 
-    def _generate_cp_metadata(self, total_num_scheduled_tokens, seq_lens):
+    def _generate_cp_metadata(self, total_num_scheduled_tokens, seq_lens, seq_lens_origin):
         num_reqs = self.input_batch.num_reqs
         num_decodes = sum(
             self.input_batch.num_computed_tokens_cpu[:num_reqs] >= self.input_batch.num_prompt_tokens[:num_reqs])
@@ -3674,11 +3782,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             long_seq_metadata = AscendCommonLongSequenceMetadata(
                 num_actual_tokens_cp_full=num_actual_tokens_cp_full,
                 num_computed_tokens_of_cp_sp=get_cp_local_seq_lens(
-                    seq_lens,
+                    seq_lens_origin,
                     self.cp_size,
                     self.dcp_size,
                     self.parallel_config.cp_kv_cache_interleave_size,
                 ).numpy(),
+                num_computed_tokens_of_cp_sp_single=self.input_batch.num_computed_tokens_of_cp_sp_single[
+                                                    :self.input_batch.num_reqs],
+                num_computed_tokens_of_cp_sp_current=self.input_batch.num_computed_tokens_of_cp_sp_current[
+                                                     :self.input_batch.num_reqs],
+                num_computed_tokens_of_cp_sp_accum=self.input_batch.num_computed_tokens_of_cp_sp_accum[
+                                                   :self.input_batch.num_reqs],
             )
             if self.cp_size > 1:
                 q_head_idx, q_tail_idx = [], []
