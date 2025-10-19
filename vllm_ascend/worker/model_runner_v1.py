@@ -898,9 +898,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
-            max_seq_len = max(seq_lens.max().item(), 0)
-            return self.attn_mask_builder.get_attn_mask(
-                max_seq_len, self.dtype, self.device)
+            if torch.version.cann.startswith("8.3"):
+                return self.attn_mask_builder.get_splitfuse_attn_mask()
+            else:
+                max_seq_len = max(seq_lens, default=0)
+                return self.attn_mask_builder.get_attn_mask(
+                    max_seq_len, self.dtype, self.device)
         # Prefill with cache hit.
         elif attn_state == AscendAttentionState.PrefillCacheHit:
             return self.attn_mask_builder.get_attn_mask(
