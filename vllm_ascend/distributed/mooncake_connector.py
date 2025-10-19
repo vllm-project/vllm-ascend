@@ -943,7 +943,7 @@ class MooncakeConnectorWorker:
         # kv_transfer variables
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
-        if self.vllm_config.model_config.is_deepseek_mla or self.use_sparse:
+        if self.vllm_config.model_config.is_deepseek_mla:
             self.num_need_pulls = 1
         else:
             num_d_block_heads = max(1,
