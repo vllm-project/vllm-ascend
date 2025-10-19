@@ -348,10 +348,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
 
-        num_tokens = query.shape[0]
         if torch.version.cann.startswith("8.3") and self.head_size != 256:
-            query_start_loc = attn_metadata.actual_seq_lengths_q
-            num_tokens = query_start_loc[-1]
+            num_tokens = query.shape[0]
             softmax_lse = torch.empty(num_tokens,
                                       dtype=query.dtype,
                                       device=query.device)
@@ -393,7 +391,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                            num_kv_heads=self.num_kv_heads,
                                            out=output)
         assert output is not None
-        return output[:num_tokens, :, :]
+        return output
 
     def _forward_prefill_cache_hit(
         self,
