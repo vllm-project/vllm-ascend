@@ -349,7 +349,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                              ACL_FORMAT_FRACTAL_NZ)
 
         if torch.version.cann.startswith("8.3") and self.head_size != 256:
-            num_tokens = query.shape[0]
             softmax_lse = torch.empty(num_tokens,
                                       dtype=query.dtype,
                                       device=query.device)
