@@ -1089,7 +1089,8 @@ class TorchairAscendFusedMoE(FusedMoE):
         local_num_experts = (torch.sum(self.expert_map != -1)
                              if self.expert_map is not None else num_experts)
         if self.dynamic_eplb:
-            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
+            self.moe_load = torch.zeros(local_num_experts,
+                                        dtype=torch.int64).npu()
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.multistream_overlap_shared_expert = \
@@ -1311,17 +1312,26 @@ class TorchairAscendFusedMoE(FusedMoE):
                           tuple) and len(e_hidden_states) == 2:
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
-        if self.dynamic_eplb and isinstance(
+        if isinstance(e_hidden_states, tuple) and len(e_hidden_states) == 4:
+            e_hidden_states, shared_hidden_states, group_list_type, expert_tokens = e_hidden_states
+            if self.dynamic_eplb:
+                self.moe_load += expert_tokens if group_list_type else \
+                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+
+        if shared_experts is None and isinstance(
                 e_hidden_states, tuple) and len(e_hidden_states) == 3:
             e_hidden_states, group_list_type, expert_tokens = e_hidden_states
-            self.moe_load += expert_tokens if group_list_type else \
-                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+            if self.dynamic_eplb:
+                self.moe_load += expert_tokens if group_list_type else \
+                    torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
         if (fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
         ] and not replace_allreduce and not self.enable_shared_expert_dp):
             if tp_size > 1:
+                if isinstance(e_hidden_states, tuple):
+                    e_hidden_states = e_hidden_states[0]
                 dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                                 self.tp_group)
                 final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
