@@ -35,7 +35,7 @@ How to extend a new linear op? Taking column parallel op as an example:
 Row parallel op follows a similar approach - inherit from RowColumnParallelOp and register the new class in get_row_parallel_op.
 """
 
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import torch
 import torch.distributed as dist
@@ -44,6 +44,8 @@ from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
 from vllm.distributed import split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.utils import direct_register_custom_op
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
@@ -120,8 +122,8 @@ class CustomRowParallelOp(CustomLinearOp):
         self.reduce_results = self.layer.reduce_results
         self.input_size_per_partition = self.layer.input_size_per_partition
 
-    def apply(self, input_):
-        output, output_bias = self.apply_impl(input_)
+    def apply(self, input_, trace_flag: bool = True):
+        output, output_bias = self.apply_impl(input_, trace_flag)
         if dense_optim_enable():
             torch.ops.vllm.maybe_prefetch_mlp_gate_up_proj(output, self.prefix)
         if not self.return_bias:
@@ -343,13 +345,21 @@ class SequenceColumnParallelOp(CustomColumnParallelOp):
 class SequenceRowParallelOp(CustomRowParallelOp):
 
     def apply_impl(
-        self, input_: torch.Tensor
+        self, input_: torch.Tensor, trace_flag: bool = True
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         """Linear layer with column parallelism.
 
         Implemented multiple optimization projects for dense models, such as FlashComm and
         communication-computation fusion.
         """
+
+        if trace_flag:
+            output_list = torch.ops.vllm.unified_custom_sequence_row_parallel(input_,
+                                                                              layer_name=self.prefix,
+                                                                              trace_flag=False)
+            if len(output_list) == 1:
+                return output_list[0], None
+            return output_list[0], output_list[1]
 
         if self.input_is_parallel:
             input_parallel = input_
@@ -369,7 +379,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
             output_parallel = self.quant_method.apply(self.layer,
                                                       input_parallel,
                                                       bias=bias_)
-            output = torch.ops.vllm.maybe_pad_and_reduce(output_parallel)
+            from vllm_ascend.ops.register_custom_ops import _maybe_pad_and_reduce_impl
+            output = _maybe_pad_and_reduce_impl(output_parallel)
 
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
@@ -379,6 +390,49 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         self.input_is_parallel = self.layer.input_is_parallel
         self.reduce_results = self.layer.reduce_results
 
+
+def unified_custom_sequence_row_parallel(
+    input_: torch.Tensor, layer_name: str, trace_flag: bool
+) -> List[torch.Tensor]:
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    if self.custom_op is not None:
+        output, output_bias = self.custom_op.apply(input_, trace_flag)
+    else:
+        output, output_bias = self.super().forward(input_)
+    
+    if output_bias is None:
+        return [output]
+    return [output, output_bias]
+
+
+def unified_custom_sequence_row_parallel_fake(
+    input_: torch.Tensor, layer_name: str, trace_flag: bool
+) -> List[torch.Tensor]:
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    num_tokens = input_.size(0)
+    if self.reduce_results and \
+        self.tp_size != 1 and \
+        forward_context.sp_enabled:
+        num_tokens = num_tokens // self.tp_size
+
+    output = torch.empty(
+        size=(num_tokens, self.output_size_per_partition),
+        device=input_.device,
+        dtype=input_.dtype)
+    output_bias = self.bias if self.skip_bias_add else None
+
+    if output_bias is None:
+        return [output]
+    return [output, output_bias]
+
+
+direct_register_custom_op(op_name="unified_custom_sequence_row_parallel",
+                          op_func=unified_custom_sequence_row_parallel,
+                          fake_impl=unified_custom_sequence_row_parallel_fake,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
 
 def _get_column_parallel_op(
         prefix, layer
