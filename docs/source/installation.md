@@ -18,6 +18,7 @@ This document describes how to install vllm-ascend manually.
 
 You have 2 way to install:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
+    - **Warning**：Before installing, make sure that the old versions of "vllm" and "vllm_ascend" have been completely uninstalled through the "pip uninstall" command. Incomplete uninstallation may result in abnormal operation.
 - **Using docker**: use the `vllm-ascend` pre-built docker image directly.
 
 ## Configure a new environment
@@ -259,6 +260,8 @@ Then run:
 ```bash
 # Try `export VLLM_USE_MODELSCOPE=true` and `pip install modelscope`
 # to speed up download if huggingface is not reachable.
+# make sure the source codes of vllm and example.py are not in the same directory.
+# If use Ascend NPU, "Failed to import from vllm._C with ModuleNotFoundError("No module named 'vllm._C'")" is normal.
 python example.py
 ```
 
