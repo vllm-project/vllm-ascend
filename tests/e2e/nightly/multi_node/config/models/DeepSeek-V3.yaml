@@ -19,6 +19,7 @@ env_common:
   OMP_NUM_THREADS: 100
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
+  DYNAMIC_EPLB: True
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
@@ -104,6 +105,46 @@ deployment:
                   }
             }
         }'
+
+  - local_index: 2
+    master_index: 0
+    headless: true
+    env_extend:
+    server_cmd: >
+      vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --data-parallel-size 2
+      --data-parallel-size-local 2
+      --tensor-parallel-size 8
+      --seed 1024
+      --quantization ascend
+      --max-num-seqs 16
+      --max-model-len 8192
+      --max-num-batched-tokens 8192
+      --enable-expert-parallel
+      --trust-remote-code
+      --no-enable-prefix-caching
+      --gpu-memory-utilization 0.9
+      --additional-config '{"torchair_graph_config":{"enabled":true}, "dynamic_eplb":true, "num_iterations_eplb_update":20, "num_wait_worker_iterations":20}'
+      --kv-transfer-config
+      '{"kv_connector": "MooncakeConnector",
+      "kv_role": "kv_consumer",
+      "kv_port": "30200",
+      "engine_id": "1",
+      "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+      "kv_connector_extra_config": {
+                "prefill": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                },
+                "decode": {
+                        "dp_size": 2,
+                        "tp_size": 8
+                }
+          }
+      }'
+
 benchmarks:
   perf:
     case_type: performance

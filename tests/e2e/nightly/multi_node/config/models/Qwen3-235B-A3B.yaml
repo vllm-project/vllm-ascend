@@ -8,6 +8,7 @@ env_common:
   OMP_NUM_THREADS: 100
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
+  DYNAMIC_EPLB: True
 
 deployment:
   -
@@ -54,6 +55,29 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
+  -
+    local_index: 2
+    master_index: 0
+    headless: true
+    env_extend:
+    server_cmd: >
+      vllm serve "Qwen/Qwen3-235B-A22B"
+      --headless
+      --data-parallel-size 4
+      --data-parallel-size-local 2
+      --data-parallel-start-rank 2
+      --data-parallel-address $MASTER_IP
+      --data-parallel-rpc-port 13389
+      --tensor-parallel-size 8
+      --seed 1024
+      --max-num-seqs 16
+      --max-model-len 8192
+      --max-num-batched-tokens 8192
+      --enable-expert-parallel
+      --trust-remote-code
+      --no-enable-prefix-caching
+      --gpu-memory-utilization 0.9
+      --additional-config '{"dynamic_eplb":true, "num_iterations_eplb_update":20, "num_wait_worker_iterations":20}'
 benchmarks:
   perf:
     case_type: performance

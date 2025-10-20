@@ -15,7 +15,9 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove eplb utils.
+import os.path
 import random
+import sys
 
 import torch
 from vllm.logger import logger
@@ -117,3 +119,65 @@ def determine_default_log2phy_map(global_expert_num, world_size, rank_id,
     log2phy_map_all = generate_log2phy_map(expert_map_all)
 
     return log2phy_map_all[rank_id]
+
+
+class EPLBParamUtils:
+
+    @staticmethod
+    def check_iterations(iterations):
+        if not isinstance(iterations, int):
+            raise TypeError(f"The {iterations} is not int.")
+        if iterations <= 0:
+            raise ValueError(f"The {iterations} can not less than or equal to 0.")
+        if iterations > sys.maxsize:
+            raise ValueError(f"The {iterations} can not large than {sys.maxsize}")
+
+    @staticmethod
+    def check_dynamic_eplb(dynamic_eplb):
+        if dynamic_eplb is None:
+            return
+        if not isinstance(dynamic_eplb, bool):
+            raise TypeError("The dynamic_eplb is not bool.")
+        if dynamic_eplb == True and os.getenv("DYNAMIC_EPLB", False) != True:
+            raise ValueError("Can not enable dynamic_eplb when not export DYNAMIC_EPLB=True.")
+
+    @staticmethod
+    def check_expert_map_path(expert_map):
+        if expert_map is None:
+            return
+        if not isinstance(expert_map, str):
+            raise TypeError("The expert_map is not str.")
+        if not expert_map.strip():
+            raise ValueError("The expert_map is not empty.")
+        _, ext = os.path.splitext(expert_map)
+        if ext.lower() != ".json":
+            raise TypeError("The expert_map is not json.")
+        if not os.path.exists(expert_map):
+            raise ValueError("The expert_map is not exist.")
+        try:
+            with open(expert_map, "w", encoding='utf-8') as f:
+                f.read()
+        except Exception as e:
+            raise IOError(
+                f"Fail read expert info from {expert_map}, please check the reading permission of {expert_map} : {e}")
+
+    @staticmethod
+    def check_expert_map_record_path(expert_map_record_path):
+        if expert_map_record_path is None:
+            return
+        if not isinstance(expert_map_record_path, str):
+            raise TypeError("The expert_map_record_path is not str.")
+        if not expert_map_record_path.strip():
+            raise ValueError("The expert_map_record_path is empty.")
+        _, ext = os.path.splitext(expert_map_record_path)
+        if ext.lower() != ".json":
+            raise TypeError("The expert_map_record_path is not json.")
+        if os.getenv("EXPERT_MAP_RECORD", False) != True:
+            raise ValueError("Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD=True.")
+        try:
+            with open(expert_map_record_path, "w", encoding='utf-8') as f:
+                f.write("")
+        except Exception as e:
+            raise IOError(
+                f"Fail write expert info to {expert_map_record_path}, please check the writing permission of {expert_map_record_path} : {e}")
+
