@@ -57,7 +57,8 @@ class BudgetRefiner:
                 "The dynamic batching feature requires the lookup table "
                 "'profile_table.csv', but it was not found at '%s'. "
                 "Please download the corresponding table file.", table_file_path)
-            self.enabled=False       
+            self.enabled=False   
+            return    
         else:
             df = pd.read_csv
 
