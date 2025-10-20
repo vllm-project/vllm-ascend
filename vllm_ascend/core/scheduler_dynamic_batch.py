@@ -58,7 +58,7 @@ class BudgetRefiner:
                 "The dynamic batching feature requires the lookup table "
                 "'profile_table.csv', but it was not found at '%s'. "
                 "Please download the corresponding table file.", table_file_path)
-            raise           
+            self.enabled=False       
         grouped = df.groupby(['ctx_len', 'd_num'])
         for (ctx_len, d_num), group in grouped:
             valid = group[group['cost'] <= slo_limit]
