@@ -31,7 +31,15 @@ We are working on further improvements and this feature will support more XPUs i
 Dynamic batch is used in the online inference.
 ```shell
 vllm serve ${model_directory}\
-    --block-size 128 \
     --additional_config '{"SLO_limits_for_dynamic_batch":'${SLO_LITMIT}'}' \
-    ... # other parameters
+    --max-num-seqs 256 \
+    --block-size 128 \
+    --tensor_parallel_size 8 \
+    --load_format dummy \
+    --max_num_batched_tokens 1024 \
+    --max_model_len 9000 \
+    --host localhost \
+    --port 12091 \
+    --gpu-memory-utilization 0.9 \
+    --trust-remote-code \
 ```
