@@ -41,9 +41,9 @@ class BudgetRefiner:
         if not self.enabled:
             return
         logger.info("Dynamic batch is enabled with SLO limit: {}, and chunked prefill is forced to be activated because dynamic batch relies on it".format(str(slo_limit)))
-        self.lookup = {}
-        self.context_keys = set()
-        self.dnum_keys = set()
+        self.lookup: dict[tuple[int, int], int] = {}
+        self.context_keys: set[int] = set()
+        self.dnum_keys: set[int] = set()
         self.default_budget = default_budget
         self._read_lookup_table(slo_limit)
 
@@ -122,6 +122,7 @@ class SchedulerDynamicBatch(Scheduler):
         super().__init__(vllm_config, kv_cache_config,
                          structured_output_manager, mm_registry,
                          include_finished_set, log_stats)
+        self.running: list[Request] = []
         self.budget_refiner = BudgetRefiner(
             default_budget=self.scheduler_config.max_num_batched_tokens,
             slo_limit=self.scheduler_config.SLO_limits_for_dynamic_batch
