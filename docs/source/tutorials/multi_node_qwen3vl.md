@@ -37,7 +37,7 @@ docker run --rm \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
 --device /dev/hisi_hdc \
---shm-size=1000g # Adjust based on workload.  Consider using a smaller value if memory is constrained.
+--shm-size 256g \
 -v /usr/local/dcmi:/usr/local/dcmi \
 -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
 -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
