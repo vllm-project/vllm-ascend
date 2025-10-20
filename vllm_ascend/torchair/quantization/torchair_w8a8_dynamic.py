@@ -365,17 +365,18 @@ def torchair_fused_experts_with_mc2(
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
         **kwargs_mc2)
 
-    if dynamic_eplb:
-        return (hidden_states, 1, expert_token_nums)
-
     if shared_experts is None:
+        if dynamic_eplb:
+            return (hidden_states, 1, expert_token_nums)
         return hidden_states
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
             shared_output, _ = shared_experts.down_proj(
                 (shared_act, swiglu_out_scale))
-        return hidden_states, shared_output
+        if dynamic_eplb:
+            return (hidden_states, shared_output, 1, expert_token_nums)
+        return (hidden_states, shared_output)
 
 
 def torchair_init_routing_quant(hidden_states, top_k, topk_ids,
