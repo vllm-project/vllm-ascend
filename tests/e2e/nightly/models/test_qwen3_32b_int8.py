@@ -47,7 +47,7 @@ batch_size_dict = {
     "linux-aarch64-a2-4": 44,
     "linux-aarch64-a3-4": 46,
 }
-VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER")
+VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
 
 aisbench_cases = [{
     "case_type": "performance",
