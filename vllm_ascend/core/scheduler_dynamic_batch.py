@@ -16,8 +16,8 @@
 #
 import os
 import time
-import pandas as pd
 
+import pandas as pd
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
 from vllm.logger import logger
@@ -35,12 +35,14 @@ from vllm.v1.structured_output import StructuredOutputManager
 class BudgetRefiner:
     """This budget refiner can make dynamic adjustment to the token budget 
     in the chunked prefill scheduling strategy."""
-    
+
     def __init__(self, default_budget, slo_limit=-1) -> None:
-        self.enabled = slo_limit>0
+        self.enabled = slo_limit > 0
         if not self.enabled:
             return
-        logger.info("Dynamic batch is enabled with SLO limit: {}, and chunked prefill is forced to be activated because dynamic batch relies on it".format(str(slo_limit)))
+        logger.info(
+            "Dynamic batch is enabled with SLO limit: {}, and chunked prefill is forced to be activated because dynamic batch relies on it"
+            .format(str(slo_limit)))
         self.lookup: dict[tuple[int, int], int] = {}
         self.context_keys: set[int] = set()
         self.dnum_keys: set[int] = set()
@@ -56,9 +58,10 @@ class BudgetRefiner:
             logger.error(
                 "The dynamic batching feature requires the lookup table "
                 "'profile_table.csv', but it was not found at '%s'. "
-                "Please download the corresponding table file.", table_file_path)
-            self.enabled=False   
-            return    
+                "Please download the corresponding table file.",
+                table_file_path)
+            self.enabled = False
+            return
         else:
             df = pd.read_csv(table_file_path)
         grouped = df.groupby(['ctx_len', 'd_num'])
@@ -70,7 +73,7 @@ class BudgetRefiner:
                 self.context_keys.add(ctx_len)
                 self.dnum_keys.add(d_num)
         self.context_keys = set(sorted(self.context_keys))
-        self.dnum_keys    = set(sorted(self.dnum_keys))
+        self.dnum_keys = set(sorted(self.dnum_keys))
 
     def _align_key(self, value, valid_keys):
         """Align the minimum value within the valid_keys that is greater than the value."""
@@ -78,10 +81,10 @@ class BudgetRefiner:
             if k >= value:
                 return k
         return None
-    
+
     def _get_max_budget(self, num_deocde_tokens, num_decode):
         """Get the maximum budget according to the number of decoding tokens and the decoding requests."""
-        aligned_ctx  = self._align_key(num_deocde_tokens, self.context_keys)
+        aligned_ctx = self._align_key(num_deocde_tokens, self.context_keys)
         aligned_dnum = self._align_key(num_decode, self.dnum_keys)
         if aligned_ctx is None or aligned_dnum is None:
             return self.default_budget
@@ -98,7 +101,7 @@ class BudgetRefiner:
         if not self.enabled:
             return budget
         # assume all running request will be scheduled.
-        num_decode_token_lst = [ 
+        num_decode_token_lst = [
             req.num_tokens_with_spec \
                 for req in running_request \
                     if req.num_computed_tokens >= req.num_prompt_tokens ]
@@ -107,6 +110,7 @@ class BudgetRefiner:
             return budget
         num_deocde_tokens = sum(num_decode_token_lst) / num_decode
         return self._get_max_budget(num_deocde_tokens, num_decode)
+
 
 class SchedulerDynamicBatch(Scheduler):
     """This Scheduler extends vllm's original v1 scheduler
@@ -127,20 +131,19 @@ class SchedulerDynamicBatch(Scheduler):
         self.running: list[Request] = []
         self.budget_refiner = BudgetRefiner(
             default_budget=self.scheduler_config.max_num_batched_tokens,
-            slo_limit=self.scheduler_config.SLO_limits_for_dynamic_batch
-        )
+            slo_limit=self.scheduler_config.SLO_limits_for_dynamic_batch)
 
     def schedule(self) -> SchedulerOutput:
-        # NOTE: This scheduling algorithm is developed based on the "super.schedule()" 
+        # NOTE: This scheduling algorithm is developed based on the "super.schedule()"
         # with the implementations of the dynamic batch and some modifications:
         # 1. Token budget can be dynamically refined according to the self.running
         # through the BudgetRefiner;
         # 2. This scheduling algorithm follows decode-first chunked prefills and FCFS
         # strategy, which is slightly different to the "super.schedule()"
-        # 3. Similar to the "super.schedule()", at each step, the scheduler tries to 
-        # assign tokens to the requests so that each request's num_computed_tokens can 
-        # catch up its num_tokens_with_spec. 
-        # 4. So far, the dynamic batch only supports 910B3 NPU. Further work will include 
+        # 3. Similar to the "super.schedule()", at each step, the scheduler tries to
+        # assign tokens to the requests so that each request's num_computed_tokens can
+        # catch up its num_tokens_with_spec.
+        # 4. So far, the dynamic batch only supports 910B3 NPU. Further work will include
         # more devices and finer optimization strategy.
 
         scheduled_new_reqs: list[Request] = []
@@ -159,14 +162,21 @@ class SchedulerDynamicBatch(Scheduler):
         req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
-        token_budget = self.budget_refiner.refine_budget(self.running, token_budget)
+        token_budget = self.budget_refiner.refine_budget(
+            self.running, token_budget)
 
         # NOTE: We move the prefill requests to the end of the self.running
         # list and keep the relative order unchanged. This rearrangement makes this
         # scheduling algorithm a strict decode-first chunked prefills.
-        d_lst=[req for req in self.running if req.num_computed_tokens >= req.num_prompt_tokens]
-        p_lst=[req for req in self.running if req.num_computed_tokens < req.num_prompt_tokens]  
-        self.running = d_lst+p_lst
+        d_lst = [
+            req for req in self.running
+            if req.num_computed_tokens >= req.num_prompt_tokens
+        ]
+        p_lst = [
+            req for req in self.running
+            if req.num_computed_tokens < req.num_prompt_tokens
+        ]
+        self.running = d_lst + p_lst
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -216,7 +226,7 @@ class SchedulerDynamicBatch(Scheduler):
                 #    its max_total_tokens or max_model_len.
                 # 2. The encoder budget is exhausted.
                 # 3. The encoder cache is exhausted.
-                # NOTE(woosuk): Here, by doing `break` instead of `continue` as 
+                # NOTE(woosuk): Here, by doing `break` instead of `continue` as
                 # in v1 scheduler, we strictly follow the FCFS scheduling policy.
                 req_index += 1
                 break
@@ -499,7 +509,7 @@ class SchedulerDynamicBatch(Scheduler):
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
-        if self.scheduler_config.SLO_limits_for_dynamic_batch==0:
+        if self.scheduler_config.SLO_limits_for_dynamic_batch == 0:
             # NOTE: We only check total number of scheduled tokens in the chunked prefills
             # strategy that follows strict FCFS (SLO_limit=0). The total_num_scheduled_tokens
             # skips checking when dynamic_batch is actually enabled (SLO_limit>0)
@@ -573,5 +583,3 @@ class SchedulerDynamicBatch(Scheduler):
 
         self._update_after_schedule(scheduler_output)
         return scheduler_output
-
-

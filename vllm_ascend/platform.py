@@ -303,8 +303,10 @@ class NPUPlatform(Platform):
 
         # Extend original scheduler_config to use SchedulerDynamicBatch.
         if ascend_config.SLO_limits_for_dynamic_batch != -1:
-            vllm_config.scheduler_config.scheduler_cls=("vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch")
-            vllm_config.scheduler_config.chunked_prefill_enabled=True
+            vllm_config.scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
+            )
+            vllm_config.scheduler_config.chunked_prefill_enabled = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
     @classmethod

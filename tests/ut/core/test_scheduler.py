@@ -188,7 +188,6 @@ class TestAscendScheduler(TestBase):
 
         return scheduler
 
-
     def test_add_requests(self):
         scheduler = self.create_scheduler()
         requests = create_requests(num_requests=10)
@@ -808,8 +807,6 @@ class TestAscendScheduler(TestBase):
         self.assertEqual(scheduler.phase, "decode")
 
 
-
-
 class TestSchedulerDynamicBatch(TestBase):
 
     @patch("vllm.config.ModelConfig.__post_init__", MagicMock())
@@ -904,7 +901,6 @@ class TestSchedulerDynamicBatch(TestBase):
         scheduler.structured_output_manager.should_advance = should_advance
 
         return scheduler
-
 
     def test_add_requests(self):
         scheduler = self.create_scheduler()
@@ -1492,4 +1488,3 @@ class TestSchedulerDynamicBatch(TestBase):
 
         # Confirm no memory leak.
         self.assert_scheduler_empty(scheduler)
-
