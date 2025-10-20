@@ -134,7 +134,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 and not ascend_config.torchair_graph_config.enabled)
         else:
             self.use_aclgraph = (
-                vllm_config.compilation_config.level
+                vllm_config.compilation_config.mode
                 == CompilationMode.VLLM_COMPILE
                 and not vllm_config.model_config.enforce_eager
                 and not ascend_config.torchair_graph_config.enabled)

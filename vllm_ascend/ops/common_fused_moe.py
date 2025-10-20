@@ -74,7 +74,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                     and not vllm_config.model_config.enforce_eager)
             else:
                 self.use_aclgraph = (
-                    vllm_config.compilation_config.level
+                    vllm_config.compilation_config.mode
                     == CompilationMode.VLLM_COMPILE
                     and not vllm_config.model_config.enforce_eager)
 
