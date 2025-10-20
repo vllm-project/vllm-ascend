@@ -14,22 +14,22 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
 import time
 import pandas as pd
-import os
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
+                                              create_request_queue)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
-                                              create_request_queue)
 
 
 class BudgetRefiner:
