@@ -21,6 +21,8 @@ Run `pytest tests/compile/test_aclgraph.py`.
 """
 
 import os
+import random
+import string
 
 import pytest
 from vllm import SamplingParams
@@ -30,6 +32,7 @@ from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
     "Qwen/Qwen3-0.6B",
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8",
 ]
 
 
@@ -45,20 +48,40 @@ def test_models_with_aclgraph(
     ]
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
-    with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=False,
-    ) as runner:
-        vllm_aclgraph_outputs = runner.model.generate(prompts, sampling_params)
+    if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=False,
+                quantization="ascend",
+        ) as runner:
+            vllm_aclgraph_outputs = runner.model.generate(
+                prompts, sampling_params)
 
-    with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=True,
-    ) as runner:
-        vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=True,
+                quantization="ascend",
+        ) as runner:
+            vllm_eager_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
+    else:
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=False,
+        ) as runner:
+            vllm_aclgraph_outputs = runner.model.generate(
+                prompts, sampling_params)
 
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=True,
+        ) as runner:
+            vllm_eager_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
     vllm_aclgraph_outputs_list = []
     for output in vllm_aclgraph_outputs:
         vllm_aclgraph_outputs_list.append(
@@ -85,6 +108,9 @@ def test_models_with_aclgraph_full_decode_only(
 ) -> None:
     if 'HCCL_OP_EXPANSION_MODE' in os.environ:
         del os.environ['HCCL_OP_EXPANSION_MODE']
+    # NOTE: Randomly fill the prompt with the requested amount for
+    # the specified capture shape to prevent accuracy issues caused by padding
+    random_number = random.choice(list(range(6, 47, 8)))
     prompts = [
         ('Solve the following math problem step by step.'
          'The last line of your response should be of the form Answer: '
@@ -110,6 +136,9 @@ def test_models_with_aclgraph_full_decode_only(
          'and $x^2 + bx + c = 0$ have a common real root, and the equations $x^2 + x + a = 0$'
          'and $x^2 + cx + b = 0$ also have a common real root.'
          'Compute the sum $a + b + c$.')
+    ] + [
+        ''.join(random.choices(string.ascii_lowercase, k=random.randint(
+            1, 25))) for _ in range(random_number)
     ]
 
     sampling_params = SamplingParams(max_tokens=5,
@@ -117,20 +146,42 @@ def test_models_with_aclgraph_full_decode_only(
                                      temperature=0.0,
                                      top_p=1.0,
                                      top_k=1)
-    with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=False,
-            compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
-    ) as runner:
-        vllm_aclgraph_outputs = runner.model.generate(prompts, sampling_params)
+    if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=False,
+                compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+                quantization="ascend",
+        ) as runner:
+            vllm_aclgraph_outputs = runner.model.generate(
+                prompts, sampling_params)
 
-    with VllmRunner(
-            model,
-            max_model_len=1024,
-            enforce_eager=True,
-    ) as runner:
-        vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=True,
+                quantization="ascend",
+        ) as runner:
+            vllm_eager_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
+    else:
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=False,
+                compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+        ) as runner:
+            vllm_aclgraph_outputs = runner.model.generate(
+                prompts, sampling_params)
+
+        with VllmRunner(
+                model,
+                max_model_len=1024,
+                enforce_eager=True,
+        ) as runner:
+            vllm_eager_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
 
     vllm_aclgraph_outputs_list = []
     for output in vllm_aclgraph_outputs:
