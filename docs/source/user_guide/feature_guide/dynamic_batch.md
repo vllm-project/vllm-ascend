@@ -12,9 +12,9 @@ We are working on further improvements and this feature will support more XPUs i
 
 ### Prerequisites
 
-1. Dynamic batch now depends on a offline cost model saved in a look-up table to refine the token budget. The lookup-table is saved in '.csv' file, which should be first downloaded from [here](https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/dynamic_batch_scheduler/A2-B3-BLK128.csv), renamed and saved to the path `vllm_ascend/core/profile_table.csv`
+1. Dynamic batch now depends on a offline cost model saved in a look-up table to refine the token budget. The lookup-table is saved in '.csv' file, which should be first downloaded from [here](https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/dynamic_batch_scheduler/A2-B3-BLK128.csv), renamed, and saved to the path `vllm_ascend/core/profile_table.csv`
 
-2. `Pandas` is needed to load the look-up table.
+2. `Pandas` is needed to load the look-up table, in case `pandas` is not installed.
     ```bash
     pip install pandas 
     ```
@@ -27,10 +27,15 @@ We are working on further improvements and this feature will support more XPUs i
 --SLO_limits_for_dynamic_batch = 0  # baseline value for dynamic batch, dynamic batch disabled, FCFS and decode-first chunked prefilling strategy is used.
 --SLO_limits_for_dynamic_batch > 0 # user-defined value for dynamic batch, dynamic batch enabled with FCFS and decode-first chunked prefilling strategy.
 ```
+
+### Supported Models
+So far, dynamic batch performs better on several dense models including Qwen and Llama (from 8B to 32B) with `tensor_parallel_size=8`. For different models, a proper `SLO_limits_for_dynamic_batch` parameter is needed. The empirical value of this parameter is generally `35, 50, or 75`. Therefore, some additional tests are needed to select the best parameter.
+
 ## Usage
-Dynamic batch is used in the online inference.
+Dynamic batch is used in the online inference. A fully executable example is as follows:
 ```shell
-vllm serve ${model_directory}\
+SLO_LITMIT=50
+vllm serve Qwen/Qwen2.5-14B-Instruct\
     --additional_config '{"SLO_limits_for_dynamic_batch":'${SLO_LITMIT}'}' \
     --max-num-seqs 256 \
     --block-size 128 \
@@ -41,5 +46,5 @@ vllm serve ${model_directory}\
     --host localhost \
     --port 12091 \
     --gpu-memory-utilization 0.9 \
-    --trust-remote-code \
+    --trust-remote-code
 ```
