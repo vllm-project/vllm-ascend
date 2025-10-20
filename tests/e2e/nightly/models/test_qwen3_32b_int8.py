@@ -47,6 +47,7 @@ batch_size_dict = {
     "linux-aarch64-a2-4": 44,
     "linux-aarch64-a3-4": 46,
 }
+VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER")
 
 aisbench_cases = [{
     "case_type": "performance",
@@ -55,7 +56,7 @@ aisbench_cases = [{
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
     "num_prompts": 1,
     "max_out_len": 1500,
-    "batch_size": batch_size_dict[os.getenv("VLLM_CI_RUNNER")],
+    "batch_size": batch_size_dict.get(VLLM_CI_RUNNER, 1),
     "baseline": 1,
     "threshold": 0.97
 }, {
