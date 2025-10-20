@@ -177,6 +177,7 @@ jobs:
           pytest -sv tests/e2e/multicard/test_data_parallel.py
           pytest -sv tests/e2e/multicard/test_expert_parallel.py
           pytest -sv tests/e2e/multicard/test_external_launcher.py
+          pytest -sv tests/e2e/multicard/test_single_request_aclgraph.py
           pytest -sv tests/e2e/multicard/test_fused_moe_allgather_ep.py
           pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
 
