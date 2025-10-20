@@ -9,8 +9,8 @@ from vllm.config import (CUDAGraphMode, VllmConfig,
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.utils import (
-    process_weights_after_loading, set_default_torch_dtype)
+from vllm.model_executor.model_loader.utils import \
+    process_weights_after_loading
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -24,7 +24,13 @@ from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
 from vllm_ascend.torchair.utils import (TORCHAIR_CACHE_DIR,
                                         TorchairCommonAttentionMetadata)
-from vllm_ascend.utils import ProfileExecuteDuration, lmhead_tp_enable
+from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
+                               vllm_version_is)
+
+if vllm_version_is("0.11.0"):
+    from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+else:
+    from vllm.utils.torch_utils import set_default_torch_dtype
 
 PADDING_SLOT_ID = -1
 
