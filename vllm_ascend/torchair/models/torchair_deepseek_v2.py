@@ -32,6 +32,7 @@ import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
+from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -69,7 +70,6 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.models.layers.sfa import AscendSFAModules, Indexer
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
@@ -552,23 +552,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             scaling_factor = rope_scaling["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
-
-        mla_modules = AscendMLAModules(
-            q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
-            q_a_layernorm=self.q_a_layernorm
-            if self.q_lora_rank is not None else None,
-            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
-            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-            kv_a_layernorm=self.kv_a_layernorm,
-            kv_b_proj=self.kv_b_proj,
-            # fused_qkv_a_proj=self.fused_qkv_a_proj
-            # if self.q_lora_rank is not None
-            # else None,
-            o_proj=self.o_proj,
-            rotary_emb=self.rotary_emb,
-            indexer=None,
-            is_sparse=hasattr(config, "index_topk"),
-        )
 
         # In the MLA backend, kv_cache includes both k_c and
         # pe (i.e. decoupled position embeddings). In particular,
