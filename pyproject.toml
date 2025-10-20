@@ -11,6 +11,7 @@ requires = [
     "pyyaml",
     "scipy",
     "pandas",
+    "pandas-stubs",
     "setuptools>=64",
     "setuptools-scm>=8",
     "torch-npu==2.7.1.dev20250724",
