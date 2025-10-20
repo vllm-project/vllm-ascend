@@ -245,13 +245,18 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.update_aclgraph_sizes")
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("os.environ", {})
+    @patch(
+        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+    )
     def test_check_and_update_config_basic_config_update(
-            self, mock_is_310p, mock_update_acl, mock_init_ascend,
-            mock_check_ascend):
+            self, mock_init_recompute, mock_is_310p, mock_update_acl,
+            mock_init_ascend, mock_check_ascend):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.enable_expert_parallel = False
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_init_recompute.return_value = MagicMock()
 
         # Use importlib.reload to reload the platform module, ensuring the mocked init_ascend_config method is used.
         # Without this reload, when calling self.platform.check_and_update_config,
@@ -268,12 +273,18 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch(
+        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+    )
     def test_check_and_update_config_no_model_config_warning(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
+            mock_is_310p):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config = None
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_init_recompute.return_value = MagicMock()
 
         with self.assertLogs(logger="vllm", level="WARNING") as cm:
             from vllm_ascend import platform
@@ -285,12 +296,18 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch(
+        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+    )
     def test_check_and_update_config_enforce_eager_mode(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
+            mock_is_310p):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = True
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_init_recompute.return_value = MagicMock()
 
         with self.assertLogs(logger="vllm", level="INFO") as cm:
             from vllm_ascend import platform
@@ -311,13 +328,19 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch(
+        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+    )
     def test_check_and_update_config_unsupported_compilation_level(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
+            mock_is_310p):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = False
         vllm_config.compilation_config.level = CompilationLevel.DYNAMO_ONCE
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_init_recompute.return_value = MagicMock()
 
         with self.assertLogs(logger="vllm", level="WARNING") as cm:
             from vllm_ascend import platform
@@ -367,14 +390,20 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch(
+        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+    )
     def test_check_and_update_config_torchair_enabled_compilation(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
+            mock_is_310p):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.torchair_graph_config.enabled = True
         mock_init_ascend.return_value = mock_ascend_config
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = False
         vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_init_recompute.return_value = MagicMock()
 
         with self.assertLogs(logger="vllm", level="INFO") as cm:
             from vllm_ascend import platform
@@ -394,13 +423,19 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch(
+        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+    )
     def test_check_and_update_config_cache_config_block_size(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
+            mock_is_310p):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.cache_config.block_size = None
         vllm_config.cache_config.enable_prefix_caching = True
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_init_recompute.return_value = MagicMock()
 
         from vllm_ascend import platform
 
@@ -413,12 +448,18 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch(
+        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+    )
     def test_check_and_update_config_v1_worker_class_selection(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
+            mock_is_310p):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.worker_cls = "auto"
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_init_recompute.return_value = MagicMock()
 
         from vllm_ascend import platform
 
@@ -443,12 +484,18 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.utils.is_310p", return_value=True)
+    @patch(
+        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+    )
     def test_check_and_update_config_310p_no_custom_ops(
-            self, mock_is_310p, mock_init_ascend, mock_check_ascend):
+            self, mock_init_recompute, mock_is_310p, mock_init_ascend,
+            mock_check_ascend):
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.compilation_config.custom_ops = []
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_init_recompute.return_value = MagicMock()
 
         from vllm_ascend import platform
 
@@ -460,13 +507,18 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch(
+        "vllm_ascend.core.recompute_schedule_config.RecomputeSchedulerConfig.initialize_from_config"
+    )
     def test_check_and_update_config_ascend_scheduler_config(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
+            self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
+            mock_is_310p):
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.ascend_scheduler_config.enabled = True
         mock_init_ascend.return_value = mock_ascend_config
-
         vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.tensor_parallel_size = 1
+        mock_init_recompute.return_value = MagicMock()
 
         with patch("vllm_ascend.core.schedule_config.AscendSchedulerConfig"
                    ) as mock_scheduler:
@@ -491,6 +543,7 @@ class TestNPUPlatform(TestBase):
             kv_cache_dtype="float16",
             block_size=64,
             use_v1=True,
+            #use_sfa=False,
             use_mla=True,
         )
         self.assertEqual(result,
@@ -511,6 +564,7 @@ class TestNPUPlatform(TestBase):
             kv_cache_dtype="float16",
             block_size=64,
             use_v1=True,
+            #use_sfa=False,
             use_mla=True,
         )
         self.assertEqual(
@@ -532,6 +586,7 @@ class TestNPUPlatform(TestBase):
             kv_cache_dtype="float16",
             block_size=64,
             use_v1=True,
+            #use_sfa=False,
             use_mla=False,
         )
         self.assertEqual(
@@ -553,6 +608,7 @@ class TestNPUPlatform(TestBase):
             kv_cache_dtype="float16",
             block_size=64,
             use_v1=True,
+            #use_sfa=False,
             use_mla=False,
         )
         self.assertEqual(

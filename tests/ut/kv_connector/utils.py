@@ -102,7 +102,7 @@ def create_scheduler(
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(block_size, 1, 1, torch.float16,
-                                               False))
+                                               False, False))
         ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
