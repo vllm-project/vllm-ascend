@@ -245,6 +245,81 @@ class AscendFusedMoE(FusedMoE):
         if self.moe_load is not None:
             self.moe_load.zero_()
 
+    def gating(self,
+                hidden_states: torch.Tensor,
+                router_logits: torch.Tensor):
+        assert self.quant_method is not None
+
+        # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
+        quantized_x_for_share, dynamic_scale_for_share = None, None
+
+        forward_context = get_forward_context()
+
+        # Load balancing for token distribution among experts in dummy_run
+        # TODO: The community only considers load balancing when DP > 1.
+        # This approach may overlook some extreme scenarios.
+        enable_force_load_balance = forward_context.in_profile_run
+
+        forward_context = get_forward_context()
+        hidden_states, router_logits = forward_context.moe_comm_method.prepare(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            replace_allreduce=forward_context.sp_enabled,
+            enable_shared_expert_dp=self.enable_shared_expert_dp)
+
+        topk_weights, topk_ids, row_idx = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=self.top_k,
+            renormalize=self.renormalize,
+            use_grouped_topk=self.use_grouped_topk,
+            topk_group=self.topk_group,
+            num_expert_group=self.num_expert_group,
+            custom_routing_function=self.custom_routing_function,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.e_score_correction_bias,
+            global_num_experts=self.global_num_experts)
+
+        topk_weights = topk_weights.to(x.dtype)
+        # this is a naive implementation for experts load balance so as
+        # to avoid accumulating too much tokens on a single rank.
+        # currently it is only activated when doing profile runs.
+        if enable_force_load_balance and not self.use_aclgraph:
+            topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
+        
+        return topk_weights, topk_ids, row_idx
+
+    def afd_ffn_compute(self, 
+                hidden_states: torch.Tensor, 
+                topk_weights: torch.Tensor,
+                topk_ids: torch.Tensor,
+                row_idx):
+        moe_comm_method = get_forward_context().moe_comm_method
+        final_hidden_states = moe_comm_method.fused_experts(
+            hidden_states=hidden_states,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            row_idx=row_idx,
+            global_num_experts=self.global_num_experts,
+            expert_map=self.expert_map,
+            shared_experts=None,
+            apply_router_weight_on_input=self.apply_router_weight_on_input,
+            dynamic_eplb=self.dynamic_eplb)
+        if isinstance(final_hidden_states, tuple):
+            final_hidden_states, group_list_type, expert_tokens = final_hidden_states
+
+        if self.dynamic_eplb:
+            self.moe_load += expert_tokens if group_list_type else \
+                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+
+        final_hidden_states = forward_context.moe_comm_method.finalize(
+            hidden_states=final_hidden_states,
+            reduce_results=self.reduce_results)
+
+        return final_hidden_states
+
     def maybe_all_reduce_tensor_model_parallel(
             self, final_hidden_states: torch.Tensor):
         """NOTE(Yizhou): This is to override the parent class method. In `mc2commimpl`,
@@ -424,3 +499,40 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         if self.multistream_overlap_shared_expert:
             torch.npu.current_stream().wait_stream(self.shared_expert_stream)
         return shared_out, fused_output
+
+    def gating(self,
+                hidden_states: torch.Tensor,
+                router_logits: torch.Tensor):
+        return AscendFusedMoE.gating(hidden_states, router_logits)
+
+    def afd_ffn_compute(self, 
+                hidden_states: torch.Tensor, 
+                topk_weights: torch.Tensor,
+                topk_ids: torch.Tensor,
+                row_idx):
+        moe_comm_method = get_forward_context().moe_comm_method
+        final_hidden_states = moe_comm_method.fused_experts(
+            hidden_states=hidden_states,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            row_idx=row_idx,
+            global_num_experts=self.global_num_experts,
+            expert_map=self.expert_map,
+            shared_experts=None,
+            apply_router_weight_on_input=self.apply_router_weight_on_input,
+            dynamic_eplb=self.dynamic_eplb)
+        if isinstance(final_hidden_states, tuple):
+            final_hidden_states, group_list_type, expert_tokens = final_hidden_states
+
+        if self.dynamic_eplb:
+            self.moe_load += expert_tokens if group_list_type else \
+                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+
+        final_hidden_states = forward_context.moe_comm_method.finalize(
+            hidden_states=final_hidden_states,
+            reduce_results=self.reduce_results)
+
+        return final_hidden_states
+

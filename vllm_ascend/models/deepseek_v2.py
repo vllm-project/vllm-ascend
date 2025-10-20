@@ -509,6 +509,40 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                     prefix=f"{prefix}.mlp",
                 )
         
+        if self.role is not None and self.role == "attention":
+            # 这里增加gating的初始化
+            self.gate = ReplicatedLinear(config.hidden_size,
+                                     config.n_routed_experts,
+                                     bias=False,
+                                     quant_config=None,
+                                     prefix=f"{prefix}.gate")
+            if config.topk_method == "noaux_tc":
+                self.gate.e_score_correction_bias = nn.Parameter(
+                    torch.empty(config.n_routed_experts, dtype=torch.float32))
+            else:
+                self.gate.e_score_correction_bias = None
+
+            # Load balancing settings.
+            eplb_config = parallel_config.eplb_config
+            self.enable_eplb = parallel_config.enable_eplb
+            self.n_routed_experts: int = config.n_routed_experts
+            self.n_shared_experts: int = config.n_shared_experts
+            self.tp_rank = get_tensor_model_parallel_rank()
+            self.ep_group = get_ep_group().device_group
+            self.ep_size = self.ep_group.size()
+            self.ep_rank = self.ep_group.rank()
+
+            self.n_redundant_experts = eplb_config.num_redundant_experts
+            self.n_logical_experts = self.n_routed_experts
+            self.n_physical_experts = (self.n_logical_experts +
+                                    self.n_redundant_experts)
+            self.n_local_physical_experts = self.n_physical_experts // self.ep_size
+
+            self.physical_expert_start = (self.ep_rank *
+                                        self.n_local_physical_experts)
+            self.physical_expert_end = (self.physical_expert_start +
+                                        self.n_local_physical_experts)
+        
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
