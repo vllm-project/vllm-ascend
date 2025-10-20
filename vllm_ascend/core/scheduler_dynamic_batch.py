@@ -51,14 +51,16 @@ class BudgetRefiner:
         """Load the lookup table for dynamic budget."""
         base_dir = os.path.dirname(os.path.abspath(__file__))
         table_file_path = os.path.join(base_dir, f"profile_table.csv")
-        try:
-            df = pd.read_csv(table_file_path)
-        except FileNotFoundError:
+        if not os.path.exists(table_file_path):
+            # proceed without dynamic batch
             logger.error(
                 "The dynamic batching feature requires the lookup table "
                 "'profile_table.csv', but it was not found at '%s'. "
                 "Please download the corresponding table file.", table_file_path)
             self.enabled=False       
+        else:
+            df = pd.read_csv
+
         grouped = df.groupby(['ctx_len', 'd_num'])
         for (ctx_len, d_num), group in grouped:
             valid = group[group['cost'] <= slo_limit]
