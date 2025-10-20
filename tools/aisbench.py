@@ -102,7 +102,8 @@ class AisbenchRunner:
             conf_path = os.path.join(DATASET_CONF_DIR,
                                      f'{self.dataset_conf}.py')
             if self.dataset_conf.startswith("textvqa"):
-                self.dataset_path = os.path.join(self.dataset_path, "textvqa_val.jsonl")
+                self.dataset_path = os.path.join(self.dataset_path,
+                                                 "textvqa_val.jsonl")
             with open(conf_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             content = re.sub(r'path=.*', f'path="{self.dataset_path}",',
@@ -183,8 +184,10 @@ class AisbenchRunner:
         result_dir = re.search(r'Performance Result files locate in (.*)',
                                self.result_line).group(1)[:-1]
         dataset_type = self.dataset_conf.split('/')[0]
-        result_csv_file = os.path.join(result_dir, f"{dataset_type}dataset.csv")
-        result_json_file = os.path.join(result_dir, f"{dataset_type}dataset.json")
+        result_csv_file = os.path.join(result_dir,
+                                       f"{dataset_type}dataset.csv")
+        result_json_file = os.path.join(result_dir,
+                                        f"{dataset_type}dataset.json")
         self.result_csv = pd.read_csv(result_csv_file)
         print("Getting performance results from file: ", result_json_file)
         with open(result_json_file, 'r', encoding='utf-8') as f:

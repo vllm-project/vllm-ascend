@@ -17,6 +17,7 @@
 from typing import Any
 
 import openai
+import os
 import pytest
 from vllm.utils import get_open_port
 
@@ -25,6 +26,11 @@ from tools.aisbench import run_aisbench_cases
 
 MODELS = [
     "vllm-ascend/Qwen3-32B-W8A8",
+]
+
+MODES = [
+    "aclgraph",
+    "single",
 ]
 
 TENSOR_PARALLELS = [4]
@@ -37,6 +43,11 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
+batch_size_dict = {
+    "linux-aarch64-a2-4": 44,
+    "linux-aarch64-a3-4": 46,
+}
+
 aisbench_cases = [{
     "case_type": "performance",
     "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
@@ -44,7 +55,7 @@ aisbench_cases = [{
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
     "num_prompts": 1,
     "max_out_len": 1500,
-    "batch_size": 44,
+    "batch_size": batch_size_dict[os.getenv("VLLM_CI_RUNNER")],
     "baseline": 1,
     "threshold": 0.97
 }, {
@@ -61,8 +72,9 @@ aisbench_cases = [{
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
-async def test_models(model: str, tp_size: int) -> None:
+async def test_models(model: str, mode: str, tp_size: int) -> None:
     port = get_open_port()
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
@@ -79,6 +91,8 @@ async def test_models(model: str, tp_size: int) -> None:
         "--gpu-memory-utilization", "0.9", "--additional-config",
         '{"enable_weight_nz_layout":true}'
     ]
+    if mode == "single":
+        server_args.append("--enforce-eager")
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
@@ -95,5 +109,8 @@ async def test_models(model: str, tp_size: int) -> None:
         )
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
+        print(choices)
+        if mode == "single":
+            return
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)
