@@ -456,9 +456,7 @@ class TestNPUWorker(TestBase):
 
             # Verify call
             mock_model_runner._dummy_run.assert_called_once_with(
-                num_tokens=mock_decode_token_per_req,
-                uniform_decode=True,
-                force_attention=False)
+                num_tokens=mock_decode_token_per_req, uniform_decode=True)
 
     @patch("vllm_ascend.worker.worker_v1.envs_vllm")
     @patch("vllm_ascend.worker.worker_v1.logger")
