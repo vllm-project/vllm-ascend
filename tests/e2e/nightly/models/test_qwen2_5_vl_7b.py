@@ -47,6 +47,17 @@ aisbench_cases = [{
     "batch_size": 128,
     "baseline": 81,
     "threshold": 5
+}, {
+    "case_type": "performance",
+    "dataset_path": "vllm-ascend/textvqa-perf-1080p",
+    "request_conf": "vllm_api_stream_chat",
+    "dataset_conf": "textvqa/textvqa_gen_base64.py",
+    "num_prompts": 512,
+    "max_out_len": 256,
+    "batch_size": 128,
+    "request_rate": 0,
+    "baseline": 1,
+    "threshold": 0.97
 }]
 
 

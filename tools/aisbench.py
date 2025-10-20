@@ -101,6 +101,8 @@ class AisbenchRunner:
         if self.task_type == "performance":
             conf_path = os.path.join(DATASET_CONF_DIR,
                                      f'{self.dataset_conf}.py')
+            if self.dataset_conf.startswith("textvqa"):
+                self.dataset_path = os.path.join(self.dataset_path, "textvqa_val.jsonl")
             with open(conf_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             content = re.sub(r'path=.*', f'path="{self.dataset_path}",',
