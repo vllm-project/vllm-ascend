@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 from vllm import SamplingParams
 from vllm.config import CompilationConfig, CUDAGraphMode
 
 from tests.e2e.conftest import VllmRunner
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 @pytest.fixture
@@ -17,12 +21,11 @@ def model_name():
     return "wemaster/deepseek_mtp_main_random_bf16"
 
 
-def mtp_correctness(
-    sampling_config: SamplingParams,
-    model_name: str,
-    num_speculative_tokens: int,
-    graph_mode: CUDAGraphMode = CUDAGraphMode.PIECEWISE,
-):
+def mtp_correctness(sampling_config: SamplingParams,
+                    model_name: str,
+                    num_speculative_tokens: int,
+                    graph_mode: CUDAGraphMode = CUDAGraphMode.PIECEWISE,
+                    disable_padded_drafter_batch=True):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -54,6 +57,7 @@ def mtp_correctness(
             speculative_config={
                 "method": "deepseek_mtp",
                 "num_speculative_tokens": num_speculative_tokens,
+                "disable_padded_drafter_batch": disable_padded_drafter_batch,
             },
             enforce_eager=False,
             max_model_len=2000,
@@ -110,3 +114,23 @@ def test_mtp2_correctness_full_graph(
     model_name: str,
 ):
     mtp_correctness(sampling_config, model_name, 2, CUDAGraphMode.FULL)
+
+
+def test_mtp1_correctness_piecewise_graph_with_pad(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config,
+                    model_name,
+                    1,
+                    disable_padded_drafter_batch=False)
+
+
+def test_mtp2_correctness_piecewise_graph_with_pad(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config,
+                    model_name,
+                    2,
+                    disable_padded_drafter_batch=False)
