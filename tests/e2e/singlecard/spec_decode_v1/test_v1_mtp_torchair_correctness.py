@@ -92,7 +92,6 @@ def mtp_torchair_correctness(
     assert matches > int(0.66 * len(ref_outputs))
 
 
-@pytest.mark.skip("TODO: revert this skip")
 def test_mtp_torchair_correctness_piecewise(
     sampling_config: SamplingParams,
     model_name: str,
