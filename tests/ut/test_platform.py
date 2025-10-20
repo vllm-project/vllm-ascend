@@ -367,7 +367,7 @@ class TestNPUPlatform(TestBase):
             if vllm_version_is("0.11.0"):
                 self.assertEqual(
                     vllm_config.compilation_config.level,
-                    CompilationMode.NONE,
+                    CompilationLevel.NO_COMPILATION,
                 )
             else:
                 self.assertEqual(
