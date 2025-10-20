@@ -19,6 +19,9 @@ requires = [
     "msgpack",
     "quart",
     "numba",
+    "attrs",
+    "psutil",
+    "googleapis-common-protos",
 ]
 build-backend = "setuptools.build_meta"
 

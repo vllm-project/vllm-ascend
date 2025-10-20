@@ -11,7 +11,7 @@
 //
 
 #include "kernel_operator.h"
-#include "../../kernels/types.h"
+#include "../../utils/types.h"
 
 #include "mla_preprocess_mix_fp16.hpp"
 #include "mla_preprocess_mix_bf16.hpp"

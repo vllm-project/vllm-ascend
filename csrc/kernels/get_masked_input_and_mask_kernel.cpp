@@ -5,8 +5,8 @@
 #include "kernel_operator.h"
 #include "kernel_tensor_impl.h"
 #include "kernel_type.h"
-#include "types.h"
-#include "utils.h"
+#include "../utils/types.h"
+#include "../utils/utils.h"
 using vllm_ascend::AccType;
 
 template<typename scalar_t>
