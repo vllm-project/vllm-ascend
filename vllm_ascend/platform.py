@@ -182,7 +182,7 @@ class NPUPlatform(Platform):
             if vllm_version_is("0.11.0"):
                 compilation_config.level = CompilationLevel.NO_COMPILATION
             else:
-                compilation_config.level = CompilationMode.NONE
+                compilation_config.mode = CompilationMode.NONE
 
         compilation_config.cudagraph_num_of_warmups = 1
 
@@ -195,12 +195,12 @@ class NPUPlatform(Platform):
                     compilation_config.level)
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
         else:
-            if compilation_config.level not in [
+            if compilation_config.mode not in [
                     CompilationMode.NONE, CompilationMode.VLLM_COMPILE
             ]:
                 logger.warning(
-                    "NPU does not support %s compilation level. Setting CUDAGraphMode to NONE",
-                    compilation_config.level)
+                    "NPU does not support %s compilation mode. Setting CUDAGraphMode to NONE",
+                    compilation_config.mode)
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # set CUDAGraphMode to None when torchair is enabled, no mather what compilation_config.level is.
@@ -286,13 +286,13 @@ class NPUPlatform(Platform):
                 compilation_config.level = CompilationLevel.NO_COMPILATION
         else:
             if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-                compilation_config.level = CompilationMode.NONE
+                compilation_config.mode = CompilationMode.NONE
             elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                 logger.info(
                     "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                     "using only ACL Graph mode")
-                assert compilation_config.level == CompilationMode.VLLM_COMPILE, \
-                    "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.level == CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
+                assert compilation_config.mode == CompilationMode.VLLM_COMPILE, \
+                    "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
                 compilation_config.set_splitting_ops_for_v1()
                 compilation_config.use_inductor = False
                 compilation_config.splitting_ops.extend([
@@ -323,7 +323,7 @@ class NPUPlatform(Platform):
                     "%s cudagraph_mode is not support on NPU. falling back to NONE",
                     compilation_config.cudagraph_mode)
                 compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-                compilation_config.level = CompilationMode.NONE
+                compilation_config.mode = CompilationMode.NONE
 
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.

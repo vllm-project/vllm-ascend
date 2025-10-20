@@ -311,7 +311,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                                  not vllm_config.model_config.enforce_eager)
         else:
             self.use_aclgraph = (vllm_config is not None
-                                 and vllm_config.compilation_config.level
+                                 and vllm_config.compilation_config.mode
                                  == CompilationMode.VLLM_COMPILE and
                                  not vllm_config.model_config.enforce_eager)
         if (layer_idx not in mlp_only_layers) and (
