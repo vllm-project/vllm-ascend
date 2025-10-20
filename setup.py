@@ -106,13 +106,13 @@ class custom_build_info(build_py):
 class build_and_install_aclnn(Command):
     description = "Build and install AclNN by running build_aclnn.sh"
     user_options = []
-    
+
     def initialize_options(self):
         pass
-    
+
     def finalize_options(self):
         pass
-    
+
     def run(self):
         try:
             print("Running bash build_aclnn.sh ...")

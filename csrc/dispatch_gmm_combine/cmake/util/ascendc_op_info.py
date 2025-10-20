@@ -10,10 +10,10 @@ PYF_PATH = os.path.dirname(os.path.realpath(__file__))
 
 
 class OpInfo:
+
     def __init__(self: any, op_type: str, cfg_file: str):
-        op_descs = opdesc_parser.get_op_desc(
-            cfg_file, [], [], opdesc_parser.OpDesc, [op_type]
-        )
+        op_descs = opdesc_parser.get_op_desc(cfg_file, [], [],
+                                             opdesc_parser.OpDesc, [op_type])
         if op_descs is None or len(op_descs) != 1:
             raise RuntimeError("cannot get op info of {}".format(op_type))
         self.op_desc = op_descs[0]

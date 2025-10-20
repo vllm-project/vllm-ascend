@@ -313,7 +313,8 @@ def optype_snake_ex(s):
             if s[i - 1] != "_":
                 if not s[i - 1].isupper():
                     snake_case += "_"
-                elif s[i - 1].isupper() and (i + 1) < len(s) and s[i + 1].islower():
+                elif s[i - 1].isupper() and (
+                        i + 1) < len(s) and s[i + 1].islower():
                     snake_case += "_"
             snake_case += c.lower()
         else:
@@ -322,14 +323,16 @@ def optype_snake_ex(s):
 
 
 class AdpBuilder(opdesc_parser.OpDesc):
+
     def __init__(self: any, op_type: str):
         self.argsdefv = []
         self.op_compile_option: str = "{}"
         super().__init__(op_type)
 
-    def write_adapt(
-        self: any, impl_path, path: str, op_compile_option_all: list = None
-    ):
+    def write_adapt(self: any,
+                    impl_path,
+                    path: str,
+                    op_compile_option_all: list = None):
         self._build_paradefault()
         if os.environ.get("BUILD_BUILTIN_OPP") != "1" and impl_path != "":
             src_file = os.path.join(impl_path, self.op_file + ".cpp")
@@ -344,7 +347,8 @@ class AdpBuilder(opdesc_parser.OpDesc):
             os.makedirs(out_path, exist_ok=True)
         adpfile = os.path.join(out_path, self.op_file + ".py")
         self._gen_op_compile_option(op_compile_option_all)
-        with os.fdopen(os.open(adpfile, const_var.WFLAGS, const_var.WMODES), "w") as fd:
+        with os.fdopen(os.open(adpfile, const_var.WFLAGS, const_var.WMODES),
+                       "w") as fd:
             self._write_head(fd)
             self._write_argparse(fd)
             self._write_impl(fd, impl_path)
@@ -439,15 +443,17 @@ class AdpBuilder(opdesc_parser.OpDesc):
             val = []
             val.append('"param_name":"{}"'.format(self.input_name[index]))
             val.append('"index":{}'.format(index))
-            val.append('"dtype":"{}"'.format(self.input_dtype[index].split(",")[0]))
-            val.append('"format":"{}"'.format(self.input_fmt[index].split(",")[0]))
-            val.append('"ori_format":"{}"'.format(self.input_fmt[index].split(",")[0]))
+            val.append('"dtype":"{}"'.format(
+                self.input_dtype[index].split(",")[0]))
+            val.append('"format":"{}"'.format(
+                self.input_fmt[index].split(",")[0]))
+            val.append('"ori_format":"{}"'.format(
+                self.input_fmt[index].split(",")[0]))
             val.append('"paramType":"optional"')
             val.append('"shape":[1]')
             val.append('"ori_shape":[1]')
-            virt_exp.append(
-                "    " + self.input_name[index] + " = {" + ",".join(val) + "}"
-            )
+            virt_exp.append("    " + self.input_name[index] + " = {" +
+                            ",".join(val) + "}")
         if len(virt_exp) > 0:
             return "\n".join(virt_exp)
         else:
@@ -487,8 +493,7 @@ class AdpBuilder(opdesc_parser.OpDesc):
                 continue
             if optional:
                 self.argsdefv.append(
-                    ATTR_DEFAULT.get(self.attr_val.get(attr).get("type"))
-                )
+                    ATTR_DEFAULT.get(self.attr_val.get(attr).get("type")))
             else:
                 self.argsdefv.append(None)
 
@@ -497,10 +502,8 @@ class AdpBuilder(opdesc_parser.OpDesc):
         curr_year = now.year
         former_year = curr_year - 1
         fd.write(
-            IMPL_HEAD.format(
-                former_year, curr_year, self.input_ori_name, self.output_ori_name
-            )
-        )
+            IMPL_HEAD.format(former_year, curr_year, self.input_ori_name,
+                             self.output_ori_name))
 
     def _write_argparse(self: any, fd: object):
         args = self._build_paralist(False)
@@ -532,16 +535,14 @@ class AdpBuilder(opdesc_parser.OpDesc):
             fd.write("    if {} != None:\n".format(attr))
             fd.write("        attr = {}\n")
             fd.write('        attr["name"] = "{}"\n'.format(attr))
-            fd.write(
-                '        attr["dtype"] = "{}"\n'.format(
-                    self.attr_val.get(attr).get("type")
-                )
-            )
+            fd.write('        attr["dtype"] = "{}"\n'.format(
+                self.attr_val.get(attr).get("type")))
             fd.write('        attr["value"] = {}\n'.format(attr))
             fd.write("        __attrs__.append(attr)\n")
         fd.write("    return __inputs__, __outputs__, __attrs__\n")
 
-    def _get_kernel_source(self: any, kernel_src_dir, src_file, dir_snake, dir_ex):
+    def _get_kernel_source(self: any, kernel_src_dir, src_file, dir_snake,
+                           dir_ex):
         src_ex = os.path.join(kernel_src_dir, dir_ex, src_file)
         if os.path.exists(src_ex):
             return src_ex
@@ -560,7 +561,8 @@ class AdpBuilder(opdesc_parser.OpDesc):
         src = os.path.join(kernel_src_dir, dir_ex, dir_ex + ".cpp")
         if os.path.exists(src):
             return src
-        src = os.path.join(kernel_src_dir, os.path.splitext(src_file)[0], src_file)
+        src = os.path.join(kernel_src_dir,
+                           os.path.splitext(src_file)[0], src_file)
         if os.path.exists(src):
             return src
         return src_ex
@@ -590,8 +592,7 @@ class AdpBuilder(opdesc_parser.OpDesc):
                 optype_snake_ex(self.op_type),
                 optype_snake(self.op_type),
                 src,
-            )
-        )
+            ))
         if self.op_replay_flag:
             fd.write(
                 REPLAY_OP_API.format(
@@ -602,8 +603,7 @@ class AdpBuilder(opdesc_parser.OpDesc):
                     self.op_file,
                     self.param_type_dynamic,
                     self.op_compile_option,
-                )
-            )
+                ))
         else:
             if os.environ.get("BUILD_BUILTIN_OPP") == "1":
                 relative_kernel_src_path = os.path.realpath(
@@ -612,12 +612,10 @@ class AdpBuilder(opdesc_parser.OpDesc):
                         src,
                         optype_snake(self.op_type),
                         optype_snake_ex(self.op_type),
-                    )
-                )
+                    ))
                 # to match src path in .dat file system, turn relative path into absolute path
                 abs_rel_kernel_src_path = os.path.join(
-                    "/", os.path.relpath(relative_kernel_src_path, impl_path)
-                )
+                    "/", os.path.relpath(relative_kernel_src_path, impl_path))
 
                 # compiling hidden src file requires src path before packaging .dat file,
                 # hard code such src path to <op_type>.py
@@ -634,8 +632,7 @@ class AdpBuilder(opdesc_parser.OpDesc):
                         self.output_shape_depend_on_compute,
                         self.op_compile_option,
                         abs_rel_kernel_src_path,
-                    )
-                )
+                    ))
             else:
                 fd.write(
                     COMPILE_OP_API.format(
@@ -649,23 +646,26 @@ class AdpBuilder(opdesc_parser.OpDesc):
                         self.output_init_value,
                         self.output_shape_depend_on_compute,
                         self.op_compile_option,
-                    )
-                )
+                    ))
 
     def _write_cap(self: any, cap_name: str, fd: object):
         argsdef = self._build_paralist()
         argsval = self._build_paralist(False)
         if cap_name == "check_supported":
-            fd.write(SUP_API.format(cap_name, argsdef, argsval, cap_name, self.op_type))
+            fd.write(
+                SUP_API.format(cap_name, argsdef, argsval, cap_name,
+                               self.op_type))
         else:
-            fd.write(CAP_API.format(cap_name, argsdef, argsval, cap_name, self.op_type))
+            fd.write(
+                CAP_API.format(cap_name, argsdef, argsval, cap_name,
+                               self.op_type))
 
     def _write_glz(self: any, fd: object):
         argsdef = self._build_paralist()
         argsval = self._build_paralist(False)
         fd.write(
-            GLZ_API.format(self.op_type, self.op_intf, argsdef, argsval, self.op_type)
-        )
+            GLZ_API.format(self.op_type, self.op_intf, argsdef, argsval,
+                           self.op_type))
 
 
 def write_scripts(

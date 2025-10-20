@@ -2,12 +2,6 @@
 # -*- coding: UTF-8 -*-
 
 import collections
-import copy
-import ctypes
-import os
-import shutil
-import stat
-import subprocess
 
 """CODE_* is used to cube/vector api is called in operator code
 CODE_MIX means both cube and vector api is called

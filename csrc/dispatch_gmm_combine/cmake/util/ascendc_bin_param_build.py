@@ -9,7 +9,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from typing import Dict, List, NamedTuple, Set, Tuple
+from typing import Dict, NamedTuple, Set
 
 import const_var
 import opdesc_parser
@@ -25,6 +25,7 @@ class ParamInfo(NamedTuple):
 
 
 class BinParamBuilder(opdesc_parser.OpDesc):
+
     def __init__(self: any, op_type: str):
         super().__init__(op_type)
         self.soc = ""
@@ -73,9 +74,8 @@ class BinParamBuilder(opdesc_parser.OpDesc):
         for key, value in self.output_fmt_for_bin.items():
             format_for_bin_list[key + len(self.input_dtype)] = value.split(",")
 
-        return ParamInfo(
-            dtype_list, format_list, dtype_for_bin_list, format_for_bin_list
-        )
+        return ParamInfo(dtype_list, format_list, dtype_for_bin_list,
+                         format_for_bin_list)
 
     def gen_bin_cprs_list(self: any, param_info: ParamInfo):
         combine_dict = {}
@@ -83,14 +83,18 @@ class BinParamBuilder(opdesc_parser.OpDesc):
         for cob_idx in range(0, len(self.input_dtype[0].split(","))):
             origin_combine = ""
             combine = ""
-            for param_idx in range(0, len(self.input_dtype) + len(self.output_dtype)):
+            for param_idx in range(
+                    0,
+                    len(self.input_dtype) + len(self.output_dtype)):
                 if param_info.dtype_for_bin_list[param_idx]:
-                    combine += param_info.dtype_for_bin_list[param_idx][cob_idx]
+                    combine += param_info.dtype_for_bin_list[param_idx][
+                        cob_idx]
                 else:
                     combine += param_info.dtype_list[param_idx][cob_idx]
                 origin_combine += param_info.dtype_list[param_idx][cob_idx]
                 if param_info.format_for_bin_list[param_idx]:
-                    combine += param_info.format_for_bin_list[param_idx][cob_idx]
+                    combine += param_info.format_for_bin_list[param_idx][
+                        cob_idx]
                 else:
                     combine += param_info.format_list[param_idx][cob_idx]
                 origin_combine += param_info.format_list[param_idx][cob_idx]
@@ -122,35 +126,36 @@ class BinParamBuilder(opdesc_parser.OpDesc):
         self.input_dtype_for_bin_list = [[] for _ in range(input_size)]
         self.output_dtype_for_bin_list = [[] for _ in range(output_size)]
         for i in range(0, input_size):
-            self.input_dtype_for_bin_list[i] = [[] for _ in range(combine_size)]
+            self.input_dtype_for_bin_list[i] = [[]
+                                                for _ in range(combine_size)]
         for i in range(0, output_size):
-            self.output_dtype_for_bin_list[i] = [[] for _ in range(combine_size)]
-        self.input_fmt_for_bin_list = copy.deepcopy(self.input_dtype_for_bin_list)
-        self.output_fmt_for_bin_list = copy.deepcopy(self.output_dtype_for_bin_list)
+            self.output_dtype_for_bin_list[i] = [[]
+                                                 for _ in range(combine_size)]
+        self.input_fmt_for_bin_list = copy.deepcopy(
+            self.input_dtype_for_bin_list)
+        self.output_fmt_for_bin_list = copy.deepcopy(
+            self.output_dtype_for_bin_list)
 
         for index, sub_list in enumerate(self.bin_cprs_list):
             head_idx = self.bin_cprs_head[index]
             for cmb_idx in sub_list:
                 for i in range(0, input_size):
                     self.input_dtype_for_bin_list[i][head_idx].append(
-                        param_info.dtype_list[i][cmb_idx]
-                    )
+                        param_info.dtype_list[i][cmb_idx])
                     self.input_fmt_for_bin_list[i][head_idx].append(
-                        param_info.format_list[i][cmb_idx]
-                    )
+                        param_info.format_list[i][cmb_idx])
                 for i in range(0, output_size):
                     self.output_dtype_for_bin_list[i][head_idx].append(
-                        param_info.dtype_list[i + input_size][cmb_idx]
-                    )
+                        param_info.dtype_list[i + input_size][cmb_idx])
                     self.output_fmt_for_bin_list[i][head_idx].append(
-                        param_info.format_list[i + input_size][cmb_idx]
-                    )
+                        param_info.format_list[i + input_size][cmb_idx])
 
-    def rm_cprs_cmb(self: any, dtype_list, format_list, input_size, output_size):
+    def rm_cprs_cmb(self: any, dtype_list, format_list, input_size,
+                    output_size):
         for i in range(0, input_size):
             self.input_dtype_for_bin_list[i] = [
-                element
-                for index, element in enumerate(self.input_dtype_for_bin_list[i])
+                element for index, element in enumerate(
+                    self.input_dtype_for_bin_list[i])
                 if index in self.bin_save_list
             ]
             self.input_fmt_for_bin_list[i] = [
@@ -159,8 +164,7 @@ class BinParamBuilder(opdesc_parser.OpDesc):
                 if index in self.bin_save_list
             ]
             new_dtype_list = [
-                element
-                for index, element in enumerate(dtype_list[i])
+                element for index, element in enumerate(dtype_list[i])
                 if index in self.bin_save_list
             ]
             new_dtype_str = ""
@@ -168,8 +172,7 @@ class BinParamBuilder(opdesc_parser.OpDesc):
                 new_dtype_str += f"{dtype},"
             self.input_dtype[i] = new_dtype_str[:-1]
             new_format_list = [
-                element
-                for index, element in enumerate(format_list[i])
+                element for index, element in enumerate(format_list[i])
                 if index in self.bin_save_list
             ]
             new_format_str = ""
@@ -178,13 +181,13 @@ class BinParamBuilder(opdesc_parser.OpDesc):
             self.input_fmt[i] = new_format_str[:-1]
         for i in range(0, output_size):
             self.output_dtype_for_bin_list[i] = [
-                element
-                for index, element in enumerate(self.output_dtype_for_bin_list[i])
+                element for index, element in enumerate(
+                    self.output_dtype_for_bin_list[i])
                 if index in self.bin_save_list
             ]
             self.output_fmt_for_bin_list[i] = [
-                element
-                for index, element in enumerate(self.output_fmt_for_bin_list[i])
+                element for index, element in enumerate(
+                    self.output_fmt_for_bin_list[i])
                 if index in self.bin_save_list
             ]
             new_dtype_list = [
@@ -207,14 +210,12 @@ class BinParamBuilder(opdesc_parser.OpDesc):
             self.output_fmt[i] = new_format_str[:-1]
 
     def is_set_for_bin_query(self: any):
-        return any(
-            [
-                self.input_dtype_for_bin,
-                self.output_dtype_for_bin,
-                self.input_fmt_for_bin,
-                self.output_fmt_for_bin,
-            ]
-        )
+        return any([
+            self.input_dtype_for_bin,
+            self.output_dtype_for_bin,
+            self.input_fmt_for_bin,
+            self.output_fmt_for_bin,
+        ])
 
     def for_bin_list_match(self: any):
         if not self.is_set_for_bin_query():
@@ -226,12 +227,11 @@ class BinParamBuilder(opdesc_parser.OpDesc):
         self.gen_for_bin_list(param_info)
         if len(self.bin_save_list) == len(self.input_dtype[0].split(",")):
             print(
-                f"WARNING: ForBinQuery can not compress number of bin file with this set, please check!!."
+                "WARNING: ForBinQuery can not compress number of bin file with this set, please check!!."
             )
             return
-        self.rm_cprs_cmb(
-            param_info.dtype_list, param_info.format_list, input_size, output_size
-        )
+        self.rm_cprs_cmb(param_info.dtype_list, param_info.format_list,
+                         input_size, output_size)
 
     def gen_input_json(self: any, auto_gen_path: str):
         key_map = {}
@@ -255,14 +255,15 @@ class BinParamBuilder(opdesc_parser.OpDesc):
                 para["name"] = self.input_name[idx][:-5]
                 para["index"] = idx
                 para["dtype"] = idtypes[i]
-                if (
-                    self.is_set_for_bin_query()
-                    and self.input_dtype_for_bin_list[idx][i]
-                ):
-                    para["dtypeForBinQuery"] = self.input_dtype_for_bin_list[idx][i]
+                if (self.is_set_for_bin_query()
+                        and self.input_dtype_for_bin_list[idx][i]):
+                    para["dtypeForBinQuery"] = self.input_dtype_for_bin_list[
+                        idx][i]
                 para["format"] = ifmts[i]
-                if self.is_set_for_bin_query() and self.input_fmt_for_bin_list[idx][i]:
-                    para["formatForBinQuery"] = self.input_fmt_for_bin_list[idx][i]
+                if self.is_set_for_bin_query(
+                ) and self.input_fmt_for_bin_list[idx][i]:
+                    para["formatForBinQuery"] = self.input_fmt_for_bin_list[
+                        idx][i]
                 para["paramType"] = itype
                 para["shape"] = [-2]
                 para["format_match_mode"] = "FormatAgnostic"
@@ -285,14 +286,15 @@ class BinParamBuilder(opdesc_parser.OpDesc):
                 para["name"] = self.output_name[idx][:-5]
                 para["index"] = idx
                 para["dtype"] = odtypes[i]
-                if (
-                    self.is_set_for_bin_query()
-                    and self.output_dtype_for_bin_list[idx][i]
-                ):
-                    para["dtypeForBinQuery"] = self.output_dtype_for_bin_list[idx][i]
+                if (self.is_set_for_bin_query()
+                        and self.output_dtype_for_bin_list[idx][i]):
+                    para["dtypeForBinQuery"] = self.output_dtype_for_bin_list[
+                        idx][i]
                 para["format"] = ofmts[i]
-                if self.is_set_for_bin_query() and self.output_fmt_for_bin_list[idx][i]:
-                    para["formatForBinQuery"] = self.output_fmt_for_bin_list[idx][i]
+                if self.is_set_for_bin_query(
+                ) and self.output_fmt_for_bin_list[idx][i]:
+                    para["formatForBinQuery"] = self.output_fmt_for_bin_list[
+                        idx][i]
                 para["paramType"] = otype
                 para["shape"] = [-2]
                 para["format_match_mode"] = "FormatAgnostic"
@@ -341,14 +343,14 @@ class BinParamBuilder(opdesc_parser.OpDesc):
             param_file = os.path.join(self.out_path, bin_file + "_param.json")
             param_file = os.path.realpath(param_file)
             with os.fdopen(
-                os.open(param_file, const_var.WFLAGS, const_var.WMODES), "w"
-            ) as fd:
+                    os.open(param_file, const_var.WFLAGS, const_var.WMODES),
+                    "w") as fd:
                 json.dump(param, fd, indent="  ")
-            self._write_build_cmd(param_file, bin_file, index_value, auto_gen_path)
+            self._write_build_cmd(param_file, bin_file, index_value,
+                                  auto_gen_path)
 
-    def _write_build_cmd(
-        self: any, param_file: str, bin_file: str, index: int, auto_gen_path: str
-    ):
+    def _write_build_cmd(self: any, param_file: str, bin_file: str, index: int,
+                         auto_gen_path: str):
         hard_soc = const_var.conv_soc_ver(self.soc)
         if not hard_soc:
             hard_soc = self.soc.capitalize()
@@ -384,19 +386,22 @@ class BinParamBuilder(opdesc_parser.OpDesc):
             enable_tiling_keys = True
 
         if self.op_debug_config:
-            op_debug_str = ",".join([str(_key) for _key in list(self.op_debug_config)])
+            op_debug_str = ",".join(
+                [str(_key) for _key in list(self.op_debug_config)])
             build_cmd_var += f" --op_debug_config={op_debug_str}"
 
         build_cmd_var += ")\n"
         build_cmd_var += "\n"
         if enable_tiling_keys is False:
             build_cmd_var += 'echo "${res}"\n'
-            build_cmd_var += const_var.CHK_CMD.format(res_file=bin_file + ".json")
+            build_cmd_var += const_var.CHK_CMD.format(res_file=bin_file +
+                                                      ".json")
             build_cmd_var += const_var.CHK_CMD.format(res_file=bin_file + ".o")
         else:
             build_cmd_var += "if [ $? -eq 1 ]; then\n"
             build_cmd_var += '    if echo "${res}" | \
 grep -q "None of the given tiling keys are in the supported list"; then\n'
+
             build_cmd_var += '        echo "${res}"\n'
             build_cmd_var += "    else\n"
             build_cmd_var += '        echo "${res}"\n'
@@ -404,14 +409,15 @@ grep -q "None of the given tiling keys are in the supported list"; then\n'
             build_cmd_var += "    fi\n"
             build_cmd_var += "else\n"
             build_cmd_var += 'echo "${res}"\n'
-            build_cmd_var += const_var.CHK_CMD.format(res_file=bin_file + ".json")
+            build_cmd_var += const_var.CHK_CMD.format(res_file=bin_file +
+                                                      ".json")
             build_cmd_var += const_var.CHK_CMD.format(res_file=bin_file + ".o")
             build_cmd_var += "fi\n"
         build_cmd_var += f'echo "[{self.soc}] Generating {bin_file} Done"\n'
 
         with os.fdopen(
-            os.open(compile_file, const_var.WFLAGS, const_var.WMODES), "w"
-        ) as fd:
+                os.open(compile_file, const_var.WFLAGS, const_var.WMODES),
+                "w") as fd:
             fd.write(build_cmd_var)
 
 
@@ -487,9 +493,11 @@ def parse_op_debug_confg(opc_config_file: str, soc: str) -> Dict:
     return tiling_key_info, op_debug_config
 
 
-def gen_bin_param_file(
-    cfgfile: str, out_dir: str, soc: str, opc_config_file: str = "", ops: list = None
-):
+def gen_bin_param_file(cfgfile: str,
+                       out_dir: str,
+                       soc: str,
+                       opc_config_file: str = "",
+                       ops: list = None):
     if not os.path.exists(cfgfile):
         print(
             f"INFO: {cfgfile} does not exists in this project, skip generating compile commands."
@@ -497,7 +505,8 @@ def gen_bin_param_file(
         return
 
     op_descs = opdesc_parser.get_op_desc(cfgfile, [], [], BinParamBuilder, ops)
-    tiling_key_info, op_debug_config = parse_op_debug_confg(opc_config_file, soc)
+    tiling_key_info, op_debug_config = parse_op_debug_confg(
+        opc_config_file, soc)
     auto_gen_path_dir = os.path.dirname(cfgfile)
     all_soc_key = "ALL"
     for op_desc in op_descs:
@@ -526,6 +535,7 @@ if __name__ == "__main__":
     args = parse_args(sys.argv)
     if len(args.argv) <= 3:
         raise RuntimeError("arguments must greater than 3")
-    gen_bin_param_file(
-        args.argv[1], args.argv[2], args.argv[3], opc_config_file=args.opc_config_file
-    )
+    gen_bin_param_file(args.argv[1],
+                       args.argv[2],
+                       args.argv[3],
+                       opc_config_file=args.opc_config_file)

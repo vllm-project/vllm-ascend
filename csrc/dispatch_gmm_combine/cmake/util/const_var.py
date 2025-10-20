@@ -21,6 +21,7 @@ SOC_MAP_EXT = {
 }
 BIN_CMD = "opc $1 --main_func={fun} --input_param={param} --soc_version={soc} \
 --output=$2 --impl_mode={impl} --simplified_key_mode=0 --op_mode=dynamic\n"
+
 SET_PLOG_LEVEL_ERROR = "export ASCEND_GLOBAL_LOG_LEVEL=3\n"
 SET_PLOG_STDOUT = "export ASCEND_SLOG_PRINT_TO_STDOUT=1\n"
 SRC_ENV = """

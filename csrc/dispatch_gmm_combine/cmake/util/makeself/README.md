@@ -126,7 +126,7 @@ Here is an example, assuming the user has a package image stored in a **/home/jo
 
 Here is also how I created the [makeself.run][9] archive which contains the Makeself distribution :
 
-`makeself.sh --notemp makeself makeself.run "Makeself by Stephane Peter" echo "Makeself has extracted itself" `
+`makeself.sh --notemp makeself makeself.run "Makeself by Stephane Peter" echo "Makeself has extracted itself"`
 
 Archives generated with Makeself can be passed the following arguments:
 
