@@ -649,8 +649,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             self._process_weights_for_fused_mlapo(act_dtype)
 
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
-        # TODO(whx): Maybe we need to explicitly free original weights here
-        # to avoid redundant memory cost.
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[
             ..., self.q_lora_rank:].contiguous()
         q_a_proj_wt = self.fused_qkv_a_proj.weight.data[

@@ -90,7 +90,7 @@ def mock_distributed():
     mock_vllm_config.scheduler_config = Mock(max_num_seqs=256)
     mock_vllm_config.model_config = Mock(max_model_len=2048, quant_config=None)
 
-    with patch("vllm_ascend.ops.fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
+    with patch("vllm_ascend.ops.common_fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
             patch("vllm_ascend.ops.moe.token_dispatcher.torch.distributed.get_rank", return_value=0), \
             patch("vllm_ascend.ops.moe.token_dispatcher.get_ascend_soc_version", return_value=None), \
             patch.dict("vllm.distributed.parallel_state.__dict__", _TP=tp_group, _EP=ep_group, _DP=dp_group,
