@@ -37,8 +37,6 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
         mocker.patch(
             "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
             return_value=None)
-        mocker.patch("vllm_ascend.models.deepseek_v2.get_ascend_config",
-                     return_value=mocker.Mock())
 
         mtp_layer = CustomDeepSeekMultiTokenPredictorLayer(config, "0", None)
         mocker_deepseek_v2_decode_layer.assert_called_once()
