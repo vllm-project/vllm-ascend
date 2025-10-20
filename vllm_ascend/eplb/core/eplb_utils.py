@@ -138,8 +138,8 @@ class EPLBParamUtils:
             return
         if not isinstance(dynamic_eplb, bool):
             raise TypeError("The dynamic_eplb is not bool.")
-        if dynamic_eplb == True and os.getenv("DYNAMIC_EPLB", False) != True:
-            raise ValueError("Can not enable dynamic_eplb when not export DYNAMIC_EPLB=True.")
+        if dynamic_eplb == True and os.getenv("DYNAMIC_EPLB", "false") != "true":
+            raise ValueError('Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".')
 
     @staticmethod
     def check_expert_map_path(expert_map):
@@ -172,8 +172,8 @@ class EPLBParamUtils:
         _, ext = os.path.splitext(expert_map_record_path)
         if ext.lower() != ".json":
             raise TypeError("The expert_map_record_path is not json.")
-        if os.getenv("EXPERT_MAP_RECORD", False) != True:
-            raise ValueError("Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD=True.")
+        if os.getenv("EXPERT_MAP_RECORD", "false") != "true":
+            raise ValueError('Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".')
         try:
             with open(expert_map_record_path, "w", encoding='utf-8') as f:
                 f.write("")

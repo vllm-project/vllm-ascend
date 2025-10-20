@@ -11,7 +11,7 @@
 # So the prefiller_host_index is [0, 1], and the decoder_host_index is [2]
 test_name: "test DeepSeek-V3 disaggregated_prefill"
 model: "vllm-ascend/DeepSeek-V3-W8A8"
-num_nodes: 2
+num_nodes: 1
 npu_per_node: 16
 env_common:
   VLLM_USE_MODELSCOPE: true
@@ -36,10 +36,8 @@ deployment:
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 2
-        --data-parallel-size-local 2
         --tensor-parallel-size 8
         --seed 1024
-        --enforce-eager
         --enable-expert-parallel
         --max-num-seqs 16
         --max-model-len 8192
@@ -48,63 +46,7 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --kv-transfer-config
-        '{"kv_connector": "MooncakeConnector",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
-        "kv_connector_extra_config": {
-                  "prefill": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  },
-                  "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  }
-            }
-        }'
-
-  -
-    local_index: 1
-    master_index: 0
-    headless: true
-    env_extend:
-    server_cmd: >
-        vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
-        --host 0.0.0.0
-        --port $SERVER_PORT
-        --data-parallel-size 2
-        --data-parallel-size-local 2
-        --tensor-parallel-size 8
-        --seed 1024
-        --quantization ascend
-        --max-num-seqs 16
-        --max-model-len 8192
-        --max-num-batched-tokens 8192
-        --enable-expert-parallel
-        --trust-remote-code
-        --no-enable-prefix-caching
-        --gpu-memory-utilization 0.9
-        --additional-config '{"torchair_graph_config":{"enabled":true}}'
-        --kv-transfer-config
-        '{"kv_connector": "MooncakeConnector",
-        "kv_role": "kv_consumer",
-        "kv_port": "30200",
-        "engine_id": "1",
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
-        "kv_connector_extra_config": {
-                  "prefill": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  },
-                  "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  }
-            }
-        }'
+        --additional-config='{"dynamic_eplb":true, "num_iterations_eplb_update":100, "num_wait_woker_iterations":50}'
 
 benchmarks:
   perf:
@@ -112,8 +54,8 @@ benchmarks:
     dataset_path: vllm-ascend/GSM8K-in3500-bs400
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 1
-    max_out_len: 2
+    num_prompts: 10
+    max_out_len: 2048
     batch_size: 1
     baseline: 5
     threshold: 0.97
@@ -122,7 +64,7 @@ benchmarks:
     dataset_path: vllm-ascend/AIME2024
     request_conf: vllm_api_general_chat
     dataset_conf: aime2024/aime2024_gen_0_shot_chat_prompt
-    max_out_len: 10
+    max_out_len: 256
     batch_size: 32
     baseline: 1
     threshold: 1
