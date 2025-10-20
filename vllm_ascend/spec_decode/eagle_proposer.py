@@ -56,7 +56,7 @@ class EagleProposer(Proposer):
                 and not self.vllm_config.model_config.enforce_eager)
         else:
             self.use_cuda_graph = (
-                self.vllm_config.compilation_config.level
+                self.vllm_config.compilation_config.mode
                 == CompilationMode.VLLM_COMPILE
                 and not self.vllm_config.model_config.enforce_eager)
 

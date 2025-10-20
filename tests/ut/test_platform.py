@@ -328,7 +328,7 @@ class TestNPUPlatform(TestBase):
             )
         else:
             self.assertEqual(
-                vllm_config.compilation_config.level,
+                vllm_config.compilation_config.mode,
                 CompilationMode.NONE,
             )
 
@@ -356,7 +356,7 @@ class TestNPUPlatform(TestBase):
         if vllm_version_is("0.11.0"):
             vllm_config.compilation_config.level = CompilationLevel.DYNAMO_ONCE
         else:
-            vllm_config.compilation_config.level = CompilationMode.DYNAMO_TRACE_ONCE
+            vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
         with self.assertLogs(logger="vllm", level="WARNING") as cm:
             from vllm_ascend import platform
@@ -364,10 +364,16 @@ class TestNPUPlatform(TestBase):
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
             self.assertTrue("NPU does not support" in cm.output[0])
-            self.assertEqual(
-                vllm_config.compilation_config.level,
-                CompilationMode.NONE,
-            )
+            if vllm_version_is("0.11.0"):
+                self.assertEqual(
+                    vllm_config.compilation_config.level,
+                    CompilationMode.NONE,
+                )
+            else:
+                self.assertEqual(
+                    vllm_config.compilation_config.mode,
+                    CompilationMode.NONE,
+                )
             self.assertEqual(
                 vllm_config.compilation_config.cudagraph_mode,
                 CUDAGraphMode.NONE,
@@ -402,7 +408,7 @@ class TestNPUPlatform(TestBase):
                 )
             else:
                 self.assertEqual(
-                    vllm_config.compilation_config.level,
+                    vllm_config.compilation_config.mode,
                     CompilationMode.NONE,
                 )
             self.assertEqual(
@@ -424,14 +430,13 @@ class TestNPUPlatform(TestBase):
         mock_init_ascend.return_value = mock_ascend_config
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.model_config.enforce_eager = False
-        vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
         vllm_config.parallel_config.tensor_parallel_size = 1
         mock_init_recompute.return_value = MagicMock()
 
         if vllm_version_is("0.11.0"):
             vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
         else:
-            vllm_config.compilation_config.level = CompilationMode.VLLM_COMPILE
+            vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
 
         with self.assertLogs(logger="vllm", level="INFO") as cm:
             from vllm_ascend import platform
@@ -447,7 +452,7 @@ class TestNPUPlatform(TestBase):
             )
         else:
             self.assertEqual(
-                vllm_config.compilation_config.level,
+                vllm_config.compilation_config.mode,
                 CompilationMode.NONE,
             )
         self.assertEqual(
