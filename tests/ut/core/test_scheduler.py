@@ -21,6 +21,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.ut.base import TestBase
 from vllm_ascend.core.scheduler import AscendScheduler
+from vllm_ascend.core.scheduler_dynamic_batch import SchedulerDynamicBatch
 
 EOS_TOKEN_ID = 50256
 MODEL = "Qwen3-0.6B"
@@ -186,6 +187,103 @@ class TestAscendScheduler(TestBase):
         scheduler.structured_output_manager.should_advance = should_advance
 
         return scheduler
+
+
+class TestSchedulerDynamicBatch(TestBase):
+
+    @patch("vllm.config.ModelConfig.__post_init__", MagicMock())
+    @patch("vllm.config.VllmConfig.__post_init__", MagicMock())
+    @patch('vllm.v1.core.sched.scheduler.compute_encoder_budget')
+    def create_scheduler(self, mock_compute_encoder_budget):
+        mock_compute_encoder_budget.return_value = [100, 100]
+        use_kv_connector = False
+        block_size = 16
+
+        scheduler_config = SchedulerConfig(
+            max_num_seqs=16,
+            max_model_len=MAX_NUM_BATCHED_TOKENS,
+            long_prefill_token_threshold=LONG_PREFILL_TOKEN_THRESHOLD,
+            disable_chunked_mm_input=False,
+            enable_chunked_prefill=True,
+            max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
+        )
+
+        scheduler_config.max_num_encoder_input_tokens = 10000
+        scheduler_config.encoder_cache_size = 10000
+        scheduler_config.chunked_prefill_enabled = True
+        scheduler_config.SLO_limits_for_dynamic_batch=0
+
+        model_config = ModelConfig(
+            model=MODEL,
+            task="auto",
+            tokenizer=MODEL,
+            tokenizer_mode="auto",
+            trust_remote_code=True,
+            dtype="float16",
+            seed=42,
+            max_model_len=MAX_NUM_BATCHED_TOKENS,
+        )
+        model_config.pooler_config = MagicMock()
+        model_config.multimodal_config = MagicMock()
+        model_config.hf_config = MagicMock()
+        model_config.hf_config.is_encoder_decoder = False
+        # Cache config, optionally force APC
+        kwargs_cache: Dict[str,
+                           Any] = ({} if ENABLE_PREFIX_CACHING is None else {
+                               'enable_prefix_caching':
+                               ENABLE_PREFIX_CACHING
+                           })
+        cache_config = CacheConfig(
+            block_size=block_size,
+            gpu_memory_utilization=0.9,
+            swap_space=0,
+            cache_dtype="auto",
+            **kwargs_cache,
+        )
+
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="SharedStorageConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"shared_storage_path": "local_storage"},
+        ) if use_kv_connector else None
+
+        speculative_config: Optional[SpeculativeConfig] = None
+        if NUM_SPECULATIVE_TOKENS is not None:
+            speculative_config = SpeculativeConfig(
+                model="ngram", num_speculative_tokens=NUM_SPECULATIVE_TOKENS)
+
+        vllm_config = VllmConfig(
+            scheduler_config=scheduler_config,
+            model_config=model_config,
+            cache_config=cache_config,
+            kv_transfer_config=kv_transfer_config,
+            speculative_config=speculative_config,
+        )
+
+        kv_cache_config = KVCacheConfig(
+            num_blocks=10000,  # A large number of blocks to hold all requests
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(['layer'],
+                                 FullAttentionSpec(block_size, 1, 1,
+                                                   torch.float32, False))
+            ],
+        )
+        cache_config.num_gpu_blocks = 10000
+
+        scheduler = SchedulerDynamicBatch(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            structured_output_manager=MagicMock(spec=StructuredOutputManager),
+        )
+
+        should_advance = MagicMock()
+        should_advance.return_value = False
+        scheduler.structured_output_manager.should_advance = should_advance
+
+        return scheduler
+
 
     def test_add_requests(self):
         scheduler = self.create_scheduler()
