@@ -65,3 +65,12 @@ jobs:
       vllm: v0.11.0
       runner: ${{ matrix.os }}
       tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
+  qwen3-32b-int8-a3:
+    strategy:
+      matrix:
+        os: [linux-aarch64-a3-4]
+    uses: ./.github/workflows/_e2e_nightly.yaml
+    with:
+      vllm: v0.11.0
+      runner: ${{ matrix.os }}
+      tests: tests/e2e/nightly/models/test_qwen3_32b_int8_a3.py

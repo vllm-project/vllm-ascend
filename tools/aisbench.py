@@ -182,9 +182,11 @@ class AisbenchRunner:
     def _get_result_performance(self):
         result_dir = re.search(r'Performance Result files locate in (.*)',
                                self.result_line).group(1)[:-1]
-        result_csv_file = os.path.join(result_dir, "gsm8kdataset.csv")
-        result_json_file = os.path.join(result_dir, "gsm8kdataset.json")
+        dataset_type = self.dataset_conf.split('/')[0]
+        result_csv_file = os.path.join(result_dir, f"{dataset_type}dataset.csv")
+        result_json_file = os.path.join(result_dir, f"{dataset_type}dataset.json")
         self.result_csv = pd.read_csv(result_csv_file)
+        print("Getting performance results from file: ", result_json_file)
         with open(result_json_file, 'r', encoding='utf-8') as f:
             self.result_json = json.load(f)
 
