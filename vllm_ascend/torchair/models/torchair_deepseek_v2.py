@@ -328,14 +328,22 @@ class TorchairDeepseekV2MoE(nn.Module):
             ascend_config.multistream_overlap_shared_expert and \
             self.torchair_graph_enabled
 
+        self.enable_super_kernel = ascend_config.torchair_graph_config.enable_super_kernel
+        self.params_dtype = torch.float32 if self.enable_super_kernel else \
+            torch.get_default_dtype()
+        # Converting gate weight to fp32 is to adapt to the super kernel feature.
+        # Super kernel feature currently cannot fuse operators such as cast, stridedslice, and add.
+        # In the moe stage, Cast will interrupt the fusion of the super kernel. To avoid this problem,
+        # modifications will be made in the initialization stage.
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
                                      bias=False,
                                      quant_config=None,
+                                     params_dtype=self.params_dtype,
                                      prefix=f"{prefix}.gate")
         if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
+                torch.empty(config.n_routed_experts, dtype=self.params_dtype))
         else:
             self.gate.e_score_correction_bias = None
 

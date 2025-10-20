@@ -44,7 +44,8 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        if is_enable_nz() and torch.version.cann.startswith("8.3"):
+        if (is_enable_nz() and torch.version.cann.startswith("8.3") and
+                layer.weight.data.dtype in [torch.float16, torch.bfloat16]):
             layer.weight.data = torch_npu.npu_format_cast(
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
 
