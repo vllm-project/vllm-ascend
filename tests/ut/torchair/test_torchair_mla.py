@@ -525,6 +525,7 @@ class TestAscendMLATorchairImpl(TestBase):
             "v_head_dim": 128,
             "rotary_emb": MagicMock(),
             "q_proj": MagicMock(),
+            "q_b_proj": MagicMock(),
             "kv_b_proj": MagicMock(),
             "o_proj": MagicMock(),
             "kv_a_proj_with_mqa": MagicMock(),
