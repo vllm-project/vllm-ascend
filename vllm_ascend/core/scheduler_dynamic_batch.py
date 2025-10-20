@@ -50,7 +50,7 @@ class BudgetRefiner:
     def _read_lookup_table(self, slo_limit):
         """Load the lookup table for dynamic budget."""
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        table_file_path = os.path.join(base_dir, f"profile_table.csv")
+        table_file_path = os.path.join(base_dir, "profile_table.csv")
         if not os.path.exists(table_file_path):
             # proceed without dynamic batch
             logger.error(
