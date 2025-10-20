@@ -1,9 +1,8 @@
 import random
 import sys
-from unittest.mock import mock_open, patch
-
 import torch
 import pytest
+from unittest.mock import patch
 
 from vllm_ascend.eplb.core import eplb_utils
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
