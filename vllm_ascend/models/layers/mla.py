@@ -42,7 +42,6 @@ else:
     from vllm.attention.layer import MLAAttention
     from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
 
-
 if vllm_version_is("0.11.0"):
     from vllm.attention import Attention
     from vllm.model_executor.layers.mla import \
