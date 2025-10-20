@@ -8,6 +8,7 @@ pip
 pybind11
 pyyaml
 scipy
+pandas
 setuptools>=64
 setuptools-scm>=8
 torch>=2.7.1

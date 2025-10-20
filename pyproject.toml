@@ -10,6 +10,7 @@ requires = [
     "pybind11",
     "pyyaml",
     "scipy",
+    "pandas",
     "setuptools>=64",
     "setuptools-scm>=8",
     "torch-npu==2.7.1.dev20250724",
