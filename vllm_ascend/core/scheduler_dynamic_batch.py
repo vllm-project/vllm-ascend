@@ -67,8 +67,8 @@ class BudgetRefiner:
                 self.lookup[(ctx_len, d_num)] = int(max_row['chunk_size'])
                 self.context_keys.add(ctx_len)
                 self.dnum_keys.add(d_num)
-        self.context_keys = sorted(self.context_keys)
-        self.dnum_keys = sorted(self.dnum_keys)
+        self.context_keys = sorted(set(self.context_keys))
+        self.dnum_keys = sorted(set(self.dnum_keys))
 
     def _align_key(self, value, valid_keys):
         """Align the minimum value within the valid_keys that is greater than the value."""

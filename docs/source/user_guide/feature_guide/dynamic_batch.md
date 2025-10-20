@@ -2,7 +2,7 @@
 
 Dynamic batch is a technique that dynamically adjusts the chunksize during each inference iteration within the chunked prefilling strategy according to the resources and SLO targets, thereby improving the effective throughput and decreasing the TBT.
 
-Dynamic batch is controled by the value of the `--SLO_limits_for_dynamic_batch`. 
+Dynamic batch is controlled by the value of the `--SLO_limits_for_dynamic_batch`. 
 Notably, only 910 B3 is supported with decode token numbers scales below 2048 so far. 
 Especially, the improvements are quite obvious on Qwen, Llama models.
 We are working on further improvements and this feature will support more XPUs in the future.
@@ -12,7 +12,7 @@ We are working on further improvements and this feature will support more XPUs i
 
 ### Prerequisites
 
-1. Dynamic batch now depends on a offline cost model saved in a look-up table to refine the token budget. The lookup-table is saved in '.csv' file, which should be first downloaded and save under `vllm_ascend/core/`
+1. Dynamic batch now depends on a offline cost model saved in a look-up table to refine the token budget. The lookup-table is saved in '.csv' file, which should be first downloaded from [here](https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/dynamic_batch_scheduler/A2-B3-BLK128.csv), renamed and saved to the path `vllm_ascend/core/profile_table.csv`
 
 2. `Pandas` is needed to load the look-up table.
     ```bash
