@@ -2259,11 +2259,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_reqs: int,
         num_tokens: int,
         max_query_len: int,
-        aclgraph_runtime_mode: Optional[CUDAGraphMode] = None
+        aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
+        force_attention: bool = False,
     ) -> Optional[dict[str, Any]]:
         attn_metadata: Optional[dict[str, Any]] = None
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+        if force_attention or aclgraph_runtime_mode == CUDAGraphMode.FULL:
             assert with_prefill is False, \
                 "Full decode graph only supports uniform batch now."
 
@@ -2352,7 +2353,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
-        # TODO: force_attention is only needed for kernel_warmup, maybe remove it
         force_attention: bool = False,
         uniform_decode: bool = False,
     ) -> torch.Tensor:
@@ -2418,6 +2418,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.is_kv_producer and not self.is_kv_consumer:
             with_prefill = True
 
+        # TODO(Mengqing): Set create_mixed_batch to False since it's only used in FI warmup
+        # and not supported in ASCEND now. We could remove it in the future.
+        attn_metadata = self._build_dummy_attn_metadata(
+            False,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            max_query_len=max_query_len,
+            aclgraph_runtime_mode=aclgraph_runtime_mode,
+            force_attention=force_attention,
+        )
+
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
@@ -2463,16 +2474,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     f"Expected {_ag_mode}, but got {aclgraph_runtime_mode}.")
             else:
                 aclgraph_runtime_mode = _ag_mode
-
-            # TODO(Mengqing): Set create_mixed_batch to False since it's only used in FI warmup
-            # and not supported in ASCEND now. We could remove it in the future.
-            attn_metadata = self._build_dummy_attn_metadata(
-                False,
-                num_reqs=num_reqs,
-                num_tokens=num_tokens,
-                max_query_len=max_query_len,
-                aclgraph_runtime_mode=aclgraph_runtime_mode,
-            )
 
             need_dummy_logits = (not self.in_profile_run
                                  and lmhead_tp_enable())

@@ -153,14 +153,15 @@ class NPUTorchairModelRunner(NPUModelRunner):
         num_reqs: int,
         num_tokens: int,
         max_query_len: int,
-        aclgraph_runtime_mode: Optional[CUDAGraphMode] = None
+        aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
+        force_attention: bool = False,
     ) -> Optional[dict[str, Any]]:
         # NOTE: If torchair graph mode and not with_prefill,
         # we can't skip_attn, it will cause graph recompile.
         if with_prefill or self.enable_shared_expert_dp:
             attn_metadata = super()._build_dummy_attn_metadata(
                 with_prefill, num_reqs, num_tokens, max_query_len,
-                aclgraph_runtime_mode)
+                aclgraph_runtime_mode, force_attention)
         else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
