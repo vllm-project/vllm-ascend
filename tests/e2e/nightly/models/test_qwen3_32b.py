@@ -95,6 +95,5 @@ async def test_models(model: str, tp_size: int) -> None:
         )
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
-        print(choices)
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)
