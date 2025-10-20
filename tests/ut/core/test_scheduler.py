@@ -994,6 +994,27 @@ class TestSchedulerDynamicBatch(TestBase):
         for i, request in enumerate(requests):
             self.assertEqual(scheduler.running[i], request)
 
+    def test_concurrent_partial_prefills_schedule(self):
+        '''Test concurrent partial prefills scheduling.
+        total requests = 10, every request has 10 token.
+        while set long_prefill_token_threshold = 1, scheduler can
+        only schedule max_long_partial_prefills long request.
+        '''
+        scheduler = self.create_scheduler()
+        scheduler.scheduler_config.chunked_prefill_enabled = False
+        scheduler.scheduler_config.max_long_partial_prefills = 2
+        scheduler.scheduler_config.long_prefill_token_threshold = 1
+        requests = create_requests(num_requests=10, num_tokens=20)
+        for request in requests:
+            scheduler.add_request(request)
+
+        # Test initial scheduling
+        output = scheduler.schedule()
+        self.assertEqual(len(output.scheduled_new_reqs),
+                         scheduler.scheduler_config.max_long_partial_prefills)
+        self.assertEqual(output.scheduled_cached_reqs.num_reqs, 0)
+        self.assertEqual(len(output.finished_req_ids), 0)
+
     def test_schedule_enable_prefix_caching(self):
         '''Test scheduling.
         Two cases: default APC/no prompt logprobs; APC=True + prompt logprobs
@@ -1439,3 +1460,31 @@ class TestSchedulerDynamicBatch(TestBase):
         # value, etc will remain since we lazily evict for prefix cache.
         for block in scheduler.kv_cache_manager.block_pool.blocks:
             self.assertEqual(block.ref_cnt, 0)
+
+    def test_memory_leak(self):
+        """Test that we do not have a memory leak."""
+        scheduler = self.create_scheduler()
+        NUM_REQUESTS = 5
+        NUM_TOKENS = 10
+        MAX_TOKENS = 10
+        requests = create_requests(num_requests=NUM_REQUESTS,
+                                   num_tokens=NUM_TOKENS,
+                                   max_tokens=MAX_TOKENS)
+
+        # Add each request.
+        for request in requests:
+            scheduler.add_request(request)
+            scheduler_output = scheduler.schedule()
+            model_runner_output = make_output(scheduler)
+            scheduler.update_from_output(scheduler_output, model_runner_output)
+
+        # Iterate until done.
+        while True:
+            scheduler_output = scheduler.schedule()
+            if len(scheduler.running) == 0:
+                break
+            model_runner_output = make_output(scheduler)
+            scheduler.update_from_output(scheduler_output, model_runner_output)
+
+        # Confirm no memory leak.
+        self.assert_scheduler_empty(scheduler)
