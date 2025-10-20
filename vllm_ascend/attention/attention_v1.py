@@ -26,7 +26,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.utils import cdiv, direct_register_custom_op
+from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -38,9 +38,15 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d, nd_to_nz_spec, version_check)
+                               nd_to_nz_2d, nd_to_nz_spec, version_check,
+                               vllm_version_is)
 
 from ..utils import weak_ref_tensors
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import direct_register_custom_op
+else:
+    from vllm.utils.torch_utils import direct_register_custom_op
 
 
 class AscendAttentionBackend(AttentionBackend):

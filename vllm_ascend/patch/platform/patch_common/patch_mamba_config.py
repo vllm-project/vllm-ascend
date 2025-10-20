@@ -3,8 +3,15 @@ import vllm.model_executor.models.config
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.models.config import MambaModelConfig
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils import cdiv
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+else:
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 
 @classmethod
