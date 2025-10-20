@@ -17,7 +17,7 @@ from unittest.mock import patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+from vllm_ascend.ops.moe.fused_moe import AscendFusedMoE
 
 
 class TestLoadWeight(TestBase):

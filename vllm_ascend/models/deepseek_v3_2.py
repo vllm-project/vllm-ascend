@@ -66,8 +66,8 @@ from vllm.platforms import current_platform
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.sfa import (AscendSFAModules,
                                            AscendSparseFlashAttention, Indexer)
-from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
 from vllm_ascend.ops.linear import AscendLinearBase
+from vllm_ascend.ops.moe.fused_moe import AscendFusedMoE
 
 
 @support_torch_compile

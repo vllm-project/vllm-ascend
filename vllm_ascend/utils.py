@@ -507,8 +507,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
-                                                  AscendSharedFusedMoE)
     from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
                                            AscendQuantRMSNorm, AscendRMSNorm)
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
@@ -516,6 +514,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendQKVParallelLinear,
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
+    from vllm_ascend.ops.moe.fused_moe import (AscendFusedMoE,
+                                               AscendSharedFusedMoE)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding,
         AscendYaRNRotaryEmbedding)
@@ -737,7 +737,7 @@ def is_hierarchical_communication_enabled():
 @functools.cache
 def version_check():
     """check if torch_npu version >= dev20250919"""
-    import re
+    import regex as re
     torch_npu_version = torch_npu.version.__version__
     date_pattern = r'dev(\d{8})'
 

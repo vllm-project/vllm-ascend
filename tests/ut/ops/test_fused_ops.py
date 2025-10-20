@@ -24,8 +24,8 @@ from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.common_fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.moe.experts_selector import select_experts
+from vllm_ascend.ops.moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.moe.moe_mlp import cumsum_group_list, unified_apply_mlp
 from vllm_ascend.utils import AscendSocVersion, adapt_patch
 
