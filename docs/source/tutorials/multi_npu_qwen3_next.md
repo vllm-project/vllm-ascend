@@ -38,6 +38,31 @@ Setup environment variables:
 export VLLM_USE_MODELSCOPE=True
 ```
 
+### Update specific version of vLLM and vLLM-ascend
+**Note:** Since the vllm and vllm-ascend versions in the docker image cannot support the Qwen3 Next, you need to manually update the version.
+
+See the Installation page for basic configuration: <project:../installation.md>
+
+```{code-block} bash
+   :substitutions:
+
+# Uninstall vLLM and vLLM-ascend
+pip uninstall vllm vllm-ascend
+
+# Update to specific version, please refer to the Installation page.
+# Use the specific version of vLLM
+git clone --depth 1 --branch v0.11.0 https://github.com/vllm-project/vllm
+cd vllm
+VLLM_TARGET_DEVICE=empty pip install -v -e .
+cd ..
+
+# Use the latest version of vLLM Ascend
+git clone  --depth 1  https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+pip install -v -e .
+cd ..
+```
+
 ### Install Triton Ascend
 
 :::::{tab-set}
@@ -117,6 +142,9 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (destroy_distributed_environment,
                                              destroy_model_parallel)
+
+import os
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 def clean_up():
     destroy_model_parallel()
