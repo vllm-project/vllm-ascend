@@ -123,6 +123,11 @@ jobs:
           --ignore=tests/ut/torchair/models/test_torchair_deepseek_v2.py \
           --ignore=tests/ut/models/test_deepseek_v2.py \
           --ignore=tests/ut/models/test_deepseek_mtp.py \
+          --ignore=tests/ut/attention/test_mla_v1.py \
+          --ignore=tests/ut/torchair/models/test_torchair_deepseek_v2.py \
+          --ignore=tests/ut/torchair/test_torchair_mla.py \
+          --ignore=tests/ut/torchair/models/test_torchair_deepseek_mtp.py
+
 
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged

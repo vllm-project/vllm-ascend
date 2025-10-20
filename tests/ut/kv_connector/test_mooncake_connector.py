@@ -13,7 +13,13 @@ from unittest.mock import MagicMock, patch
 import msgspec
 import pytest
 import zmq
-from vllm.utils import make_zmq_path
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import make_zmq_path
+else:
+    from vllm.utils.network_utils import make_zmq_path
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
