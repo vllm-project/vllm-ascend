@@ -59,7 +59,7 @@ jobs:
   qwen2-5-vl-7b:
     strategy:
       matrix:
-        os: [linux-aarch64-a2-4]
+        os: [linux-aarch64-a3-4]
     uses: ./.github/workflows/_e2e_nightly.yaml
     with:
       vllm: v0.11.0
