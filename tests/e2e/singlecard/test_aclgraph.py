@@ -21,6 +21,8 @@ Run `pytest tests/compile/test_aclgraph.py`.
 """
 
 import os
+import random
+import string
 
 import pytest
 from vllm import SamplingParams
@@ -106,6 +108,9 @@ def test_models_with_aclgraph_full_decode_only(
 ) -> None:
     if 'HCCL_OP_EXPANSION_MODE' in os.environ:
         del os.environ['HCCL_OP_EXPANSION_MODE']
+    # NOTE: Randomly fill the prompt with the requested amount for
+    # the specified capture shape to prevent accuracy issues caused by padding
+    random_number = random.choice(list(range(6, 47, 8)))
     prompts = [
         ('Solve the following math problem step by step.'
          'The last line of your response should be of the form Answer: '
@@ -131,6 +136,9 @@ def test_models_with_aclgraph_full_decode_only(
          'and $x^2 + bx + c = 0$ have a common real root, and the equations $x^2 + x + a = 0$'
          'and $x^2 + cx + b = 0$ also have a common real root.'
          'Compute the sum $a + b + c$.')
+    ] + [
+        ''.join(random.choices(string.ascii_lowercase, k=random.randint(
+            1, 25))) for _ in range(random_number)
     ]
 
     sampling_params = SamplingParams(max_tokens=5,
