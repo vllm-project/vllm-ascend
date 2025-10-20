@@ -60,8 +60,7 @@ class BudgetRefiner:
             self.enabled=False   
             return    
         else:
-            df = pd.read_csv
-
+            df = pd.read_csv(table_file_path)
         grouped = df.groupby(['ctx_len', 'd_num'])
         for (ctx_len, d_num), group in grouped:
             valid = group[group['cost'] <= slo_limit]
