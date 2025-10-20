@@ -279,6 +279,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         self.reorgnized_batch_ids = get_flashcomm2_reorgnized_batch_ids(
             get_tp_group().world_size)
         self.group_indices = torch.tensor(self.reorgnized_batch_ids).npu()
+        self._quant_comm_config = {}
 
     @property
     def comm_group(self):
@@ -319,40 +320,46 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         if num_padding_tokens > 0:
             input_parallel = nn.functional.pad(input_parallel,
                                                (0, 0, 0, num_padding_tokens))
+        def otp_quant_comm(x):
+            
+            # Reorganize the tensor so that the batch id and rank id correspond to each other.
+            chunk_num = len(self.reorgnized_batch_ids) * len(
+                self.reorgnized_batch_ids[0])
+            batch_size = x.size(0)
 
-        # Reorganize the tensor so that the batch id and rank id correspond to each other.
-        chunk_num = len(self.reorgnized_batch_ids) * len(
-            self.reorgnized_batch_ids[0])
-        batch_size = input_parallel.size(0)
+            assert batch_size % chunk_num == 0, f"Batch_size({batch_size}) must be divisible by chunk_num({chunk_num})"
 
-        assert batch_size % chunk_num == 0, f"Batch_size({batch_size}) must be divisible by chunk_num({chunk_num})"
+            batch_size_per_chunk = batch_size // chunk_num
+            # Indices of reorganized tensor
+            chunked = x.view(chunk_num, batch_size_per_chunk,
+                                        x.shape[1])
+            reorganized_chunks = chunked[self.group_indices]
+            send_buf = reorganized_chunks.flatten(1, 2)
 
-        batch_size_per_chunk = batch_size // chunk_num
-        # Indices of reorganized tensor
-        chunked = input_parallel.view(chunk_num, batch_size_per_chunk,
-                                      input_parallel.shape[1])
-        reorganized_chunks = chunked[self.group_indices]
-        send_buf = reorganized_chunks.flatten(1, 2)
+            # all-to-all operation parameters
+            all2all_tp_size = self.odp_size
+            local_intermediate_size = x.size(1)
+            chunk_size = x.size(0) // all2all_tp_size
+            total_intermediate_size = local_intermediate_size * all2all_tp_size
 
-        # all-to-all operation parameters
-        all2all_tp_size = self.odp_size
-        local_intermediate_size = input_parallel.size(1)
-        chunk_size = input_parallel.size(0) // all2all_tp_size
-        total_intermediate_size = local_intermediate_size * all2all_tp_size
+            # Create receive buffer
+            recv_buf = torch.empty(total_intermediate_size * chunk_size,
+                                dtype=x.dtype,
+                                device=x.device)
 
-        # Create receive buffer
-        recv_buf = torch.empty(total_intermediate_size * chunk_size,
-                               dtype=input_parallel.dtype,
-                               device=input_parallel.device)
+            # Perform all-to-all communication
+            dist.all_to_all_single(recv_buf,
+                                send_buf,
+                                group=self.odp_group.device_group)
 
-        # Perform all-to-all communication
-        dist.all_to_all_single(recv_buf,
-                               send_buf,
-                               group=self.odp_group.device_group)
+            return recv_buf.view(all2all_tp_size, chunk_size,
+                                        -1).transpose(0, 1).reshape(
+                                            chunk_size, -1)
+        
+        if not hasattr(self, '_quant_comm_config'):
+            self._quant_comm_config = {}
+        self._quant_comm_config['communication_fn'] = otp_quant_comm
 
-        input_parallel = recv_buf.view(all2all_tp_size, chunk_size,
-                                       -1).transpose(0, 1).reshape(
-                                           chunk_size, -1)
 
         # Matrix multiply.
         assert self.quant_method is not None
