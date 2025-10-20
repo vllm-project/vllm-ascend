@@ -14,10 +14,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from typing import Any
 
 import openai
-import os
 import pytest
 from vllm.utils import get_open_port
 
