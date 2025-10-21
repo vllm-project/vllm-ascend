@@ -19,8 +19,7 @@ import torch
 from vllm.distributed.parallel_state import GroupCoordinator
 
 from tests.ut.base import TestBase
-from vllm_ascend.patch.worker.patch_common.patch_distributed import \
-    GroupCoordinatorPatch
+from vllm_ascend.patch.worker.patch_distributed import GroupCoordinatorPatch
 
 
 class TestPatchDistributed(TestBase):

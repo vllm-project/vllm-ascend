@@ -390,7 +390,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         if is_310p():
             # on 300I Duo platform, we need to patch broadcast. however, this patch will be
             # overwritten by patch_for_hcom in torchair. so we need to re-patch it here.
-            from vllm_ascend.patch.platform.patch_common.patch_distributed import \
+            from vllm_ascend.patch.platform.patch_distributed import \
                 communication_adaptation_310p
             communication_adaptation_310p()
 

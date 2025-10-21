@@ -18,7 +18,7 @@ from unittest.mock import MagicMock
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.patch.worker.patch_common.patch_minicpm import forward
+from vllm_ascend.patch.worker.patch_minicpm import forward
 
 
 class TestPatchMiniCPM(TestBase):
