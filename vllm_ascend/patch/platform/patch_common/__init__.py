@@ -30,7 +30,7 @@ def patch_v1_executor():
                                      "EXPERT_MAP_RECORD", "false") == "true"
         if dynamic_eplb:
             import vllm_ascend.patch.platform.patch_common.patch_multiproc_executor  # noqa
-            logger.warning(
+            logger.info(
                 "Enable dynamic eplb/expert_map_record_path by patching v1 executor."
             )
         else:
