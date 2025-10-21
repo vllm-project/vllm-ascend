@@ -701,7 +701,7 @@ class MooncakeConnectorScheduler:
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port +
-            vllm_config.parallel_config.data_parallel_rank_local *
+            vllm_config.parallel_config.data_parallel_rank *
             vllm_config.parallel_config.tensor_parallel_size)
 
         # Requests that need to start recv.
@@ -891,7 +891,7 @@ class MooncakeConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_group = get_tp_group()
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.dp_size = vllm_config.parallel_config.data_parallel_size_local
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_ip()
@@ -902,7 +902,7 @@ class MooncakeConnectorWorker:
         # Handshake base port
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port +
-            vllm_config.parallel_config.data_parallel_rank_local *
+            vllm_config.parallel_config.data_parallel_rank *
             vllm_config.parallel_config.tensor_parallel_size)
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
