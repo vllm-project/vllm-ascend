@@ -76,20 +76,16 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         "DYNAMIC_EPLB": "true"
     }
     server_args = [
-        "--no-enable-prefix-caching",
-        "--enable-expert-parallel",
-        "--tensor-parallel-size", str(tp_size),
-        "--data-parallel-size", str(dp_size),
-        "--port", str(port),
-        "--max-model-len", "36864",
-        "--max-num-batched-tokens", "36864",
-        "--block-size", "128",
-        "--trust-remote-code",
-        "quantization", "ascend",
-        "--gpu-memory-utilization", "0.9",
-        "--additional-config", '{"enable_weight_nz_layout":true, '
-                               '"torch_air_graph_config":{"enabled": true, "enable_multistream_mla": true, "graph_batch_size": [16], "use_cached_graph": ture},'
-                               '"dynamic_eplb": true, "num_iterations_eplb_update": 200, "num_wait_worker_iterations": 100, "init_redundancy_expert": 16}'
+        "--no-enable-prefix-caching", "--enable-expert-parallel",
+        "--tensor-parallel-size",
+        str(tp_size), "--data-parallel-size",
+        str(dp_size), "--port",
+        str(port), "--max-model-len", "36864", "--max-num-batched-tokens",
+        "36864", "--block-size", "128", "--trust-remote-code", "quantization",
+        "ascend", "--gpu-memory-utilization", "0.9", "--additional-config",
+        '{"enable_weight_nz_layout":true, '
+        '"torch_air_graph_config":{"enabled": true, "enable_multistream_mla": true, "graph_batch_size": [16], "use_cached_graph": ture},'
+        '"dynamic_eplb": true, "num_iterations_eplb_update": 200, "num_wait_worker_iterations": 100, "init_redundancy_expert": 16}'
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
