@@ -27,6 +27,8 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import MoECommType
@@ -144,6 +146,141 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             dynamic_eplb=self.dynamic_eplb)
 
 
+class AscendAFD(FusedMoE):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        num_experts = kwargs["num_experts"]
+        self.global_num_experts = num_experts
+        ascend_config = get_ascend_config()
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+        vllm_config = get_current_vllm_config()
+        if ascend_config.torchair_graph_config.enabled:
+            self.use_aclgraph = False
+        else:
+            self.use_aclgraph = (vllm_config.compilation_config.level
+                                 == CompilationLevel.PIECEWISE and
+                                 not vllm_config.model_config.enforce_eager)
+
+    # def __init__(
+    #     self,
+    #     num_experts: int,  # Global number of experts
+    #     top_k: int,
+    #     hidden_size: int,
+    #     renormalize: bool = True,
+    #     use_grouped_topk: bool = False,
+    #     num_expert_group: Optional[int] = None,
+    #     topk_group: Optional[int] = None,
+    #     quant_config: Optional[QuantizationConfig] = None,
+    #     tp_size: Optional[int] = None,
+    #     ep_size: Optional[int] = None,
+    #     dp_size: Optional[int] = None,
+    #     custom_routing_function: Optional[Callable] = None,
+    #     scoring_func: str = "softmax",
+    #     e_score_correction_bias: Optional[torch.Tensor] = None,
+    #     ):
+
+    #     ascend_config = get_ascend_config()
+    #     self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
+    #     if ascend_config.torchair_graph_config.enabled:
+    #         self.use_aclgraph = False
+    #     else:
+    #         self.use_aclgraph = (vllm_config.compilation_config.level
+    #                              == CompilationLevel.PIECEWISE and
+    #                              not vllm_config.model_config.enforce_eager)
+
+    #     self.top_k = top_k
+    #     self.renormalize = renormalize
+    #     self.use_grouped_topk = use_grouped_topk
+    #     if self.use_grouped_topk:
+    #         assert num_expert_group is not None and topk_group is not None
+    #     self.num_expert_group = num_expert_group
+    #     self.topk_group = topk_group
+    #     self.custom_routing_function = custom_routing_function
+    #     self.scoring_func = scoring_func
+    #     self.e_score_correction_bias = e_score_correction_bias
+    #     self.local_num_experts = local_num_experts
+    #     tp_size_ = (tp_size if tp_size is not None else
+    #                 get_tensor_model_parallel_world_size())
+    #     dp_size_ = (dp_size
+    #                 if dp_size is not None else get_dp_group().world_size)
+    #     self.is_sequence_parallel = is_sequence_parallel
+    #     self.sp_size = tp_size_ if is_sequence_parallel else 1
+
+    #     self.moe_parallel_config: FusedMoEParallelConfig = (
+    #         FusedMoEParallelConfig.make(
+    #             tp_size_=tp_size_,
+    #             dp_size_=dp_size_,
+    #             vllm_parallel_config=vllm_config.parallel_config))
+
+    #     num_experts = kwargs["num_experts"]
+    #     self.global_num_experts = num_experts
+
+
+    #     moe = FusedMoEConfig(
+    #         num_experts=self.global_num_experts,
+    #         experts_per_token=top_k,
+    #         hidden_dim=hidden_size,
+    #         num_local_experts=self.local_num_experts,
+    #         moe_parallel_config=self.moe_parallel_config,
+    #         in_dtype=moe_in_dtype,
+    #         max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+    #         has_bias=has_bias,
+    #     )
+    #     self.moe_config = moe
+
+    #     self.quant_config = quant_config
+    #     if self.quant_config is None:
+    #         self.quant_method = AscendUnquantizedFusedMoEMethod(
+    #             self.moe_config)
+    #     else:
+    #         self.quant_method = self.quant_config.get_quant_method(
+    #             self, self.layer_name)
+
+
+    def gating(self,
+                hidden_states: torch.Tensor,
+                router_logits: torch.Tensor):
+        assert self.quant_method is not None
+
+        # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
+        quantized_x_for_share, dynamic_scale_for_share = None, None
+
+        forward_context = get_forward_context()
+
+        # Load balancing for token distribution among experts in dummy_run
+        # TODO: The community only considers load balancing when DP > 1.
+        # This approach may overlook some extreme scenarios.
+        enable_force_load_balance = forward_context.in_profile_run
+
+        # hidden_states, router_logits = forward_context.moe_comm_method.prepare(
+        #     hidden_states=hidden_states,
+        #     router_logits=router_logits,
+        #     replace_allreduce=forward_context.sp_enabled,
+        #     enable_shared_expert_dp=self.enable_shared_expert_dp)
+
+        topk_weights, topk_ids, row_idx = select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=self.top_k,
+            renormalize=self.renormalize,
+            use_grouped_topk=self.use_grouped_topk,
+            topk_group=self.topk_group,
+            num_expert_group=self.num_expert_group,
+            custom_routing_function=self.custom_routing_function,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.e_score_correction_bias,
+            global_num_experts=self.global_num_experts)
+
+        topk_weights = topk_weights.to(hidden_states.dtype)
+        # this is a naive implementation for experts load balance so as
+        # to avoid accumulating too much tokens on a single rank.
+        # currently it is only activated when doing profile runs.
+        if enable_force_load_balance and not self.use_aclgraph:
+            topk_ids = torch.randint_like(topk_ids, 0, self.global_num_experts)
+        
+        return topk_weights, topk_ids, row_idx
+
+
 class AscendFusedMoE(FusedMoE):
     moe_counter = -1
 
@@ -245,49 +382,6 @@ class AscendFusedMoE(FusedMoE):
         if self.moe_load is not None:
             self.moe_load.zero_()
 
-    def gating(self,
-                hidden_states: torch.Tensor,
-                router_logits: torch.Tensor):
-        assert self.quant_method is not None
-
-        # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
-        quantized_x_for_share, dynamic_scale_for_share = None, None
-
-        forward_context = get_forward_context()
-
-        # Load balancing for token distribution among experts in dummy_run
-        # TODO: The community only considers load balancing when DP > 1.
-        # This approach may overlook some extreme scenarios.
-        enable_force_load_balance = forward_context.in_profile_run
-
-        forward_context = get_forward_context()
-        hidden_states, router_logits = forward_context.moe_comm_method.prepare(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            replace_allreduce=forward_context.sp_enabled,
-            enable_shared_expert_dp=self.enable_shared_expert_dp)
-
-        topk_weights, topk_ids, row_idx = select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            top_k=self.top_k,
-            renormalize=self.renormalize,
-            use_grouped_topk=self.use_grouped_topk,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias,
-            global_num_experts=self.global_num_experts)
-
-        topk_weights = topk_weights.to(x.dtype)
-        # this is a naive implementation for experts load balance so as
-        # to avoid accumulating too much tokens on a single rank.
-        # currently it is only activated when doing profile runs.
-        if enable_force_load_balance and not self.use_aclgraph:
-            topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
-        
-        return topk_weights, topk_ids, row_idx
 
     def afd_ffn_compute(self, 
                 hidden_states: torch.Tensor, 

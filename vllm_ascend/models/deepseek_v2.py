@@ -35,7 +35,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
-                              
+                              get_ep_group,
                               tensor_model_parallel_all_reduce,
                               )
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -65,7 +65,7 @@ from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.models.layers.sfa import (AscendSFAModules,
                                            AscendSparseFlashAttention, Indexer)
 from typing import Any, Optional, Union
-from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+from vllm_ascend.ops.common_fused_moe import AscendFusedMoE, AscendAFD
 
 
 class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
@@ -458,6 +458,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
+        self.first_k_dense_replace = config.first_k_dense_replace
 
         if self.role is None or self.role == "attention":
             # TODO: enable mla in vllm-ascend
@@ -510,6 +511,15 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 )
         
         if self.role is not None and self.role == "attention":
+            if layer_idx < config.first_k_dense_replace:
+                print('开始加载attn侧的mlp')
+                self.mlp = DeepseekV2MLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                )
             # 这里增加gating的初始化
             self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
@@ -542,13 +552,33 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                                         self.n_local_physical_experts)
             self.physical_expert_end = (self.physical_expert_start +
                                         self.n_local_physical_experts)
+
+            self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+            self.afd_gating = AscendAFD(
+                num_experts=config.n_routed_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=config.hidden_size,
+                intermediate_size=config.moe_intermediate_size,
+                reduce_results=False,
+                renormalize=config.norm_topk_prob,
+                quant_config=quant_config,
+                use_grouped_topk=True,
+                num_expert_group=config.n_group,
+                topk_group=config.topk_group,
+                prefix=f"{prefix}.experts",
+                scoring_func=config.scoring_func,
+                # we do scaling outside, set factor to 1.0 to avoid double mul
+                routed_scaling_factor=1.0,
+                e_score_correction_bias=self.gate.e_score_correction_bias,
+                enable_eplb=self.enable_eplb,
+                num_redundant_experts=self.n_redundant_experts,
+                is_sequence_parallel=self.is_sequence_parallel,)
         
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
         self.routed_scaling_factor = config.routed_scaling_factor
-        self.first_k_dense_replace = config.first_k_dense_replace
         self.tp_group = get_tp_group().device_group
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
@@ -652,6 +682,10 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            if 'mlp.gate.' in name:
+                print('name before replace:%s', name)
+                name = name.replace("mlp.gate.", "gate.")
+                print('name after replace:%s', name)
             if "rotary_emb.inv_freq" in name:
                 continue
             if "module" in name:
@@ -738,10 +772,17 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         return loaded_params
 
     def is_moe_weight(self,name):
-        if "shared_experts" in name or "experts" in name or "gate" in name \
+        if "shared_experts" in name or "experts" in name or "gate_" in name \
             or "up" in name or "down" in name:
             return True
         return False
+        # if 'mlp.gate_proj.weight' in name or 'mlp.up_proj.weight' in name or 'mlp.down_proj.weight' in name:
+        #     return False
+        # if "shared_experts" in name or "experts" in name or "gate_" in name\
+        #     or "up" in name or "down" in name:
+
+        #     return True
+        # return False
 
     def is_common_weight(self,name):
         if "lm_head" in name or "model.norm.weight" in name or "embed_tokens" in name \
