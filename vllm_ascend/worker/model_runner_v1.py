@@ -537,20 +537,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _init_mc2_tokens_capacity(self):
         tp_size = self.parallel_config.tensor_parallel_size
 
-        if is_moe_model(self.vllm_config):
+        if not is_moe_model(self.vllm_config):
             num_tokens_per_tp_rank = 0
         else:
             # NOTE: To be clear, we need to make sure that during graph capture, the number of
             # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
             # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
             if self.compilation_config.cudagraph_capture_sizes:
-                max_num_tokens = self.compilation_config.cudagraph_capture_sizes[0]
+                max_num_tokens = self.compilation_config.cudagraph_capture_sizes[
+                    0]
             else:
                 max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
-            
+
             # Use integer arithmetic for ceiling division.
             num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        
+
         soc_version = get_ascend_soc_version()
         limit = None
         if soc_version in {AscendSocVersion.A3}:
@@ -564,7 +565,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 f"but got {num_tokens_per_tp_rank}. Please try to reduce `max_num_seqs` "
                 f"(current: {self.max_num_reqs}) or increase `tp_size` (current: {tp_size})."
             )
-        
+
         self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
     def _make_buffer(self,
