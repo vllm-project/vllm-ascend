@@ -44,8 +44,8 @@ from torch.distributed import ProcessGroup
 from torch.nn.parameter import Parameter
 from vllm.distributed import split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.utils import direct_register_custom_op
 from vllm.forward_context import get_forward_context
+from vllm.utils import direct_register_custom_op
 
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
@@ -373,19 +373,21 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
-    def matmul_and_reduce(
-        self,
-        input_parallel: torch.Tensor,
-        bias_: Optional[Parameter],
-        trace_flag: bool = True
-    ) -> torch.Tensor:
+    def matmul_and_reduce(self,
+                          input_parallel: torch.Tensor,
+                          bias_: Optional[Parameter],
+                          trace_flag: bool = True) -> torch.Tensor:
         if trace_flag:
-            output = torch.ops.vllm.matmul_and_reduce(input_parallel, self.prefix, trace_flag=False)
+            output = torch.ops.vllm.matmul_and_reduce(input_parallel,
+                                                      self.prefix,
+                                                      trace_flag=False)
             return output
+        assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self.layer,
                                                   input_parallel,
                                                   bias=bias_)
-        from vllm_ascend.ops.register_custom_ops import _maybe_pad_and_reduce_impl
+        from vllm_ascend.ops.register_custom_ops import \
+            _maybe_pad_and_reduce_impl
         output = _maybe_pad_and_reduce_impl(output_parallel)
         return output
 
@@ -395,30 +397,28 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         self.reduce_results = self.layer.reduce_results
 
 
-def _matmul_and_reduce_impl(
-    input_parallel: torch.Tensor, layer_name: str, trace_flag: bool
-) -> torch.Tensor:
+def _matmul_and_reduce_impl(input_parallel: torch.Tensor, layer_name: str,
+                            trace_flag: bool) -> torch.Tensor:
     forward_context = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.custom_op is not None
     bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-    output = self.custom_op.matmul_and_reduce(input_parallel, bias_, trace_flag)
+    output = self.custom_op.matmul_and_reduce(input_parallel, bias_,
+                                              trace_flag)
 
     return output
 
 
-def _matmul_and_reduce_impl_fake(
-    input_parallel: torch.Tensor, layer_name: str, trace_flag: bool
-) -> torch.Tensor:
+def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor, layer_name: str,
+                                 trace_flag: bool) -> torch.Tensor:
     forward_context = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     num_tokens = input_parallel.size(0)
     if forward_context.sp_enabled:
         num_tokens = num_tokens // self.tp_size
-    output = torch.empty(
-        size=(num_tokens, self.output_size_per_partition),
-        device=input_parallel.device,
-        dtype=input_parallel.dtype)
+    output = torch.empty(size=(num_tokens, self.output_size_per_partition),
+                         device=input_parallel.device,
+                         dtype=input_parallel.dtype)
 
     return output
 

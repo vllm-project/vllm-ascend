@@ -26,6 +26,7 @@ import torch
 import torch.nn as nn
 import torch_npu
 from torch.nn.parameter import Parameter
+from vllm.config import get_current_vllm_config
 from vllm.distributed import divide
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear, LinearBase,
@@ -34,7 +35,6 @@ from vllm.model_executor.layers.linear import (  # noqa
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.config import get_current_vllm_config
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
@@ -45,7 +45,8 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        if is_enable_nz() and torch.version.cann.startswith("8.3"):
+        if (is_enable_nz() and torch.version.cann.startswith("8.3") and
+                layer.weight.data.dtype in [torch.float16, torch.bfloat16]):
             layer.weight.data = torch_npu.npu_format_cast(
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
 
