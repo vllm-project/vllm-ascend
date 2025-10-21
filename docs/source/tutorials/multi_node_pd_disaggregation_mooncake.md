@@ -66,16 +66,16 @@ Install the relevant dependencies. The installation of Go is not required.
 
 ```shell
 cd Mooncake
-bash dependencies.sh
+bash dependencies.sh -y
 ```
 
 Install mpi
 
 ```shell
-apt purge mpich libmpich-dev
-apt purge openmpi-bin
-apt purge openmpi-bin libopenmpi-dev
-apt install mpich libmpich-dev
+apt purge mpich libmpich-dev -y
+apt purge openmpi-bin -y
+apt purge openmpi-bin libopenmpi-dev -y
+apt install mpich libmpich-dev -y
 export CPATH=/usr/lib/aarch64-linux-gnu/mpich/include/:$CPATH
 export CPATH=/usr/lib/aarch64-linux-gnu/openmpi/lib:$CPATH
 ```

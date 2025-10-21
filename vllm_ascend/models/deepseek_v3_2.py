@@ -45,7 +45,6 @@ from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mla import MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -65,7 +64,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.models.layers.mla import AscendMLAModules
 from vllm_ascend.models.layers.sfa import (AscendSFAModules,
                                            AscendSparseFlashAttention, Indexer)
 from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
@@ -84,16 +82,13 @@ class AscendDeepseekV2Model(DeepseekV2Model, nn.Module):
         self.config = config
 
         self.vocab_size = config.vocab_size
-        self.is_v32 = hasattr(config, "index_topk")
-        if self.is_v32:
-            topk_tokens = config.index_topk
-            topk_indices_buffer = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                topk_tokens,
-                dtype=torch.int32,
-                device=current_platform.device_type)
-        else:
-            topk_indices_buffer = None
+        assert hasattr(config, "index_topk")
+        topk_tokens = config.index_topk
+        topk_indices_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            topk_tokens,
+            dtype=torch.int32,
+            device=current_platform.device_type)
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -216,153 +211,6 @@ class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
         if not self.return_bias:
             return output
         return output, output_bias
-
-
-class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        hidden_size: int,
-        num_heads: int,
-        qk_nope_head_dim: int,
-        qk_rope_head_dim: int,
-        v_head_dim: int,
-        q_lora_rank: Optional[int],
-        kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        nn.Module.__init__(self)
-        self.hidden_size = hidden_size
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
-        self.v_head_dim = v_head_dim
-
-        self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank
-
-        self.num_heads = num_heads
-        self.tp_size = get_tensor_model_parallel_world_size()
-        assert num_heads % self.tp_size == 0
-        self.num_local_heads = num_heads // self.tp_size
-        self.layers = config.num_hidden_layers
-        self.first_k_dense_replace = config.first_k_dense_replace
-
-        self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
-        self.max_position_embeddings = max_position_embeddings
-
-        self.prefix = prefix
-        self.debug_layer_idx = int(self.prefix.split(".")[-2])
-
-        ascend_config = get_ascend_config()
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-
-        if self.q_lora_rank is not None:
-            self.q_a_proj = ReplicatedLinear(self.hidden_size,
-                                             self.q_lora_rank,
-                                             bias=False,
-                                             quant_config=quant_config,
-                                             prefix=f"{prefix}.q_a_proj")
-            self.q_a_layernorm = RMSNorm(self.q_lora_rank,
-                                         eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(q_lora_rank,
-                                                 self.num_heads *
-                                                 self.qk_head_dim,
-                                                 bias=False,
-                                                 quant_config=quant_config,
-                                                 prefix=f"{prefix}.q_b_proj")
-        else:
-            self.q_proj = ColumnParallelLinear(self.hidden_size,
-                                               self.num_heads *
-                                               self.qk_head_dim,
-                                               bias=False,
-                                               quant_config=quant_config,
-                                               prefix=f"{prefix}.q_proj")
-
-        self.kv_a_proj_with_mqa = ReplicatedLinear(
-            self.hidden_size,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_a_proj_with_mqa")
-        self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
-                                      eps=config.rms_norm_eps)
-        self.kv_b_proj = ColumnParallelLinear(
-            self.kv_lora_rank,
-            self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_b_proj")
-        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
-                                        self.hidden_size,
-                                        bias=False,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.o_proj")
-
-        if rope_scaling:
-            rope_scaling["rope_type"] = 'deepseek_yarn'
-        self.rotary_emb = get_rope(qk_rope_head_dim,
-                                   rotary_dim=qk_rope_head_dim,
-                                   max_position=max_position_embeddings,
-                                   base=rope_theta,
-                                   rope_scaling=rope_scaling,
-                                   is_neox_style=False)
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
-            scaling_factor = rope_scaling["factor"]
-            mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
-            self.scaling = self.scaling * mscale * mscale
-        self.indexer = None
-
-        mla_modules = AscendMLAModules(
-            q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
-            q_a_layernorm=self.q_a_layernorm
-            if self.q_lora_rank is not None else None,
-            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
-            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-            kv_a_layernorm=self.kv_a_layernorm,
-            kv_b_proj=self.kv_b_proj,
-            o_proj=self.o_proj,
-            rotary_emb=self.rotary_emb,
-            indexer=None,
-            is_sparse=hasattr(config, "index_topk"),
-        )
-
-        self.mla_attn = MultiHeadLatentAttention(
-            self.hidden_size,
-            self.enable_shared_expert_dp,
-            self.debug_layer_idx,
-            self.first_k_dense_replace,
-            self.tp_size,
-            mla_modules,
-            self.num_local_heads,
-            self.scaling,
-            self.layers,
-            self.kv_lora_rank,
-            self.qk_rope_head_dim,
-            self.q_lora_rank,
-            self.qk_nope_head_dim,
-            self.qk_head_dim,
-            self.v_head_dim,
-            cache_config,
-            quant_config,
-            prefix,
-        )
-
-    def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: Optional[torch.Tensor] = None,
-            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        return self.mla_attn(positions, hidden_states, kv_cache, attn_metadata)
 
 
 class CustomDeepseekV2SFAAttention(DeepseekV2MLAAttention):
@@ -566,10 +414,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_rank = get_tp_group().rank_in_group
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
-            if hasattr(model_config.hf_config, "index_topk"):
-                attn_cls = CustomDeepseekV2SFAAttention
-            else:
-                attn_cls = CustomDeepseekV2MLAAttention
+            attn_cls = CustomDeepseekV2SFAAttention
         else:
             attn_cls = DeepseekV2Attention
         self.self_attn = attn_cls(

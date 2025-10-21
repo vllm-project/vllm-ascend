@@ -19,13 +19,13 @@
 
 import math
 import types
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import get_forward_context
@@ -82,6 +82,32 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         self._check_batch_sizes_consistency()
 
+    def _may_pad_kv_consumer_num_seq(self):
+        # pd disaggregation scenario need redundant_batch_sizes to avoid each batch's seq_len exceed 16 tokens
+        # self.max_num_reqs here is greater than the actual maximum request number
+        if self.decode_token_per_req > 1 and self.is_kv_consumer:
+            # applied only when speculative decoding is active
+            FIA_SEQ_LEN_LIMIT = 16
+            new_max_num_reqs = self.max_num_reqs + math.ceil(
+                self.max_num_reqs / FIA_SEQ_LEN_LIMIT) + math.ceil(
+                    (self.max_num_reqs * self.decode_token_per_req) /
+                    (FIA_SEQ_LEN_LIMIT**2))
+            if self.max_num_reqs < new_max_num_reqs:
+                logger.warning(
+                    f"max_num_reqs is updated to {new_max_num_reqs}")
+                self.max_num_reqs = new_max_num_reqs
+
+    def _init_mc2_tokens_capacity(self):
+        # NOTE: To be clear, we need to make sure that during graph capture, the number of
+        # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
+        # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
+        max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
+        tp_size = self.parallel_config.tensor_parallel_size
+        # Use integer arithmetic for ceiling division.
+        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        # maintain the same calculation logic as the function _align_graph_size_divisible_by_tp_size()
+        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+
     def _sync_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
@@ -121,14 +147,21 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
 
-    def _build_attention_metadata(self, with_prefill, num_reqs, num_tokens,
-                                  max_query_len, force_attention):
+    def _build_dummy_attn_metadata(
+        self,
+        with_prefill: bool,
+        num_reqs: int,
+        num_tokens: int,
+        max_query_len: int,
+        aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
+        force_attention: bool = False,
+    ) -> Optional[dict[str, Any]]:
         # NOTE: If torchair graph mode and not with_prefill,
         # we can't skip_attn, it will cause graph recompile.
         if with_prefill or self.enable_shared_expert_dp:
-            attn_metadata = super()._build_attention_metadata(
+            attn_metadata = super()._build_dummy_attn_metadata(
                 with_prefill, num_reqs, num_tokens, max_query_len,
-                force_attention)
+                aclgraph_runtime_mode, force_attention)
         else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
@@ -452,31 +485,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 self.torchair_graph_batch_sizes.append(self.max_num_reqs)
 
         # padded max number tokens = max_num_req * decode_token_per_req
-        if self.decode_token_per_req > 1:
-            # pd disaggregation scenario need redundant_batch_sizes to avoid each batch's seq_len exceed 16 tokens
-            if self.is_kv_consumer:
-                FIA_SEQ_LEN_LIMIT = 16
-                self.torchair_graph_batch_sizes = [
-                    (graph_batch_size +
-                     math.ceil(graph_batch_size / FIA_SEQ_LEN_LIMIT) +
-                     math.ceil(graph_batch_size * self.decode_token_per_req /
-                               FIA_SEQ_LEN_LIMIT / FIA_SEQ_LEN_LIMIT)) *
-                    self.decode_token_per_req
-                    for graph_batch_size in self.torchair_graph_batch_sizes
-                ]
-                new_max_num_reqs = math.ceil(
-                    max(self.torchair_graph_batch_sizes) /
-                    self.decode_token_per_req)
-                if self.max_num_reqs < new_max_num_reqs:
-                    logger.warning(
-                        f"max_num_reqs is updated to {new_max_num_reqs}")
-                    self.max_num_reqs = new_max_num_reqs
-                    self.scheduler_config.max_num_seqs = new_max_num_reqs
-            else:
-                self.torchair_graph_batch_sizes = [
-                    graph_batch_size * self.decode_token_per_req
-                    for graph_batch_size in self.torchair_graph_batch_sizes
-                ]
+        self.torchair_graph_batch_sizes = [
+            graph_batch_size * self.decode_token_per_req
+            for graph_batch_size in self.torchair_graph_batch_sizes
+        ]
 
         # NOTE: when enable_expert_parallel on A3, we need to check if `graph_batch_size` is divisible by `tp_size`
         # Because we use x_active_mask for dispatch/combine op on A3, which requires that input shape should be same
