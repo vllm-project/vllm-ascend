@@ -545,7 +545,6 @@ class AscendScheduler(Scheduler):
         else:
             return prompt_limit
 
-
     def finish_requests(
         self,
         request_ids: Union[str, Iterable[str]],
