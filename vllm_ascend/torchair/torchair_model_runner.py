@@ -517,11 +517,12 @@ class NPUTorchairModelRunner(NPUModelRunner):
                     f"torchair_graph_batch_sizes {cur_graph_batch_size} is bigger than max_num_batched_tokens",
                     f"{self.scheduler_config.max_num_batched_tokens} will skip this batch size."
                 )
-        new_max_num_reqs = math.ceil(max(new_graph_batch_sizes) / self.decode_token_per_req)
+        new_max_num_reqs = math.ceil(
+            max(new_graph_batch_sizes) / self.decode_token_per_req)
         if self.max_num_reqs != new_max_num_reqs:
             logger.warning(f"max_num_reqs is updated to {new_max_num_reqs}")
             self.max_num_reqs = new_max_num_reqs
-            if not(self.decode_token_per_req > 1 and self.is_kv_consumer):
+            if not (self.decode_token_per_req > 1 and self.is_kv_consumer):
                 # Do not update scheduler_config.max_num_seqs in KV consumer + MTP
                 # Since FIA need extra space for padding
                 # Enforce self.max_num_seqs > self.scheduler_config.max_num_seqs in KV consumer + MTP
