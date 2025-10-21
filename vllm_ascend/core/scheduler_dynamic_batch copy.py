@@ -147,7 +147,6 @@ class SchedulerDynamicBatch(Scheduler):
         # 4. So far, the dynamic batch only supports 910B3 NPU. Further work will include
         # more devices and finer optimization strategy.
 
-
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
@@ -189,10 +188,8 @@ class SchedulerDynamicBatch(Scheduler):
             num_new_tokens = (request.num_tokens_with_spec +
                               request.num_output_placeholders -
                               request.num_computed_tokens)
-            if (0 < self.scheduler_config.long_prefill_token_threshold <
-                    num_new_tokens):
-                num_new_tokens = (
-                    self.scheduler_config.long_prefill_token_threshold)
+            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
+                num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
             # Make sure the input position does not exceed the max model len.
@@ -205,11 +202,16 @@ class SchedulerDynamicBatch(Scheduler):
             encoder_inputs_to_schedule = None
             new_encoder_compute_budget = encoder_compute_budget
             if request.has_encoder_inputs:
-                (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_compute_budget
-                 ) = self._try_schedule_encoder_inputs(
-                     request, request.num_computed_tokens, num_new_tokens,
-                     encoder_compute_budget)
+                (
+                    encoder_inputs_to_schedule,
+                    num_new_tokens,
+                    new_encoder_compute_budget,
+                ) = self._try_schedule_encoder_inputs(
+                    request,
+                    request.num_computed_tokens,
+                    num_new_tokens,
+                    encoder_compute_budget,
+                )
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -226,46 +228,53 @@ class SchedulerDynamicBatch(Scheduler):
                 req_index += 1
                 break
 
+            # Schedule newly needed KV blocks for the request.
             while True:
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
-                    num_lookahead_tokens=self.num_lookahead_tokens)
-                if new_blocks is None:
-                    # The request cannot be scheduled.
-                    # Preempt the lowest-priority request.
-                    if self.policy == SchedulingPolicy.PRIORITY:
-                        preempted_req = max(
-                            self.running,
-                            key=lambda r: (r.priority, r.arrival_time),
-                        )
-                        self.running.remove(preempted_req)
-                        if preempted_req in scheduled_running_reqs:
-                            scheduled_running_reqs.remove(preempted_req)
-                    else:
-                        preempted_req = self.running.pop()
+                    num_lookahead_tokens=self.num_lookahead_tokens,
+                )
 
-                    self.kv_cache_manager.free(preempted_req)
-                    self.encoder_cache_manager.free(preempted_req)
-                    preempted_req.status = RequestStatus.PREEMPTED
-                    preempted_req.num_computed_tokens = 0
-                    if self.log_stats:
-                        preempted_req.record_event(
-                            EngineCoreEventType.PREEMPTED, scheduled_timestamp)
-
-                    self.waiting.prepend_request(preempted_req)
-                    preempted_reqs.append(preempted_req)
-                    if preempted_req == request:
-                        # No more request to preempt.
-                        can_schedule = False
-                        break
-                else:
+                if new_blocks is not None:
                     # The request can be scheduled.
-                    can_schedule = True
                     break
-            if not can_schedule:
+
+                # The request cannot be scheduled.
+                # Preempt the lowest-priority request.
+                if self.policy == SchedulingPolicy.PRIORITY:
+                    preempted_req = max(
+                        self.running,
+                        key=lambda r: (r.priority, r.arrival_time),
+                    )
+                    self.running.remove(preempted_req)
+                    if preempted_req in scheduled_running_reqs:
+                        scheduled_running_reqs.remove(preempted_req)
+                        token_budget += num_scheduled_tokens[
+                            preempted_req.request_id]
+                        req_to_new_blocks.pop(preempted_req.request_id)
+                        num_scheduled_tokens.pop(preempted_req.request_id)
+                else:
+                    preempted_req = self.running.pop()
+
+                self.kv_cache_manager.free(preempted_req)
+                self.encoder_cache_manager.free(preempted_req)
+                preempted_req.status = RequestStatus.PREEMPTED
+                preempted_req.num_computed_tokens = 0
+                preempted_req.num_preemptions += 1
+                if self.log_stats:
+                    preempted_req.record_event(EngineCoreEventType.PREEMPTED,
+                                               scheduled_timestamp)
+
+                self.waiting.prepend_request(preempted_req)
+                preempted_reqs.append(preempted_req)
+                if preempted_req == request:
+                    # No more request to preempt. Cannot schedule this request.
+                    break
+
+            if new_blocks is None:
+                # Cannot schedule this request.
                 break
-            assert new_blocks is not None
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
@@ -322,7 +331,8 @@ class SchedulerDynamicBatch(Scheduler):
                     else:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
-                            request.request_id)
+                            request.request_id,
+                        )
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
@@ -354,9 +364,8 @@ class SchedulerDynamicBatch(Scheduler):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = \
-                        self.kv_cache_manager.get_computed_blocks(
-                            request)
+                    new_computed_blocks, num_new_local_computed_tokens = (
+                        self.kv_cache_manager.get_computed_blocks(request))
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -378,8 +387,7 @@ class SchedulerDynamicBatch(Scheduler):
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
                 else:
-                    new_computed_blocks = (
-                        self.kv_cache_manager.create_empty_block_list())
+                    new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
@@ -403,8 +411,8 @@ class SchedulerDynamicBatch(Scheduler):
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
-                    if not self.scheduler_config.chunked_prefill_enabled and \
-                        num_new_tokens > token_budget:
+                    if (not self.scheduler_config.chunked_prefill_enabled
+                            and num_new_tokens > token_budget):
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
@@ -414,11 +422,16 @@ class SchedulerDynamicBatch(Scheduler):
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
-                        (encoder_inputs_to_schedule, num_new_tokens,
-                         new_encoder_compute_budget
-                         ) = self._try_schedule_encoder_inputs(
-                             request, num_computed_tokens, num_new_tokens,
-                             encoder_compute_budget)
+                        (
+                            encoder_inputs_to_schedule,
+                            num_new_tokens,
+                            new_encoder_compute_budget,
+                        ) = self._try_schedule_encoder_inputs(
+                            request,
+                            num_computed_tokens,
+                            num_new_tokens,
+                            encoder_compute_budget,
+                        )
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
@@ -438,8 +451,8 @@ class SchedulerDynamicBatch(Scheduler):
                     # always padded to the maximum length. If we support other
                     # encoder-decoder models, this will need to be updated if we
                     # want to only allocate what is needed.
-                    num_encoder_tokens =\
-                        self.scheduler_config.max_num_encoder_input_tokens
+                    num_encoder_tokens = (
+                        self.scheduler_config.max_num_encoder_input_tokens)
                 else:
                     num_encoder_tokens = 0
 
@@ -523,8 +536,8 @@ class SchedulerDynamicBatch(Scheduler):
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
-        assert (len(scheduled_new_reqs) + len(scheduled_resumed_reqs) +
-                len(scheduled_running_reqs) <= len(self.running))
+        assert len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(
+            scheduled_running_reqs) <= len(self.running)
 
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
@@ -534,7 +547,7 @@ class SchedulerDynamicBatch(Scheduler):
             any_request = self.running[0]
             num_common_prefix_blocks = (
                 self.kv_cache_manager.get_num_common_prefix_blocks(
-                    any_request, len(self.running)))
+                    any_request.request_id))
 
         # Construct the scheduler output.
         new_reqs_data = [
@@ -549,11 +562,8 @@ class SchedulerDynamicBatch(Scheduler):
             scheduled_spec_decode_tokens,
             req_to_new_blocks,
         )
-        scheduled_requests = (scheduled_new_reqs + scheduled_running_reqs +
-                              scheduled_resumed_reqs)
-        structured_output_request_ids, grammar_bitmask = (
-            self.get_grammar_bitmask(scheduled_requests,
-                                     scheduled_spec_decode_tokens))
+        structured_output_request_ids, grammar_bitmask = self.get_grammar_bitmask(
+            num_scheduled_tokens.keys(), scheduled_spec_decode_tokens)
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -600,4 +610,3 @@ class SchedulerDynamicBatch(Scheduler):
 
         self._update_after_schedule(scheduler_output)
         return scheduler_output
-
