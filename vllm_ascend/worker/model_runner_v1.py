@@ -3332,21 +3332,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # TODO(lucas): move the attention specs into the model layers like
             # the attention backends
             if attn_module.attn_type == AttentionType.DECODER:
-                if use_mla and not use_sparse:
-                    kv_cache_spec[layer_name] = MLAAttentionSpec(
+                if use_mla and getattr(attn_module, "fa_quant_layer", False):
+                    kv_cache_spec[layer_name] = MlaFAQuantAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype,
-                        cache_dtype_str=self.cache_config.cache_dtype)
+                        dtype=attn_module.dtype,
+                        use_mla=use_mla,
+                        kv_lora_rank=attn_module.impl.kv_lora_rank,
+                        qk_rope_head_dim=attn_module.impl.qk_rope_head_dim,
+                        origin_dtype=self.vllm_config.model_config.dtype)
                 else:
-                    # TODO(cmq): This is a hack way to fix deepseek kvcache when
-                    # using DSA. Fix the spec in vLLM is a finnal way.
                     kv_cache_spec[layer_name] = FullAttentionSpec(
                         block_size=block_size,
                         num_kv_heads=attn_module.num_kv_heads,
                         head_size=attn_module.head_size,
-                        dtype=self.kv_cache_dtype)
+                        dtype=attn_module.dtype,
+                        use_mla=use_mla)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
@@ -3670,3 +3672,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _build_drafter_prepare_inputs_torchair_param(self):
         return False
+
+@dataclass(frozen=True)
+class MlaFAQuantAttentionSpec(FullAttentionSpec):
+    kv_lora_rank: int = 0
+    qk_rope_head_dim: int = 0
+    origin_dtype: torch.dtype = torch.bfloat16
+
+    @property
+    def page_size_bytes(self) -> int:
+        # page_size_bytes: space required by a single block
+        # we only quantize nope, rope use origin dtype
+        head_size_bytes = self.kv_lora_rank * get_dtype_size(self.dtype) \
+            + self.qk_rope_head_dim * get_dtype_size(self.origin_dtype)
+        return self.block_size * self.num_kv_heads * head_size_bytes

@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import MappingProxyType
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, TypeVar
 
 import torch
 from vllm.config import get_current_vllm_config
@@ -41,7 +41,8 @@ from vllm_ascend.ops.common_fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, mlp_tp_enable,
                                oproj_tp_enable)
-
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.models.layers.mla import AscendMLAModules
 from .utils import get_quant_method
 
 
@@ -157,6 +158,12 @@ class AscendQuantConfig(QuantizationConfig):
 
     def get_scaled_act_names(self) -> List[str]:
         return []
+
+    def is_enable_fa_quant(self):
+        if 'fa_quant_type' in self.quant_description.keys() and \
+                self.quant_description['fa_quant_type'] is not None:
+            return True
+        return False
 
 
 packed_modules_model_mapping = {
@@ -319,6 +326,8 @@ class AscendLinearMethod(LinearMethodBase):
         return self.quant_method.apply(layer, x, bias, tp_rank)
 
 
+M = TypeVar("M", bound=AscendMLAMetadata)
+
 class AscendKVCacheMethod(BaseKVCacheMethod):
     """KVCache method for Ascend quantization.
 
@@ -340,11 +349,11 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
-    def apply(self, layer: torch.nn.Module, query: torch.Tensor,
-              key: torch.Tensor, value: torch.Tensor, kv_cache, attn_metadata,
-              attn_type, scale, output) -> torch.Tensor:
-        return self.quant_method.apply(layer, query, key, value, kv_cache,
-                                       attn_metadata, attn_type, scale, output)
+    def apply(self, layer: torch.nn.Module, hidden_states: torch.Tensor,
+              kv_cache: Tuple[torch.Tensor], attn_metadata: M, mla_module: AscendMLAModules ,need_gather_q_kv: bool = False,
+        output: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self.quant_method.apply(hidden_states, kv_cache, attn_metadata, mla_module, need_gather_q_kv,
+                                      output)
 
 
 class AscendFusedMoEMethod(FusedMoEMethodBase):

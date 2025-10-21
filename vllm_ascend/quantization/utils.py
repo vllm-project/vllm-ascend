@@ -6,7 +6,7 @@ from .w4a4_flatquant_dynamic import AscendW4A4FlatQuantDynamicLinearMethod
 from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
                            AscendW4A8DynamicLinearMethod)
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
-                   AscendW8A8LinearMethod)
+                   AscendW8A8LinearMethod, AscendFAQuantAttentionMethod)
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
                            AscendW8A8DynamicLinearMethod)
 
@@ -29,6 +29,9 @@ ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     },
     "C8": {
         "attention": AscendC8KVCacheMethod,
+    },
+    "FAQuant": {
+        "attention": AscendFAQuantAttentionMethod, 
     },
 }
 

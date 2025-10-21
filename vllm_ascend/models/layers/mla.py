@@ -159,8 +159,10 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
-        torch.ops.vllm.mla_forward(hidden_states, need_gather_q_kv, output,
-                                   self.prefix)
+        if hasattr(self.mla_attn, "quant_method") and self.mla_attn.fa_quant_layer:
+            self.mla_attn.quant_method.apply(hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output)
+        else:
+            self.mla_attn.impl.forward(hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output)
         output = output.view(-1, output_shape[-1])
         return output
 
