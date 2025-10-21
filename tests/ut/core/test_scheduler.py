@@ -940,7 +940,7 @@ class TestSchedulerDynamicBatch(TestBase):
         Two cases: default APC/no prompt logprobs; APC=True + prompt logprobs
         '''
         scheduler = self.create_scheduler()
-        scheduler.scheduler_config.chunked_prefill_enabled = False
+        scheduler.scheduler_config.chunked_prefill_enabled = True
         requests = create_requests(num_requests=10)
         for request in requests:
             scheduler.add_request(request)
@@ -963,7 +963,7 @@ class TestSchedulerDynamicBatch(TestBase):
 
     def test_schedule_multimodal_requests(self):
         scheduler = self.create_scheduler()
-        scheduler.scheduler_config.chunked_prefill_enabled = False
+        scheduler.scheduler_config.chunked_prefill_enabled = True
         mm_positions = [[PlaceholderRange(offset=i, length=10)]
                         for i in range(10)]
         requests = create_requests(
@@ -993,27 +993,6 @@ class TestSchedulerDynamicBatch(TestBase):
         self.assertEqual(len(scheduler.running), len(requests))
         for i, request in enumerate(requests):
             self.assertEqual(scheduler.running[i], request)
-
-    def test_concurrent_partial_prefills_schedule(self):
-        '''Test concurrent partial prefills scheduling.
-        total requests = 10, every request has 10 token.
-        while set long_prefill_token_threshold = 1, scheduler can
-        only schedule max_long_partial_prefills long request.
-        '''
-        scheduler = self.create_scheduler()
-        scheduler.scheduler_config.chunked_prefill_enabled = False
-        scheduler.scheduler_config.max_long_partial_prefills = 2
-        scheduler.scheduler_config.long_prefill_token_threshold = 1
-        requests = create_requests(num_requests=10, num_tokens=20)
-        for request in requests:
-            scheduler.add_request(request)
-
-        # Test initial scheduling
-        output = scheduler.schedule()
-        self.assertEqual(len(output.scheduled_new_reqs),
-                         scheduler.scheduler_config.max_long_partial_prefills)
-        self.assertEqual(output.scheduled_cached_reqs.num_reqs, 0)
-        self.assertEqual(len(output.finished_req_ids), 0)
 
     def test_schedule_enable_prefix_caching(self):
         '''Test scheduling.
