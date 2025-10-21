@@ -109,6 +109,16 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.oproj_tensor_parallel_size = 2
 
+        from types import SimpleNamespace
+        ascend_config._ASCEND_CONFIG.ascend_scheduler_config = SimpleNamespace(
+            max_num_batched_tokens=4096,
+            max_model_len=4096,
+            enable_chunked_prefill=False,
+            long_prefill_token_threshold=1,
+            max_long_partial_prefills=1,
+            enabled=False,
+        )
+
         linear = AscendRowParallelLinear(
             input_size=16,
             output_size=8,
