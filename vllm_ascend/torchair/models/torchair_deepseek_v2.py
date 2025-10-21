@@ -577,21 +577,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         # i.e.
         #     kv_lora_rank + qk_rope_head_dim == head_size
 
-    # def __init__(
-    #     self,
-    #     hidden_size: int,
-    #     num_heads: int,
-    #     scale: float,
-    #     qk_nope_head_dim: int,
-    #     qk_rope_head_dim: int,
-    #     v_head_dim: int,
-    #     q_lora_rank: Optional[int],
-    #     kv_lora_rank: int,
-    #     mla_modules: MLAModules,
-    #     cache_config: Optional[CacheConfig] = None,
-    #     quant_config: Optional[QuantizationConfig] = None,
-    #     prefix: str = "",
-    # ) -> None:
         if vllm_version_is("0.11.0"):
             self.mla_attn = MultiHeadLatentAttention(
                 hidden_size=self.hidden_size,
@@ -797,6 +782,22 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 return_bias=False,
             )
 
+        if self.q_lora_rank is not None:
+            self.fused_qkv_a_proj = MergedColumnParallelLinear(
+                self.hidden_size,
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fused_qkv_a_proj",
+                disable_tp=True)
+        else:
+            self.kv_a_proj_with_mqa = ReplicatedLinear(
+                self.hidden_size,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.kv_a_proj_with_mqa")
+
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
         self.rotary_emb = get_rope(qk_rope_head_dim,
@@ -825,41 +826,26 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
             index_topk=self.index_topk,
             prefix=f"{prefix}.indexer",
         )
+
         sfa_modules = AscendSFAModules(
             q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
             q_a_layernorm=self.q_a_layernorm
             if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
+            q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
+            fused_qkv_a_proj=self.fused_qkv_a_proj
+            if self.q_lora_rank is not None else None,
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
             o_proj=self.o_proj,
             rotary_emb=self.rotary_emb,
             indexer=self.indexer,
-            is_sparse=hasattr(config, "index_topk"))
+            is_sparse=hasattr(config, "index_topk"),
+            topk_indices_buffer=None)
 
         if vllm_version_is("0.11.0"):
-            # self.sfa_attn = MultiHeadLatentAttention(
-            #     self.hidden_size,
-            #     self.enable_shared_expert_dp,
-            #     self.debug_layer_idx,
-            #     self.first_k_dense_replace,
-            #     self.tp_size,
-            #     sfa_modules,
-            #     self.num_local_heads,
-            #     self.scaling,
-            #     self.layers,
-            #     self.kv_lora_rank,
-            #     self.qk_rope_head_dim,
-            #     self.q_lora_rank,
-            #     self.qk_nope_head_dim,
-            #     self.qk_head_dim,
-            #     self.v_head_dim,
-            #     cache_config,
-            #     quant_config,
-            #     prefix,
-            # )
-            self.mla_attn = MultiHeadLatentAttention(
+            self.sfa_attn = MultiHeadLatentAttention(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_local_heads,
                 scale=self.scaling,
@@ -874,27 +860,7 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 prefix=prefix,
             )
         else:
-            # self.sfa_attn = MultiHeadLatentAttentionWrapper(
-            #     self.hidden_size,
-            #     self.enable_shared_expert_dp,
-            #     self.debug_layer_idx,
-            #     self.first_k_dense_replace,
-            #     self.tp_size,
-            #     sfa_modules,
-            #     self.num_local_heads,
-            #     self.scaling,
-            #     self.layers,
-            #     self.kv_lora_rank,
-            #     self.qk_rope_head_dim,
-            #     self.q_lora_rank,
-            #     self.qk_nope_head_dim,
-            #     self.qk_head_dim,
-            #     self.v_head_dim,
-            #     cache_config,
-            #     quant_config,
-            #     prefix,
-            # )
-            self.mla_attn = MultiHeadLatentAttentionWrapper(
+            self.sfa_attn = MultiHeadLatentAttentionWrapper(
                 hidden_size=self.hidden_size,
                 num_heads=self.num_local_heads,
                 scale=self.scaling,
@@ -908,6 +874,7 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=prefix,
             )
+
     def forward(
             self,
             positions: torch.Tensor,
