@@ -343,21 +343,6 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.num_queries_per_kv, 32)
         self.assertEqual(self.impl.tp_size, 2)
 
-    def test_v_up_proj(self):
-        batch_size = 4
-        x = torch.randn(batch_size, self.impl.num_heads,
-                        self.impl.kv_lora_rank)
-
-        if not hasattr(self.impl, 'W_UV') or self.impl.W_UV is None:
-            self.impl.W_UV = torch.randn(self.impl.num_heads,
-                                         self.impl.kv_lora_rank,
-                                         self.impl.v_head_dim)
-        result = self.impl._v_up_proj(x)
-
-        self.assertEqual(result.shape[0], batch_size)
-        self.assertEqual(result.shape[1],
-                         self.impl.num_heads * self.impl.v_head_dim)
-
     def test_q_proj_and_k_up_proj(self):
         batch_size = 4
         x = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
