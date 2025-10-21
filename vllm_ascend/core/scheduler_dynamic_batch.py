@@ -147,7 +147,6 @@ class SchedulerDynamicBatch(Scheduler):
         # 4. So far, the dynamic batch only supports 910B3 NPU. Further work will include
         # more devices and finer optimization strategy.
 
-
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
@@ -600,4 +599,3 @@ class SchedulerDynamicBatch(Scheduler):
 
         self._update_after_schedule(scheduler_output)
         return scheduler_output
-
