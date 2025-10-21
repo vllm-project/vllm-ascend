@@ -424,6 +424,7 @@ class MooncakeStoreConfig:
     protocol: str
     device_name: str
     master_server_address: str
+    use_ascend_direct: bool
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
@@ -436,7 +437,8 @@ class MooncakeStoreConfig:
             local_buffer_size=config.get("local_buffer_size", 1073741824),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address"))
+            master_server_address=config.get("master_server_address"),
+            use_ascend_direct=config.get("use_ascend_direct", False))
 
     @staticmethod
     def load_from_env() -> "MooncakeStoreConfig":
