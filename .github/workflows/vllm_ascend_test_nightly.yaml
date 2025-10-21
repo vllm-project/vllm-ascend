@@ -51,7 +51,7 @@ jobs:
         os: [linux-aarch64-a2-4]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
-      uses: ./.github/workflows/_e2e_nightly.yaml
+    uses: ./.github/workflows/_e2e_nightly.yaml
     with:
       vllm: v0.11.0
       runner: ${{ matrix.os }}
