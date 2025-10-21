@@ -1,6 +1,5 @@
 import random
 import sys
-
 from unittest.mock import patch
 
 import pytest
@@ -129,20 +128,24 @@ class TestEPLBParamUtils:
         with pytest.raises(
                 ValueError,
                 match=
-                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'):
+                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+        ):
             EPLBParamUtils.check_dynamic_eplb(True)
 
         monkeypatch.setenv("DYNAMIC_EPLB", "false")
         with pytest.raises(
                 ValueError,
                 match=
-                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'):
+                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+        ):
             EPLBParamUtils.check_dynamic_eplb(True)
 
         monkeypatch.setenv("DYNAMIC_EPLB", "any_other_value")
-        with pytest.raises(ValueError,
-                           match=
-                           'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'):
+        with pytest.raises(
+                ValueError,
+                match=
+                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+        ):
             EPLBParamUtils.check_dynamic_eplb(True)
 
     def test_check_dynamic_eplb_valid_with_env_set(self, monkeypatch):
@@ -208,12 +211,14 @@ class TestEPLBParamUtils:
         with pytest.raises(
                 ValueError,
                 match=
-                'Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".'):
+                'Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".'
+        ):
             EPLBParamUtils.check_expert_map_record_path("path/to/record.json")
 
         monkeypatch.setenv("EXPERT_MAP_RECORD", "false")
         with pytest.raises(
                 ValueError,
                 match=
-                'Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".'):
+                'Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".'
+        ):
             EPLBParamUtils.check_expert_map_record_path("path/to/record.json")
