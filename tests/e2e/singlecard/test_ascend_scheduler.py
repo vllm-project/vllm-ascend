@@ -107,12 +107,12 @@ def test_chunked_prefill_with_scheduler_dynamic_batch(
                     max_num_batched_tokens=max_num_batched_tokens,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
-        chunked_prefill_output = vllm_model.generate_greedy(
+        dynamic_batch_output = vllm_model.generate_greedy(
             example_prompts, max_tokens)
 
     with VllmRunner(MODEL,
                     additional_config={
-                        'SLO_limits_for_dynamic_batch': 0,
+                        'SLO_limits_for_dynamic_batch': -1,
                     },
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
@@ -120,7 +120,7 @@ def test_chunked_prefill_with_scheduler_dynamic_batch(
 
     check_outputs_equal(
         outputs_0_lst=vllm_output,
-        outputs_1_lst=chunked_prefill_output,
+        outputs_1_lst=dynamic_batch_output,
         name_0="vllm_output",
         name_1="chunked_prefill_output",
     )
