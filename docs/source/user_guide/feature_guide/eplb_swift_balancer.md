@@ -16,7 +16,7 @@ Expert balancing for MoE models in LLM serving is essential for optimal performa
 
 ### Dynamic EPLB
 
-We need to add environment variable `export PYTHONOPTIMIZE=1` to get context of vllm process. Enable dynamic balancing with auto-tuned parameters. Adjust num_iterations_eplb_update and num_wait_worker_iterations based on workload patterns.
+We need to add environment variable `export DYNAMIC_EPLB=true` to enable vllm eplb. Enable dynamic balancing with auto-tuned parameters. Adjust num_iterations_eplb_update and num_wait_worker_iterations based on workload patterns.
 
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
@@ -32,7 +32,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 ### Static EPLB
 #### Initial Setup (Record Expert Map)
 
-Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
+We need to add environment variable `export EXPERT_MAP_RECORD=true` to record expert map.Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
 
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \

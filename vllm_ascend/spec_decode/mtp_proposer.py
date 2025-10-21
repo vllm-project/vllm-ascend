@@ -1,9 +1,9 @@
 import torch
 import torch.nn as nn
 from vllm.attention.layer import Attention
-from vllm.config import (VllmConfig, get_layers_from_vllm_config,
-                         set_current_vllm_config)
-from vllm.forward_context import BatchDescriptor
+from vllm.config import (CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
+from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
@@ -91,9 +91,10 @@ class MtpProposer(Proposer):
                   with_prefill: bool = False,
                   skip_attn: bool = False,
                   num_reqs: int = 0,
-                  num_tokens_across_dp=None) -> None:
-
-        # TODO: adapt enable_dbo later
+                  num_tokens_across_dp=None,
+                  aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+                  batch_descriptor=None) -> None:
+            # TODO: adapt enable_dbo later
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill,
                                                    False)
@@ -116,7 +117,9 @@ class MtpProposer(Proposer):
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
                     in_profile_run=self.runner.in_profile_run,
-                    num_actual_tokens=0):
+                    num_actual_tokens=0,
+                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor):
 
                 self.model(input_ids=input_ids,
                            positions=positions,
@@ -355,6 +358,7 @@ class MtpProposer(Proposer):
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):

@@ -32,10 +32,7 @@ checkout_src() {
 
     #mooncake
     if [ ! -d "$SRC_DIR/Mooncake" ]; then
-        git clone https://github.com/kvcache-ai/Mooncake.git "$SRC_DIR/Mooncake"
-        cd "$SRC_DIR/Mooncake"
-        git checkout 06cc217504a6f1b0cdaa26b096b985651b262748
-        cd -
+        git clone -b pooling_async_memecpy_v1 https://github.com/AscendTransport/Mooncake "$SRC_DIR/Mooncake"
     fi
 }
 
@@ -62,25 +59,77 @@ install_vllm() {
 
 install_mooncake() {
     echo "====> Install mooncake"
-    apt-get update
-    apt install -y --allow-change-held-packages python3 python-is-python3
+    apt-get update -y
     apt-get install -y --no-install-recommends mpich libmpich-dev
     cd $SRC_DIR/Mooncake
-    sed -i '/option(USE_ASCEND_DIRECT)/s/OFF/ON/' mooncake-common/common.cmake
     bash dependencies.sh --yes
+    apt purge mpich libmpich-dev -y
+    apt purge openmpi-bin -y
+    apt purge openmpi-bin libopenmpi-dev -y
+    apt install mpich libmpich-dev -y
+    export CPATH=/usr/lib/aarch64-linux-gnu/mpich/include/:$CPATH
+    export CPATH=/usr/lib/aarch64-linux-gnu/openmpi/lib:$CPATH
+
     mkdir build
     cd -
     cd $SRC_DIR/Mooncake/build
     cmake ..
     make -j
     make install
+    cp mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/libascend_transport_mem.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
+    cp mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
     cd -
+}
+
+kill_npu_processes() {
+  pgrep python3 | xargs -r kill -9
+  pgrep VLLM | xargs -r kill -9
+
+  sleep 4
 }
 
 run_tests() {
     echo "====> Run tests"
-    cd "$SRC_DIR/vllm-ascend"
-    pytest -sv tests/e2e/multi_node/test_multi_dp.py
+
+    shopt -s nullglob
+    declare -A results
+    local total=0
+    local passed=0
+    local failed=0
+
+    local REPORT_FILE="/root/.cache/test_summary.md"
+    echo "#Nightly Multi-node Test Summary" > "$REPORT_FILE"
+    echo "" >> "$REPORT_FILE"
+    echo "| Config File | Result |" >> "$REPORT_FILE"
+    echo "|--------------|---------|" >> "$REPORT_FILE"
+
+    for file in tests/e2e/nightly/multi_node/config/models/*.yaml; do
+        export CONFIG_YAML_PATH="$file"
+        echo "Running test with config: $CONFIG_YAML_PATH"
+
+        if pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py; then
+            results["$file"]="✅ PASS"
+            ((passed++))
+        else
+            results["$file"]="❌ FAIL"
+            ((failed++))
+        fi
+        ((total++))
+
+        echo "| \`$file\` | ${results[$file]} |" >> "$REPORT_FILE"
+        echo "------------------------------------------"
+        kill_npu_processes
+    done
+    shopt -u nullglob
+
+    echo "" >> "$REPORT_FILE"
+    echo "## Summary" >> "$REPORT_FILE"
+    echo "- **Total:** $total" >> "$REPORT_FILE"
+    echo "- **Passed:** $passed ✅" >> "$REPORT_FILE"
+    echo "- **Failed:** $failed ❌" >> "$REPORT_FILE"
+
+    echo
+    echo "✅ Markdown report written to: $REPORT_FILE"
 }
 
 main() {
@@ -89,7 +138,7 @@ main() {
     checkout_src
     install_sys_dependencies
     install_vllm
-    #install_mooncake
+    install_mooncake
     run_tests
 }
 

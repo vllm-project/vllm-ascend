@@ -26,7 +26,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.torchair.ops.torchair_fused_moe import torchair_select_experts
-from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
+from vllm_ascend.torchair.utils import (npu_stream_switch, npu_wait_tensor,
+                                        super_kernel)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version,
                                is_enable_nz,
@@ -246,7 +247,7 @@ def torchair_fused_experts_with_mc2(
     enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
 
     if (expert_map is not None):
-        moe_expert_num = len(expert_map) + global_redundant_expert_num
+        moe_expert_num = len(expert_map)
     else:
         moe_expert_num = global_redundant_expert_num
     # hidden_states = hidden_states.bfloat16()
@@ -365,17 +366,18 @@ def torchair_fused_experts_with_mc2(
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
         **kwargs_mc2)
 
-    if dynamic_eplb:
-        return (hidden_states, 1, expert_token_nums)
-
     if shared_experts is None:
+        if dynamic_eplb:
+            return (hidden_states, 1, expert_token_nums)
         return hidden_states
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
             shared_output, _ = shared_experts.down_proj(
                 (shared_act, swiglu_out_scale))
-        return hidden_states, shared_output
+        if dynamic_eplb:
+            return (hidden_states, shared_output, 1, expert_token_nums)
+        return (hidden_states, shared_output)
 
 
 def torchair_init_routing_quant(hidden_states, top_k, topk_ids,
@@ -431,7 +433,7 @@ def torchair_fused_experts_with_all2all(
 
     if expert_map is not None:
         assert ep_group is not None, "ep_group must be provided when expert_map is given"
-        global_num_experts = len(expert_map) + global_redundant_expert_num
+        global_num_experts = len(expert_map)
         if hasattr(torch_npu, "npu_moe_init_routing_quant"):
             quantized_tokens, expanded_row_idx, global_expert_tokens, _, token_scales = torch_npu.npu_moe_init_routing_quant(
                 hidden_states,
@@ -458,7 +460,7 @@ def torchair_fused_experts_with_all2all(
         token_counts_combined = token_counts_combined.view(
             2, ep_group.world_size, -1).sum(dim=2)
         token_counts_combined_cpu = token_counts_combined.to(
-            torch.device("cpu"), non_blocking=True).numpy()
+            torch.device("cpu"), non_blocking=False).numpy()
         all_tokens = gather_sizes.sum()
 
         gathered_tokens = quantized_tokens.new_empty(all_tokens.item(),
@@ -926,62 +928,68 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
         shared_experts: Optional[Any] = None,
         quantized_x_for_share: Optional[Any] = None,
         dynamic_scale_for_share: Optional[Any] = None,
+        prefix: str = "",
+        running_in_super_kernel: bool = False,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
-            1] == global_num_experts, "Number of global experts mismatch"
+            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
-        is_deepseek_v3_r1 = global_num_experts == 256
-
-        # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-        if is_deepseek_v3_r1:
-            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
-                router_logits,
-                k=top_k,  # topk currently is 8
-                bias=e_score_correction_bias,
-                k_group=topk_group,  # fix: 4
-                group_count=num_expert_group,  # fix 8
-                group_select_mode=
-                1,  # 0: the maximum in the group; 1: topk2.sum(fix)
-                renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
-                norm_type=1,  # 0: softmax; 1: sigmoid(fix)
-                # out_flag=False, # todo new api; should the third output be output
-                # y2_flag=False, # old api; should the third output be output
-                routed_scaling_factor=1,
-                eps=float(1e-20))
-        else:
-            topk_weights, topk_ids = torchair_select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                top_k=top_k,
-                use_grouped_topk=use_grouped_topk,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-            )
+        is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256
 
         fused_moe_state = get_forward_context().fused_moe_state
         if self.enable_shared_expert_dp and fused_moe_state == FusedMoEState.MC2:
             fused_moe_state = FusedMoEState.All2All
         shared_gate_up, shared_dequant_scale = None, None
-        if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
-            with npu_stream_switch("moe_secondary", 0):
-                npu_wait_tensor(quantized_x_for_share, router_logits)
-                share_up_out, _ = shared_experts.gate_up_proj(
-                    (quantized_x_for_share, dynamic_scale_for_share))
-                shared_gate_up, shared_dequant_scale = share_up_out[
-                    0], share_up_out[1]
 
-        # this is a naive implementation for experts load balance so as
-        # to avoid accumulating too much tokens on a single rank.
-        # currently it is only activated when doing profile runs.
-        if enable_force_load_balance:
-            topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
+        with super_kernel(prefix,
+                          "stream-fusion=1",
+                          enabled=running_in_super_kernel):
+            # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
+            if is_deepseek_v3_r1:
+                topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
+                    router_logits,
+                    k=top_k,  # topk currently is 8
+                    bias=e_score_correction_bias,
+                    k_group=topk_group,  # fix: 4
+                    group_count=num_expert_group,  # fix 8
+                    group_select_mode=
+                    1,  # 0: the maximum in the group; 1: topk2.sum(fix)
+                    renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
+                    norm_type=1,  # 0: softmax; 1: sigmoid(fix)
+                    # out_flag=False, # todo new api; should the third output be output
+                    # y2_flag=False, # old api; should the third output be output
+                    routed_scaling_factor=1,
+                    eps=float(1e-20))
+            else:
+                topk_weights, topk_ids = torchair_select_experts(
+                    hidden_states=x,
+                    router_logits=router_logits,
+                    top_k=top_k,
+                    use_grouped_topk=use_grouped_topk,
+                    renormalize=renormalize,
+                    topk_group=topk_group,
+                    num_expert_group=num_expert_group,
+                    custom_routing_function=custom_routing_function,
+                    scoring_func=scoring_func,
+                    e_score_correction_bias=e_score_correction_bias,
+                )
 
-        topk_weights = topk_weights.to(x.dtype)
+            if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
+                with npu_stream_switch("moe_secondary", 0):
+                    npu_wait_tensor(quantized_x_for_share, router_logits)
+                    share_up_out, _ = shared_experts.gate_up_proj(
+                        (quantized_x_for_share, dynamic_scale_for_share))
+                    shared_gate_up, shared_dequant_scale = share_up_out[
+                        0], share_up_out[1]
+
+            # this is a naive implementation for experts load balance so as
+            # to avoid accumulating too much tokens on a single rank.
+            # currently it is only activated when doing profile runs.
+            if enable_force_load_balance:
+                topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
+            topk_weights = topk_weights.to(x.dtype)
+
         if fused_moe_state == FusedMoEState.AllGatherEP:
             return torchair_fused_experts_with_allgather(
                 hidden_states=x,
@@ -994,25 +1002,28 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
                 top_k=top_k,
                 expert_map=expert_map)
         elif fused_moe_state == FusedMoEState.MC2:
-            return torchair_fused_experts_with_mc2(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                w1_scale=layer.w13_weight_scale_fp32,
-                w2_scale=layer.w2_weight_scale,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                top_k=top_k,
-                expert_map=expert_map,
-                moe_all_to_all_group_name=self.moe_all_to_all_group_name,
-                log2phy=log2phy,
-                global_redundant_expert_num=global_redundant_expert_num,
-                shared_experts=shared_experts,
-                is_torchair=self.torchair_graph_enabled,
-                mc2_mask=kwargs.get("mc2_mask", None),
-                shared_gate_up=shared_gate_up,
-                shared_dequant_scale=shared_dequant_scale,
-                dynamic_eplb=self.dynamic_eplb)
+            with super_kernel(prefix,
+                              "stream-fusion=1",
+                              enabled=running_in_super_kernel):
+                return torchair_fused_experts_with_mc2(
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    w1_scale=layer.w13_weight_scale_fp32,
+                    w2_scale=layer.w2_weight_scale,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    top_k=top_k,
+                    expert_map=expert_map,
+                    moe_all_to_all_group_name=self.moe_all_to_all_group_name,
+                    log2phy=log2phy,
+                    global_redundant_expert_num=global_redundant_expert_num,
+                    shared_experts=shared_experts,
+                    is_torchair=self.torchair_graph_enabled,
+                    mc2_mask=kwargs.get("mc2_mask", None),
+                    shared_gate_up=shared_gate_up,
+                    shared_dequant_scale=shared_dequant_scale,
+                    dynamic_eplb=self.dynamic_eplb)
         elif fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
         ]:

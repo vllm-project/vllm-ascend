@@ -56,6 +56,7 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
+_ENABLE_SP = None
 
 
 def is_310p():
@@ -546,7 +547,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
     if vllm_config is not None and \
         vllm_config.quant_config is not None and \
-        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
+        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()) and \
+            not version_check():
         REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
@@ -605,15 +607,20 @@ def dense_optim_enable() -> bool:
 
 
 def enable_sp(vllm_config=None) -> bool:
-    if vllm_config is None:
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-    return (
-        vllm_config.compilation_config.pass_config.enable_sequence_parallelism
-        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
-        # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
-        # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
-        or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+    global _ENABLE_SP
+    if _ENABLE_SP is None:
+        if vllm_config is None:
+            from vllm.config import get_current_vllm_config
+            vllm_config = get_current_vllm_config()
+        _ENABLE_SP = (
+            vllm_config.compilation_config.pass_config.
+            enable_sequence_parallelism
+            or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+
+    return _ENABLE_SP
 
 
 # TODO remove it after vllm has this func
@@ -725,3 +732,18 @@ def calculate_dp_buffer_size() -> int:
 def is_hierarchical_communication_enabled():
     return (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
             and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
+
+
+@functools.cache
+def version_check():
+    """check if torch_npu version >= dev20250919"""
+    import re
+    torch_npu_version = torch_npu.version.__version__
+    date_pattern = r'dev(\d{8})'
+
+    match = re.search(date_pattern, torch_npu_version)
+    if match:
+        full_date = match.group(1)
+        if full_date >= "20250919":
+            return True
+    return False

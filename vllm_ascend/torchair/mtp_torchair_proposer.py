@@ -5,8 +5,8 @@ import torch.nn as nn
 import torchair
 from torchair import patch_for_hcom
 from vllm.attention.layer import Attention
-from vllm.config import (VllmConfig, get_layers_from_vllm_config,
-                         set_current_vllm_config)
+from vllm.config import (CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
@@ -76,7 +76,9 @@ class MtpTorchairProposer(MtpProposer):
                   with_prefill: bool = False,
                   skip_attn: bool = False,
                   num_reqs: int = 0,
-                  num_tokens_across_dp=None) -> None:
+                  num_tokens_across_dp=None,
+                  aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+                  batch_descriptor=None) -> None:
         moe_comm_type = self.runner._select_moe_comm_method(
             num_tokens, with_prefill)
 
@@ -109,7 +111,9 @@ class MtpTorchairProposer(MtpProposer):
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
                     in_profile_run=self.runner.in_profile_run,
-                    num_actual_tokens=0):
+                    num_actual_tokens=0,
+                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor):
                 if not with_prefill:
                     assert attn_metadata is not None
                     torch._dynamo.mark_static(input_ids)
@@ -355,6 +359,7 @@ class MtpTorchairProposer(MtpProposer):
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):

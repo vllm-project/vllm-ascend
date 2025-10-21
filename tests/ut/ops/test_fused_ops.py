@@ -257,7 +257,7 @@ class MockFusedMoEMethod(FusedMoEMethodBase):
 
 class TestExpertsSelector:
 
-    @pytest.mark.parametrize("global_num_experts", [[256], [128]])
+    @pytest.mark.parametrize("global_num_experts", [256, 128])
     def test_select_experts(self, mock_dist_env, mock_moe_env,
                             global_num_experts):
 
