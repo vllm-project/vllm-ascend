@@ -206,7 +206,8 @@ class TestEPLBParamUtils:
                            match="The expert_map_record_path is not json."):
             EPLBParamUtils.check_expert_map_record_path("path/to/record.XML")
 
-    def test_check_expert_map_record_path_value_error_env_not_set(self, monkeypatch):
+    def test_check_expert_map_record_path_value_error_env_not_set(
+            self, monkeypatch):
         monkeypatch.delenv("EXPERT_MAP_RECORD", raising=False)
         with pytest.raises(
                 ValueError,
