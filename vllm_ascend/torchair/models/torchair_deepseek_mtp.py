@@ -176,14 +176,12 @@ class TorchairDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata=None,  # type: ignore
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
         mtp_layer = self.layers_list[current_step_idx]
         logits = self.logits_processor(mtp_layer.shared_head.head,
-                                       mtp_layer.shared_head(hidden_states),
-                                       sampling_metadata)
+                                       mtp_layer.shared_head(hidden_states))
         return logits
 
 
@@ -209,12 +207,12 @@ class TorchairDeepSeekMTP(DeepSeekMTP):
         positions: torch.Tensor,
         kv_caches: Optional[List[torch.Tensor]] = None,
         attn_metadata: Optional[AttentionMetadata] = None,
-        previous_hidden_states: Optional[torch.Tensor] = None,
+        hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, previous_hidden_states,
-                                   inputs_embeds, spec_step_idx)
+                                   attn_metadata, hidden_states, inputs_embeds,
+                                   spec_step_idx)
         return hidden_states
