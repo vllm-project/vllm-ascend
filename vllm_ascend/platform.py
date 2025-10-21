@@ -270,6 +270,12 @@ class NPUPlatform(Platform):
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and \
+            os.environ.get("ASCEND_LAUNCH_BLOCKING", "0") == "1":
+            raise ValueError(
+                "ACL Graph is incompatible with ASCEND_LAUNCH_BLOCKING=1."
+                " Please unset ASCEND_LAUNCH_BLOCKING or set it to 0.")
+
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             os.environ["VLLM_ALL2ALL_BACKEND"] = "flashinfer_all2allv"
