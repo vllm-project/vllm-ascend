@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (AttentionBackend,
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.logger import logger
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
@@ -649,10 +650,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         # self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
 
         # Currently mlapo only supports W8A8 quantization in MLA scenario
+        # TODO(whx): modify this limitation when mlapo supports floating point
         if self.fused_qkv_a_proj is None or not isinstance(
                 getattr(self.fused_qkv_a_proj.quant_method, 'quant_method',
                         None), AscendW8A8LinearMethod):
             self.enable_mlapo = False
+            logger.warning(
+                "Currently mlapo only supports W8A8 quantization in MLA scenario."
+                "Some layers in your model are not quantized with W8A8,"
+                "thus mlapo is disabled for these layers.")
         if self.enable_mlapo:
             self._process_weights_for_fused_mlapo(act_dtype)
 
