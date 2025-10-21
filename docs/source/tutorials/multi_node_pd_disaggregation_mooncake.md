@@ -1,12 +1,5 @@
 # Prefill-Decode Disaggregation Mooncake Verification (Qwen)
 
-## Environmental Dependencies
-* Software:
-  * Python >= 3.9, < 3.12
-  * CANN >= 8.3.rc1
-  * PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
-  * Mooncake£º[AscendTransport/Mooncake at pooling-async-memcpy](https://github.com/AscendTransport/Mooncake/tree/pooling-async-memcpy)(Currently available branch code, continuously updated.)
-
 ## Getting Start
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide take one-by-one steps to verify these features with constrained resources.
@@ -37,11 +30,10 @@ for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
 for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
 # View gateway configuration
 for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
-# View NPU network configuration
-cat /etc/hccn.conf
 ```
 
 2. Check NPU network configuration:
+
 ```bash
 # Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 cat /etc/hccn.conf
