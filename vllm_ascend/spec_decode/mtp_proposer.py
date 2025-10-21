@@ -175,7 +175,7 @@ class MtpProposer(Proposer):
                     torchair_compiled_model(
                         input_ids=input_ids,
                         positions=positions,
-                        previous_hidden_states=previous_hidden_states,
+                        hidden_states=previous_hidden_states,
                         inputs_embeds=None,
                         intermediate_tensors=None,
                         attn_metadata=attn_metadata,
@@ -460,7 +460,7 @@ class MtpProposer(Proposer):
                         hidden_states = torchair_compiled_model(
                             input_ids=self.input_ids[:num_input_tokens],
                             positions=self.positions[:num_input_tokens],
-                            previous_hidden_states=self.
+                            hidden_states=self.
                             hidden_states[:num_input_tokens],
                             inputs_embeds=None,
                             intermediate_tensors=None,
