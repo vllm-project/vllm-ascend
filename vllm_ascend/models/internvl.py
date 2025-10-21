@@ -21,9 +21,9 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.models.internvl import InternVLChatModel
 from vllm.model_executor.models.intern_vit import (InternParallelAttention,
-                                                    InternVisionModel)
+                                                   InternVisionModel)
+from vllm.model_executor.models.internvl import InternVLChatModel
 from vllm.model_executor.models.utils import maybe_prefix
 
 
@@ -66,9 +66,12 @@ class AscendInternParallelAttention(InternParallelAttention):
             q, k = self._apply_qk_norm(q, k)
 
         # Reshape for multi-head attention: [batch, seq_len, num_heads, head_dim]
-        q = q.reshape(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
-        k = k.reshape(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
-        v = v.reshape(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
+        q = q.reshape(batch_size, seq_len, self.num_heads_per_partition,
+                      self.head_dim)
+        k = k.reshape(batch_size, seq_len, self.num_heads_per_partition,
+                      self.head_dim)
+        v = v.reshape(batch_size, seq_len, self.num_heads_per_partition,
+                      self.head_dim)
 
         # Transpose to [batch, num_heads, seq_len, head_dim] for attention
         q = q.transpose(1, 2).contiguous()
@@ -90,7 +93,7 @@ class AscendInternParallelAttention(InternParallelAttention):
         attn_output = attn_output.transpose(1, 2).contiguous()
 
         # Reshape: [batch, seq_len, num_heads * head_dim]
-        attn_output = attn_output.reshape(batch_size, seq_len, -1).contiguous()
+        attn_output = attn_output.reshape(batch_size, seq_len, -1)
 
         # Output projection using parent's layer
         output, _ = self.proj(attn_output)
@@ -125,7 +128,6 @@ class AscendInternVisionModel(InternVisionModel):
         )
 
         # Replace each layer's attention with Ascend version
-        from vllm.model_executor.models.intern_vit import InternVisionEncoderLayer
 
         for i, layer in enumerate(self.encoder.layers):
             # Replace the attention module
@@ -158,11 +160,8 @@ class AscendInternVLChatModel(InternVLChatModel):
         if not is_mono:
             vision_feature_layer = config.select_layer
             if vision_feature_layer < 0:
-                num_hidden_layers = (
-                    config.vision_config.num_hidden_layers
-                    + vision_feature_layer
-                    + 1
-                )
+                num_hidden_layers = (config.vision_config.num_hidden_layers +
+                                     vision_feature_layer + 1)
             else:
                 num_hidden_layers = vision_feature_layer + 1
 
@@ -177,6 +176,7 @@ class AscendInternVLChatModel(InternVLChatModel):
         else:
             # For mono architecture, use parent implementation
             # (not commonly used, can be optimized later if needed)
-            return super()._init_vision_model(
-                config, quant_config, is_mono=is_mono, prefix=prefix
-            )
+            return super()._init_vision_model(config,
+                                              quant_config,
+                                              is_mono=is_mono,
+                                              prefix=prefix)
