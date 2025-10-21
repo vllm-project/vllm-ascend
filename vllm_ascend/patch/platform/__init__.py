@@ -20,5 +20,6 @@ import vllm_ascend.patch.platform.patch_config  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 
-if os.getenv("DYNAMIC_EPLB", "false") == "true" or os.getenv("EXPERT_MAP_RECORD", "false") == "true":
+if os.getenv("DYNAMIC_EPLB", "false") == "true" or os.getenv(
+        "EXPERT_MAP_RECORD", "false") == "true":
     import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa
