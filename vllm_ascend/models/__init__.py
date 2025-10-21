@@ -54,3 +54,7 @@ def register_model():
     ModelRegistry.register_model(
         "Qwen3NextForCausalLM",
         "vllm_ascend.models.qwen3_next:CustomQwen3NextForCausalLM")
+
+    ModelRegistry.register_model(
+        "InternVLChatModel",
+        "vllm_ascend.models.internvl:AscendInternVLChatModel")
