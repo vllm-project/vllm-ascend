@@ -18,7 +18,6 @@ from typing import Any
 
 import openai
 import pytest
-
 from vllm.utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
