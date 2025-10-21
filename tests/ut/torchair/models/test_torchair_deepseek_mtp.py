@@ -145,8 +145,7 @@ class TestTorchairDeepSeekMultiTokenPredictor(PytestBase):
             return_value=None)
         predictor.logits_processor.return_value = torch.tensor([1.0, 2.0, 3.0])
 
-        result_logits = predictor.compute_logits(hidden_states=hidden_states,
-                                                 sampling_metadata=None)
+        result_logits = predictor.compute_logits(hidden_states=hidden_states)
         predictor.logits_processor.assert_called_once()
         assert torch.allclose(result_logits, torch.tensor([1.0, 2.0, 3.0]))
 
