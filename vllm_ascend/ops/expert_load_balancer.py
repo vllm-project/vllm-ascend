@@ -108,7 +108,10 @@ class ExpertLoadBalancer(object):
                 dist.all_gather_object(all_expert_maps, self.tensor_data)
                 for rank_id, expert_map_tensor in enumerate(all_expert_maps):
                     if self.tensor_data != expert_map_tensor:
-                        raise ValueError(f"The expert map of rank{rank} is not equal to rank{rank_id}")
+                        raise ValueError(
+                            f"The expert map of rank{rank} is not equal to rank{rank_id}"
+                        )
                 return True
             except Exception as e:
-                raise ValueError(f"The expert maps of all ranks are inconsistency: {e}")
+                raise ValueError(
+                    f"The expert maps of all ranks are inconsistency: {e}")
