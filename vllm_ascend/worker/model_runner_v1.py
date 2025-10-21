@@ -130,7 +130,7 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                enable_sp, get_ascend_soc_version, is_310p,
-                               is_enable_nz, lmhead_tp_enable)
+                               is_enable_nz, is_moe_model, lmhead_tp_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
@@ -469,11 +469,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.in_profile_run = False
 
         self._init_mc2_tokens_capacity()
+
         self.reserved_mc2_mask = torch.zeros(
             self.mc2_tokens_capacity,
             dtype=torch.bool,
             device=self.device,
         )
+
         self.dynamic_eplb = self.ascend_config.dynamic_eplb or self.ascend_config.expert_map_record_path
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False
@@ -533,16 +535,36 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         pass
 
     def _init_mc2_tokens_capacity(self):
-        # NOTE: To be clear, we need to make sure that during graph capture, the number of
-        # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
-        # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
-        if self.compilation_config.cudagraph_capture_sizes:
-            max_num_tokens = self.compilation_config.cudagraph_capture_sizes[0]
-        else:
-            max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
         tp_size = self.parallel_config.tensor_parallel_size
-        # Use integer arithmetic for ceiling division.
-        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+
+        if is_moe_model(self.vllm_config):
+            num_tokens_per_tp_rank = 0
+        else:
+            # NOTE: To be clear, we need to make sure that during graph capture, the number of
+            # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
+            # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
+            if self.compilation_config.cudagraph_capture_sizes:
+                max_num_tokens = self.compilation_config.cudagraph_capture_sizes[0]
+            else:
+                max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
+            
+            # Use integer arithmetic for ceiling division.
+            num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
+        
+        soc_version = get_ascend_soc_version()
+        limit = None
+        if soc_version in {AscendSocVersion.A3}:
+            limit = 512
+        elif soc_version in {AscendSocVersion.A2}:
+            limit = 256
+
+        if limit is not None and num_tokens_per_tp_rank > limit:
+            raise ValueError(
+                f"For {soc_version}, the max supported tokens per TP rank for MC2 is {limit}, "
+                f"but got {num_tokens_per_tp_rank}. Please try to reduce `max_num_seqs` "
+                f"(current: {self.max_num_reqs}) or increase `tp_size` (current: {tp_size})."
+            )
+        
         self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
     def _make_buffer(self,
