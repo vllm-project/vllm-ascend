@@ -15,7 +15,9 @@
 import torch
 
 
-def _generate_attn_mask(max_seq_len, dtype):
+def _generate_attn_mask(max_seq_len, dtype, is_causal):
+    if not is_causal:
+        return torch.zeros(size=(max_seq_len, max_seq_len)).to(dtype)
     # Construct lower triangle matrix.
     mask_flag = torch.ones((max_seq_len, max_seq_len),
                            dtype=torch.bool).tril_()
@@ -35,7 +37,6 @@ class AttentionMaskBuilder:
         self.attn_mask_cache = None
         self._seq_len_cached = 0
         self.device = device
-        self.pooling_mask = None
         self.mla_mask = None
         self.chunked_prefill_attn_mask = None
         self.pcp_mla_mask = None
@@ -49,14 +50,6 @@ class AttentionMaskBuilder:
             self.attn_mask_cache = self.attn_mask_cache.to(dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
         ).to(self.device, non_blocking=True)
-
-    def get_pooling_mask(self):
-        if self.pooling_mask is None:
-            # the compressed attention mask for npu_fusion_attention sparse mode 4
-            self.pooling_mask = torch.triu(torch.ones(
-                2048, 2048), diagonal=1).to(torch.bool).to(self.device,
-                                                           non_blocking=True)
-        return self.pooling_mask
 
     def get_splitfuse_attn_mask(self) -> torch.Tensor:
         if self.chunked_prefill_attn_mask is None:

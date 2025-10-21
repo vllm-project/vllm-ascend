@@ -48,7 +48,8 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 |-------------------------------|-----------|----------------------------------------------------------------------|------|--------------------|------|-----------------|------------------------|------|----------------------|------------------|-----------------|-------------------|-----------------|---------------|-------------------------------|--------------------|--------------------|---------------|---------------------|-----|
 | Qwen3-Embedding               | ✅        |                                                                      |||||||||||||||||||
 | Molmo                         | ✅        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |||||||||||||||||||
-| XLM-RoBERTa-based             | ❌        | [1960](https://github.com/vllm-project/vllm-ascend/issues/1960)      |||||||||||||||||||
+| XLM-RoBERTa-based             | ✅        | [1960](https://github.com/vllm-project/vllm-ascend/issues/1960)      |||||||||||||||||||
+| Bert                          | ✅        | [1960](https://github.com/vllm-project/vllm-ascend/issues/1960)      |||||||||||||||||||
 
 ## Multimodal Language Models
 

@@ -697,9 +697,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 " for AscendAttentionBackendImpl")
 
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
-        if self.attn_type != AttentionType.DECODER and self.attn_type != AttentionType.ENCODER_ONLY:
-            raise NotImplementedError("Encoder/decoder cross-attention "
-                                      "are not implemented for "
+        attn_type = self.attn_type
+        if attn_type not in [
+                AttentionType.DECODER, AttentionType.ENCODER_ONLY
+        ]:
+            raise NotImplementedError("Encoder/Decoder cross-attention "
+                                      "is not implemented for "
                                       "PallasAttentionBackendImpl")
         num_tokens = query.shape[0]
         if attn_metadata is None:
