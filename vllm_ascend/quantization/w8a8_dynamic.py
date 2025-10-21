@@ -35,6 +35,7 @@ else:
     from vllm.config import CompilationMode
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import FusedAlltoAllCommImpl
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 
 class AscendW8A8DynamicLinearMethod:

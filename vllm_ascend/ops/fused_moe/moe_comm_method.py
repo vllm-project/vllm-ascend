@@ -268,7 +268,6 @@ class FusedAlltoAllCommImpl(MoECommMethod):
                       w2,
                       topk_weights,
                       topk_ids,
-                      row_idx,
                       activation="silu",
                       apply_router_weight_on_input=False,
                       use_int8_w8a8=False,

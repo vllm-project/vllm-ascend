@@ -479,21 +479,22 @@ class AdpBuilder(opdesc_parser.OpDesc):
                 self.argsdefv.append(None)
             in_idx += 1
         for attr in self.attr_list:
-            atype = self.attr_val.get(attr).get("paramType")
+            attr_info = self.attr_val.get(attr)
+            atype = attr_info.get("paramType")
             if atype == "optional":
                 optional = True
-            attrval = self.attr_val.get(attr).get("defaultValue")
+            attrval = attr_info.get("defaultValue")
+            attr_type = attr_info.get("type")
             if attrval is not None:
                 optional = True
-                if type == "bool":
+                if attr_type == "bool":
                     attrval = attrval.capitalize()
-                elif type == "str":
+                elif attr_type == "str":
                     attrval = '"' + attrval + '"'
                 self.argsdefv.append(attrval)
                 continue
             if optional:
-                self.argsdefv.append(
-                    ATTR_DEFAULT.get(self.attr_val.get(attr).get("type")))
+                self.argsdefv.append(ATTR_DEFAULT.get(attr_type))
             else:
                 self.argsdefv.append(None)
 

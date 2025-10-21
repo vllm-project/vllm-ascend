@@ -347,8 +347,8 @@ def _get_op_custom_options(op_descs: list, auto_gen_dir: str):
             op_type = param_list[0]
             if op_type.upper() == "ALL":
                 op_type = OP_ALL
-            if op_type != OP_ALL and _is_op_type_in_opdesc(op_descs,
-                                                           op_type) == False:
+            if (op_type != OP_ALL
+                    and not _is_op_type_in_opdesc(op_descs, op_type)):
                 continue
             soc_ver_compile_options = {}
             soc_ver = param_list[1]

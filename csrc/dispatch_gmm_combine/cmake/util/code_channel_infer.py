@@ -1,24 +1,20 @@
 #!/usr/bin/env python
 # -*- coding: UTF-8 -*-
+"""Utilities for inferring the code channel used by generated Ascend ops.
+
+CODE_* constants describe whether the generated code uses cube kernels,
+vector kernels, or both.
+"""
 
 import collections
 
-"""CODE_* is used to cube/vector api is called in operator code
-CODE_MIX means both cube and vector api is called
-CODE_CUBE means only cube api is called
-CODE_VEC means only vector api is called
-"""
 CODE_MIX = 0
 CODE_CUBE = 1
 CODE_VEC = 2
 
 
 def _is_v220(op_product: str):
-    """return if current soc version is V220
-
-    Returns:
-        res: True means V220
-    """
+    """Return whether the current SoC version is V220."""
     if op_product == "ascend910_93" or op_product == "ascend910b":
         return True
     return False

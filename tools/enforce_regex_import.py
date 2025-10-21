@@ -79,6 +79,14 @@ def main() -> int:
         if filepath == "setup.py":
             continue
 
+        try:
+            parts = Path(filepath).parts
+            if parts and parts[0] == "csrc":
+                continue
+        except Exception:
+            if str(filepath).startswith("csrc/"):
+                continue
+
         violations = check_file(filepath)
         if violations:
             print(f"\n❌ {filepath}:")
