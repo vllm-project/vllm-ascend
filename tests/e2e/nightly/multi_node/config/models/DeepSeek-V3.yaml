@@ -19,7 +19,6 @@ env_common:
   OMP_NUM_THREADS: 100
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
-  DYNAMIC_EPLB: True
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
@@ -105,7 +104,6 @@ deployment:
                   }
             }
         }'
-
 benchmarks:
   perf:
     case_type: performance
