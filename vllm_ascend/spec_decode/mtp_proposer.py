@@ -3,7 +3,7 @@ import torch.nn as nn
 from vllm.attention.layer import Attention
 from vllm.config import (CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, set_current_vllm_config)
-from vllm.forward_context import BatchDescriptor, get_forward_context
+from vllm.forward_context import BatchDescriptor
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
@@ -94,7 +94,7 @@ class MtpProposer(Proposer):
                   num_tokens_across_dp=None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None) -> None:
-            # TODO: adapt enable_dbo later
+        # TODO: adapt enable_dbo later
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill,
                                                    False)
