@@ -1507,9 +1507,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
         attn_type = self.attn_type
-        if attn_type != AttentionType.DECODER and attn_type != AttentionType.ENCODER_ONLY:
-            raise NotImplementedError("Encoder/decoder cross-attention "
-                                      "are not implemented for "
+        if attn_type not in [
+                AttentionType.DECODER, AttentionType.ENCODER_ONLY
+        ]:
+            raise NotImplementedError("Encoder/Decoder cross-attention "
+                                      "is not implemented for "
                                       "PallasAttentionBackendImpl")
 
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -1560,23 +1562,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if self.pcp_size * self.dcp_size > 1:
                 intermediate_output = self._forward_pcp_dcp(
                     query, key, value, kv_cache, attn_metadata, output)
-            elif attn_type == AttentionType.ENCODER_ONLY:
-                # TODO(zzzwwjj): Deal with this `cum_seq_len` more elegantly.
-                cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
-                intermediate_output = torch_npu.npu_fusion_attention(
-                    query,
-                    key,
-                    value,
-                    head_num=self.num_heads,
-                    input_layout="TND",
-                    scale=self.scale,
-                    sparse_mode=4,
-                    atten_mask=attn_metadata.attn_mask,
-                    pre_tockens=attn_metadata.max_query_len,
-                    next_tockens=attn_metadata.max_query_len,
-                    actual_seq_qlen=cum_seq_len,
-                    actual_seq_kvlen=cum_seq_len,
-                )[0]
             # V0-Style scheduler situation.
             elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 intermediate_output = self._forward_prefill_no_cache(
