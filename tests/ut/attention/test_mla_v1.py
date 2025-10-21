@@ -306,6 +306,7 @@ class TestAscendMLAImpl(TestBase):
             "kv_b_proj": MagicMock(),
             "o_proj": MagicMock(),
             "kv_a_proj_with_mqa": MagicMock(),
+            "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": kv_a_layernorm,
         }
 
@@ -511,7 +512,6 @@ class TestAscendMLAImpl(TestBase):
         attn_metadata.prefill.cos = torch.randn(2, 64)
         attn_metadata.prefill.sin = torch.randn(2, 64)
 
-        self.impl.q_a_proj = MagicMock()
         self.impl.q_a_layernorm = MagicMock()
         self.impl.q_a_layernorm.return_value = torch.randn(
             attn_metadata.num_actual_tokens, self.impl.num_heads,
@@ -519,7 +519,14 @@ class TestAscendMLAImpl(TestBase):
         self.impl.kv_a_proj_with_mqa = MagicMock()
         self.impl.kv_a_proj_with_mqa.return_value = [
             torch.randn(num_prefill_tokens, self.impl.num_heads,
-                        self.impl.qk_nope_head_dim + self.impl.kv_lora_rank)
+                        self.impl.qk_rope_head_dim + self.impl.kv_lora_rank)
+        ]
+        self.impl.fused_qkv_a_proj = MagicMock()
+        self.impl.fused_qkv_a_proj.return_value = [
+            torch.randn(
+                num_prefill_tokens, self.impl.num_heads,
+                self.impl.qk_rope_head_dim + self.impl.kv_lora_rank +
+                self.impl.q_lora_rank)
         ]
         self.impl.q_proj = MagicMock()
         self.impl.q_proj.return_value = [
