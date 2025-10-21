@@ -83,8 +83,6 @@ at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_
 
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState,
-    const at::Tensor &gamma0,
-    const at::Tensor &beta0,
     const at::Tensor &wdqkv,
     const at::Tensor &descale0,
     const at::Tensor &gamma1,
