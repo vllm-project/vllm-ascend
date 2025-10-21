@@ -15,7 +15,9 @@
 import torch
 
 
-def _generate_attn_mask(max_seq_len, dtype):
+def _generate_attn_mask(max_seq_len, dtype, tril):
+    if not tril:
+        return torch.zeros(size=(max_seq_len, max_seq_len)).to(dtype)
     # Construct lower triangle matrix.
     mask_flag = torch.ones((max_seq_len, max_seq_len),
                            dtype=torch.bool).tril_()
@@ -36,17 +38,17 @@ class AttentionMaskBuilder:
         max_seq_len: int,
         dtype: torch.dtype,
         device: torch.device = None,
+        tril: bool = True,
     ):
         # NOTE: The device argument specifies the target NPU
         # to be used for the newly added FIA operator.
         # Only pass this parameter when using the new FIA operator.
-
-        attn_mask = _generate_attn_mask(max_seq_len, dtype)
+        self.tril = tril
+        attn_mask = _generate_attn_mask(max_seq_len, dtype, self.tril)
 
         self._seq_len_cached = attn_mask.shape[0]
         self.attn_mask_cache = attn_mask
         self.device = device
-        self.pooling_mask = None
         if torch.version.cann.startswith("8.3"):
             assigned_mask_dim = 2048
             self.chunked_prefill_attn_mask = torch.triu(
@@ -71,14 +73,6 @@ class AttentionMaskBuilder:
         self._update_attn_cache(max_seq_len, dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
         ).to(device, non_blocking=True)
-
-    def get_pooling_mask(self, device):
-        if self.pooling_mask is None:
-            # the compressed attention mask for npu_fusion_attention sparse mode 4
-            self.pooling_mask = torch.triu(torch.ones(
-                2048, 2048), diagonal=1).to(torch.bool).to(device,
-                                                           non_blocking=True)
-        return self.pooling_mask
 
     def get_splitfuse_attn_mask(
         self,
@@ -108,6 +102,7 @@ class AttentionMaskBuilder:
     def _update_attn_cache(self, seqlen: int, dtype: torch.dtype):
         if seqlen > self._seq_len_cached:
             self._seq_len_cached = seqlen
-            self.attn_mask_cache = _generate_attn_mask(seqlen, dtype)
+            self.attn_mask_cache = _generate_attn_mask(seqlen, dtype,
+                                                       self.tril)
         if self.attn_mask_cache.dtype != dtype:
             self.attn_mask_cache = self.attn_mask_cache.to(dtype)
