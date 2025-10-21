@@ -328,14 +328,22 @@ class TorchairDeepseekV2MoE(nn.Module):
             ascend_config.multistream_overlap_shared_expert and \
             self.torchair_graph_enabled
 
+        self.enable_super_kernel = ascend_config.torchair_graph_config.enable_super_kernel
+        self.params_dtype = torch.float32 if self.enable_super_kernel else \
+            torch.get_default_dtype()
+        # Converting gate weight to fp32 is to adapt to the super kernel feature.
+        # Super kernel feature currently cannot fuse operators such as cast, stridedslice, and add.
+        # In the moe stage, Cast will interrupt the fusion of the super kernel. To avoid this problem,
+        # modifications will be made in the initialization stage.
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
                                      bias=False,
                                      quant_config=None,
+                                     params_dtype=self.params_dtype,
                                      prefix=f"{prefix}.gate")
         if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
+                torch.empty(config.n_routed_experts, dtype=self.params_dtype))
         else:
             self.gate.e_score_correction_bias = None
 
@@ -570,7 +578,8 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             rotary_emb=self.rotary_emb,
-            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
+            q_proj=self.q_proj if self.q_lora_rank is None else None,
+            q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
