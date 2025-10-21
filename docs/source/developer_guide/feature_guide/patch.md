@@ -20,13 +20,9 @@ In `vllm_ascend/patch`, you can see the code structure as follows:
 vllm_ascend
 ├── patch
 │   ├── platform
-│   │   ├── patch_0_9_2
-│   │   ├── patch_common
-│   │   ├── patch_main
+│   │   ├── patch_xxx.py
 │   ├── worker
-│   │   ├── patch_0_9_2
-│   │   ├── patch_common
-│   │   ├── patch_main
+│   │   ├── patch_yyy.py
 └───────────
 ```
 
@@ -36,19 +32,13 @@ vllm_ascend
 - **worker**: The patch code in this directory is for patching the code in vLLM worker process. It's called by `vllm_ascend/worker/worker_v1::NPUWorker::__init__` when the vLLM worker process is initialized.
   - For both online and offline mode, vLLM engine core process calls the worker patch here `vllm/vllm/worker/worker_base.py::WorkerWrapperBase.init_worker` when initializing the worker process.
 
-In both **platform** and **worker** folder, there are several patch modules. They are used for patching different version of vLLM.
-
-- `patch_0_10_0`: This module is used for patching vLLM 0.10.0. The version is always the nearest version of vLLM. Once vLLM is released, we will drop this patch module and bump to a new version. For example, `patch_0_10_0` is used for patching vLLM 0.10.0.
-- `patch_main`: This module is used for patching the code in vLLM main branch.
-- `patch_common`: This module is used for patching both vLLM 0.10.0 and vLLM main branch.
-
 ## How to write a patch
 
 Before writing a patch, following the principle above, we should patch the least code. If it's necessary, we can patch the code in either **platform** and **worker** folder. Here is an example to patch `distributed` module in vLLM.
 
 1. Decide which version of vLLM we should patch. For example, after analysis, here we want to patch both 0.10.0 and main of vLLM.
 2. Decide which process we should patch. For example, here `distributed` belongs to the vLLM main process, so we should patch `platform`.
-3. Create the patch file in the right folder. The file should be named as `patch_{module_name}.py`. The example here is `vllm_ascend/patch/platform/patch_common/patch_distributed.py`.
+3. Create the patch file in the right folder. The file should be named as `patch_{module_name}.py`. The example here is `vllm_ascend/patch/platform/patch_distributed.py`.
 4. Write your patch code in the new file. Here is an example:
 
     ```python
@@ -61,7 +51,7 @@ Before writing a patch, following the principle above, we should patch the least
     vllm.distributed.parallel_state.destroy_model_parallel = patch_destroy_model_parallel
     ```
 
-5. Import the patch file in `__init__.py`. In this example, add `import vllm_ascend.patch.platform.patch_common.patch_distributed` into `vllm_ascend/patch/platform/patch_common/__init__.py`.
+5. Import the patch file in `__init__.py`. In this example, add `import vllm_ascend.patch.platform.patch_distributed` into `vllm_ascend/patch/platform/__init__.py`.
 6. Add the description of the patch in `vllm_ascend/patch/__init__.py`. The description format is as follows:
 
     ```
