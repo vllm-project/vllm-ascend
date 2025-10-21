@@ -40,5 +40,6 @@ def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
 
     return token_type_ids
 
+
 bert._encode_token_type_ids = _encode_token_type_ids
 bert._decode_token_type_ids = _decode_token_type_ids
