@@ -14,5 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from vllm_ascend.patch.platform import patch_common  # noqa: F401
-from vllm_ascend.patch.platform import patch_main  # noqa: F401
+import os
+
+import vllm_ascend.patch.platform.patch_config  # noqa
+import vllm_ascend.patch.platform.patch_distributed  # noqa
+import vllm_ascend.patch.platform.patch_mamba_config  # noqa
+
+if os.getenv("DYNAMIC_EPLB", False) or os.getenv("EXPERT_MAP_RECORD", False):
+    import vllm_ascend.patch.platform.patch_multiproc_executor  # noqa

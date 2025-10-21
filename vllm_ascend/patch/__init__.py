@@ -23,11 +23,6 @@
 #           `vllm_ascend.utils.adapt_patch(is_global_patch=False)` in
 #           each worker's `__init__` function.
 #
-# Then in each kind of patch, there are three folders:
-# - patch_0_10_0: contains the patches applied when vllm version is 0.10.0.
-# - patch_main: contains the patches applied when vllm version is main branch.
-# - patch_common: contains the patches applied in both 0.10.0 and main branch.
-#
 # Once a new patch is added in vllm-ascend, please add the patch description into this file as well.
 # ----------------------------------------------------------------------------------
 
@@ -35,7 +30,7 @@
 # --------------------------------
 # * Platform Patch:
 # =================
-# ** File: platform/patch_common/patch_distributed.py**
+# ** File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.ParallelConfig.get_next_dp_init_port`
 #    Why:
@@ -56,7 +51,7 @@
 #    Future Plan:
 #       Find a better way to support tensor alignment for 310p without this patch.
 #
-# ** File: worker/patch_common/patch_multimodal_merge.py**
+# ** File: worker/patch_multimodal_merge.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.utils._merge_multimodal_embeddings`
 #    Why:
@@ -70,7 +65,7 @@
 #
 # * Worker Patch:
 # ===============
-# ** File: worker/patch_common/patch_minicpm.py **
+# ** File: worker/patch_minicpm.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minicpm.MiniCPMAttention.forward`
 #    Why:
@@ -84,7 +79,7 @@
 #    Future Plan:
 #       Keep this patch in vllm-ascend.
 #
-# ** File: worker/patch_common/patch_distributed.py **
+# ** File: worker/patch_distributed.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
 #   (1) __init__()
@@ -120,7 +115,7 @@
 #       - https://github.com/vllm-project/vllm/pull/21591
 #    Future Plan:
 #       Revert it when vLLM merge #21591 and release new version
-# ** File: worker/patch_common/patch_logits.py **
+# ** File: worker/patch_logits.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm._custom_ops.apply_repetition_penalties`
 #    Why:
