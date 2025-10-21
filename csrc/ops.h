@@ -128,8 +128,6 @@ namespace vllm_ascend {
     extern void mla_preprocess_impl(
         void* stream,
         void* hidden_state,
-        void* gamma1,
-        void* beta1,
         void* quant_scale1,
         void* quant_offset1,
         void* wdqkv,

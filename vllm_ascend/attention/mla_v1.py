@@ -716,17 +716,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.qb_qt_bias = qb_qt_bias.reshape(
             self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
 
-        device = self.q_proj.weight.device
-        self.gamma0 = torch.ones(
-            [self.fused_qkv_a_proj.weight.shape[-1]],
-            dtype=act_dtype,
-            device=device,
-        )
-        self.beta0 = torch.zeros(
-            [self.fused_qkv_a_proj.weight.shape[-1]],
-            dtype=act_dtype,
-            device=device,
-        )
+        device = self.q_a_proj.weight.device
         self.gamma1 = self.q_a_layernorm.weight.data
         self.beta1 = self.q_a_layernorm.bias.data
         self.gamma2 = self.kv_a_layernorm.weight.data
@@ -1085,8 +1075,6 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         torch.ops._C_ascend.mla_preprocess(
             hidden_states,
-            self.gamma0,
-            self.beta0,
             self.wd_qkv,
             self.deq_scale_qkv,
             self.gamma1,
