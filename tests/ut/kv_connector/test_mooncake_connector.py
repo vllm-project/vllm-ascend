@@ -499,7 +499,7 @@ class MockVllmConfig:
         self.kv_transfer_config = MagicMock()
         self.model_config.use_mla = True
         self.parallel_config.tensor_parallel_size = 2
-        self.parallel_config.data_parallel_rank_local = 0
+        self.parallel_config.data_parallel_rank = 0
         self.parallel_config.data_parallel_size_local = 1
         self.cache_config.block_size = 16
         self.kv_transfer_config.kv_port = 5000
@@ -1085,7 +1085,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
                 config.parallel_config = MagicMock()
                 config.parallel_config.tensor_parallel_size = 2
-                config.parallel_config.data_parallel_rank_local = 0
+                config.parallel_config.data_parallel_rank = 0
                 config.parallel_config.data_parallel_size_local = 1
                 config.kv_transfer_config.kv_port = 8000
                 config.kv_transfer_config.kv_role = 'worker'
