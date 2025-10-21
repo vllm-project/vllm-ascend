@@ -56,6 +56,14 @@ class AscendQuantConfig(QuantizationConfig):
     def __init__(self, quant_config: Dict[str, Any]):
         super().__init__()
         self.quant_description = quant_config
+        # TODO(whx): remove this adaptation after adding "shared_head"
+        # to prefix of DeepSeekShareHead in vLLM.
+        extra_quant_dict = {}
+        for k in self.quant_description.keys():
+            if "shared_head" in k:
+                new_k = k.replace(".shared_head.", ".")
+                extra_quant_dict[new_k] = self.quant_description[k]
+        self.quant_description.update(extra_quant_dict)
 
     def __repr__(self) -> str:
         return "AscendQuantConfig:\n" + super().__repr__()
