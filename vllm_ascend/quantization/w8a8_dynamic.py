@@ -26,8 +26,8 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 from vllm_ascend.ops.moe.moe_comm_method import FusedAlltoAllCommImpl
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 
 class AscendW8A8DynamicLinearMethod:
@@ -288,9 +288,6 @@ class AscendW8A8DynamicFusedMoEMethod:
 def scale_from_float_to_int64(scale):
     import numpy as np
     scale = torch.from_numpy(
-        np.frombuffer(
-            scale.cpu().to(torch.float32).numpy().tobytes(),
-            dtype=np.int32
-        ).astype(np.int64)
-    ).to(scale.device)
+        np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(),
+                      dtype=np.int32).astype(np.int64)).to(scale.device)
     return scale

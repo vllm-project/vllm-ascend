@@ -109,9 +109,8 @@ def get_params_config(support_info):
     return params_dict
 
 
-def add_simplified_config(
-    op_type, support_info, core_type, task_ration, objfile, config
-):
+def add_simplified_config(op_type, support_info, core_type, task_ration,
+                          objfile, config):
     simplified_key = support_info.get("simplifiedKey")
 
     json_path = objfile.split(".")[0] + ".json"
@@ -137,24 +136,20 @@ def add_simplified_config(
 
     bin_list = op_cfg.get("binaryList")
     if core_type == 0 and task_ration == "tilingKey":
-        bin_list.append(
-            {
-                "coreType": core_type,
-                "simplifiedKey": simplified_key,
-                "multiKernelType": 1,
-                "binPath": objfile,
-                "jsonPath": json_path,
-            }
-        )
+        bin_list.append({
+            "coreType": core_type,
+            "simplifiedKey": simplified_key,
+            "multiKernelType": 1,
+            "binPath": objfile,
+            "jsonPath": json_path,
+        })
     else:
-        bin_list.append(
-            {
-                "coreType": core_type,
-                "simplifiedKey": simplified_key,
-                "binPath": objfile,
-                "jsonPath": json_path,
-            }
-        )
+        bin_list.append({
+            "coreType": core_type,
+            "simplifiedKey": simplified_key,
+            "binPath": objfile,
+            "jsonPath": json_path,
+        })
 
 
 def add_op_config(op_file, bin_info, config):
@@ -187,7 +182,8 @@ def gen_ops_config(json_file, soc, config):
     task_ration = contents.get("taskRation")
     core_type = core_type_map.get(core_type, -1)
     if core_type == -1 and soc != "ascend310b":
-        raise Exception("[ERROR]: must set coreType in json when soc version is {soc}.")
+        raise Exception(
+            "[ERROR]: must set coreType in json when soc version is {soc}.")
 
     bin_file_name = bin_name + bin_suffix
     op_type = bin_name.split("_")[0]
@@ -196,17 +192,18 @@ def gen_ops_config(json_file, soc, config):
 
     add_dict_key(bin_info, "implMode", support_info.get("implMode"))
     add_dict_key(bin_info, "int64Mode", support_info.get("int64Mode"))
-    add_dict_key(bin_info, "simplifiedKeyMode", support_info.get("simplifiedKeyMode"))
+    add_dict_key(bin_info, "simplifiedKeyMode",
+                 support_info.get("simplifiedKeyMode"))
 
     simplified_key = support_info.get("simplifiedKey")
     if simplified_key is not None:
         bin_info["simplifiedKey"] = simplified_key
         obj_file = os.path.join(soc, op_dir, bin_file_name)
-        add_simplified_config(
-            op_type, support_info, core_type, task_ration, obj_file, config
-        )
+        add_simplified_config(op_type, support_info, core_type, task_ration,
+                              obj_file, config)
 
-    add_dict_key(bin_info, "dynamicParamMode", support_info.get("dynamicParamMode"))
+    add_dict_key(bin_info, "dynamicParamMode",
+                 support_info.get("dynamicParamMode"))
     bin_info["staticKey"] = support_info.get("staticKey")
     bin_info["inputs"] = support_info.get("inputs")
     bin_info["outputs"] = support_info.get("outputs")
@@ -214,14 +211,16 @@ def gen_ops_config(json_file, soc, config):
         bin_info["attrs"] = support_info.get("attrs")
 
     add_dict_key(bin_info, "opMode", support_info.get("opMode"))
-    add_dict_key(bin_info, "optionalInputMode", support_info.get("optionalInputMode"))
+    add_dict_key(bin_info, "optionalInputMode",
+                 support_info.get("optionalInputMode"))
     add_dict_key(bin_info, "deterministic", support_info.get("deterministic"))
     if support_info.get("optionalOutputMode") is not None:
-        add_dict_key(
-            bin_info, "optionalOutputMode", support_info.get("optionalOutputMode")
-        )
+        add_dict_key(bin_info, "optionalOutputMode",
+                     support_info.get("optionalOutputMode"))
 
-    bin_info["binInfo"] = {"jsonFilePath": os.path.join(soc, op_dir, json_base_name)}
+    bin_info["binInfo"] = {
+        "jsonFilePath": os.path.join(soc, op_dir, json_base_name)
+    }
     add_op_config(op_file, bin_info, config)
 
 
@@ -254,9 +253,8 @@ def gen_all_config(root_dir, soc, out_dir, skip_binary_info_config):
         if skip_binary_info_config and cfg_key == BINARY_INFO_CONFIG_JSON:
             continue
         cfg_file = os.path.join(out_dir, cfg_key)
-        with os.fdopen(
-            os.open(cfg_file, const_var.WFLAGS, const_var.WMODES), "w"
-        ) as fd:
+        with os.fdopen(os.open(cfg_file, const_var.WFLAGS, const_var.WMODES),
+                       "w") as fd:
             json.dump(config.get(cfg_key), fd, indent="  ")
 
 
@@ -285,9 +283,11 @@ def args_prase():
         help="Parse the path of the json file.",
     )
 
-    parser.add_argument(
-        "-s", "--soc", nargs="?", required=True, help="Parse the soc_version of ops."
-    )
+    parser.add_argument("-s",
+                        "--soc",
+                        nargs="?",
+                        required=True,
+                        help="Parse the soc_version of ops.")
 
     parser.add_argument("-o", "--out", nargs="?", help="Output directory.")
 

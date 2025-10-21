@@ -260,38 +260,36 @@ class FusedAlltoAllCommImpl(MoECommMethod):
 
     def _get_fused_moe_prepare_finalize(self):
         return FusedMoEPrepareAndFinalizeWithAll2All(self.moe_config)
-    
-    def fused_experts(
-        self,
-        hidden_states,
-        w1,
-        w2,
-        topk_weights,
-        topk_ids,
-        row_idx,
-        activation = "silu",
-        apply_router_weight_on_input = False,
-        use_int8_w8a8 = False,
-        use_int4_w4a8 = False,
-        global_num_experts = None,
-        expert_map = None,
-        w1_scale = None,
-        w2_scale = None,
-        w1_scale_bias = None,
-        w2_scale_bias = None,
-        is_torchair = False,
-        shared_experts = None,
-        quantized_x_for_share = None,
-        dynamic_scale_for_share = None,
-        log2phy = None,
-        global_redundant_expert_num = 0,
-        need_trans = False,
-        dynamic_eplb = False):
+
+    def fused_experts(self,
+                      hidden_states,
+                      w1,
+                      w2,
+                      topk_weights,
+                      topk_ids,
+                      activation="silu",
+                      apply_router_weight_on_input=False,
+                      use_int8_w8a8=False,
+                      use_int4_w4a8=False,
+                      global_num_experts=None,
+                      expert_map=None,
+                      w1_scale=None,
+                      w2_scale=None,
+                      w1_scale_bias=None,
+                      w2_scale_bias=None,
+                      is_torchair=False,
+                      shared_experts=None,
+                      quantized_x_for_share=None,
+                      dynamic_scale_for_share=None,
+                      log2phy=None,
+                      global_redundant_expert_num=0,
+                      need_trans=False,
+                      dynamic_eplb=False):
         out = torch.empty_like(hidden_states)
-        
+
         torch.ops._C_ascend.dispatch_gmm_combine(
             x=hidden_states,
-            weight1=w1, 
+            weight1=w1,
             weight2=w2,
             expert_idx=topk_ids,
             scale1=w1_scale,

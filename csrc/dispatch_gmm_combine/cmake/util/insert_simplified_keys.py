@@ -6,44 +6,45 @@ import glob
 import json
 import os
 import re
-import sys
 
-import const_var
+_DATA_TYPE_ITEMS = [
+    ("float32", 0),
+    ("float16", 1),
+    ("int8", 2),
+    ("int16", 6),
+    ("uint16", 7),
+    ("uint8", 4),
+    ("int32", 3),
+    ("int64", 9),
+    ("uint32", 8),
+    ("uint64", 10),
+    ("bool", 12),
+    ("double", 11),
+    ("string", 13),
+    ("dual", 14),
+    ("dual", 15),
+    ("complex64", 16),
+    ("complex128", 17),
+    ("qint8", 18),
+    ("qint16", 19),
+    ("qint32", 20),
+    ("quint8", 21),
+    ("quint16", 22),
+    ("resource", 23),
+    ("string", 24),
+    ("dual", 25),
+    ("variant", 26),
+    ("bf16", 27),
+    ("bfloat16", 27),
+    ("undefined", 28),
+    ("int4", 29),
+    ("uint1", 30),
+    ("int2", 31),
+]
 
-DATA_TPYE_DICT = {
-    "float32": 0,
-    "float16": 1,
-    "int8": 2,
-    "int16": 6,
-    "uint16": 7,
-    "uint8": 4,
-    "int32": 3,
-    "int64": 9,
-    "uint32": 8,
-    "uint64": 10,
-    "bool": 12,
-    "double": 11,
-    "string": 13,
-    "dual": 14,
-    "dual": 15,
-    "complex64": 16,
-    "complex128": 17,
-    "qint8": 18,
-    "qint16": 19,
-    "qint32": 20,
-    "quint8": 21,
-    "quint16": 22,
-    "resource": 23,
-    "string": 24,
-    "dual": 25,
-    "variant": 26,
-    "bf16": 27,
-    "bfloat16": 27,
-    "undefined": 28,
-    "int4": 29,
-    "uint1": 30,
-    "int2": 31,
-}
+DATA_TPYE_DICT = {}
+for _dtype, _value in _DATA_TYPE_ITEMS:
+    DATA_TPYE_DICT[_dtype] = _value
 
 FORMAT_DICT = {
     "NCHW": 0,
@@ -207,9 +208,8 @@ def insert_simplified_keys(json_file):
     precision = str(get_precision_value(support_info))
     overflow = str(get_overflow_value(support_info))
     input_parameters = get_all_input_parameters(support_info)
-    key = "{}/d={},p={},o={}/{}/".format(
-        op_type, deterministic, precision, overflow, input_parameters
-    )
+    key = "{}/d={},p={},o={}/{}/".format(op_type, deterministic, precision,
+                                         overflow, input_parameters)
     result = '"simplifiedKey": "' + key + '",\n'
     insert_content_into_file(json_file, result)
 
