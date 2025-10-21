@@ -370,6 +370,10 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
+        mocker.patch(
+            "torch_npu.npu_format_cast",
+            return_value=torch.rand((384, 300)),
+        )
         res = attention.pad_qkv_weight(torch.rand((300, 300)))
         assert res.shape == (384, 300)
 
@@ -378,6 +382,10 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
+        mocker.patch(
+            "torch_npu.npu_format_cast",
+            return_value=torch.rand((300, 384)),
+        )
         res = attention.pad_proj_weight(torch.rand((300, 300)))
         assert res.shape == (300, 384)
 
