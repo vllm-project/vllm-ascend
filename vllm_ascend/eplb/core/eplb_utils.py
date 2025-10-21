@@ -128,9 +128,11 @@ class EPLBParamUtils:
         if not isinstance(iterations, int):
             raise TypeError(f"The {iterations} is not int.")
         if iterations <= 0:
-            raise ValueError(f"The {iterations} can not less than or equal to 0.")
+            raise ValueError(
+                f"The {iterations} can not less than or equal to 0.")
         if iterations > sys.maxsize:
-            raise ValueError(f"The {iterations} can not large than {sys.maxsize}")
+            raise ValueError(
+                f"The {iterations} can not large than {sys.maxsize}")
 
     @staticmethod
     def check_dynamic_eplb(dynamic_eplb):
@@ -138,8 +140,11 @@ class EPLBParamUtils:
             return
         if not isinstance(dynamic_eplb, bool):
             raise TypeError("The dynamic_eplb is not bool.")
-        if dynamic_eplb == True and os.getenv("DYNAMIC_EPLB", "false") != "true":
-            raise ValueError('Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".')
+        if dynamic_eplb == True and os.getenv("DYNAMIC_EPLB",
+                                              "false") != "true":
+            raise ValueError(
+                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+            )
 
     @staticmethod
     def check_expert_map_path(expert_map):
@@ -159,7 +164,8 @@ class EPLBParamUtils:
                 f.read()
         except Exception as e:
             raise IOError(
-                f"Fail read expert info from {expert_map}, please check the reading permission of {expert_map} : {e}")
+                f"Fail read expert info from {expert_map}, please check the reading permission of {expert_map} : {e}"
+            )
 
     @staticmethod
     def check_expert_map_record_path(expert_map_record_path):
@@ -173,11 +179,14 @@ class EPLBParamUtils:
         if ext.lower() != ".json":
             raise TypeError("The expert_map_record_path is not json.")
         if os.getenv("EXPERT_MAP_RECORD", "false") != "true":
-            raise ValueError('Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".')
+            raise ValueError(
+                'Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".'
+            )
         try:
             with open(expert_map_record_path, "w", encoding='utf-8') as f:
                 f.write("")
         except Exception as e:
             raise IOError(
-                f"Fail write expert info to {expert_map_record_path}, please check the writing permission of {expert_map_record_path} : {e}")
+                f"Fail write expert info to {expert_map_record_path}, please check the writing permission of {expert_map_record_path} : {e}"
+            )
 

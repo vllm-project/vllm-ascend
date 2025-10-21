@@ -478,7 +478,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dynamic_eplb = self.ascend_config.dynamic_eplb
         self.expert_map_record_path = self.ascend_config.expert_map_record_path
         EPLBParamUtils.check_dynamic_eplb(self.ascend_config.dynamic_eplb)
-        EPLBParamUtils.check_expert_map_record_path(self.ascend_config.expert_map_record_path)
+        EPLBParamUtils.check_expert_map_record_path(
+            self.ascend_config.expert_map_record_path)
         self.dynamic_eplb = self.ascend_config.dynamic_eplb or self.ascend_config.expert_map_record_path
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False

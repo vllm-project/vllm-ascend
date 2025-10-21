@@ -25,11 +25,14 @@ import vllm_ascend.patch.platform.patch_common.patch_mamba_config  # noqa
 
 def patch_v1_executor():
     try:
-        dynamic_eplb = os.getenv("DYNAMIC_EPLB", "false") == "true" or os.getenv(
-            "EXPERT_MAP_RECORD", "false") == "true"
+        dynamic_eplb = os.getenv("DYNAMIC_EPLB",
+                                 "false") == "true" or os.getenv(
+                                    "EXPERT_MAP_RECORD", "false") == "true"
         if dynamic_eplb:
             import vllm_ascend.patch.platform.patch_common.patch_multiproc_executor  # noqa
-            logger.warning("Enable dynamic eplb/expert_map_record_path by patching v1 executor.")
+            logger.warning(
+                "Enable dynamic eplb/expert_map_record_path by patching v1 executor."
+            )
         else:
             logger.warning("Do not patch v1 executor.")
     except RuntimeError as e:
