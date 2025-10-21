@@ -11,6 +11,7 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
+from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -18,7 +19,6 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
@@ -82,11 +82,13 @@ class MtpProposer(Proposer):
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            if self.torchair_graph_enabled:
+            if self.torchair_graph_enabled or (
+                    self.enable_shared_expert_dp
+                    and self.vllm_config.model_config.use_mla):
                 self.model = TorchairDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
             else:
-                self.model = CustomDeepSeekMTP(
+                self.model = DeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
 
         draft_attn_layer_names = (
@@ -175,7 +177,7 @@ class MtpProposer(Proposer):
                     torchair_compiled_model(
                         input_ids=input_ids,
                         positions=positions,
-                        previous_hidden_states=previous_hidden_states,
+                        hidden_states=previous_hidden_states,
                         inputs_embeds=None,
                         intermediate_tensors=None,
                         attn_metadata=attn_metadata,
@@ -184,7 +186,7 @@ class MtpProposer(Proposer):
                 else:
                     self.model(input_ids=input_ids,
                                positions=positions,
-                               previous_hidden_states=previous_hidden_states)
+                               hidden_states=previous_hidden_states)
             if with_prefill:
                 break
 
@@ -460,7 +462,7 @@ class MtpProposer(Proposer):
                         hidden_states = torchair_compiled_model(
                             input_ids=self.input_ids[:num_input_tokens],
                             positions=self.positions[:num_input_tokens],
-                            previous_hidden_states=self.
+                            hidden_states=self.
                             hidden_states[:num_input_tokens],
                             inputs_embeds=None,
                             intermediate_tensors=None,
@@ -470,9 +472,8 @@ class MtpProposer(Proposer):
                         hidden_states = self.model(
                             input_ids=self.input_ids[:num_input_tokens],
                             positions=self.positions[:num_input_tokens],
-                            previous_hidden_states=self.
-                            hidden_states[:num_input_tokens],
-                            kv_caches=self.runner.kv_caches[-1:])
+                            hidden_states=self.hidden_states[:num_input_tokens]
+                        )
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
@@ -485,7 +486,7 @@ class MtpProposer(Proposer):
                     (0, max_num_reqs_across_dp - num_indices))
 
             sample_hidden_states = hidden_states[last_token_indices]
-            logits = self.model.compute_logits(sample_hidden_states, None)
+            logits = self.model.compute_logits(sample_hidden_states)
             if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
             draft_token_ids = logits.argmax(dim=-1)

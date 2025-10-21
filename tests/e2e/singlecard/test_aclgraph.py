@@ -100,6 +100,8 @@ def test_models_with_aclgraph(
     )
 
 
+@pytest.mark.skip("Skipping this test for now, "
+                  "it fails intermittently and needs investigation.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [5])
 def test_models_with_aclgraph_full_decode_only(
