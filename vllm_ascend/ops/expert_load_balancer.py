@@ -3,6 +3,7 @@ import random
 from typing import Dict, List
 
 import torch
+import torch.distributed as dist
 
 
 class ExpertLoadBalancer(object):
@@ -12,20 +13,21 @@ class ExpertLoadBalancer(object):
         self.global_expert_num = global_expert_num
         self.expert_map_tensor, self.layers_num, self.ranks_num = (
             self._expert_file_to_tensor())
+        self.expert_placement_map = self.generate_expert_placement_map()
+        self.tensor_data = []
+
 
     def _expert_file_to_tensor(self):
         with open(self.expert_map_path, "r") as f:
             data = json.load(f)
         layers_num = data["moe_layer_count"]
         gpus_num = data["layer_list"][0]["device_count"]
-
-        tensor_data = []
         for layer in data["layer_list"]:
             device_data = []
             for device in layer["device_list"]:
                 device_data.append(device["device_expert"])
-            tensor_data.append(device_data)
-        expert_map_tensor = torch.tensor(tensor_data, dtype=torch.int32)
+            self.tensor_data.append(device_data)
+        expert_map_tensor = torch.tensor(self.tensor_data, dtype=torch.int32)
         return expert_map_tensor, layers_num, gpus_num
 
     def generate_index_dicts(self, tensor_2d):
@@ -81,8 +83,7 @@ class ExpertLoadBalancer(object):
         return log2phy_map
 
     def get_rank_placement_map(self, layer_id, rank_id):
-        expert_placement_map = self.generate_expert_placement_map()
-        layer_expert_map = expert_placement_map[layer_id]
+        layer_expert_map = self.expert_placement_map[layer_id]
         rank_expert_map = layer_expert_map[rank_id].to(
             torch.npu.current_device())
         rank_local_expert_num = torch.sum(torch.ne(rank_expert_map, -1)).item()
@@ -97,3 +98,17 @@ class ExpertLoadBalancer(object):
             len(self.expert_map_tensor[0][0]) * self.ranks_num -
             self.global_expert_num)
         return global_redundant_expert_num
+
+    def check_expert_map_tensor(self):
+        if dist.is_initialized():
+            try:
+                rank = dist.get_rank()
+                world_size = dist.get_world_size()
+                all_expert_maps = [None for _ in range(world_size)]
+                dist.all_gather_object(all_expert_maps, self.tensor_data)
+                for rank_id, expert_map_tensor in enumerate(all_expert_maps):
+                    if self.tensor_data != expert_map_tensor:
+                        raise ValueError(f"The expert map of rank{rank} is not equal to rank{rank_id}")
+                return True
+            except Exception as e:
+                raise ValueError(f"The expert maps of all ranks are inconsistency: {e}")

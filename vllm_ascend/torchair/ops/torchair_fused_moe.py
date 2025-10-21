@@ -1042,6 +1042,7 @@ class TorchairAscendFusedMoE(FusedMoE):
                                                     os.R_OK):
             self.expert_load_balancer = ExpertLoadBalancer(
                 self.expert_map_path, self.global_num_experts)
+            self.expert_load_balancer.check_expert_map_tensor()
             self.global_redundant_expert_num = (
                 self.expert_load_balancer.get_global_redundant_expert_num())
             try:
