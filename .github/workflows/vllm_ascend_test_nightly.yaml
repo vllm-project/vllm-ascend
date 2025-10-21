@@ -44,18 +44,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  #qwen3-32b:
-  #  strategy:
-  #    matrix:
+  qwen3-32b:
+    strategy:
+      matrix:
         # should add A3 chip runner when available
-        #      os: [linux-aarch64-a2-4]
+        os: [linux-aarch64-a2-4]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    #  uses: ./.github/workflows/_e2e_nightly.yaml
-    #with:
-    #  vllm: v0.11.0
-    #  runner: ${{ matrix.os }}
-    #  tests: tests/e2e/nightly/models/test_qwen3_32b.py
+      uses: ./.github/workflows/_e2e_nightly.yaml
+    with:
+      vllm: v0.11.0
+      runner: ${{ matrix.os }}
+      tests: tests/e2e/nightly/models/test_qwen3_32b.py
   qwen3-32b-in8-a3:
     strategy:
       matrix:

@@ -18,7 +18,6 @@ import json
 import os
 import re
 import subprocess
-import time
 
 import pandas as pd
 from modelscope import snapshot_download  # type: ignore
@@ -174,7 +173,6 @@ class AisbenchRunner:
         while True:
             line = self.proc.stdout.readline().strip()
             print(line)
-            time.sleep(0.1)
             if result_msg in line:
                 self.result_line = line
                 return

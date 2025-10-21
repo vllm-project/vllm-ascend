@@ -48,26 +48,27 @@ batch_size_dict = {
     "linux-aarch64-a3-4": 46,
 }
 VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
+performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
 
 aisbench_cases = [{
     "case_type": "performance",
     "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
     "request_conf": "vllm_api_stream_chat",
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 1,
+    "num_prompts": 4 * performance_batch_size,
     "max_out_len": 1500,
-    "batch_size": batch_size_dict.get(VLLM_CI_RUNNER, 1),
+    "batch_size": performance_batch_size,
     "baseline": 1,
     "threshold": 0.97
 }, {
     "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+    "dataset_path": "vllm-ascend/aime2024",
+    "request_conf": "vllm_api_general_chat",
+    "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
     "max_out_len": 32768,
     "batch_size": 32,
-    "baseline": 76,
-    "threshold": 75
+    "baseline": 83.33,
+    "threshold": 17
 }]
 
 
