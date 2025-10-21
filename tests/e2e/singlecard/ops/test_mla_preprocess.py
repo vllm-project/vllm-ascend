@@ -18,8 +18,6 @@ def test_mla_preprocess_kernel():
     dtype = torch.bfloat16
 
     hidden_states = torch.randn((token_num, N_7168), dtype=dtype).npu()
-    gamma0 = torch.randn((N_7168), dtype=dtype).npu()
-    beta0 = torch.randn((N_7168), dtype=dtype).npu()
     quant_scale0 = torch.randn((1, ), dtype=dtype).npu()
     quant_offset0 = torch.randint(0, 7, (1, ), dtype=torch.int8).npu()
 
@@ -74,8 +72,6 @@ def test_mla_preprocess_kernel():
 
     torch.ops._C_ascend.mla_preprocess(
         hidden_states,
-        gamma0,
-        beta0,
         wdqkv,
         de_scale0,
         gamma1,
