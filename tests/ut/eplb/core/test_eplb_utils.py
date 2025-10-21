@@ -3,8 +3,8 @@ import sys
 
 from unittest.mock import patch
 
-import torch
 import pytest
+import torch
 
 from vllm_ascend.eplb.core import eplb_utils
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
@@ -126,15 +126,17 @@ class TestEPLBParamUtils:
 
     def test_check_dynamic_eplb_value_error_env_not_set(self, monkeypatch):
         monkeypatch.delenv("DYNAMIC_EPLB", raising=False)
-        with pytest.raises(ValueError,
-                           match=
-                           'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'):
+        with pytest.raises(
+                ValueError,
+                match=
+                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'):
             EPLBParamUtils.check_dynamic_eplb(True)
 
         monkeypatch.setenv("DYNAMIC_EPLB", "false")
-        with pytest.raises(ValueError,
-                           match=
-                           'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'):
+        with pytest.raises(
+                ValueError,
+                match=
+                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'):
             EPLBParamUtils.check_dynamic_eplb(True)
 
         monkeypatch.setenv("DYNAMIC_EPLB", "any_other_value")
@@ -151,27 +153,21 @@ class TestEPLBParamUtils:
         EPLBParamUtils.check_expert_map_path(None)
 
     def test_check_expert_map_path_type_error_not_string(self):
-        with pytest.raises(TypeError,
-                           match="The expert_map is not str."):
+        with pytest.raises(TypeError, match="The expert_map is not str."):
             EPLBParamUtils.check_expert_map_path(123)
-        with pytest.raises(TypeError,
-                           match="The expert_map is not str."):
+        with pytest.raises(TypeError, match="The expert_map is not str."):
             EPLBParamUtils.check_expert_map_path(True)
 
     def test_check_expert_map_path_value_error_empty_string(self):
-        with pytest.raises(ValueError,
-                           match="The expert_map is not empty."):
+        with pytest.raises(ValueError, match="The expert_map is not empty."):
             EPLBParamUtils.check_expert_map_path("")
-        with pytest.raises(ValueError,
-                           match="The expert_map is not empty."):
+        with pytest.raises(ValueError, match="The expert_map is not empty."):
             EPLBParamUtils.check_expert_map_path("   ")
 
     def test_check_expert_map_path_type_error_incorrect_extension(self):
-        with pytest.raises(TypeError,
-                           match="The expert_map is not json."):
+        with pytest.raises(TypeError, match="The expert_map is not json."):
             EPLBParamUtils.check_expert_map_path("path/to/map.txt")
-        with pytest.raises(TypeError,
-                           match="The expert_map is not json."):
+        with pytest.raises(TypeError, match="The expert_map is not json."):
             EPLBParamUtils.check_expert_map_path("path/to/map.JSON_")
 
     @patch('os.path.exists', return_value=False)
@@ -184,32 +180,40 @@ class TestEPLBParamUtils:
         EPLBParamUtils.check_expert_map_record_path(None)
 
     def test_check_expert_map_record_path_type_error_not_string(self):
-        with pytest.raises(TypeError, match="The expert_map_record_path is not str."):
+        with pytest.raises(TypeError,
+                           match="The expert_map_record_path is not str."):
             EPLBParamUtils.check_expert_map_record_path(123)
-        with pytest.raises(TypeError, match="The expert_map_record_path is not str."):
+        with pytest.raises(TypeError,
+                           match="The expert_map_record_path is not str."):
             EPLBParamUtils.check_expert_map_record_path(False)
 
     def test_check_expert_map_record_path_value_error_empty_string(self):
-        with pytest.raises(ValueError, match="The expert_map_record_path is empty."):
+        with pytest.raises(ValueError,
+                           match="The expert_map_record_path is empty."):
             EPLBParamUtils.check_expert_map_record_path("")
-        with pytest.raises(ValueError, match="The expert_map_record_path is empty."):
+        with pytest.raises(ValueError,
+                           match="The expert_map_record_path is empty."):
             EPLBParamUtils.check_expert_map_record_path("   ")
 
     def test_check_expert_map_record_path_type_error_incorrect_extension(self):
-        with pytest.raises(TypeError, match="The expert_map_record_path is not json."):
+        with pytest.raises(TypeError,
+                           match="The expert_map_record_path is not json."):
             EPLBParamUtils.check_expert_map_record_path("path/to/record.txt")
-        with pytest.raises(TypeError, match="The expert_map_record_path is not json."):
+        with pytest.raises(TypeError,
+                           match="The expert_map_record_path is not json."):
             EPLBParamUtils.check_expert_map_record_path("path/to/record.XML")
 
     def test_check_expert_map_record_path_value_error_env_not_set(self, monkeypatch):
         monkeypatch.delenv("EXPERT_MAP_RECORD", raising=False)
-        with pytest.raises(ValueError,
-                           match=
-                           'Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".'):
+        with pytest.raises(
+                ValueError,
+                match=
+                'Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".'):
             EPLBParamUtils.check_expert_map_record_path("path/to/record.json")
 
         monkeypatch.setenv("EXPERT_MAP_RECORD", "false")
-        with pytest.raises(ValueError,
-                           match=
-                           'Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".'):
+        with pytest.raises(
+                ValueError,
+                match=
+                'Can not enable expert_map_record_path when not export EXPERT_MAP_RECORD="true".'):
             EPLBParamUtils.check_expert_map_record_path("path/to/record.json")

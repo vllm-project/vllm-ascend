@@ -27,7 +27,7 @@ def patch_v1_executor():
     try:
         dynamic_eplb = os.getenv("DYNAMIC_EPLB",
                                  "false") == "true" or os.getenv(
-                                    "EXPERT_MAP_RECORD", "false") == "true"
+                                     "EXPERT_MAP_RECORD", "false") == "true"
         if dynamic_eplb:
             import vllm_ascend.patch.platform.patch_common.patch_multiproc_executor  # noqa
             logger.warning(
