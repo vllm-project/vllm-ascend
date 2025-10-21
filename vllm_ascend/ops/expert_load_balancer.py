@@ -16,7 +16,6 @@ class ExpertLoadBalancer(object):
         self.expert_placement_map = self.generate_expert_placement_map()
         self.tensor_data = []
 
-
     def _expert_file_to_tensor(self):
         with open(self.expert_map_path, "r") as f:
             data = json.load(f)
