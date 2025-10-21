@@ -109,6 +109,7 @@ jobs:
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
+          VLLM_CI_RUNNER: ${{ inputs.runner }}
         run: |
           # TODO: enable more tests
           pytest -sv ${{ inputs.tests }}
