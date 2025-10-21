@@ -42,7 +42,7 @@ from vllm.model_executor.models.qwen2_5_vl import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, is_enable_nz)
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, is_enable_nz
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
@@ -290,7 +290,7 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
             qkv_weight_final_copy = torch_npu.npu_format_cast(
                 qkv_weight_final_copy, ACL_FORMAT_FRACTAL_ND)
             return qkv_weight_final_copy
-        
+
         return qkv_weight_final
 
     def pad_proj_weight(self, data):
@@ -302,10 +302,10 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
 
         if is_enable_nz():
             out_weight_copy = torch.empty_like(out_weight).copy_(out_weight)
-            out_weight_copy = torch_npu.npu_format_cast(out_weight_copy,
-                                                        ACL_FORMAT_FRACTAL_ND)
+            out_weight_copy = torch_npu.npu_format_cast(
+                out_weight_copy, ACL_FORMAT_FRACTAL_ND)
             return out_weight_copy
-        
+
         return out_weight
 
     def pad_qkv_weight_scale_offset(self, data):
