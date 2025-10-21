@@ -598,7 +598,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # self.mc2_tokens_capacity.
         # NOTE: To be clear, we need to make sure that during graph capture, the number of
         # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
-        # the max number of tokens in graph is min(max_num_seqs * 2, 512).
+        # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
         if self.compilation_config.cudagraph_capture_sizes:
             max_num_tokens = self.compilation_config.cudagraph_capture_sizes[0]
         else:
