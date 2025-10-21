@@ -149,6 +149,11 @@ class AscendConfig:
                 raise AssertionError(
                     f"Global tensor parallel size ({global_tp_size}) must be divisible by flashcomm2_oproj_tensor_parallel_size ({self.flashcomm2_oproj_tensor_parallel_size})"
                 )
+            if vllm_config.kv_transfer_config is None or vllm_config.kv_transfer_config.is_kv_consumer:
+                raise AssertionError(
+                    "flashcomm2 primarily targets P-scenario deployments, "
+                    "with additional support for hybrid deployment scenarios. "
+                    "It is not applicable in D-scenario environments.")
 
 
 class TorchairGraphConfig:
