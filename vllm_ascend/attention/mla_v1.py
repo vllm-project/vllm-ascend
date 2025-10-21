@@ -1278,8 +1278,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
-                    o_proj_input[
-                        num_decode_tokens:num_actual_tokens] = output_prefill
+                    o_proj_input[num_decode_tokens:] = output_prefill
                     current_ms_metadata.after_comm_event.record()
             else:
                 o_proj_input[
