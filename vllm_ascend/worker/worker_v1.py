@@ -26,7 +26,7 @@ import torch_npu
 import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
@@ -43,7 +43,8 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
 from vllm.v1.worker.worker_base import WorkerBase
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
@@ -109,6 +110,17 @@ class NPUWorker(WorkerBase):
                          rank=rank,
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
+
+        # binding cpu
+        if get_ascend_config().enable_cpu_binding:
+            try:
+                bind_cpus(self.local_rank, ratio=1.0)
+            except RuntimeError as e:
+                logger.error(f"{e} in {self.local_rank}")
+            except ValueError as e:
+                logger.error(f"{e} in {self.local_rank}")
+            except Exception:
+                logger.info("Skip binding cpu.")
 
         # Try to import mindie_turbo to accelerate vLLM inference.
         try_register_lib(
@@ -360,11 +372,9 @@ class NPUWorker(WorkerBase):
         return self.model_runner.pin_lora(lora_id)
 
     def execute_dummy_batch(self) -> None:
-        force_attention = self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
         self.model_runner._dummy_run(
             num_tokens=self.model_runner.decode_token_per_req,
-            uniform_decode=True,
-            force_attention=force_attention)
+            uniform_decode=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
