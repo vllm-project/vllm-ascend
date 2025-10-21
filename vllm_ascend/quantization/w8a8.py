@@ -118,15 +118,16 @@ class AscendW8A8LinearMethod:
                     weight=layer.weight,
                     start_flag=x,
                 )
-            if enable_flashcomm2_quant_comm:
-                x = x.contiguous().view(-1, layer.aclnn_input_scale_reciprocal.size(0))
+            if enable_flashcomm2_quant_comm and comm_fn is not None:
+                x = x.contiguous().view(
+                    -1, layer.aclnn_input_scale_reciprocal.size(0))
             # quant
             x = quant_per_tensor(
                 x,
                 layer.aclnn_input_scale_reciprocal,
                 layer.aclnn_input_offset,
             )
-            if enable_flashcomm2_quant_comm:
+            if enable_flashcomm2_quant_comm and comm_fn is not None:
                 comm_input = x.view(x.size(0), -1)
                 x = comm_fn(comm_input)
 

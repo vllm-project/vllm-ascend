@@ -320,8 +320,9 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         if num_padding_tokens > 0:
             input_parallel = nn.functional.pad(input_parallel,
                                                (0, 0, 0, num_padding_tokens))
+
         def otp_quant_comm(x):
-            
+
             # Reorganize the tensor so that the batch id and rank id correspond to each other.
             chunk_num = len(self.reorgnized_batch_ids) * len(
                 self.reorgnized_batch_ids[0])
@@ -331,8 +332,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
 
             batch_size_per_chunk = batch_size // chunk_num
             # Indices of reorganized tensor
-            chunked = x.view(chunk_num, batch_size_per_chunk,
-                                        x.shape[1])
+            chunked = x.view(chunk_num, batch_size_per_chunk, x.shape[1])
             reorganized_chunks = chunked[self.group_indices]
             send_buf = reorganized_chunks.flatten(1, 2)
 
@@ -344,22 +344,20 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
 
             # Create receive buffer
             recv_buf = torch.empty(total_intermediate_size * chunk_size,
-                                dtype=x.dtype,
-                                device=x.device)
+                                   dtype=x.dtype,
+                                   device=x.device)
 
             # Perform all-to-all communication
             dist.all_to_all_single(recv_buf,
-                                send_buf,
-                                group=self.odp_group.device_group)
+                                   send_buf,
+                                   group=self.odp_group.device_group)
 
             return recv_buf.view(all2all_tp_size, chunk_size,
-                                        -1).transpose(0, 1).reshape(
-                                            chunk_size, -1)
-        
+                                 -1).transpose(0, 1).reshape(chunk_size, -1)
+
         if not hasattr(self, '_quant_comm_config'):
             self._quant_comm_config = {}
         self._quant_comm_config['communication_fn'] = otp_quant_comm
-
 
         # Matrix multiply.
         assert self.quant_method is not None
