@@ -11,10 +11,10 @@ class ExpertLoadBalancer(object):
     def __init__(self, expert_map_path, global_expert_num):
         self.expert_map_path = expert_map_path
         self.global_expert_num = global_expert_num
+        self.tensor_data = []
         self.expert_map_tensor, self.layers_num, self.ranks_num = (
             self._expert_file_to_tensor())
         self.expert_placement_map = self.generate_expert_placement_map()
-        self.tensor_data = []
 
     def _expert_file_to_tensor(self):
         with open(self.expert_map_path, "r") as f:
