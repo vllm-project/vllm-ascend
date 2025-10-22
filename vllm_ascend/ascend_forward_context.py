@@ -124,7 +124,7 @@ def set_ascend_forward_context(
                 num_tokens is not None and num_tokens > 1000
         forward_context.mmrs_fusion = mmrs_fusion
         flashcomm_v2_enabled = flashcomm2_enable() and \
-            tp_world_size > 1
+            tp_world_size > 1 and num_tokens is not None
 
         if sp_enabled or flashcomm_v2_enabled:
             pad_size = (tp_world_size -
