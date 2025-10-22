@@ -2394,7 +2394,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
-        max_num_reqs = self.scheduler_config.max_num_seqs
+        max_num_reqs = self.max_num_reqs
         if uniform_decode:
             num_reqs = cdiv(num_tokens, max_query_len)
             num_scheduled_tokens_list = [max_query_len] * num_reqs
