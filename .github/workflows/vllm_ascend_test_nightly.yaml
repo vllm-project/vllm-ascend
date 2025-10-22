@@ -39,7 +39,7 @@ defaults:
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
   group: ascend-nightly-${{ github.ref }}
-  #cancel-in-progress: true
+  #cancel-uses: ./.github/workflows/_e2e_nightly.yaml
 
 jobs:
   qwen3-32b:
@@ -120,3 +120,14 @@ jobs:
       runner: ${{ matrix.os }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8.py
+  qwen3-32b-int8-a3-feature-stack3:
+    # if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
+    strategy:
+      matrix:
+        os: [ linux-arrch64-a3-4 ]
+    uses: ./.github/workflows/_e2e_nightly.yaml
+    with:
+      vllm: v0.11.0
+      runner: ${{ matrix.os }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      tests: tests/e2e/nightly/features/test_qwen3_32b_int8_a3_feature_stack3.py
