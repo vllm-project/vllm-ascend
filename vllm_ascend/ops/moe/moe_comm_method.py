@@ -43,7 +43,7 @@ def get_moe_comm_method(
 
 
 def setup_moe_comm_method(moe_config):
-    _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
+    _MoECommMethods[MoECommType.ALLTOALL] = FusedAlltoAllCommImpl(moe_config)
     _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
     _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
     _MoECommMethods[MoECommType.NAIVE_MULTICAST] = NaiveMulticastCommImpl(
@@ -240,6 +240,66 @@ class AlltoAllCommImpl(MoECommMethod):
 
     def _get_fused_moe_prepare_finalize(self):
         return FusedMoEPrepareAndFinalizeWithAll2All(self.moe_config)
+
+
+class FusedAlltoAllCommImpl(MoECommMethod):
+    """This implementation is for the scenarios listed below:
+    1. `enable_expert_parallel=True`.
+    2. `npu_grouped_matmul` is available.
+
+    This implementation uses all-to-all communication to exchange tokens
+    between data parallel ranks before and after the MLP computation. It should
+    have better performance than AllGatherCommImpl when DP size > 1.
+    """
+
+    def _get_token_dispatcher(self):
+        return TokenDispatcherWithAll2AllV(
+            top_k=self.moe_config.experts_per_token,
+            num_experts=self.moe_config.num_experts,
+            num_local_experts=self.moe_config.num_local_experts)
+
+    def _get_fused_moe_prepare_finalize(self):
+        return FusedMoEPrepareAndFinalizeWithAll2All(self.moe_config)
+
+    def fused_experts(self,
+                      hidden_states,
+                      w1,
+                      w2,
+                      topk_weights,
+                      topk_ids,
+                      activation="silu",
+                      apply_router_weight_on_input=False,
+                      use_int8_w8a8=False,
+                      use_int4_w4a8=False,
+                      global_num_experts=None,
+                      expert_map=None,
+                      w1_scale=None,
+                      w2_scale=None,
+                      w1_scale_bias=None,
+                      w2_scale_bias=None,
+                      is_torchair=False,
+                      shared_experts=None,
+                      quantized_x_for_share=None,
+                      dynamic_scale_for_share=None,
+                      log2phy=None,
+                      global_redundant_expert_num=0,
+                      need_trans=False,
+                      dynamic_eplb=False):
+        out = torch.empty_like(hidden_states)
+
+        torch.ops._C_ascend.dispatch_gmm_combine(
+            x=hidden_states,
+            weight1=w1,
+            weight2=w2,
+            expert_idx=topk_ids,
+            scale1=w1_scale,
+            scale2=w2_scale,
+            probs=topk_weights.to(torch.float32),
+            group=self.token_dispatcher.moe_all_to_all_group_name,
+            max_output_size=512,
+            out=out,
+        )
+        return out
 
 
 class NaiveMulticastCommImpl(MoECommMethod):

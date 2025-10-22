@@ -488,6 +488,12 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
         self.tokens_per_expert = None
         self.global_input_tokens_local_experts_indices = None
 
+        device_group = self.ep_group
+        # TODO: Try local_rank = ep_group.rank_in_group
+        local_rank = torch.distributed.get_rank(group=device_group)
+        backend = device_group._get_backend(torch.device("npu"))
+        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+
         assert self.num_local_experts > 0, "Expected at least one expert"
         if self.num_local_experts > 1:
             self.expert_ids_per_ep_rank = torch.tensor(

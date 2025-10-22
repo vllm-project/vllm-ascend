@@ -4,7 +4,7 @@
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
-#include "utils.h"
+#include "utils/torch_utils.h"
 /*
  * How to write a meta implementation for a custom operator (meta kernel):
  *
@@ -114,6 +114,21 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     return {q_out0, kv_cache_out0, q_out1, kv_cache_out1};
 }
 
+at::Tensor& dispatch_gmm_combine_meta(
+    const at::Tensor& x,
+    const at::Tensor& weight1,
+    const at::Tensor& weight2,
+    const at::Tensor& expert_idx,
+    const at::Tensor& scale1,
+    const at::Tensor& scale2,
+    const at::Tensor& probs,
+    c10::string_view group,
+    int64_t max_output_size,
+    at::Tensor& out
+) {
+    return out;
+}
+
 
 } // namespace meta
 } // namespace vllm_ascend
@@ -132,5 +147,7 @@ namespace {
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
+    // MoE dispatch-gmm-combine
+    ops.impl("dispatch_gmm_combine", &vllm_ascend::meta::dispatch_gmm_combine_meta);
 }
 }
