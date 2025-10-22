@@ -270,10 +270,21 @@ class NPUPlatform(Platform):
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
+        # Then, we will have to discuss the error handling strategy and user experience
+        if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and \
+            os.environ.get("ASCEND_LAUNCH_BLOCKING", "0") == "1":
+            raise ValueError(
+                "ACL graph is incompatible with ASCEND_LAUNCH_BLOCKING=1. "
+                "Please unset ASCEND_LAUNCH_BLOCKING or set it to 0. If you "
+                "need ASCEND_LAUNCH_BLOCKING for debugging, consider other methods — "
+                "for example, check the plog files (default: $HOME/ascend/log/debug) "
+                "for more information about runtime errors.")
+
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             os.environ["VLLM_ALL2ALL_BACKEND"] = "flashinfer_all2allv"
-            if ascend_config.torchair_graph_config.enabled:
+            if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
@@ -326,6 +337,8 @@ class NPUPlatform(Platform):
         ascend_config = get_ascend_config()
 
         if use_mla and ascend_config.enable_shared_expert_dp:
+            if use_mla and not use_sparse:
+                return "vllm_ascend.torchair.torchair_mla.AscendMLATorchairBackend"
             if use_mla and use_sparse:
                 return "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend"
 
