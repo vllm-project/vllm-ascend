@@ -33,7 +33,7 @@ see https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8
 
 ```bash
 # The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
-git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitee.com/ascend/msit
+git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitcode.com/Ascend/msit
 
 cd msit/msmodelslim
 

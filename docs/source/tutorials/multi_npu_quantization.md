@@ -36,7 +36,7 @@ see https://www.modelscope.cn/models/vllm-ascend/QwQ-32B-W8A8
 
 ```bash
 # (Optional)This tag is recommended and has been verified
-git clone https://gitee.com/ascend/msit -b modelslim-VLLM-8.1.RC1.b020_001
+git clone https://gitcode.com/Ascend/msit -b modelslim-VLLM-8.1.RC1.b020_001
 
 cd msit/msmodelslim
 # Install by run this script
