@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import os
+import json
 from typing import Any
 
 import openai
@@ -74,19 +74,37 @@ async def test_models(model: str, mode: str) -> None:
         "HCCL_BUFFSIZE": "1024",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True"
     }
-    speculative_config = {"num_speculative_tokens": 1, "method": "deepseek_mtp"}
-    additional_config = {"ascend_scheduler_config": {"enabled": false}, "torchair_graph_config": {"enabled": true, "enable_multistream_moe":false, "enable_multistream_mla": true, "graph_batch_sizes":[16], "use_cached_graph":true}, "chunked_prefill_for_mla":true, "enable_weight_nz_layout":true}
+    speculative_config = {
+        "num_speculative_tokens": 1,
+        "method": "deepseek_mtp"
+    }
+    additional_config = {
+        "ascend_scheduler_config": {
+            "enabled": False
+        },
+        "torchair_graph_config": {
+            "enabled": True,
+            "enable_multistream_moe": False,
+            "enable_multistream_mla": True,
+            "graph_batch_sizes": [16],
+            "use_cached_graph": True
+        },
+        "chunked_prefill_for_mla": True,
+        "enable_weight_nz_layout": True
+    }
     server_args = [
         "--quantization", "ascend", "--data-parallel-size", "2",
         "--tensor-parallel-size", "8", "--enable-expert-parallel", "--port",
-        str(port), "--seed", "1024", "--max-model-len", "36864", "--max-num-batched-tokens",
-        "4096", "--max-num-seqs", "16", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.9", "--speculative-config", str(speculative_config)
+        str(port), "--seed", "1024", "--max-model-len", "36864",
+        "--max-num-batched-tokens", "4096", "--max-num-seqs", "16",
+        "--trust-remote-code", "--gpu-memory-utilization", "0.9",
+        "--speculative-config",
+        str(speculative_config)
     ]
     if mode == "single":
         server_args.append("--enforce-eager")
-        additional_config["torchair_graph_config"] = {"enabled": false}
-    server_args.extend(["--additional-config", str(additional_config)])
+        additional_config["torchair_graph_config"] = {"enabled": False}
+    server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
