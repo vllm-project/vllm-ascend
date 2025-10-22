@@ -369,7 +369,6 @@ class CustomDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         )
 
         sfa_modules = AscendSFAModules(
-            q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
             q_a_layernorm=self.q_a_layernorm
             if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,

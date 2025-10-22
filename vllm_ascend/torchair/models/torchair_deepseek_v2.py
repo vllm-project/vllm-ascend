@@ -486,11 +486,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         if self.q_lora_rank is not None:
-            self.q_a_proj = ReplicatedLinear(self.hidden_size,
-                                             self.q_lora_rank,
-                                             bias=False,
-                                             quant_config=quant_config,
-                                             prefix=f"{prefix}.q_a_proj")
             self.q_a_layernorm = RMSNorm(self.q_lora_rank,
                                          eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(q_lora_rank,
@@ -645,10 +640,10 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                   and attn_metadata.num_decodes > 0)
         forward_kwargs = {"enable_multistream_mla": enable_multistream_mla}
         if self.q_lora_rank is not None:
-            maybe_npu_prefetch(self.q_a_proj.weight,
+            maybe_npu_prefetch(self.fused_qkv_a_proj.weight,
                                hidden_states,
                                enabled=enable_multistream_mla)
-            ckq = self.q_a_proj(hidden_states)[0]
+            ckq = self.fused_qkv_a_proj(hidden_states)[0]
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
             forward_kwargs['ckq'] = ckq
         else:
@@ -737,14 +732,6 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
         if self.q_lora_rank is not None:
-            self.q_a_proj = ReplicatedLinear(
-                self.hidden_size,
-                self.q_lora_rank,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.q_a_proj",
-                return_bias=False,
-            )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank,
                                          eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
@@ -852,7 +839,6 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         )
 
         sfa_modules = AscendSFAModules(
-            q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
             q_a_layernorm=self.q_a_layernorm
             if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,

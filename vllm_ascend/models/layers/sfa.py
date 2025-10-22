@@ -47,7 +47,6 @@ else:
 
 @dataclass
 class AscendSFAModules:
-    q_a_proj: Optional[torch.nn.Module]
     q_a_layernorm: Optional[torch.nn.Module]
     q_proj: Optional[torch.nn.Module]
     kv_a_proj_with_mqa: torch.nn.Module
@@ -127,7 +126,6 @@ class AscendSparseFlashAttention(MultiHeadLatentAttentionWrapper):
                 kv_a_layernorm=mla_modules.kv_a_layernorm,
                 kv_b_proj=mla_modules.kv_b_proj,
                 o_proj=mla_modules.o_proj,
-                q_a_proj=mla_modules.q_a_proj,
             )
         else:
             self.sfa_attn = MLAAttention(
@@ -153,7 +151,6 @@ class AscendSparseFlashAttention(MultiHeadLatentAttentionWrapper):
                 kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
                 kv_a_layernorm=mla_modules.kv_a_layernorm,
                 o_proj=mla_modules.o_proj,
-                q_a_proj=mla_modules.q_a_proj,
             )
 
         compilation_config = get_current_vllm_config().compilation_config

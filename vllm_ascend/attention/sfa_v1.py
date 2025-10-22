@@ -493,21 +493,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.qk_head_dim = kwargs['qk_head_dim']
         self.v_head_dim = kwargs['v_head_dim']
         self.rotary_emb = kwargs['rotary_emb']
-        self.q_proj = kwargs['q_proj']
+        self.q_proj = kwargs['q_proj'] if self.q_lora_rank is None else kwargs[
+            'q_b_proj']
+        self.fused_qkv_a_proj = kwargs.get('fused_qkv_a_proj', None)
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
         self.indexer = kwargs['indexer']
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
-        self.q_a_proj = kwargs.get('q_a_proj', None)
         self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_rank = self.num_heads // self.tp_size
-        if self.q_a_proj is not None:
-            self.q_b_proj = self.q_proj
-        else:
-            self.q_b_proj = None
+        self.q_b_proj = kwargs['q_b_proj']
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
@@ -629,10 +627,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         if has_decode:
             q_len = 1
             hidden_states_decode = hidden_states[:num_decode_tokens]
-            decode_kq = self.q_a_proj(hidden_states_decode)  # q down
-            decode_q_c = self.q_a_layernorm(decode_kq)  # q down layernorm
-            decode_kv_no_split = self.kv_a_proj_with_mqa(
-                hidden_states_decode)  # c_kv
+            decode_qkv_lora = self.fused_qkv_a_proj(hidden_states_decode)
+            decode_q_c, decode_kv_no_split = decode_qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            decode_q_c = self.q_a_layernorm(decode_q_c)  # q down layernorm
 
             # decode_q_c = q_c[:num_decode_tokens]
             decode_slot_mapping = attn_metadata.slot_mapping[:
@@ -713,10 +713,12 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             hidden_states_prefill = hidden_states[
                 num_decode_tokens:num_actual_tokens]
-            prefill_kq = self.q_a_proj(hidden_states_prefill)  # q down
-            prefill_q_c = self.q_a_layernorm(prefill_kq)  # q down layernorm
-            prefill_kv_no_split = self.kv_a_proj_with_mqa(
-                hidden_states_prefill)  # c_kv
+            prefill_qkv_lora = self.fused_qkv_a_proj(hidden_states_prefill)
+            prefill_q_c, prefill_kv_no_split = prefill_qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            prefill_q_c = self.q_a_layernorm(prefill_q_c)  # q down layernorm
 
             # prefill_q_c = q_c[
             #     num_decode_tokens:num_actual_tokens]
