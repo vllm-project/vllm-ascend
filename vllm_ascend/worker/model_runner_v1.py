@@ -583,19 +583,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # exceeding a sequence length limit (16 tokens) in npu_fused_infer_attention_score operation
         pass
 
-    def _init_mc2(self):
-        """Initialization of MC2-related parameters and verify the validity."""
-
-        self.reserved_mc2_mask = None
-
-        # For models contains no moe modules, we simply skip the
-        # initialization of MC2.
-        if not is_moe_model(self.vllm_config):
-            self.mc2_tokens_capacity = 0
-            return
-
-        # For moe models, we first assume that this model will use MC2, and compute
-        # self.mc2_tokens_capacity.
+    def _init_mc2_tokens_capacity(self):
         # NOTE: To be clear, we need to make sure that during graph capture, the number of
         # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
         # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
@@ -610,6 +598,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Therefore, self.mc2_tokens_capacity is set to maximum of possible input_tokens
         # in graph or decode cases.
         self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+
+
+    def _init_mc2(self):
+        """Initialization of MC2-related parameters and verify the validity."""
+
+        self.reserved_mc2_mask = None
+
+        # For models contains no moe modules, we simply skip the
+        # initialization of MC2.
+        if not is_moe_model(self.vllm_config):
+            self.mc2_tokens_capacity = 0
+            return
+
+        # For moe models, we first assume that this model will use MC2, and compute
+        # self.mc2_tokens_capacity.
+        self._init_mc2_tokens_capacity()
 
         # We then check whether it is really necessary to run MC2
         # and verify the validation of self.mc2_tokens_capacity on

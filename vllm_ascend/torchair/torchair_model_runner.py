@@ -98,17 +98,6 @@ class NPUTorchairModelRunner(NPUModelRunner):
                     f"max_num_reqs is updated to {new_max_num_reqs}")
                 self.max_num_reqs = new_max_num_reqs
 
-    def _init_mc2_tokens_capacity(self):
-        # NOTE: To be clear, we need to make sure that during graph capture, the number of
-        # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
-        # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
-        max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
-        tp_size = self.parallel_config.tensor_parallel_size
-        # Use integer arithmetic for ceiling division.
-        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        # maintain the same calculation logic as the function _align_graph_size_divisible_by_tp_size()
-        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
-
     def _sync_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
