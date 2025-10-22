@@ -599,7 +599,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # in graph or decode cases.
         self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
-
     def _init_mc2(self):
         """Initialization of MC2-related parameters and verify the validity."""
 
@@ -631,12 +630,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             elif soc_version in {AscendSocVersion.A2}:
                 limit = 256
 
+            num_tokens_per_tp_rank = self.mc2_tokens_capacity // self.parallel_config.tensor_parallel_size
             if limit is not None and num_tokens_per_tp_rank > limit:
                 raise ValueError(
                     f"For {soc_version}, the max supported tokens per TP rank for MC2 is {limit}, "
                     f"but got {num_tokens_per_tp_rank}. Please try to reduce `max_num_seqs` "
-                    f"(current: {self.max_num_reqs}) or increase `tp_size` (current: {tp_size})."
-                )
+                    f"(current: {self.max_num_reqs}) or increase `tp_size` (current: "
+                    f"{self.parallel_config.tensor_parallel_size}).")
 
             # All verification is passed, we finally initialize self.reserved_mc2_mask.
             self.reserved_mc2_mask = torch.zeros(
