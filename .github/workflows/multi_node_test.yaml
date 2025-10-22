@@ -35,6 +35,7 @@ jobs:
            # configure apt and pip source
            sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
            pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+           pip install jinja2-cli -y
 
            apt-get update -y && apt-get install -y git curl
 
@@ -58,7 +59,13 @@ jobs:
 
         - name: Launch cluster
           run: |
-            kubectl apply -f tests/e2e/multi_node/scripts/lws.yaml
+            jinja2 tests/e2e/multi_node/scripts/lws.yaml.jinja2 \
+              -D size=2 \
+              -D replicas=1 \
+              -D image="m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11" \
+              --outfile lws.yaml
+
+            kubectl apply -f /lws.yaml
           
         - name: Waiting for pod ready
           run: |
@@ -115,4 +122,4 @@ jobs:
           if: always()
           run: |
             kubectl get pods -n $NAMESPACE
-            kubectl delete -f tests/e2e/multi_node/scripts/lws.yaml
+            kubectl delete -f ./lws.yaml
