@@ -110,6 +110,8 @@ async def test_models(model: str, mode: str) -> None:
         additional_config["torchair_graph_config"] = {"enabled": False}
     if mode == "no_chunkprefill":
         additional_config["ascend_scheduler_config"] = {"enabled": True}
+        i = server_args.index("--max-num-batched-tokens") + 1
+        server_args[i] = "36864"
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
