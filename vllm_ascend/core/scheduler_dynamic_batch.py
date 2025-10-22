@@ -16,6 +16,7 @@
 #
 import os
 import time
+from typing import Optional
 
 import pandas as pd
 from vllm.config import VllmConfig
@@ -31,6 +32,8 @@ from vllm.v1.engine import EngineCoreEventType
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
+
+from vllm_ascend.utils import vllm_version_is
 
 
 class BudgetRefiner:
@@ -122,13 +125,19 @@ class SchedulerDynamicBatch(Scheduler):
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
+        block_size: Optional[int] = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
-        super().__init__(vllm_config, kv_cache_config,
-                         structured_output_manager, mm_registry,
-                         include_finished_set, log_stats)
+        if vllm_version_is("0.11.0"):
+            super().__init__(vllm_config, kv_cache_config,
+                             structured_output_manager, mm_registry,
+                             include_finished_set, log_stats)
+        else:
+            super().__init__(vllm_config, kv_cache_config,
+                             structured_output_manager, block_size,
+                             mm_registry, include_finished_set, log_stats)
         self.running: list[Request] = []
         self.budget_refiner = BudgetRefiner(
             default_budget=self.scheduler_config.max_num_batched_tokens,
