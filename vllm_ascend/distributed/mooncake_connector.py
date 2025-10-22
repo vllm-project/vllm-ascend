@@ -1140,7 +1140,7 @@ class MooncakeConnectorWorker:
                 if self.tp_rank in self._prefill_get_remote_tp_rank(req_id):
                     self.kv_send_thread.add_delayed_request(
                         req_id, delay_start_time)
-    
+
     def _prefill_get_remote_tp_rank(self, req_id: str) -> List[int]:
         return sum(self._get_remote_tp_ranks_for_req(req_id), [])
 
