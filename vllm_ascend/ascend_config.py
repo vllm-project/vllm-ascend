@@ -37,7 +37,8 @@ class AscendConfig:
 
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
-        self.torchair_graph_config = TorchairGraphConfig(torchair_graph_config)
+        self.torchair_graph_config = TorchairGraphConfig(
+            torchair_graph_config, vllm_config, additional_config)
 
         ascend_scheduler_config = additional_config.get(
             "ascend_scheduler_config", {})
@@ -70,6 +71,8 @@ class AscendConfig:
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
         self.multistream_overlap_shared_expert = additional_config.get(
             "multistream_overlap_shared_expert", False)
+        self.recompute_scheduler_enable = additional_config.get(
+            "recompute_scheduler_enable", False)
         self.lmhead_tensor_parallel_size = additional_config.get(
             "lmhead_tensor_parallel_size", None)
         if self.lmhead_tensor_parallel_size is not None:
@@ -98,6 +101,8 @@ class AscendConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
+        self.enable_cpu_binding = additional_config.get(
+            "enable_cpu_binding", False)
         self.pd_tp_ratio = 1
         self.pd_head_ratio = 1
         self.num_head_replica = 1
@@ -133,7 +138,7 @@ class TorchairGraphConfig:
     Configuration Object for torchair_graph_config from additional_config
     """
 
-    def __init__(self, torchair_graph_config):
+    def __init__(self, torchair_graph_config, vllm_config, additional_config):
         self.enabled = torchair_graph_config.get("enabled", False)
         self.mode = torchair_graph_config.get("mode", '')
         self.use_cached_graph = torchair_graph_config.get(
@@ -151,6 +156,8 @@ class TorchairGraphConfig:
         self.enable_frozen_parameter = torchair_graph_config.get(
             "enable_frozen_parameter", True)
         self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
+        self.enable_super_kernel = torchair_graph_config.get(
+            "enable_super_kernel", False)
 
         if not isinstance(self.graph_batch_sizes, list):
             raise TypeError("graph_batch_sizes must be list[int]")
@@ -185,6 +192,20 @@ class TorchairGraphConfig:
             if self.enable_kv_nz:
                 raise RuntimeError(
                     "enable_kv_nz is valid only when Torchair graph mode is enabled"
+                )
+            if self.enable_super_kernel:
+                raise RuntimeError(
+                    "enable_super_kernel is valid only when Torchair graph mode is enabled"
+                )
+        if self.enable_super_kernel:
+            if vllm_config.parallel_config.tensor_parallel_size != 1:
+                raise RuntimeError(
+                    "enable_super_kernel is valid only when tensor_parallel_size is 1"
+                )
+            if not additional_config.get("multistream_overlap_shared_expert",
+                                         False):
+                raise RuntimeError(
+                    "enable_super_kernel is valid only when multistream_overlap_shared_expert is enabled"
                 )
         if self.use_cached_kv_cache_bytes and not self.use_cached_graph:
             raise RuntimeError(

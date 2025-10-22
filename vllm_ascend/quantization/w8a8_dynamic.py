@@ -62,8 +62,11 @@ class AscendW8A8DynamicLinearMethod:
                                                    dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
+                           params_dtype: torch.dtype,
+                           layer_type: Optional[str] = None) -> Dict[str, Any]:
         return {}
 
     @staticmethod
@@ -203,7 +206,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
-            1] == global_num_experts, "Number of global experts mismatch"
+            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,

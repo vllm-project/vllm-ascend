@@ -71,7 +71,7 @@ def test_ngram_correctness(
     should be the same when using ngram speculative decoding.
     '''
     pytest.skip("Not current support for the test.")
-    ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=True)
+    ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=False)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
     with VllmRunner(model_name,
@@ -82,7 +82,7 @@ def test_ngram_correctness(
                         "num_speculative_tokens": 3,
                     },
                     max_model_len=1024,
-                    enforce_eager=True) as runner:
+                    enforce_eager=False) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
     matches = 0
     misses = 0
@@ -111,7 +111,7 @@ def test_eagle_correctness(
     should be the same when using eagle speculative decoding.
     '''
 
-    ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=True)
+    ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=False)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
 
@@ -129,7 +129,7 @@ def test_eagle_correctness(
                 "max_model_len": 128,
             },
             max_model_len=128,
-            enforce_eager=True,
+            enforce_eager=False,
     ) as runner:
         spec_outputs = runner.model.chat(test_prompts, sampling_config)
 

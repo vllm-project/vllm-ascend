@@ -71,7 +71,7 @@ def model_register(model, model_config):
     if config.model_type == "qwen3_moe":
         model.num_moe_layers = config.num_hidden_layers
     elif config.model_type == "deepseek_v2" or config.model_type == "deepseek_v3":
-        num_dense_layers = config.first_k_dense_replace
-        model.num_moe_layers = config.num_hidden_layers - num_dense_layers
+        model.num_dense_layers = config.first_k_dense_replace
+        model.num_moe_layers = config.num_hidden_layers - model.num_dense_layers
     else:
         raise NotImplementedError("EPLB is not supported.")

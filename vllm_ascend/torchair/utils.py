@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 import torch_npu
+from torchair.scope import super_kernel as _super_kernel
 
 try:
     # Recent release of torchair has moved these ops to `.scope`.
@@ -231,3 +232,7 @@ def torchair_ops_patch():
     AscendRMSNorm.forward_oot = torchair_layernorm.torchair_rmsnorm_forward_oot  # type: ignore[method-assign]
     AscendSiluAndMul.forward_oot = torchair_activation.torchair_silu_and_mul_forward_oot  # type: ignore[method-assign]
     AscendVocabParallelEmbedding.forward = vocab_embedding_forward  # type: ignore[method-assign]
+
+
+def super_kernel(prefix: str, option: str, enabled: bool = True):
+    return _super_kernel(prefix, option) if enabled else nullcontext()

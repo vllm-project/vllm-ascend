@@ -170,7 +170,8 @@ class TestAscendScheduler(TestBase):
             kv_cache_groups=[
                 KVCacheGroupSpec(['layer'],
                                  FullAttentionSpec(block_size, 1, 1,
-                                                   torch.float32, False))
+                                                   torch.float32, False,
+                                                   False))
             ],
         )
         cache_config.num_gpu_blocks = 10000
