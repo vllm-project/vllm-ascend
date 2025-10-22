@@ -313,6 +313,7 @@ class CustomDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.fused_qkv_a_proj",
                 disable_tp=True)
+            self.kv_a_proj_with_mqa = None
         else:
             self.kv_a_proj_with_mqa = ReplicatedLinear(
                 self.hidden_size,
