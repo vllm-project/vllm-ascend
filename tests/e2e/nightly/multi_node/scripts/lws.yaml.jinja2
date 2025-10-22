@@ -4,9 +4,9 @@ metadata:
   name: vllm
   namespace: vllm-project
 spec:
-  replicas: 1
+  replicas: {{ replicas | default(1) }}
   leaderWorkerTemplate:
-    size: 2
+    size: {{ size | default(2) }}
     restartPolicy: RecreateGroupOnPodRestart
     leaderTemplate:
       metadata:
@@ -15,7 +15,7 @@ spec:
       spec:
         containers:
           - name: vllm-leader
-            image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+            image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11") }}
             env:
               - name: WORKSPACE
                 value: "/root/workspace"
@@ -24,8 +24,6 @@ spec:
                 value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
                 value: "main"
-              - name: MOONCAKE_VERSION
-                value: "06cc217504a6f1b0cdaa26b096b985651b262748"
             command:
               - sh
               - -c
@@ -70,7 +68,7 @@ spec:
       spec:
         containers:
           - name: vllm-worker
-            image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+            image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11") }}
             env:
               - name: WORKSPACE
                 value: "/root/workspace"
@@ -79,8 +77,6 @@ spec:
                 value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
                 value: "main"
-              - name: MOONCAKE_VERSION
-                value: "06cc217504a6f1b0cdaa26b096b985651b262748"
             command:
               - sh
               - -c
