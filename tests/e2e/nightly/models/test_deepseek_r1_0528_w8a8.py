@@ -101,7 +101,7 @@ async def test_models(model: str, mode: str) -> None:
         "--max-num-batched-tokens", "4096", "--max-num-seqs", "16",
         "--trust-remote-code", "--gpu-memory-utilization", "0.9",
         "--speculative-config",
-        str(speculative_config)
+        json.dumps(speculative_config)
     ]
     if mode == "single":
         server_args.append("--enforce-eager")
