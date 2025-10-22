@@ -26,9 +26,7 @@ on:
     branches:
       - 'main'
       - '*-dev'
-    paths:
-      - 'tests/e2e/nightly/**'
-      - '.github/workflows/vllm_ascend_test_nightly.yaml'
+    types: [labeled]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -45,6 +43,7 @@ concurrency:
 
 jobs:
   qwen3-32b:
+    if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
       matrix:
         # should add A3 chip runner when available
@@ -57,6 +56,7 @@ jobs:
       runner: ${{ matrix.os }}
       tests: tests/e2e/nightly/models/test_qwen3_32b.py
   qwen3-32b-in8-a3:
+    if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
       matrix:
         os: [ linux-aarch64-a3-4 ]
@@ -67,6 +67,7 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
   qwen3-32b-in8-a2:
+    if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
       matrix:
         os: [ linux-aarch64-a2-4 ]
@@ -76,6 +77,7 @@ jobs:
       runner: ${{ matrix.os }}
       tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
   qwen3-235b-a22b-w8a8-eplb:
+    if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
       matrix:
         # should add A3 chip runner when available
@@ -89,6 +91,7 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_qwen3_235b_a22b_w8a8_eplb.py
   deepseek-r1-w8a8-eplb:
+    if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
       matrix:
         # should add A3 chip runner when available
