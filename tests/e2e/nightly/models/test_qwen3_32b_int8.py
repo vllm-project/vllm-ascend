@@ -51,6 +51,15 @@ VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
 performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
 
 aisbench_cases = [{
+    "case_type": "accuracy",
+    "dataset_path": "vllm-ascend/aime2024",
+    "request_conf": "vllm_api_general_chat",
+    "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
+    "max_out_len": 32768,
+    "batch_size": 32,
+    "baseline": 83.33,
+    "threshold": 17
+}, {
     "case_type": "performance",
     "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
     "request_conf": "vllm_api_stream_chat",
@@ -60,15 +69,6 @@ aisbench_cases = [{
     "batch_size": performance_batch_size,
     "baseline": 1,
     "threshold": 0.97
-}, {
-    "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/aime2024",
-    "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "baseline": 83.33,
-    "threshold": 17
 }]
 
 
