@@ -412,18 +412,25 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
     # default or defined cudagraph_capture_sizes may not consider num_speculative_tokens>1 scenario
     # the maximum size cudagraph_capture_sizes[0] should be greater or equal than
-    # max_num_seqs*(num_speculative_tokens+1), otherwise draft model will run in eager mode
-    if vllm_config.speculative_config is not None:
-        original_sizes = compilation_config.cudagraph_capture_sizes
-        required_size = (vllm_config.scheduler_config.max_num_seqs *
-                         (vllm_config.speculative_config.num_speculative_tokens + 1))
+    # (num_speculative_tokens+1)*max_num_seqs, otherwise draft model will run in eager mode
+    if vllm_config.speculative_config is not None and \
+        vllm_config.speculative_config.num_speculative_tokens > 1:
+        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        original_sizes, compilation_config.cudagraph_capture_sizes = \
+            compilation_config.cudagraph_capture_sizes, None
         assert len(original_sizes) > 0
-        if original_sizes[0] < required_size:
-            original_sizes[0] = required_size
-            compilation_config.init_with_cudagraph_sizes(original_sizes)
+        if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
+            enlarged_sizes = [
+                (num_speculative_tokens + 1) * size
+                for size in original_sizes
+            ]
+            compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
             logger.info(
-                "Adjusted ACL graph maximum batch size to: %d for speculative decoding",
-                original_sizes[0])
+                "Adjusted ACL graphs: %s → %s for speculative decoding",
+                original_sizes, enlarged_sizes)
+        else:
+            compilation_config.cudagraph_capture_sizes = original_sizes
 
 
 # TODO(wxy): Move to ops module
