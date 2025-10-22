@@ -807,8 +807,7 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
 
 
 def flashcomm2_enable() -> bool:
-    return get_ascend_config(
-    ).flashcomm2_oproj_tensor_parallel_size is not None
+    return envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2 > 0
 
 
 def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:

@@ -130,13 +130,17 @@ class AscendConfig:
                     "Only support P node tp size lagger then D node tp size")
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
-        self.flashcomm2_oproj_tensor_parallel_size = additional_config.get(
-            "flashcomm2_oproj_tensor_parallel_size", None)
-        if self.flashcomm2_oproj_tensor_parallel_size is not None:
+        import vllm_ascend.envs as envs_ascend
+        self.flashcomm2_oproj_tensor_parallel_size = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2
+        if self.flashcomm2_oproj_tensor_parallel_size > 0:
             global_tp_size = vllm_config.parallel_config.tensor_parallel_size
             logger.info(
                 f"Enable Flashcomm2 with flashcomm2_oproj_tensor_parallel_size={self.flashcomm2_oproj_tensor_parallel_size} and global_tp_size={global_tp_size}"
             )
+            if envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
+                logger.warning_once(
+                    "Enabling both FLASHCOMM1 and FLASHCOMM2 will default to using the optimizations of FLASHCOMM2."
+                )
             if self.oproj_tensor_parallel_size is not None:
                 raise AssertionError(
                     "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
