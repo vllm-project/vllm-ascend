@@ -43,13 +43,12 @@ class AisbenchRunner:
         if self.task_type == "accuracy":
             aisbench_cmd = [
                 'ais_bench', '--models', f'{self.request_conf}_custom',
-                '--datasets', f'{dataset_conf}', '--debug'
+                '--datasets', f'{dataset_conf}'
             ]
         if self.task_type == "performance":
             aisbench_cmd = [
                 'ais_bench', '--models', f'{self.request_conf}_custom',
-                '--datasets', f'{dataset_conf}_custom', '--debug', '--mode',
-                'perf'
+                '--datasets', f'{dataset_conf}_custom', '--mode', 'perf'
             ]
             if self.num_prompts:
                 aisbench_cmd.extend(['--num-prompts', str(self.num_prompts)])
