@@ -1137,7 +1137,8 @@ class MooncakeConnectorWorker:
 
         if self.kv_send_thread is not None:
             for req_id, delay_start_time in metadata.requests_to_send.items():
-                if self.tp_rank in self._get_remote_tp_ranks_for_req(req_id):
+                if self.tp_rank in np.array(
+                        self._get_remote_tp_ranks_for_req(req_id)):
                     self.kv_send_thread.add_delayed_request(
                         req_id, delay_start_time)
 
