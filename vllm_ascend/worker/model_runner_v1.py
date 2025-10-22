@@ -601,13 +601,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _init_mc2(self):
         """Initialization of MC2-related parameters and verify the validity."""
-
-        self.reserved_mc2_mask = None
-
         # For models contains no moe modules, we simply skip the
         # initialization of MC2.
         if not is_moe_model(self.vllm_config):
             self.mc2_tokens_capacity = 0
+            self.reserved_mc2_mask = torch.zeros(
+                0,
+                dtype=torch.bool,
+                device=self.device,
+            )
+
             return
 
         # For moe models, we first assume that this model will use MC2, and compute
@@ -649,6 +652,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # (such as a single node of A2). self.mc2_tokens_capacity falls
             # back to 0.
             self.mc2_tokens_capacity = 0
+        
+        self.reserved_mc2_mask = torch.zeros(
+            self.mc2_tokens_capacity,
+            dtype=torch.bool,
+            device=self.device,
+        )
 
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
