@@ -393,7 +393,8 @@ class AscendW4A8DynamicFusedMoEMethod:
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
-            dynamic_eplb=self.dynamic_eplb)
+            dynamic_eplb=self.dynamic_eplb,
+            mc2_mask=kwargs.get("mc2_mask", None))
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         scale = scale.transpose(1, 2).contiguous()
