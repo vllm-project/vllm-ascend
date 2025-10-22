@@ -669,12 +669,6 @@ class TestNPUPlatform(TestBase):
     def test_is_pin_memory_available_returns_true(self):
         self.assertTrue(self.platform.is_pin_memory_available())
 
-    def test_supports_v1(self):
-        from vllm.config import ModelConfig
-
-        mock_config = MagicMock(spec=ModelConfig)
-        self.assertTrue(self.platform.supports_v1(mock_config))
-
     def test_get_static_graph_wrapper_cls_returns_correct_value(self):
         self.assertEqual(
             self.platform.get_static_graph_wrapper_cls(),
