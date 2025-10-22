@@ -141,6 +141,7 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC_new_version(model):
 
 @pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_MLA_PA": "1"})
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
     prompts = [
         "Hello, my name is",
