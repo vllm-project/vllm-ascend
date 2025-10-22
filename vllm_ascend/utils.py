@@ -421,10 +421,8 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             compilation_config.cudagraph_capture_sizes, None
         assert len(original_sizes) > 0
         if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
-            enlarged_sizes = [
-                (num_speculative_tokens + 1) * size
-                for size in original_sizes
-            ]
+            enlarged_sizes = [(num_speculative_tokens + 1) * size
+                              for size in original_sizes]
             compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
             logger.info(
                 "Adjusted ACL graphs: %s → %s for speculative decoding",
