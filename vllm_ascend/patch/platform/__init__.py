@@ -19,10 +19,6 @@ import os
 import vllm_ascend.patch.platform.patch_config  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    import vllm_ascend.patch.platform.patch_deepseek_mtp  # noqa
 
 if os.getenv("DYNAMIC_EPLB", "false") == "true" or os.getenv(
         "EXPERT_MAP_RECORD", "false") == "true":
