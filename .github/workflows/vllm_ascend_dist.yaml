@@ -97,4 +97,8 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           # TODO: enable more tests
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
+          pytest -sv \
+            tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe \
+            tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC \
+            tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP \
+            tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_W8A8_WITH_EP

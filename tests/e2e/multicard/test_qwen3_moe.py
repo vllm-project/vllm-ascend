@@ -22,6 +22,7 @@ Run `pytest tests/e2e/multicard/test_qwen3_moe.py`.
 """
 
 import os
+from unittest.mock import patch
 
 from modelscope import snapshot_download  # type: ignore
 
@@ -41,6 +42,7 @@ def test_models_distributed_Qwen3_MOE_TP2():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_models_distributed_Qwen3_MOE_TP2_WITH_EP():
     example_prompts = [
         "Hello, my name is",
@@ -65,6 +67,22 @@ def test_models_distributed_Qwen3_MOE_W8A8():
             snapshot_download("vllm-ascend/Qwen3-30B-A3B-W8A8"),
             max_model_len=8192,
             tensor_parallel_size=2,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
+def test_models_distributed_Qwen3_MOE_W8A8_WITH_EP():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+            snapshot_download("vllm-ascend/Qwen3-30B-A3B-W8A8"),
+            max_model_len=8192,
+            tensor_parallel_size=2,
+            enable_expert_parallel=True,
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
