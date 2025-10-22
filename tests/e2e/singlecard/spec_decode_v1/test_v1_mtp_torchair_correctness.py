@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 from vllm import SamplingParams
+from vllm.config import CompilationConfig, CUDAGraphMode
 
 from tests.e2e.conftest import VllmRunner
 
@@ -16,9 +17,10 @@ def model_name():
     return "wemaster/deepseek_mtp_main_random_bf16"
 
 
-def test_mtp_torchair_correctness(
+def mtp_torchair_correctness(
     sampling_config: SamplingParams,
     model_name: str,
+    graph_mode: CUDAGraphMode = CUDAGraphMode.PIECEWISE,
 ):
     example_prompts = [
         "Hello, my name is",
@@ -44,6 +46,11 @@ def test_mtp_torchair_correctness(
                         "multistream_overlap_shared_expert": "True"
                     }) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
+
+    graph_mode_str = "PIECEWISE"
+    if graph_mode == CUDAGraphMode.FULL:
+        graph_mode_str = "FULL"
+
     with VllmRunner(model_name,
                     tensor_parallel_size=1,
                     max_num_seqs=256,
@@ -56,6 +63,8 @@ def test_mtp_torchair_correctness(
                     },
                     enforce_eager=False,
                     max_model_len=2000,
+                    compilation_config=CompilationConfig(
+                        cudagraph_mode=graph_mode_str),
                     additional_config={
                         "torchair_graph_config": {
                             "enabled": True,
@@ -81,3 +90,17 @@ def test_mtp_torchair_correctness(
     # Heuristic: expect at least 66% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
     assert matches > int(0.66 * len(ref_outputs))
+
+
+def test_mtp_torchair_correctness_piecewise(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_torchair_correctness(sampling_config, model_name)
+
+
+def test_mtp_torchair_correctness_full(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_torchair_correctness(sampling_config, model_name, CUDAGraphMode.FULL)

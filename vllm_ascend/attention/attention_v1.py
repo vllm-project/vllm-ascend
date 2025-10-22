@@ -216,6 +216,29 @@ class AscendAttentionMetadataBuilder:
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
                                                                        num_reqs
                                                                        + 1]
+
+        if attn_state == AscendAttentionState.DecodeOnly and \
+            common_attn_metadata.num_input_tokens > num_actual_tokens:
+            padded_num_tokens = common_attn_metadata.num_input_tokens - num_actual_tokens
+            seq_lens = torch.cat([
+                seq_lens,
+                torch.ones(padded_num_tokens,
+                           dtype=seq_lens.dtype,
+                           device=seq_lens.device)
+            ])
+            block_table_padding = torch.zeros(
+                (padded_num_tokens, ) + block_table.shape[1:],
+                dtype=block_table.dtype,
+                device=block_table.device)
+            block_table = torch.cat([block_table, block_table_padding], dim=0)
+            query_start_loc_cpu = torch.cat([
+                query_start_loc_cpu,
+                torch.arange(query_start_loc_cpu[-1] + 1,
+                             query_start_loc_cpu[-1] + padded_num_tokens,
+                             dtype=query_start_loc_cpu.dtype,
+                             device=query_start_loc_cpu.device)
+            ])
+
         query_start_loc = query_start_loc_cpu.to(self.device,
                                                  non_blocking=True)
 

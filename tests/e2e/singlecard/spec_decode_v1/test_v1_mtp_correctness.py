@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+from unittest.mock import patch
+
 import pytest
 from vllm import SamplingParams
+from vllm.config import CompilationConfig, CUDAGraphMode
 
 from tests.e2e.conftest import VllmRunner
 
@@ -20,6 +24,7 @@ def mtp_correctness(
     sampling_config: SamplingParams,
     model_name: str,
     num_speculative_tokens: int,
+    graph_mode: CUDAGraphMode = CUDAGraphMode.PIECEWISE,
 ):
     example_prompts = [
         "Hello, my name is",
@@ -38,6 +43,10 @@ def mtp_correctness(
                     enforce_eager=False) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
 
+    graph_mode_str = "PIECEWISE"
+    if graph_mode == CUDAGraphMode.FULL:
+        graph_mode_str = "FULL"
+
     with VllmRunner(
             model_name,
             tensor_parallel_size=1,
@@ -51,6 +60,8 @@ def mtp_correctness(
             },
             enforce_eager=False,
             max_model_len=2000,
+            compilation_config=CompilationConfig(
+                cudagraph_mode=graph_mode_str),
             additional_config={"ascend_scheduler_config": {
                 "enabled": False
             }}) as spec_llm:
@@ -74,15 +85,45 @@ def mtp_correctness(
     del spec_llm
 
 
-def test_mtp1_correctness(
+def test_mtp1_correctness_piecewise_graph(
     sampling_config: SamplingParams,
     model_name: str,
 ):
     mtp_correctness(sampling_config, model_name, 1)
 
 
-def test_mtp2_correctness(
+def test_mtp2_correctness_piecewise_graph(
     sampling_config: SamplingParams,
     model_name: str,
 ):
     mtp_correctness(sampling_config, model_name, 2)
+
+
+def test_mtp1_correctness_full_graph(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 1, CUDAGraphMode.FULL)
+
+
+def test_mtp2_correctness_full_graph(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 2, CUDAGraphMode.FULL)
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MLAPO": "1"})
+def test_mtp_correctness_piecewise_graph_with_mlapo_kernel(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 1)
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MLAPO": "1"})
+def test_mtp_correctness_full_graph_with_mlapo_kernel(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 1, CUDAGraphMode.FULL)
