@@ -44,19 +44,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  qwen3-32b:
-    strategy:
-      matrix:
-        # should add A3 chip runner when available
-        os: [linux-aarch64-a2-4]
-    # Note (yikun): If CI resource are limited we can split job into two chain jobs
-    # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    uses: ./.github/workflows/_e2e_nightly.yaml
-    with:
-      vllm: v0.11.0
-      runner: ${{ matrix.os }}
-      tests: tests/e2e/nightly/models/test_qwen3_32b.py
-  qwen3-32b-in8-a3:
+  qwen2-5-vl-7b:
     strategy:
       matrix:
         os: [ linux-aarch64-a3-4 ]
@@ -65,39 +53,4 @@ jobs:
       vllm: v0.11.0
       runner: ${{ matrix.os }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
-      tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
-  qwen3-32b-in8-a2:
-    strategy:
-      matrix:
-        os: [ linux-aarch64-a2-4 ]
-    uses: ./.github/workflows/_e2e_nightly.yaml
-    with:
-      vllm: v0.11.0
-      runner: ${{ matrix.os }}
-      tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
-  qwen3-235b-a22b-w8a8-eplb:
-    strategy:
-      matrix:
-        # should add A3 chip runner when available
-        os: [ linux-aarch64-a3-16 ]
-    # Note (yikun): If CI resource are limited we can split job into two chain jobs
-    # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    uses: ./.github/workflows/_e2e_nightly.yaml
-    with:
-      vllm: v0.11.0
-      runner: ${{ matrix.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
-  deepseek-r1-w8a8-eplb:
-    strategy:
-      matrix:
-        # should add A3 chip runner when available
-        os: [ linux-aarch64-a3-16 ]
-    # Note (yikun): If CI resource are limited we can split job into two chain jobs
-    # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    uses: ./.github/workflows/_e2e_nightly.yaml
-    with:
-      vllm: v0.11.0
-      runner: ${{ matrix.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
-      tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
