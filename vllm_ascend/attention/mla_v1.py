@@ -35,6 +35,7 @@ from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.utils import context_parallel_enable
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.worker.npu_input_batch import InputBatch
+from vllm.logger import logger
 
 if context_parallel_enable():
     from vllm.distributed import (get_context_model_parallel_rank,
@@ -110,9 +111,8 @@ class AscendMLAPrefillMetadata:
     q_full_idx: torch.Tensor = None
     cp_prefill_mask: torch.Tensor = None
     num_computed_tokens_of_cp_sp: Optional[list[Optional[list[Optional[list[int]]]]]] = None
-    num_computed_tokens_of_cp_sp_single: Optional[list[Optional[list[Optional[list[int]]]]]] = None
-    num_computed_tokens_of_cp_sp_current: Optional[list[Optional[list[Optional[list[int]]]]]] = None
     num_computed_tokens_of_cp_sp_accum: Optional[list[Optional[list[Optional[list[int]]]]]] = None
+    cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
 
 
 @dataclass
@@ -129,10 +129,6 @@ class AscendMLADecodeMetadata:
     sin: torch.Tensor = None
     cos: torch.Tensor = None
     num_computed_tokens_of_cp_sp: Optional[list[Optional[list[Optional[
-        list[int]]]]]] = None
-    num_computed_tokens_of_cp_sp_single: Optional[list[Optional[list[Optional[
-        list[int]]]]]] = None
-    num_computed_tokens_of_cp_sp_current: Optional[list[Optional[list[Optional[
         list[int]]]]]] = None
     num_computed_tokens_of_cp_sp_accum: Optional[list[Optional[list[Optional[
         list[int]]]]]] = None
@@ -331,6 +327,7 @@ class AscendMLAMetadataBuilder:
         long_seq_metadata = common_attn_metadata.common_long_seq_metadata
 
         cp_kv_recover_idx = long_seq_metadata.cp_kv_recover_idx if long_seq_metadata else None
+        cp_kv_recover_idx_for_chunk = long_seq_metadata.cp_kv_recover_idx_for_chunk if long_seq_metadata else None
         num_actual_tokens_cp_full = long_seq_metadata.num_actual_tokens_cp_full if long_seq_metadata else None
         num_computed_tokens_of_cp_sp = long_seq_metadata.num_computed_tokens_of_cp_sp if long_seq_metadata else None
         q_head_idx_tensor = long_seq_metadata.q_head_idx_tensor if long_seq_metadata else None
@@ -344,8 +341,6 @@ class AscendMLAMetadataBuilder:
         tail_attn_nomask_seqlens = long_seq_metadata.tail_attn_nomask_seqlens if long_seq_metadata else None
         q_full_idx = long_seq_metadata.q_full_idx if long_seq_metadata else None
         cp_prefill_mask = long_seq_metadata.cp_prefill_mask if long_seq_metadata else None
-        num_computed_tokens_of_cp_sp_single = long_seq_metadata.num_computed_tokens_of_cp_sp_single if long_seq_metadata else None
-        num_computed_tokens_of_cp_sp_current = long_seq_metadata.num_computed_tokens_of_cp_sp_current if long_seq_metadata else None
         num_computed_tokens_of_cp_sp_accum = long_seq_metadata.num_computed_tokens_of_cp_sp_accum if long_seq_metadata else None
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
@@ -459,9 +454,8 @@ class AscendMLAMetadataBuilder:
                 q_full_idx=q_full_idx,
                 cp_prefill_mask=cp_prefill_mask,
                 num_computed_tokens_of_cp_sp=num_computed_tokens_of_cp_sp,
-                num_computed_tokens_of_cp_sp_single=num_computed_tokens_of_cp_sp_single,
-                num_computed_tokens_of_cp_sp_current=num_computed_tokens_of_cp_sp_current,
-                num_computed_tokens_of_cp_sp_accum=num_computed_tokens_of_cp_sp_accum
+                num_computed_tokens_of_cp_sp_accum=num_computed_tokens_of_cp_sp_accum,
+                cp_kv_recover_idx_for_chunk=cp_kv_recover_idx_for_chunk
             )
 
         decode_metadata = None
@@ -489,8 +483,6 @@ class AscendMLAMetadataBuilder:
                 sin=sin,
                 cos=cos,
                 num_computed_tokens_of_cp_sp=num_computed_tokens_of_cp_sp,
-                num_computed_tokens_of_cp_sp_single=num_computed_tokens_of_cp_sp_single,
-                num_computed_tokens_of_cp_sp_current=num_computed_tokens_of_cp_sp_current,
                 num_computed_tokens_of_cp_sp_accum=num_computed_tokens_of_cp_sp_accum)
 
         return self.metadata_cls(  # type: ignore
@@ -706,8 +698,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
         # token -> request mapping for building per-token masks when CP>1
         num_tokens_all = q_nope.size(0)
-        seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32, device=q_nope.device).contiguous()
-        seq_len1.mul_(self.cp_size)  # q_full
+        seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32, device=q_nope.device)
+        seq_len1.mul_(self.cp_size)  # q_full: already padded, divisible by cp_size
 
         # normalize prefix LSE to [bs, heads, 1] for stable updates
         prefix_lse_bt = prefix_lse.permute(1, 0).unsqueeze(-1).contiguous() if prefix_lse is not None else None
@@ -723,7 +715,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         if attn_metadata is not None and attn_metadata.prefill is not None and \
                 attn_metadata.prefill.cp_prefill_mask is not None:
             mask_local = attn_metadata.prefill.cp_prefill_mask
-            # logger.info(f"||||||====> mask shape:{mask_local.shape}, mask_local: \n{mask_local}")
         else:
             mask_local = self.prefill_mask
             if mask_local is None:
@@ -867,27 +858,23 @@ class AscendMLAImpl(MLAAttentionImpl):
                                              dtype=torch.float32,
                                              device=q_nope.device)
 
-                if seq_len2.item() > 0:
-                    torch_npu.atb.npu_ring_mla(
-                        q_nope=q_nope,
-                        q_rope=q_pe,
-                        k_nope=k_nope,
-                        k_rope=k_pe,
-                        value=v,
-                        mask=mask_local,
-                        seqlen=seq_len,
-                        head_num=self.num_heads,
-                        kv_head_num=self.num_heads,
-                        qk_scale=self.scale,
-                        kernel_type="kernel_type_high_precision",
-                        mask_type="no_mask",
-                        input_layout="type_bsnd",
-                        calc_type="calc_type_first_ring",
-                        output=block_out_local,
-                        softmax_lse=block_lse_local)
-
-                # CP dimension fusion (SP already handled above)
-                # logger.debug(f"block_out_local shape:{block_out_local.shape}, block_lse_local shape:{block_lse_local.shape}")
+                torch_npu.atb.npu_ring_mla(
+                    q_nope=q_nope,
+                    q_rope=q_pe,
+                    k_nope=k_nope,
+                    k_rope=k_pe,
+                    value=v,
+                    mask=mask_local,
+                    seqlen=seq_len,
+                    head_num=self.num_heads,
+                    kv_head_num=self.num_heads,
+                    qk_scale=self.scale,
+                    kernel_type="kernel_type_high_precision",
+                    mask_type="no_mask",
+                    input_layout="type_bsnd",
+                    calc_type="calc_type_first_ring",
+                    output=block_out_local,
+                    softmax_lse=block_lse_local)
 
                 block_lse_local_bt = block_lse_local.permute(1, 0).unsqueeze(-1)
                 out_lse_local = torch.cat([block_out_local, block_lse_local_bt], dim=-1)
@@ -913,14 +900,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                         prefix_output = chunk_out_g.to(torch.float32)
                         prefix_lse_bt = chunk_lse_g
                     else:
-                        # logger.info(f"--->here, chunk shape:{chunk_out_g.shape},{chunk_lse_g.shape}, prefix shape:{prefix_output.shape},{prefix_lse_bt.shape}")
-                        chunk_out_g = self.pad_to_match(chunk_out_g, prefix_output)
-                        chunk_lse_g = self.pad_to_match(chunk_lse_g, prefix_lse_bt)
                         prefix_output, prefix_lse_bt = self._update_out_and_lse(
                             prefix_output, prefix_lse_bt, chunk_out_g, chunk_lse_g)
-                # logger.info(
-                #     f"#####> [MLA-CTX-CP] it={i}  q_nope.shape={q_nope.shape} k_nope.shape={k_nope.shape} "
-                #     f"v.shape={v.shape} out_local.shape={block_out_local.shape} lse_local.shape={block_lse_local.shape}")
 
             else:
                 # compute this chunk block then update prefix tensors to keep shapes consistent
@@ -955,29 +936,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 else:
                     prefix_output, prefix_lse_bt = self._update_out_and_lse(
                         prefix_output, prefix_lse_bt, block_out_local2, block_lse_local_bt2)
-                # logger.info(
-                #     f"#####> [MLA-CTX] it={i} toks={toks} q_nope.shape={q_nope.shape} k_nope.shape={k_nope.shape} v.shape={v.shape} "
-                #     f"prefix_out.shape={prefix_output.shape} prefix_lse.shape={prefix_lse_bt.shape}")
+
         # convert lse back to [heads, bs]
         if prefix_lse_bt is not None:
             prefix_lse = prefix_lse_bt.squeeze(-1).permute(1, 0).contiguous()
         return prefix_output, prefix_lse
-
-    def pad_to_match(self, A: torch.Tensor, B: torch.Tensor, value: float = 0.0):
-        # check dimension
-        if A.dim() != B.dim():
-            raise ValueError("A and B dimension must be consistent")
-        elif A.shape == B.shape:
-            return A
-
-        pad_sizes = []
-        for i in reversed(range(A.dim())):
-            diff = B.size(i) - A.size(i)
-            if diff < 0:
-                raise ValueError(f"A's dimension {i} is larger than B, cannot pad")
-            pad_sizes.extend([0, diff])  # pad on right
-
-        return F.pad(A, pad_sizes, value=value)
 
     def _forward_prefill(
         self,
@@ -1490,8 +1453,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             # q all_gather
             q_nope_full = get_cp_group().all_gather(q_nope.contiguous(), 0)
             q_pe_full = get_cp_group().all_gather(q_pe.contiguous(), 0)
-            q_nope_full = torch.index_select(q_nope_full, 0, attn_metadata.prefill.cp_kv_recover_idx)
-            q_pe_full = torch.index_select(q_pe_full, 0, attn_metadata.prefill.cp_kv_recover_idx)
+            q_nope_full = torch.index_select(q_nope_full, 0, attn_metadata.prefill.cp_kv_recover_idx_for_chunk)
+            q_pe_full = torch.index_select(q_pe_full, 0, attn_metadata.prefill.cp_kv_recover_idx_for_chunk)
             attn_output_pre = output.view(num_tokens, self.num_heads, self.v_head_dim)
             attn_output_pre, attn_lse = self._compute_prefill_context(
                 q_nope_full,

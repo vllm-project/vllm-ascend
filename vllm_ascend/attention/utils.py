@@ -10,15 +10,13 @@ from vllm.forward_context import ForwardContext, get_forward_context
 @dataclass
 class AscendCommonLongSequenceMetadata:
     cp_kv_recover_idx: torch.Tensor = None
+    
+    cp_kv_recover_idx_for_chunk: torch.Tensor = None
 
     num_actual_tokens_cp_full: Optional[int] = None
 
     num_computed_tokens_of_cp_sp: Optional[list[Optional[list[Optional[
         list[int]]]]]] = None
-
-    num_computed_tokens_of_cp_sp_single: list[list[list[int]]] = None
-
-    num_computed_tokens_of_cp_sp_current: list[list[list[int]]] = None
 
     num_computed_tokens_of_cp_sp_accum: list[list[list[int]]] = None
 
