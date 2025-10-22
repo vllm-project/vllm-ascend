@@ -266,14 +266,6 @@ class CustomDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         if self.q_lora_rank is not None:
-            self.q_a_proj = ReplicatedLinear(
-                self.hidden_size,
-                self.q_lora_rank,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.q_a_proj",
-                return_bias=False,
-            )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank,
                                          eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
@@ -294,14 +286,6 @@ class CustomDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 return_bias=False,
             )
 
-        self.kv_a_proj_with_mqa = ReplicatedLinear(
-            self.hidden_size,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_a_proj_with_mqa",
-            return_bias=False,
-        )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
@@ -578,6 +562,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("fused_qkv_a_proj", "q_a_proj", 0),
+            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales

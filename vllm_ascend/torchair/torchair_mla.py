@@ -664,6 +664,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.fused_qkv_a_proj = kwargs.get('fused_qkv_a_proj', None)
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
@@ -913,7 +914,14 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         B = hidden_states.shape[0]
         N = self.num_kv_heads
         S = 1
-        kv = self.kv_a_proj_with_mqa(hidden_states)[0]
+        if self.fused_qkv_a_proj is not None:
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            _, kv = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+        else:
+            kv = self.kv_a_proj_with_mqa(hidden_states)[0]
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
@@ -942,7 +950,14 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         B = hidden_states.shape[0]
         N = self.num_kv_heads
         S = 1
-        kv = self.kv_a_proj_with_mqa(hidden_states)[0]
+        if self.fused_qkv_a_proj is not None:
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            _, kv = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+        else:
+            kv = self.kv_a_proj_with_mqa(hidden_states)[0]
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
@@ -1105,9 +1120,22 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         self.running_chunkprefilll_with_torchair = self.torchair_graph_enabled and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
         num_actual_toks = attn_metadata.num_actual_tokens
         if k_pe is None and not self.running_in_graph:
-            kv_c, k_pe = self.kv_a_proj_with_mqa(
-                hidden_states_or_kv_c_normed)[0].split(
+            if self.fused_qkv_a_proj is not None:
+                qkv_lora = self.fused_qkv_a_proj(hidden_states_or_q_c)[0]
+                _, kv = qkv_lora.split(
+                    [
+                        self.q_lora_rank,
+                        self.kv_lora_rank + self.qk_rope_head_dim
+                    ],
+                    dim=-1,
+                )
+                kv_c, k_pe = kv.split(
                     [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            else:
+                kv = self.kv_a_proj_with_mqa(hidden_states_or_kv_c_normed)[0]
+                kv_c, k_pe = self.kv_a_proj_with_mqa(
+                    hidden_states_or_kv_c_normed)[0].split(
+                        [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
             kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         else:
             kv_c_normed = hidden_states_or_kv_c_normed

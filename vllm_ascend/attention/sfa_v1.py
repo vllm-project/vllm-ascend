@@ -627,7 +627,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         if has_decode:
             q_len = 1
             hidden_states_decode = hidden_states[:num_decode_tokens]
-            decode_qkv_lora = self.fused_qkv_a_proj(hidden_states_decode)
+            decode_qkv_lora = self.fused_qkv_a_proj(hidden_states_decode)[0]
             decode_q_c, decode_kv_no_split = decode_qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
@@ -713,7 +713,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             hidden_states_prefill = hidden_states[
                 num_decode_tokens:num_actual_tokens]
-            prefill_qkv_lora = self.fused_qkv_a_proj(hidden_states_prefill)
+            prefill_qkv_lora = self.fused_qkv_a_proj(hidden_states_prefill)[0]
             prefill_q_c, prefill_kv_no_split = prefill_qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,

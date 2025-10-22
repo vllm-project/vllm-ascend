@@ -719,22 +719,20 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         self.qk_head_dim = kwargs['qk_head_dim']
         self.v_head_dim = kwargs['v_head_dim']
         self.rotary_emb = kwargs['rotary_emb']
-        self.q_proj = kwargs['q_proj']
+        self.q_proj = kwargs['q_proj'] if self.q_lora_rank is None else kwargs[
+            'q_b_proj']
+        self.fused_qkv_a_proj = kwargs.get('fused_qkv_a_proj', None)
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
         self.indexer = kwargs['indexer']
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
-        self.q_a_proj = kwargs.get('q_a_proj', None)
         self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
         self.decoder_layer = kwargs.get('decoder_layer', None)
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_rank = self.num_heads // self.tp_size
-        if self.q_a_proj is not None:
-            self.q_b_proj = self.q_proj
-        else:
-            self.q_b_proj = None
+        self.q_b_proj = kwargs['q_b_proj']
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
@@ -768,8 +766,8 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
 
         self.cp_size = 1
 
-        if self.q_a_proj is not None:
-            self.prefix = self.q_a_proj.prefix
+        if self.fused_qkv_a_proj is not None:
+            self.prefix = self.fused_qkv_a_proj.prefix
         else:
             self.prefix = 0
         self.debug_layer_idx = int(self.prefix.split(".")[2])
@@ -833,39 +831,47 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             self._process_weights_for_fused_mlapo(act_dtype)
 
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
-        kv_a_proj_wt = self.kv_a_proj_with_mqa.weight.data.clone()
-        kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
+        kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[
+            ..., self.q_lora_rank:].contiguous()
+        q_a_proj_wt = self.fused_qkv_a_proj.weight.data[
+            ..., :self.q_lora_rank].contiguous()
         kv_a_proj_wt = trans_rope_weight(kv_a_proj_wt, self.qk_rope_head_dim)
-        kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
-        wd_qkv = torch.cat((kv_a_proj_wt, self.q_a_proj.weight.data.clone()),
-                           dim=-1)
+        kv_a_proj_wt = kv_a_proj_wt.contiguous()
+
+        wd_qkv = torch.cat((kv_a_proj_wt, q_a_proj_wt), dim=-1)
         wd_qkv = wd_qkv.t().contiguous()
         wd_qkv = transdata(wd_qkv,
                            block_size=(16, 32)).unsqueeze(0).contiguous()
         if is_enable_nz():
             self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
 
-        kv_a_proj_deq_scl = self.kv_a_proj_with_mqa.deq_scale.clone()
+        kv_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[
+            self.q_lora_rank:].contiguous()
+        q_a_proj_deq_scl = self.fused_qkv_a_proj.deq_scale[:self.
+                                                           q_lora_rank].contiguous(
+                                                           )
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(
             self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
         kv_a_proj_deq_scl = trans_rope_weight(kv_a_proj_deq_scl,
                                               self.qk_rope_head_dim)
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.view(
             self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.deq_scale_qkv = torch.cat(
-            (kv_a_proj_deq_scl, self.q_a_proj.deq_scale.clone()),
-            dim=-1).contiguous()
+        self.deq_scale_qkv = torch.cat((kv_a_proj_deq_scl, q_a_proj_deq_scl),
+                                       dim=-1).contiguous()
 
-        kv_a_proj_qt_bias = self.kv_a_proj_with_mqa.quant_bias.clone()
+        kv_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[
+            self.q_lora_rank:].contiguous()
+        q_a_proj_qt_bias = self.fused_qkv_a_proj.quant_bias[:self.
+                                                            q_lora_rank].contiguous(
+                                                            )
         kv_a_proj_qt_bias = kv_a_proj_qt_bias.reshape(
             self.kv_lora_rank + self.qk_rope_head_dim, -1).contiguous()
         kv_a_proj_qt_bias = trans_rope_weight(kv_a_proj_qt_bias,
                                               self.qk_rope_head_dim)
         kv_a_proj_qt_bias = kv_a_proj_qt_bias.view(
             self.kv_lora_rank + self.qk_rope_head_dim).contiguous()
-        self.quant_bias_qkv = torch.cat(
-            (kv_a_proj_qt_bias, self.q_a_proj.quant_bias.clone()),
-            dim=-1).contiguous()
+        self.quant_bias_qkv = torch.cat((kv_a_proj_qt_bias, q_a_proj_qt_bias),
+                                        dim=-1).contiguous()
 
         wu_q = self.q_proj.weight.data.clone()
         wu_q = wu_q.t().reshape(self.num_heads,
@@ -898,8 +904,8 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         self.gamma1 = self.q_a_layernorm.weight.data
         self.beta1 = self.q_a_layernorm.bias.data
         self.gamma2 = self.kv_a_layernorm.weight.data
-        self.quant_scale0 = self.q_a_proj.input_scale.data
-        self.quant_offset0 = self.q_a_proj.input_offset.data
+        self.quant_scale0 = self.fused_qkv_a_proj.input_scale.data
+        self.quant_offset0 = self.fused_qkv_a_proj.input_offset.data
         self.quant_scale1 = self.q_proj.input_scale.data
         self.quant_offset1 = self.q_proj.input_offset.data
 
@@ -951,8 +957,12 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         decode_q_pe = decode_q_pe.view(bsz, self.num_heads, -1)
 
         hidden_states = self.decoder_layer.input_layernorm(hidden_states)
-        decode_kq = self.q_a_proj(hidden_states)  # q down
-        decode_q_c = self.q_a_layernorm(decode_kq)  # q down layernorm
+        decode_qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+        decode_q_c, decode_kv_no_split = decode_qkv_lora.split(
+            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+            dim=-1,
+        )
+        decode_q_c = self.q_a_layernorm(decode_q_c)  # q down layernorm
 
         topk_indices = self.indexer_select(hidden_states,
                                            decode_q_c,
@@ -993,10 +1003,13 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
 
             hidden_states_prefill = hidden_states
             prefill_slot_mapping = attn_metadata.slot_mapping
-            prefill_kq = self.q_a_proj(hidden_states_prefill)  # q down
-            prefill_q_c = self.q_a_layernorm(prefill_kq)  # q down layernorm
-            prefill_kv_no_split = self.kv_a_proj_with_mqa(
-                hidden_states_prefill)  # c_kv
+            prefill_qkv_lora = self.fused_qkv_a_proj(hidden_states_prefill)[0]
+            prefill_q_c, prefill_kv_no_split = prefill_qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            prefill_q_c = self.q_a_layernorm(prefill_q_c)  # q down layernorm
+
             if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
                 prefill_kv_no_split = get_tp_group().all_gather(
                     prefill_kv_no_split,
@@ -1110,10 +1123,16 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             else:
                 q_len = 1
                 hidden_states_decode = hidden_states
-                decode_kq = self.q_a_proj(hidden_states_decode)  # q down
-                decode_q_c = self.q_a_layernorm(decode_kq)  # q down layernorm
-                decode_kv_no_split = self.kv_a_proj_with_mqa(
-                    hidden_states_decode)  # c_kv
+                decode_qkv_lora = self.fused_qkv_a_proj(hidden_states_decode)[
+                    0]  # q down
+                decode_q_c, decode_kv_no_split = decode_qkv_lora.split(
+                    [
+                        self.q_lora_rank,
+                        self.kv_lora_rank + self.qk_rope_head_dim
+                    ],
+                    dim=-1,
+                )
+                decode_q_c = self.q_a_layernorm(decode_q_c)  # q down layernorm
                 # self.actual_seq_length = torch.arange(1,self.graph_batch_size+1).to(torch.int32).npu()
 
                 # decode_q_c = q_c[:num_decode_tokens]

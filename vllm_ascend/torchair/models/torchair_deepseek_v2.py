@@ -502,12 +502,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                                quant_config=quant_config,
                                                prefix=f"{prefix}.q_proj")
 
-        self.kv_a_proj_with_mqa = ReplicatedLinear(
-            self.hidden_size,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_a_proj_with_mqa")
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
@@ -643,11 +637,19 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             maybe_npu_prefetch(self.fused_qkv_a_proj.weight,
                                hidden_states,
                                enabled=enable_multistream_mla)
-            ckq = self.fused_qkv_a_proj(hidden_states)[0]
-            hidden_states_or_q_c = self.q_a_layernorm(ckq)
-            forward_kwargs['ckq'] = ckq
+            # ckq = self.fused_qkv_a_proj(hidden_states)[0]
+            # hidden_states_or_q_c = self.q_a_layernorm(ckq)
+            # forward_kwargs['ckq'] = ckq'
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_no_split = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            hidden_states_or_q_c = self.q_a_layernorm(q_c)
+            forward_kwargs['ckq'] = q_c
         else:
             hidden_states_or_q_c = hidden_states
+            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
         if self.torchair_graph_enabled:
             output_shape = hidden_states.shape
             output = torch.empty(output_shape,
@@ -660,7 +662,6 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             output = output.view(-1, output_shape[-1])
             return output
         else:
-            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
             if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
                 hidden_states_or_q_c = get_tp_group().all_gather(
                     hidden_states_or_q_c, 0)
@@ -752,14 +753,6 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 return_bias=False,
             )
 
-        self.kv_a_proj_with_mqa = ReplicatedLinear(
-            self.hidden_size,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_a_proj_with_mqa",
-            return_bias=False,
-        )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
@@ -1266,6 +1259,8 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("fused_qkv_a_proj", "q_a_proj", 0),
+            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales
