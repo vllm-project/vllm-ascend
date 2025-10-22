@@ -2842,7 +2842,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # allowing vLLM to correctly estimate the maximum memory required.
             # Only run this extra dummy_run when MC2 is actually needed and
             # cases are not covered by the above dummy_run.
-            if self.reserved_mc2_mask is not None and \
+            if self.mc2_tokens_capacity > 0 and \
                 self.max_num_tokens > self.mc2_tokens_capacity:
                 self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
 
