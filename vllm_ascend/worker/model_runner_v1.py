@@ -3652,6 +3652,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return self.get_kv_cache_spec_v0110()
 
         block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config,
                                                   AttentionLayerBase)
@@ -3689,11 +3690,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         f"Unknown attention type: {attn_module.attn_type}")
 
             elif isinstance(attn_module, MLAAttention):
-                kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype)
+                if use_mla and not self.use_sparse:
+                    kv_cache_spec[layer_name] = MLAAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype,
+                        cache_dtype_str=self.cache_config.cache_dtype)
+                else:
+                    # TODO(cmq): This is a hack way to fix deepseek kvcache when
+                    # using DSA. Fix the spec in vLLM is a finnal way.
+                    kv_cache_spec[layer_name] = FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=attn_module.head_size,
+                        dtype=self.kv_cache_dtype)
 
         mamba_layers = get_layers_from_vllm_config(self.vllm_config, MambaBase)
         if len(mamba_layers) > 0:
