@@ -229,7 +229,9 @@ def torchair_ops_patch():
     AscendDeepseekScalingRotaryEmbedding.__init__ = deepseek_rope_init_func  # type: ignore[method-assign]
     AscendDeepseekScalingRotaryEmbedding.forward = native_rope_deepseek_forward  # type: ignore[method-assign]
 
+    AscendRMSNorm.__init__ = torchair_layernorm.torchair_rmsnorm_init_  # type: ignore[method-assign]
     AscendRMSNorm.forward_oot = torchair_layernorm.torchair_rmsnorm_forward_oot  # type: ignore[method-assign]
+
     AscendSiluAndMul.forward_oot = torchair_activation.torchair_silu_and_mul_forward_oot  # type: ignore[method-assign]
     AscendVocabParallelEmbedding.forward = vocab_embedding_forward  # type: ignore[method-assign]
 
