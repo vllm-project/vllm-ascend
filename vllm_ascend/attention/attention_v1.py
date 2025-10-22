@@ -632,7 +632,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         else:
             if attn_metadata is None:
-                return output.view(num_tokens, self.hidden_size)
+                return output.view(num_tokens, self.hidden_size).fill_(0)
             num_actual_tokens = attn_metadata.num_actual_tokens
             assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
             attn_type = self.attn_type

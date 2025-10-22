@@ -1098,7 +1098,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
         self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
