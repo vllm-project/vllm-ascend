@@ -736,8 +736,10 @@ class MooncakeConnectorScheduler:
             num_computed_tokens, params)
 
         if params is not None and params.get("do_remote_prefill"):
-            assert num_computed_tokens == 0, "Currently only support " \
-                                             "prefill with num_computed_tokens == 0."
+            if num_computed_tokens != 0:
+                logger.warning(
+                    "Currently only support prefill with num_computed_tokens == 0."
+                )
             # Assume that the request's KV cache is already fully prefilled and
             # can be fetched entirely from the prefill node.
             count = max(len(request.prompt_token_ids) - 1, 0)
