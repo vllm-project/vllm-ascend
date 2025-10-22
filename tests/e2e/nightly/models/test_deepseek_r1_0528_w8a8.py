@@ -31,6 +31,8 @@ MODELS = [
 MODES = [
     "torchair",
     "single",
+    "aclgraph",
+    "no_chunkprefill",
 ]
 
 prompts = [
@@ -104,6 +106,10 @@ async def test_models(model: str, mode: str) -> None:
     if mode == "single":
         server_args.append("--enforce-eager")
         additional_config["torchair_graph_config"] = {"enabled": False}
+    if mode == "aclgraph":
+        additional_config["torchair_graph_config"] = {"enabled": False}
+    if mode == "no_chunkprefill":
+        additional_config["ascend_scheduler_config"] = {"enabled": True}
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
@@ -122,7 +128,7 @@ async def test_models(model: str, mode: str) -> None:
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
         print(choices)
-        if mode == "single":
+        if mode in ["single", "no_chunkprefill"]:
             return
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)
