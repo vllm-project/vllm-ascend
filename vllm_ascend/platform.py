@@ -296,8 +296,8 @@ class NPUPlatform(Platform):
                 compilation_config.set_splitting_ops_for_v1()
                 compilation_config.use_inductor = False
                 compilation_config.splitting_ops.extend([
-                    "vllm.unified_ascend_attention_with_output",
-                    "vllm.mla_forward"
+                    "vllm::unified_ascend_attention_with_output",
+                    "vllm::mla_forward"
                 ])
                 update_aclgraph_sizes(vllm_config)
             elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
