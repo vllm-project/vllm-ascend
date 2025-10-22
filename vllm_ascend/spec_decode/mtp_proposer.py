@@ -502,7 +502,7 @@ class MtpProposer(Proposer):
 
             # prepare next mtp inputs
             # mtp>1: prefill skip or decode skip last loop
-            if with_prefill and self.torchair_graph_enabled:
+            if with_prefill:
                 for _ in range(self.num_speculative_tokens - 1):
                     draft_token_ids_list.append(draft_token_ids)
             if step == self.num_speculative_tokens - 1 or with_prefill:
