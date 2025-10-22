@@ -88,10 +88,6 @@ class NPUPlatform(Platform):
         return torch.npu.get_device_name(device_id)
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
-        return True
-
-    @classmethod
     def inference_mode(cls):
         return torch.inference_mode()
 
@@ -270,6 +266,17 @@ class NPUPlatform(Platform):
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
+        # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
+        # Then, we will have to discuss the error handling strategy and user experience
+        if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and \
+            os.environ.get("ASCEND_LAUNCH_BLOCKING", "0") == "1":
+            raise ValueError(
+                "ACL graph is incompatible with ASCEND_LAUNCH_BLOCKING=1. "
+                "Please unset ASCEND_LAUNCH_BLOCKING or set it to 0. If you "
+                "need ASCEND_LAUNCH_BLOCKING for debugging, consider other methods — "
+                "for example, check the plog files (default: $HOME/ascend/log/debug) "
+                "for more information about runtime errors.")
+
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             os.environ["VLLM_ALL2ALL_BACKEND"] = "flashinfer_all2allv"
@@ -300,6 +307,20 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config,
                 ascend_config.ascend_scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
+        elif ascend_config.recompute_scheduler_enable:
+            from vllm_ascend.core.recompute_schedule_config import \
+                RecomputeSchedulerConfig
+            recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
+                vllm_config.scheduler_config)
+            vllm_config.scheduler_config = recompute_scheduler_config
+
+        # Extend original scheduler_config to use SchedulerDynamicBatch.
+        if ascend_config.SLO_limits_for_dynamic_batch != -1:
+            vllm_config.scheduler_config.scheduler_cls = (
+                "vllm_ascend.core.scheduler_dynamic_batch.SchedulerDynamicBatch"
+            )
+            vllm_config.scheduler_config.chunked_prefill_enabled = True
+            vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
     @classmethod
     def get_attn_backend_cls(
@@ -360,13 +381,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        return True
-
-    @classmethod
-    def supports_v1(cls, model_config: ModelConfig) -> bool:
-        """Returns whether the current platform can support v1 for the supplied
-        model configuration.
-        """
         return True
 
     @classmethod

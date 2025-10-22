@@ -62,8 +62,11 @@ class AscendW8A8DynamicLinearMethod:
                                                    dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
+                           params_dtype: torch.dtype,
+                           layer_type: Optional[str] = None) -> Dict[str, Any]:
         return {}
 
     @staticmethod
@@ -203,7 +206,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
-            1] == global_num_experts, "Number of global experts mismatch"
+            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -224,22 +227,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
-        if self.use_aclgraph:
-            moe_comm_method = get_forward_context().moe_comm_method
-            return moe_comm_method.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                use_int8_w8a8=True,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                expert_map=expert_map,
-                dynamic_eplb=self.dynamic_eplb,
-                log2phy=log2phy,
-                global_redundant_expert_num=global_redundant_expert_num)
-
         topk_weights = topk_weights.to(x.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
@@ -258,7 +245,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
-            dynamic_eplb=self.dynamic_eplb)
+            dynamic_eplb=self.dynamic_eplb,
+            mc2_mask=kwargs.get("mc2_mask", None))
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

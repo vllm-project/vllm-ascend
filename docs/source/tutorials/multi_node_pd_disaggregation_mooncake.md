@@ -4,7 +4,7 @@
 
 vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide take one-by-one steps to verify these features with constrained resources.
 
-Take the Qwen3-235B model as an example, use vllm-ascend v0.11.0rc1 (with vLLM v0.11.0) on 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the ip of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs 16 chips to deploy one service instance.
+Take the Qwen3-235B model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the ip of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs 16 chips to deploy one service instance.
 
 ## Verify Multi-Node Communication Environment
 
@@ -30,17 +30,22 @@ for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
 for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
 # View gateway configuration
 for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
-# View NPU network configuration
+```
+
+2. Check NPU network configuration:
+
+```bash
+# Ensure that the hccn.conf file exists in the environment. If using Docker, mount it into the container.
 cat /etc/hccn.conf
 ```
 
-2. Get NPU IP Addresses
+3. Get NPU IP Addresses
 
 ```bash
 for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
 ```
 
-3. Cross-Node PING Test
+4. Cross-Node PING Test
 
 ```bash
 # Execute on the target node (replace 'x.x.x.x' with actual npu ip address)
@@ -66,16 +71,16 @@ Install the relevant dependencies. The installation of Go is not required.
 
 ```shell
 cd Mooncake
-bash dependencies.sh
+bash dependencies.sh -y
 ```
 
 Install mpi
 
 ```shell
-apt purge mpich libmpich-dev
-apt purge openmpi-bin
-apt purge openmpi-bin libopenmpi-dev
-apt install mpich libmpich-dev
+apt purge mpich libmpich-dev -y
+apt purge openmpi-bin -y
+apt purge openmpi-bin libopenmpi-dev -y
+apt install mpich libmpich-dev -y
 export CPATH=/usr/lib/aarch64-linux-gnu/mpich/include/:$CPATH
 export CPATH=/usr/lib/aarch64-linux-gnu/openmpi/lib:$CPATH
 ```
@@ -123,7 +128,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
-  --api-server-count 2 \
+  --api-server-count 1 \
   --data-parallel-size 2 \
   --data-parallel-size-local 2 \
   --data-parallel-address 192.0.0.1 \
@@ -182,7 +187,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
-  --api-server-count 2 \
+  --api-server-count 1 \
   --data-parallel-size 2 \
   --data-parallel-size-local 2 \
   --data-parallel-address 192.0.0.2 \
@@ -241,7 +246,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
-  --api-server-count 4 \
+  --api-server-count 1 \
   --data-parallel-size 32 \
   --data-parallel-size-local 16 \
   --data-parallel-address 192.0.0.3 \
@@ -370,7 +375,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
-  --api-server-count 2 \
+  --api-server-count 1 \
   --data-parallel-size 2 \
   --data-parallel-size-local 2 \
   --data-parallel-address 192.0.0.1 \
@@ -397,8 +402,8 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
                     "tp_size": 8
              },
              "decode": {
-                    "dp_size": 4,
-                    "tp_size": 8
+                    "dp_size": 32,
+                    "tp_size": 1
              }
       }
   }'
@@ -429,7 +434,7 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
-  --api-server-count 2 \
+  --api-server-count 1 \
   --data-parallel-size 2 \
   --data-parallel-size-local 2 \
   --data-parallel-address 192.0.0.2 \
@@ -456,8 +461,8 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
                     "tp_size": 8
              },
              "decode": {
-                    "dp_size": 4,
-                    "tp_size": 8
+                    "dp_size": 32,
+                    "tp_size": 1
              }
       }
   }'
@@ -488,12 +493,12 @@ export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packa
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
-  --api-server-count 4 \
-  --data-parallel-size 4 \
-  --data-parallel-size-local 2 \
+  --api-server-count 1 \
+  --data-parallel-size 32 \
+  --data-parallel-size-local 16 \
   --data-parallel-address 192.0.0.3 \
   --data-parallel-rpc-port 5964  \
-  --tensor-parallel-size 8 \
+  --tensor-parallel-size 1 \
   --enable-expert-parallel \
   --seed 1024 \
   --distributed-executor-backend mp \
@@ -517,8 +522,8 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
                     "tp_size": 8
              },
              "decode": {
-                    "dp_size": 4,
-                    "tp_size": 8
+                    "dp_size": 32,
+                    "tp_size": 1
              }
       }
   }'
@@ -550,12 +555,12 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
   --host 0.0.0.0 \
   --port 8004 \
   --headless \
-  --data-parallel-size 4 \
-  --data-parallel-size-local 2 \
-  --data-parallel-start-rank 2 \
+  --data-parallel-size 32 \
+  --data-parallel-size-local 16 \
+  --data-parallel-start-rank 16 \
   --data-parallel-address 192.0.0.3 \
   --data-parallel-rpc-port 5964  \
-  --tensor-parallel-size 8 \
+  --tensor-parallel-size 1 \
   --enable-expert-parallel \
   --seed 1024 \
   --distributed-executor-backend mp \
@@ -579,8 +584,8 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
                     "tp_size": 8
              },
              "decode": {
-                    "dp_size": 4,
-                    "tp_size": 8
+                    "dp_size": 32,
+                    "tp_size": 1
              }
       }
   }'

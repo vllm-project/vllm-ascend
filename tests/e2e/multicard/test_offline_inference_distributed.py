@@ -30,9 +30,18 @@ from vllm import SamplingParams
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 QWEN_DENSE_MODELS = [
     "vllm-ascend/Qwen3-8B-W8A8", "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8"
+]
+
+QWEN_W4A8_OLD_VERSION_MODELS = [
+    "vllm-ascend/Qwen3-8B-W4A8",
+]
+
+QWEN_W4A8_NEW_VERSION_MODELS = [
+    "vllm-ascend/Qwen3-1.7B-W4A8-V1",
 ]
 
 DEEPSEEK_W4A8_MODELS = [
@@ -52,7 +61,7 @@ def test_models_distributed_QwQ():
             dtype=dtype,
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
-            enforce_eager=True,
+            enforce_eager=False,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -98,24 +107,41 @@ def test_models_distributed_Qwen3_W8A8():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_models_distributed_Qwen3_W4A8DYNAMIC():
-    example_prompts = [
+@pytest.mark.parametrize("model", QWEN_W4A8_OLD_VERSION_MODELS)
+def test_models_distributed_Qwen3_W4A8DYNAMIC_old_version(model):
+    prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
-
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-8B-W4A8"),
+            snapshot_download(model),
             max_model_len=8192,
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
     ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+        vllm_model.generate_greedy(prompts, max_tokens)
+
+
+@pytest.mark.parametrize("model", QWEN_W4A8_NEW_VERSION_MODELS)
+def test_models_distributed_Qwen3_W4A8DYNAMIC_new_version(model):
+    prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+            snapshot_download(model),
+            max_model_len=8192,
+            dtype="auto",
+            tensor_parallel_size=2,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(prompts, max_tokens)
 
 
 @pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_MLA_PA": "1"})
+@patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
     prompts = [
         "Hello, my name is",
@@ -163,11 +189,10 @@ def test_sp_for_qwen3_moe() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
-def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model, enforce_eager):
+def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model):
     example_prompts = [
         "Hello, my name is",
     ]
@@ -176,7 +201,7 @@ def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model, enforce_eager):
     with VllmRunner(
             snapshot_download(model),
             max_model_len=8192,
-            enforce_eager=enforce_eager,
+            enforce_eager=False,
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
@@ -184,12 +209,10 @@ def test_models_distributed_Qwen_Dense_with_flashcomm_v1(model, enforce_eager):
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"})
-def test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight(
-        model, enforce_eager):
+def test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight(model):
     example_prompts = [
         "Hello, my name is",
     ]
@@ -198,7 +221,7 @@ def test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight(
     with VllmRunner(
             snapshot_download(model),
             max_model_len=8192,
-            enforce_eager=enforce_eager,
+            enforce_eager=False,
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",

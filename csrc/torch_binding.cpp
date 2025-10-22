@@ -17,15 +17,77 @@
 #include <torch/extension.h>
 #include <torch/library.h>
 #include <torch/version.h>
+#include <torch/torch.h>
 #include <torch_npu/csrc/core/npu/NPUStream.h>
 #include <torch_npu/csrc/framework/OpCommand.h>
+#include "torch_npu/csrc/core/npu/NPUGuard.h"
 #include <torch_npu/csrc/npu/Module.h>
 #include "acl/acl.h"
+#include "acl/acl_rt.h"
 #include "ops.h"
 #include "utils.h"
 #include "mla_preprocess/op_host/mla_preprocess.h"
 
+#include <c10/core/Device.h>
+#include <c10/util/Exception.h>
+#include <c10/util/Logging.h>
+
 namespace vllm_ascend {
+void swap_blocks_impl(torch::Tensor& src, torch::Tensor& dst,
+                 const torch::Tensor& block_mapping, aclrtStream stream) {
+  torch::Device src_device = src.device();
+  torch::Device dst_device = dst.device();
+  aclrtMemcpyKind memcpy_type;
+
+  if ((!src_device.is_cpu()) && (!dst_device.is_cpu())) {
+    TORCH_CHECK(src_device.index() == dst_device.index(),
+                "src and dst must be on the same npu");
+    memcpy_type = ACL_MEMCPY_DEVICE_TO_DEVICE;
+  } else if ((!src_device.is_cpu()) && dst_device.is_cpu()) {
+    memcpy_type = ACL_MEMCPY_DEVICE_TO_HOST;
+  } else if (src_device.is_cpu() && (!dst_device.is_cpu())) {
+    memcpy_type = ACL_MEMCPY_HOST_TO_DEVICE;
+  } else {
+    TORCH_CHECK(false, "Invalid device combination, src tensor device: ", src_device, ", dst tensor device: ", dst_device);
+  }
+
+  TORCH_CHECK(block_mapping.device().is_cpu(), "block_mapping must be on CPU");
+
+  char* src_ptr = static_cast<char*>(src.data_ptr());
+  char* dst_ptr = static_cast<char*>(dst.data_ptr());
+
+  const int64_t block_size_in_bytes = src.element_size() * src.stride(0);
+  
+  const int64_t num_blocks = block_mapping.size(0);
+  const int64_t max_src_block = src.size(0);
+  const int64_t max_dst_block = dst.size(0);
+  for (size_t i = 0; i < num_blocks; i++) {
+    int64_t src_block_number = block_mapping[i][0].item<int64_t>();
+    int64_t dst_block_number = block_mapping[i][1].item<int64_t>();
+    TORCH_CHECK(src_block_number >= 0 && src_block_number <= max_src_block,
+                    "src block index ", src_block_number, " out of range (max: ", max_src_block, ")");
+    TORCH_CHECK(dst_block_number >= 0 && dst_block_number <= max_dst_block,
+                    "dst block index ", dst_block_number, " out of range (max: ", max_dst_block, ")");
+    
+    int64_t src_offset = src_block_number * block_size_in_bytes;
+    int64_t dst_offset = dst_block_number * block_size_in_bytes;
+
+    aclrtMemcpyAsync(dst_ptr + dst_offset, block_size_in_bytes,
+                          src_ptr + src_offset, block_size_in_bytes,
+                          memcpy_type, stream);
+  }
+}
+
+void swap_blocks(torch::Tensor &x, torch::Tensor &y, const torch::Tensor &z)
+{    
+  
+  const c10_npu::OptionalNPUGuard npuGuard(
+        (!x.device().is_cpu()) ? x.device() : y.device()
+    );
+  aclrtStream stream = c10_npu::getCurrentNPUStream().stream();                       
+  swap_blocks_impl(x, y, z, stream);           
+  return;
+}
 
 AscendType get_dtype_from_torch(at::ScalarType scalarType)
 {
@@ -108,7 +170,7 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
 }
 
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
-    const at::Tensor &hiddenState, const at::Tensor &gamma0, const at::Tensor &beta0, const at::Tensor &wdqkv,
+    const at::Tensor &hiddenState, const at::Tensor &wdqkv,
     const at::Tensor &descale0, const at::Tensor &gamma1, const at::Tensor &beta1, const at::Tensor &wuq,
     const at::Tensor &descale1, const at::Tensor &gamma2, const at::Tensor &cos, const at::Tensor &sin,
     const at::Tensor &wuk, const at::Tensor &kv_cache, const at::Tensor &kv_cache_rope, const at::Tensor &slotmapping,
@@ -135,8 +197,6 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     );
 
     void *hidden_state_ptr = hiddenState.data_ptr();
-    void *gamma0_ptr = gamma0.data_ptr();
-    void *beta0_ptr = beta0.data_ptr();
     void *quant_scale0_ptr = quant_scale0.data_ptr();
     void *quant_offset0_ptr = quant_offset0.data_ptr();
     void *wdqkv_ptr = wdqkv.data_ptr();
@@ -168,12 +228,12 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     at_npu::native::OpCommand cmd;
     cmd.Name("mla_preprocess");
 
-    cmd.SetCustomHandler([stream, hidden_state_ptr, gamma0_ptr, beta0_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
+    cmd.SetCustomHandler([stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
                           gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr,
                           kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
                           qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, workspace_ptr,
                           tiling_ptr, block_dim]() -> int {
-        mla_preprocess_impl(stream, hidden_state_ptr, gamma0_ptr, beta0_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
+        mla_preprocess_impl(stream, hidden_state_ptr, quant_scale0_ptr, quant_offset0_ptr, wdqkv_ptr, bias0_ptr,
                             gamma1_ptr, beta1_ptr, quant_scale1_ptr, quant_offset1_ptr, gamma2_ptr, sin_ptr, cos_ptr, sin_ptr, cos_ptr,
                             kv_cache_ptr, slotmapping_ptr, wuq_ptr, bias1_ptr, wuk_ptr, descale0_ptr, descale1_ptr, ctkv_scale_ptr,
                             qnope_scale_ptr, q_out0_ptr, kv_cache_out0_ptr, q_out1_ptr, kv_cache_out1_ptr, workspace_ptr,
@@ -502,7 +562,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
 
     ops.def(
-        "mla_preprocess(Tensor hiddenState, Tensor gamma0, Tensor beta0, Tensor wdqkv,"
+        "mla_preprocess(Tensor hiddenState, Tensor wdqkv,"
         "               Tensor descale0, Tensor gamma1, Tensor beta1, Tensor wuq, Tensor descale1,"
         "               Tensor gamma2, Tensor cos, Tensor sin, Tensor wuk, Tensor kv_cache,"
         "               Tensor kv_cache_rope, Tensor slotmapping, Tensor quant_scale0,"
@@ -513,4 +573,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                          Tensor q_out1, Tensor kv_cache_out1)"
     );
     ops.impl("mla_preprocess", torch::kPrivateUse1, &vllm_ascend::mla_preprocess);
+
+    ops.def("swap_blocks(Tensor! x, Tensor! y, Tensor z) -> ()");    
+    ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 }

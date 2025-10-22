@@ -4,9 +4,9 @@ metadata:
   name: vllm
   namespace: vllm-project
 spec:
-  replicas: 1
+  replicas: {{ replicas | default(1) }}
   leaderWorkerTemplate:
-    size: 2
+    size: {{ size | default(2) }}
     restartPolicy: RecreateGroupOnPodRestart
     leaderTemplate:
       metadata:
@@ -15,28 +15,21 @@ spec:
       spec:
         containers:
           - name: vllm-leader
-            image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+            image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11") }}
             env:
-              - name: VLLM_USE_MODELSCOPE
-                value: "true"
               - name: WORKSPACE
                 value: "/root/workspace"
-              - name: WORLD_SIZE
-                value: "2"
-              - name: NPU_PER_NODE
-                value: "16"
               # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
               - name: VLLM_VERSION
                 value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
                 value: "main"
-              - name: MOONCAKE_VERSION
-                value: "06cc217504a6f1b0cdaa26b096b985651b262748"
             command:
               - sh
               - -c
               - |
                 bash /root/.cache/tests/run.sh
+                tail -f /dev/null
             resources:
               limits:
                 huawei.com/ascend-1980: "16"
@@ -75,28 +68,21 @@ spec:
       spec:
         containers:
           - name: vllm-worker
-            image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+            image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11") }}
             env:
-              - name: VLLM_USE_MODELSCOPE
-                value: "true"
               - name: WORKSPACE
                 value: "/root/workspace"
-              - name: WORLD_SIZE
-                value: "2"
-              - name: NPU_PER_NODE
-                value: "16"
               # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
               - name: VLLM_VERSION
                 value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
                 value: "main"
-              - name: MOONCAKE_VERSION
-                value: "06cc217504a6f1b0cdaa26b096b985651b262748"
             command:
               - sh
               - -c
               - |
                 bash /root/.cache/tests/run.sh
+                tail -f /dev/null
             resources:
               limits:
                 huawei.com/ascend-1980: "16"
