@@ -38,6 +38,21 @@ def _addrmsnorm_forward_oot(
 
     torch_npu_check = version_check()
     if layer is not None and not is_310p():
+        layer_cls_name = layer.__class__.__name__
+        try:
+            weight_prefetch_method = get_forward_context(
+            ).weight_prefetch_method
+        except AssertionError:
+            weight_prefetch_method = None
+
+        # prefetch qkvo_proj.weight preprocess
+        if weight_prefetch_method:
+            weight_prefetch_method.maybe_prefetch_attn_weight_preprocess(
+                layer_cls_name=layer_cls_name,
+                weight=layer.weight,
+                start_flag=x,
+            )
+        # add_rms_norm_quant
         if torch_npu_check:
             x, _, residual = torch_npu.npu_add_rms_norm_quant(
                 x,
@@ -55,6 +70,13 @@ def _addrmsnorm_forward_oot(
                 layer.aclnn_input_scale,
                 layer.aclnn_input_offset,
                 epsilon=self.variance_epsilon)
+        # prefetch qkvo_proj.weight postprocess
+        if weight_prefetch_method:
+            weight_prefetch_method.maybe_prefetch_attn_weight_postprocess(
+                layer_cls_name=layer_cls_name,
+                stop_flag=x,
+            )
+
     else:
         if is_310p():
             orig_dtype = residual.dtype
