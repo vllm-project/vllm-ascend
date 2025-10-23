@@ -61,7 +61,8 @@ class MtpProposer(Proposer):
         self.hidden_size = self.draft_model_config.get_hidden_size()
 
         self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
-        self.draft_indexer_metadata_builder: Optional[AttentionMetadataBuilder] = None
+        self.draft_indexer_metadata_builder: Optional[
+            AttentionMetadataBuilder] = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
 
@@ -181,8 +182,8 @@ class MtpProposer(Proposer):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor):
                 self.model(input_ids=input_ids,
-                            positions=positions,
-                            hidden_states=previous_hidden_states)
+                           positions=positions,
+                           hidden_states=previous_hidden_states)
             if with_prefill:
                 break
 
@@ -385,7 +386,8 @@ class MtpProposer(Proposer):
         last_token_indices: Optional[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
+        mm_embed_inputs: Optional[tuple[list[torch.Tensor],
+                                        torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -439,8 +441,8 @@ class MtpProposer(Proposer):
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
         if aclgraph_runtime_mode not in [
-            CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE
-        ] :
+                CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE
+        ]:
             # Fallback to piecewise graph, when acl full graph is enabled
             logger.debug(
                 "Currently the eagle proposer only supports cudagraph_mode "
