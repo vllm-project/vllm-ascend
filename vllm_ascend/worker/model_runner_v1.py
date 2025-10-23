@@ -3406,7 +3406,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         splitting_ops_contain_attention = (
             self.compilation_config.splitting_ops is not None
             and all(op in self.compilation_config.splitting_ops for op in [
-                "vllm.unified_ascend_attention_with_output",
                 "vllm.mla_forward",
             ]))
 

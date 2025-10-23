@@ -26,14 +26,12 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.utils import cdiv, direct_register_custom_op
+from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         maybe_save_kv_layer_to_connector,
-                                         wait_for_kv_layer_from_connector)
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
@@ -590,158 +588,94 @@ class AscendAttentionBackendImpl(AttentionImpl):
         kv_cache: Tuple[torch.Tensor],
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
-        trace_flag: bool = True,
+        output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Ascend attention.
         Args:
-            query: shape = [batch_size, seq_len, num_heads * head_size]
-            key: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            value: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            kv_cache: shape = [key_cache, value_cache]
-                      key_cache = [num_blocks, block_size,
-                                   num_kv_heads, head_size]
-                      value_cache = [num_blocks, block_size,
-                                     num_kv_heads, head_size]
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
-            shape = [batch_size * seq_len, num_heads, head_size]
+            shape = [num_tokens, num_heads * head_size]
         """
+        assert output is not None, "Output tensor must be provided."
+
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for AscendAttentionBackendImpl")
+
         num_tokens = query.shape[0]
-        use_kv_cache_int8 = len(
-            kv_cache) > 0 and kv_cache[0].dtype == torch.int8
-        if output is None:
-            output = torch.empty(num_tokens,
-                                 self.num_heads,
-                                 self.head_size,
-                                 dtype=query.dtype,
-                                 device=query.device)
-        ori_output = output
-        if trace_flag:
-            torch.ops.vllm.unified_ascend_attention_with_output(
-                query=query,
-                key=key,
-                value=value,
-                output=output,
-                layer_name=layer.layer_name)
+        if attn_metadata is None:
+            return output
 
-        elif hasattr(layer, 'quant_method') and use_kv_cache_int8:
-            output = layer.quant_method.apply(layer, query, key, value,
-                                              kv_cache, attn_metadata,
-                                              self.attn_type, self.scale,
-                                              output)
+        # NOTE: Currently, we have various attention paths for different
+        # scenarios, and not all of them are in-place operations. Therefore,
+        # we need to create a separate tensor to hold the attention result.
+        # In the future, we may consolidate them into fewer paths, which will
+        # hopefully allow us to use in-place operation by default.
+        intermediate_output: torch.Tensor
 
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
+        attn_type = self.attn_type
+        if attn_type != AttentionType.DECODER and attn_type != AttentionType.ENCODER_ONLY:
+            raise NotImplementedError("Encoder/decoder cross-attention "
+                                      "are not implemented for "
+                                      "PallasAttentionBackendImpl")
+
+        if len(kv_cache) > 1:
+            if self.key_cache is None:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            slots = attn_metadata.slot_mapping
+            torch_npu._npu_reshape_and_cache(key=key[:num_actual_tokens],
+                                             value=value[:num_actual_tokens],
+                                             key_cache=self.key_cache,
+                                             value_cache=self.value_cache,
+                                             slot_indices=slots)
+        if attn_type == AttentionType.ENCODER_ONLY:
+            # TODO(zzzwwjj): Deal with this `cum_seq_len` more elegantly.
+            cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
+            intermediate_output = torch_npu.npu_fusion_attention(
+                query,
+                key,
+                value,
+                head_num=self.num_heads,
+                input_layout="TND",
+                scale=self.scale,
+                sparse_mode=4,
+                atten_mask=attn_metadata.attn_mask,
+                pre_tockens=attn_metadata.max_query_len,
+                next_tockens=attn_metadata.max_query_len,
+                actual_seq_qlen=cum_seq_len,
+                actual_seq_kvlen=cum_seq_len,
+            )[0]
+        # V0-Style scheduler situation.
+        elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            intermediate_output = self._forward_prefill_no_cache(
+                query, key, value, attn_metadata, output, num_tokens)
+        elif attn_metadata.attn_state == \
+            AscendAttentionState.PrefillCacheHit:
+            intermediate_output = self._forward_prefill_cache_hit(
+                query, attn_metadata, output)
+        elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            intermediate_output = self._forward_decode_only(
+                query, attn_metadata, output)
+        # Normal V1 situation.
         else:
-            if attn_metadata is None:
-                return output.view(num_tokens, self.hidden_size)
-            num_actual_tokens = attn_metadata.num_actual_tokens
-            assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
-            attn_type = self.attn_type
-            if attn_type != AttentionType.DECODER and attn_type != AttentionType.ENCODER_ONLY:
-                raise NotImplementedError("Encoder/decoder cross-attention "
-                                          "are not implemented for "
-                                          "PallasAttentionBackendImpl")
-            # View q k v to BSH.
-            query = query.view(-1, self.num_heads, self.head_size)
-            key = key.view(-1, self.num_kv_heads, self.head_size)
-            value = value.view(-1, self.num_kv_heads, self.head_size)
-            # TODO: Remove this contiguous in the future.
-            value = value.contiguous()
+            if torch.version.cann.startswith("8.3"):
+                # npu_fused_infer_attention_score does not support cases
+                # where query.shape[0] != attn_metadata.query_start_loc[-1].
+                # Thus we need unpad it here.
+                num_tokens = attn_metadata.query_start_loc[-1]
+                query = query[:num_tokens]
+            intermediate_output = self._forward_v1_style(
+                query, attn_metadata, output)
 
-            if len(kv_cache) > 1:
-                if self.key_cache is None:
-                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
-                slots = attn_metadata.slot_mapping
-                torch_npu._npu_reshape_and_cache(
-                    key=key[:num_actual_tokens],
-                    value=value[:num_actual_tokens],
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_indices=slots)
-            if attn_type == AttentionType.ENCODER_ONLY:
-                cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
-                attn_out = torch_npu.npu_fusion_attention(
-                    query,
-                    key,
-                    value,
-                    head_num=self.num_heads,
-                    input_layout="TND",
-                    scale=self.scale,
-                    sparse_mode=4,
-                    atten_mask=attn_metadata.attn_mask,
-                    pre_tockens=attn_metadata.max_query_len,
-                    next_tockens=attn_metadata.max_query_len,
-                    actual_seq_qlen=cum_seq_len,
-                    actual_seq_kvlen=cum_seq_len,
-                )
-                output = attn_out[0]
-            # V0-Style scheduler situation.
-            elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-                output = self._forward_prefill_no_cache(
-                    query, key, value, attn_metadata, output, num_tokens)
-            elif attn_metadata.attn_state == \
-                AscendAttentionState.PrefillCacheHit:
-                output = self._forward_prefill_cache_hit(
-                    query, attn_metadata, output)
-            elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                output = self._forward_decode_only(query, attn_metadata,
-                                                   output)
-            # Normal V1 situation.
-            else:
-                if torch.version.cann.startswith("8.3"):
-                    # npu_fused_infer_attention_score does not support cases
-                    # where query.shape[0] != attn_metadata.query_start_loc[-1].
-                    # Thus we need unpad it here.
-                    num_tokens = attn_metadata.query_start_loc[-1]
-                    query = query[:num_tokens]
-                output = self._forward_v1_style(query, attn_metadata, output)
+        output[:num_tokens, :, :] = intermediate_output[:num_tokens, :, :]
 
-        # to make in-place change to the output tensor
-        if hasattr(layer, 'quant_method') and use_kv_cache_int8:
-            output = output.view(num_tokens, self.num_heads, self.head_size)
-        ori_output[:num_tokens, :, :] = output[:num_tokens, :, :]
-        return output.view(num_tokens, self.hidden_size)
-
-
-def unified_ascend_attention_with_output(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    wait_for_kv_layer_from_connector(layer_name)
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
-    self.impl.forward(self,
-                      query,
-                      key,
-                      value,
-                      kv_cache,
-                      attn_metadata,
-                      output,
-                      trace_flag=False)
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
-    return
-
-
-def unified_attention_with_output_fake(
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="unified_ascend_attention_with_output",
-    op_func=unified_ascend_attention_with_output,
-    mutates_args=["output"],
-    fake_impl=unified_attention_with_output_fake,
-    dispatch_key="PrivateUse1",
-)
+        return output
