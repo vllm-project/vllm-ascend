@@ -16,6 +16,7 @@ from tests.e2e.nightly.multi_node.config.utils import (get_avaliable_port,
 setup_logger()
 logger = logging.getLogger(__name__)
 DISAGGREGATED_PREFILL_PROXY_SCRIPT = "examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py"
+DISAGGEGATED_PREFILL_PORT = 5333
 
 
 @dataclass
@@ -58,7 +59,14 @@ class MultiNodeConfig:
         self.cluster_ips = get_cluster_ips(self.num_nodes)
         self.disaggregated_prefill = disaggregated_prefill
         self.cur_node_info: NodeInfo = self.nodes_info[int(self.cur_index)]
+        decode_start_index = self.disaggregated_prefill.get(
+            "decoder_host_index")
+        if not decode_start_index:
+            raise RuntimeError("got empty decode_start_index")
+        self.num_prefillers = decode_start_index[0]
+        self.num_decoders = self.num_nodes - self.num_prefillers
         self._init_dist_env()
+        self._gen_ranktable()
         self.server_cmd = self._expand_env_vars(self.cur_node_info.server_cmd,
                                                 self.envs)
 
@@ -70,6 +78,10 @@ class MultiNodeConfig:
         self.envs["LOCAL_IP"] = self.cur_ip
         self.envs["NIC_NAME"] = self.nic_name
         self.envs["MASTER_IP"] = self.cluster_ips[0]
+        if self.disaggregated_prefill:
+            self.envs[
+                "DISAGGREGATED_PREFILL_RANK_TABLE_PATH"] = self.disaggregated_prefill.get(
+                    "ranktable_path")
         ascend_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages"
         self.envs[
             "LD_LIBRARY_PATH"] = f"{ascend_path}:{self.envs.get('LD_LIBRARY_PATH', os.environ.get('LD_LIBRARY_PATH', ''))}"
@@ -216,3 +228,45 @@ class MultiNodeConfig:
     @property
     def is_master(self):
         return int(self.cur_index) == 0
+
+    def _gen_ranktable(self):
+        cluster_ip = self.cluster_ips
+        assert len(cluster_ip) > 0
+        nnodes = self.num_nodes
+        node_rank = self.cur_index
+        master_addr = cluster_ip[0]
+        master_port = DISAGGEGATED_PREFILL_PORT
+        ranktable_gen_path = self.disaggregated_prefill.get(
+            "ranktable_gen_path")
+        ranktable_path = self.disaggregated_prefill.get("ranktable_path")
+
+        local_host = self.cur_ip
+
+        cmd = [
+            "torchrun",
+            "--nproc_per_node",
+            "1",
+            "--nnodes",
+            str(nnodes),
+            "--node_rank",
+            str(node_rank),
+            "--master_addr",
+            master_addr,
+            "--master_port",
+            str(master_port),
+            ranktable_gen_path,
+            "--ranktable-path",
+            ranktable_path,
+            "--local-host",
+            local_host,
+            "--prefill-device-cnt",
+            str(self.num_prefiller),
+            "--decode-device-cnt",
+            str(self.num_decoders),
+        ]
+
+        env = os.environ.copy()
+        env["GLOO_SOCKET_IFNAME"] = self.nic_name
+
+        subprocess.run(cmd, env=env, check=True)
+        assert os.path.exists(ranktable_path), "failed generate ranktable.json"
