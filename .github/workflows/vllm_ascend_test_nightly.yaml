@@ -110,7 +110,7 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
   deepseek-r1-0528-w8a8:
-    #if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
+    if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
       matrix:
         os: [ linux-aarch64-a3-16 ]
