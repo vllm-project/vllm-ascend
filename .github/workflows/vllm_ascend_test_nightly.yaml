@@ -98,6 +98,17 @@ jobs:
       runner: ${{ matrix.os }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
+  qwen3-32b-int8-a3-feature-stack3:
+    # if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
+    strategy:
+      matrix:
+        os: [ linux-aarch64-a3-4 ]
+    uses: ./.github/workflows/_e2e_nightly.yaml
+    with:
+      vllm: v0.11.0
+      runner: ${{ matrix.os }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      tests: tests/e2e/nightly/features/test_qwen3_32b_int8_a3_feature_stack3.py
   qwen2-5-vl-7b:
     if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
@@ -120,14 +131,3 @@ jobs:
       runner: ${{ matrix.os }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8.py
-  qwen3-32b-int8-a3-feature-stack3:
-    # if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
-    strategy:
-      matrix:
-        os: [ linux-aarch64-a3-4 ]
-    uses: ./.github/workflows/_e2e_nightly.yaml
-    with:
-      vllm: v0.11.0
-      runner: ${{ matrix.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
-      tests: tests/e2e/nightly/features/test_qwen3_32b_int8_a3_feature_stack3.py
