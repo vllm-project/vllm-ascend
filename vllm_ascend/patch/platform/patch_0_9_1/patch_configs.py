@@ -1,5 +1,5 @@
 import vllm.envs as envs
-from vllm.config import DistributedExecutorBackend, ParallelConfig
+from vllm.config import DistributedExecutorBackend, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
 
 import vllm_ascend.envs as vllm_ascend_envs
@@ -72,6 +72,24 @@ def __post_init__(self: ParallelConfig) -> None:
     self._verify_args()
 
 
+# mypy: ignore-errors
+@property
+def is_deepseek_mla(self: ModelConfig):
+    if not hasattr(self.hf_text_config, "model_type"):
+        return False
+    elif self.hf_text_config.model_type in \
+        ('deepseek_v2', 'deepseek_v3', 'deepseek_mtp', 'kimi_k2'):
+        return self.hf_text_config.kv_lora_rank is not None
+    elif self.hf_text_config.model_type == 'eagle':
+        # if the model is an EAGLE module, check for the
+        # underlying architecture
+        return self.hf_text_config.model.model_type in \
+                ('deepseek_v2', 'deepseek_v3', 'kimi_k2') \
+            and self.hf_text_config.kv_lora_rank is not None
+    return False
+
+
+ModelConfig.is_deepseek_mla = is_deepseek_mla
 # apply this patch only if the external data parallelism is enabled
 if vllm_ascend_envs.VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED:
     ParallelConfig.__post_init__ = __post_init__  # type: ignore[attr-defined]
