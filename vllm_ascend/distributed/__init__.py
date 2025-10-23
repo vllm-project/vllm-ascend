@@ -17,7 +17,7 @@
 
 from vllm.distributed.kv_transfer.kv_connector.factory import \
     KVConnectorFactory
-
+from .M2NAFDConnector import *
 
 def register_connector():
     KVConnectorFactory.register_connector(
