@@ -4,6 +4,7 @@ from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm import config
 
 from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
@@ -106,6 +107,9 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         linear(input_tensor)
 
     def test_oproj_tp(self):
+
+        config._current_vllm_config = MagicMock()
+
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.oproj_tensor_parallel_size = 2
 
