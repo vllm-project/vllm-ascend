@@ -51,6 +51,7 @@ vllm serve /path/to/pangu-pro-moe-model \
 --tensor-parallel-size 4 \
 --enable-expert-parallel \
 --trust-remote-code \
+--max_model_len=1024 \
 --enforce-eager
 ```
 
@@ -217,6 +218,7 @@ if __name__ == "__main__":
 
     llm = LLM(model="/path/to/pangu-pro-moe-model",
             tensor_parallel_size=4,
+            enable_expert_parallel=True,
             distributed_executor_backend="mp",
             max_model_len=1024,
             trust_remote_code=True,
