@@ -1,3 +1,5 @@
+from typing import Optional
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,11 +11,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
+from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
-from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -58,8 +60,8 @@ class MtpProposer(Proposer):
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
 
-        self.attn_metadata_builder: AttentionMetadataBuilder | None = None
-        self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
+        self.attn_metadata_builder: Optional[AttentionMetadataBuilder] = None
+        self.draft_indexer_metadata_builder: Optional[AttentionMetadataBuilder] = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
 
@@ -178,35 +180,9 @@ class MtpProposer(Proposer):
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor):
-                if is_running_torchair:
-                    assert attn_metadata is not None
-                    torch._dynamo.mark_static(input_ids)
-                    torch._dynamo.mark_static(positions)
-                    torch._dynamo.mark_static(previous_hidden_states)
-                    torch._dynamo.mark_static(attn_metadata.decode.block_table)
-                    torch._dynamo.mark_static(
-                        attn_metadata.decode.input_positions)
-                    if hasattr(attn_metadata.decode, "sin"):
-                        torch._dynamo.mark_static(attn_metadata.decode.sin)
-                        torch._dynamo.mark_static(attn_metadata.decode.cos)
-                    torch._dynamo.mark_static(get_forward_context().mc2_mask)
-                    torch._dynamo.mark_static(attn_metadata.slot_mapping)
-                    torch._dynamo.mark_static(attn_metadata.decode.attn_mask)
-                    torchair_compiled_model = self._get_torchair_lazy_compiled_model(
-                        num_tokens)
-                    torchair_compiled_model(
-                        input_ids=input_ids,
-                        positions=positions,
-                        hidden_states=previous_hidden_states,
-                        inputs_embeds=None,
-                        intermediate_tensors=None,
-                        attn_metadata=attn_metadata,
-                        kv_caches=self.runner.kv_caches[-1:],
-                        spec_step_idx=0)
-                else:
-                    self.model(input_ids=input_ids,
-                               positions=positions,
-                               hidden_states=previous_hidden_states)
+                self.model(input_ids=input_ids,
+                            positions=positions,
+                            hidden_states=previous_hidden_states)
             if with_prefill:
                 break
 
@@ -406,10 +382,10 @@ class MtpProposer(Proposer):
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
-        last_token_indices: torch.Tensor | None,
+        last_token_indices: Optional[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
-        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        mm_embed_inputs: Optional[tuple[list[torch.Tensor], torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -462,7 +438,9 @@ class MtpProposer(Proposer):
                                            uniform_decode=False)
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
-        if aclgraph_runtime_mode not in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE] :
+        if aclgraph_runtime_mode not in [
+            CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE
+        ] :
             # Fallback to piecewise graph, when acl full graph is enabled
             logger.debug(
                 "Currently the eagle proposer only supports cudagraph_mode "
@@ -490,8 +468,7 @@ class MtpProposer(Proposer):
                     hidden_states = self.model(
                         input_ids=self.input_ids[:num_input_tokens],
                         positions=self.positions[:num_input_tokens],
-                        hidden_states=self.
-                        hidden_states[:num_input_tokens])
+                        hidden_states=self.hidden_states[:num_input_tokens])
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():

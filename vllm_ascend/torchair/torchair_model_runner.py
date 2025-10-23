@@ -83,7 +83,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         self._check_batch_sizes_consistency()
 
     def _set_up_drafter(self, is_torchair_graph: bool = False):
-        super._set_up_drafter(is_torchair_graph=True)
+        super()._set_up_drafter(is_torchair_graph=True)
 
     def _may_pad_kv_consumer_num_seq(self):
         # pd disaggregation scenario need redundant_batch_sizes to avoid each batch's seq_len exceed 16 tokens

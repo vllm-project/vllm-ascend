@@ -557,7 +557,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         tp_size = self.parallel_config.tensor_parallel_size
         # Use integer arithmetic for ceiling division.
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+        self.mc2_tokens_capacity: int = num_tokens_per_tp_rank * tp_size
 
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
