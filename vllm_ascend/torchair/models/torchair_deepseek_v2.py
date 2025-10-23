@@ -505,13 +505,13 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                                bias=False,
                                                quant_config=quant_config,
                                                prefix=f"{prefix}.q_proj")
+
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,
             self.kv_lora_rank + self.qk_rope_head_dim,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_a_proj_with_mqa")
-
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
@@ -576,7 +576,9 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.attn",
                 use_mla=True,
-                # MLA Args
+                use_sparse=False,
+                indexer=None,
+                # SFA Args
                 q_lora_rank=self.q_lora_rank,
                 kv_lora_rank=self.kv_lora_rank,
                 qk_nope_head_dim=self.qk_nope_head_dim,
@@ -584,13 +586,17 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 qk_head_dim=self.qk_head_dim,
                 v_head_dim=self.v_head_dim,
                 rotary_emb=self.rotary_emb,
-                q_proj=self.q_proj if self.q_lora_rank is None else None,
-                q_b_proj=self.q_b_proj
+                q_a_proj=self.q_a_proj
                 if self.q_lora_rank is not None else None,
+                q_a_layernorm=self.q_a_layernorm
+                if self.q_lora_rank is not None else None,
+                q_proj=self.q_proj
+                if self.q_lora_rank is None else self.q_b_proj,
                 kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
                 kv_a_layernorm=self.kv_a_layernorm,
                 kv_b_proj=self.kv_b_proj,
                 o_proj=self.o_proj,
+                decoder_layer=decoder_layer,
             )
         else:
             self.mla_attn = MLAAttention(
@@ -608,9 +614,12 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 indexer=None,
                 # MLA Args
                 rotary_emb=self.rotary_emb,
-                q_proj=self.q_proj if self.q_lora_rank is None else None,
-                q_b_proj=self.q_b_proj
+                q_a_proj=self.q_a_proj
                 if self.q_lora_rank is not None else None,
+                q_a_layernorm=self.q_a_layernorm
+                if self.q_lora_rank is not None else None,
+                q_proj=self.q_proj
+                if self.q_lora_rank is None else self.q_b_proj,
                 kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
                 kv_a_layernorm=self.kv_a_layernorm,
                 kv_b_proj=self.kv_b_proj,
@@ -630,22 +639,14 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                   and attn_metadata.num_decodes > 0)
         forward_kwargs = {"enable_multistream_mla": enable_multistream_mla}
         if self.q_lora_rank is not None:
-            maybe_npu_prefetch(self.fused_qkv_a_proj.weight,
+            maybe_npu_prefetch(self.q_a_proj.weight,
                                hidden_states,
                                enabled=enable_multistream_mla)
-            # ckq = self.fused_qkv_a_proj(hidden_states)[0]
-            # hidden_states_or_q_c = self.q_a_layernorm(ckq)
-            # forward_kwargs['ckq'] = ckq'
-            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
-            q_c, kv_no_split = qkv_lora.split(
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                dim=-1,
-            )
-            hidden_states_or_q_c = self.q_a_layernorm(q_c)
-            forward_kwargs['ckq'] = q_c
+            ckq = self.q_a_proj(hidden_states)[0]
+            hidden_states_or_q_c = self.q_a_layernorm(ckq)
+            forward_kwargs['ckq'] = ckq
         else:
             hidden_states_or_q_c = hidden_states
-            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
         if self.torchair_graph_enabled:
             output_shape = hidden_states.shape
             output = torch.empty(output_shape,
@@ -660,6 +661,7 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             output = output.view(-1, output_shape[-1])
             return output
         else:
+            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
             if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
                 hidden_states_or_q_c = get_tp_group().all_gather(
                     hidden_states_or_q_c, 0)
@@ -731,6 +733,14 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
         if self.q_lora_rank is not None:
+            self.q_a_proj = ReplicatedLinear(
+                self.hidden_size,
+                self.q_lora_rank,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.q_a_proj",
+                return_bias=False,
+            )
             self.q_a_layernorm = RMSNorm(self.q_lora_rank,
                                          eps=config.rms_norm_eps)
             self.q_b_proj = ColumnParallelLinear(
@@ -751,6 +761,14 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 return_bias=False,
             )
 
+        self.kv_a_proj_with_mqa = ReplicatedLinear(
+            self.hidden_size,
+            self.kv_lora_rank + self.qk_rope_head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_a_proj_with_mqa",
+            return_bias=False,
+        )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
@@ -783,23 +801,6 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 prefix=f"{prefix}.o_proj",
                 return_bias=False,
             )
-
-        if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = MergedColumnParallelLinear(
-                self.hidden_size,
-                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.fused_qkv_a_proj",
-                disable_tp=True)
-            self.kv_a_proj_with_mqa = None
-        else:
-            self.kv_a_proj_with_mqa = ReplicatedLinear(
-                self.hidden_size,
-                self.kv_lora_rank + self.qk_rope_head_dim,
-                bias=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.kv_a_proj_with_mqa")
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -840,7 +841,9 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.attn",
                 use_mla=True,
-                # MLA Args
+                use_sparse=True,
+                indexer=self.indexer,
+                # SFA Args
                 q_lora_rank=self.q_lora_rank,
                 kv_lora_rank=self.kv_lora_rank,
                 qk_nope_head_dim=self.qk_nope_head_dim,
@@ -848,13 +851,17 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 qk_head_dim=self.qk_head_dim,
                 v_head_dim=self.v_head_dim,
                 rotary_emb=self.rotary_emb,
-                q_proj=self.q_proj if self.q_lora_rank is None else None,
-                q_b_proj=self.q_b_proj
+                q_a_proj=self.q_a_proj
                 if self.q_lora_rank is not None else None,
+                q_a_layernorm=self.q_a_layernorm
+                if self.q_lora_rank is not None else None,
+                q_proj=self.q_proj
+                if self.q_lora_rank is None else self.q_b_proj,
                 kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
                 kv_a_layernorm=self.kv_a_layernorm,
                 kv_b_proj=self.kv_b_proj,
                 o_proj=self.o_proj,
+                decoder_layer=decoder_layer,
             )
         else:
             self.sfa_attn = MLAAttention(
@@ -872,9 +879,12 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
                 indexer=self.indexer,
                 # MLA Args
                 rotary_emb=self.rotary_emb,
-                q_proj=self.q_proj if self.q_lora_rank is None else None,
-                q_b_proj=self.q_b_proj
+                q_a_proj=self.q_a_proj
                 if self.q_lora_rank is not None else None,
+                q_a_layernorm=self.q_a_layernorm
+                if self.q_lora_rank is not None else None,
+                q_proj=self.q_proj
+                if self.q_lora_rank is None else self.q_b_proj,
                 kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
                 kv_a_layernorm=self.kv_a_layernorm,
                 kv_b_proj=self.kv_b_proj,
@@ -1257,20 +1267,12 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         """"""
-        if self.config.q_lora_rank is not None:
-            stacked_params_mapping = [
-                # (param_name, shard_name, shard_id)
-                ("gate_up_proj", "gate_proj", 0),
-                ("gate_up_proj", "up_proj", 1),
-                ("fused_qkv_a_proj", "q_a_proj", 0),
-                ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
-            ]
-        else:
-            stacked_params_mapping = [
-                # (param_name, shard_name, shard_id)
-                ("gate_up_proj", "gate_proj", 0),
-                ("gate_up_proj", "up_proj", 1),
-            ]
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = TorchairAscendFusedMoE.make_expert_params_mapping(
