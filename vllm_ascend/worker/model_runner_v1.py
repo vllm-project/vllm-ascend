@@ -1473,7 +1473,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 )
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
-                blk_table_tensor = blk_table.get_device_tensor()
+                blk_table_tensor = blk_table.get_device_tensor(num_reqs)
                 slot_mapping = blk_table.slot_mapping_cpu[:
                                                           total_num_scheduled_tokens]
                 self.slot_mapping[:total_num_scheduled_tokens].copy_(
