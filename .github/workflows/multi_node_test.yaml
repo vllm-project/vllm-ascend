@@ -109,15 +109,6 @@ jobs:
               fi
             done
 
-            if ! [[ "$size" =~ ^[0-9]+$ ]] || [ "$size" -lt 1 ]; then
-              echo "Error: size must be a positive integer"
-              exit 1
-            fi
-            
-            if ! [[ "$replicas" =~ ^[0-9]+$ ]] || [ "$replicas" -lt 1 ]; then
-              echo "Error: replicas must be a positive integer"
-              exit 1
-            fi
 
             jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
               -D size="$size" \
