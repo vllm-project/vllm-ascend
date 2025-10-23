@@ -21,6 +21,7 @@ import math
 import types
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -153,6 +154,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         num_reqs: int,
         num_tokens: int,
         max_query_len: int,
+        num_scheduled_tokens: np.ndarray[Any, Any],
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
     ) -> Optional[dict[str, Any]]:
@@ -161,7 +163,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         if with_prefill or self.enable_shared_expert_dp:
             attn_metadata = super()._build_dummy_attn_metadata(
                 with_prefill, num_reqs, num_tokens, max_query_len,
-                aclgraph_runtime_mode, force_attention)
+                num_scheduled_tokens, aclgraph_runtime_mode, force_attention)
         else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
