@@ -143,7 +143,8 @@ class AisbenchRunner:
                 r"temperature.*",
                 "temperature = 0.6,\n            ignore_eos = False,", content)
         if self.temperature:
-            content = re.sub(r"temperature.*", f"temperature = {self.temperature}", content)
+            content = re.sub(r"temperature.*",
+                             f"temperature = {self.temperature}", content)
         if self.top_p:
             content = re.sub(r"#?top_p.*", f"top_p = {self.top_p}", content)
         if self.top_k:
@@ -151,7 +152,9 @@ class AisbenchRunner:
         if self.seed:
             content = re.sub(r"#seed.*", f"seed = {self.seed}", content)
         if self.repetition_penalty:
-            content = re.sub(r"#repetition_penalty.*", f"repetition_penalty = {self.repetition_penalty}", content)
+            content = re.sub(
+                r"#repetition_penalty.*",
+                f"repetition_penalty = {self.repetition_penalty}", content)
         conf_path_new = os.path.join(REQUEST_CONF_DIR,
                                      f'{self.request_conf}_custom.py')
         with open(conf_path_new, 'w', encoding='utf-8') as f:
