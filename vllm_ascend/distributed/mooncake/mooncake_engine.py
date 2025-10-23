@@ -479,8 +479,8 @@ class MooncakeEngine:
                         tokens):
                     keys.append(key.to_string())
                     starts.append(start)
-                res = self.m_store.batch_exists(keys)
-                for index, value in enumerate(res):
+                res = self.m_store.batch_exists(keys)  # type: ignore[assignment]
+                for index, value in enumerate(res):  # type: ignore[arg-type]
                     if value != 1:
                         return starts[index]
             # all tokens where found, return the maximal end
@@ -528,12 +528,12 @@ class MooncakeEngine:
                 multi_tp_keys = keys[:]
                 for i in range(1, self.tp_size):
                     for item in keys:
-                        new_str = item.replace("@0", f"@{i}", 1)
+                        new_str = item.replace("@0", f"@{i}", 1)  # type: ignore[attr-type]
                         multi_tp_keys.append(new_str)
-                res = self.m_store.batch_exists(multi_tp_keys)
+                res = self.m_store.batch_exists(multi_tp_keys)  # type: ignore[assignment]
                 num_block = len(keys)
                 multi_tp_values = [
-                    res[i * num_block:(i + 1) * num_block]
+                    res[i * num_block:(i + 1) * num_block]  # type: ignore[index]
                     for i in range(self.tp_size)
                 ]
                 index = self.find_min_first_non_one_index(multi_tp_values)
