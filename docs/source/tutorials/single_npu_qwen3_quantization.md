@@ -11,6 +11,7 @@ w4a8 quantization feature is supported by v0.9.1rc2 or higher
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
