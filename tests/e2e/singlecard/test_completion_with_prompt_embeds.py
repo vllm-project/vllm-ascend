@@ -38,7 +38,7 @@ class RemoteOpenAIServer:
         """Subclasses override this method to customize server process launch
         """
         env = os.environ.copy()
-        # the current process might initialize cuda,
+        # the current process might initialize npu,
         # to be safe, we should use spawn method
         env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
         if env_dict is not None:
