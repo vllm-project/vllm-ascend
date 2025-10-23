@@ -130,8 +130,11 @@ class AscendW4A4FlatQuantDynamicLinearMethod:
                                                    dtype=torch.float32)
         return params_dict
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
+                           params_dtype: torch.dtype,
+                           layer_type: Optional[str] = None) -> Dict[str, Any]:
         return {}
 
     @staticmethod
