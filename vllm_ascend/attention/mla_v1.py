@@ -737,7 +737,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.qb_qt_bias = qb_qt_bias.reshape(
             self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim))
 
-        device = self.q_a_proj.weight.device
+        device = self.q_proj.weight.device
         self.gamma1 = self.q_a_layernorm.weight.data
         self.beta1 = self.q_a_layernorm.bias.data
         self.gamma2 = self.kv_a_layernorm.weight.data
