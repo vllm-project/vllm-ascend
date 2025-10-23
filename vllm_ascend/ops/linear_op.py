@@ -366,11 +366,22 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                                              input_parallel,
                                              bias=bias_)
         else:
-            output = torch.ops.vllm.apply_matmul_and_reduce(
-                self.prefix, input_parallel)
+            output = torch.ops.vllm.matmul_and_reduce(input_parallel,
+                                                      self.prefix)
 
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
+
+    def matmul_and_reduce(self, input_parallel: torch.Tensor,
+                          bias_: Optional[Parameter]) -> torch.Tensor:
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self.layer,
+                                                  input_parallel,
+                                                  bias=bias_)
+        from vllm_ascend.ops.register_custom_ops import \
+            _maybe_pad_and_reduce_impl
+        output = _maybe_pad_and_reduce_impl(output_parallel)
+        return output
 
     def update_attrs(self):
         super().update_attrs()
