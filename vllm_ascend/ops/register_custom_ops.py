@@ -235,6 +235,31 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
         return tensor_model_parallel_all_reduce(final_hidden_states)
 
 
+def _matmul_and_reduce_impl(input_parallel: torch.Tensor,
+                            layer_name: str) -> torch.Tensor:
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    assert self.custom_op is not None
+    bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+    output = self.custom_op.matmul_and_reduce(input_parallel, bias_)
+
+    return output
+
+
+def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
+                                 layer_name: str) -> torch.Tensor:
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    num_tokens = input_parallel.size(0)
+    if forward_context.sp_enabled:
+        num_tokens = num_tokens // self.tp_size
+    output = torch.empty(size=(num_tokens, self.output_size_per_partition),
+                         device=input_parallel.device,
+                         dtype=input_parallel.dtype)
+
+    return output
+
+
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,
                           fake_impl=_maybe_all_gather_and_maybe_unpad_fake,
@@ -280,5 +305,11 @@ direct_register_custom_op(op_name="prefetch_postprocess",
 direct_register_custom_op(op_name="maybe_all_reduce_tensor_model_parallel",
                           op_func=_maybe_all_reduce_tensor_model_parallel_impl,
                           fake_impl=lambda x: x,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="matmul_and_reduce",
+                          op_func=_matmul_and_reduce_impl,
+                          fake_impl=_matmul_and_reduce_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")
