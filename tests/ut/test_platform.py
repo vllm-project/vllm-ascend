@@ -1,12 +1,8 @@
 import importlib
-import unittest
-from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from torch.distributed import ProcessGroup
-from torch.distributed.distributed_c10d import PrefixStore
 from vllm.config.compilation import CUDAGraphMode
 from vllm.platforms import PlatformEnum
 
