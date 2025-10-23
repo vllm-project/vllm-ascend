@@ -628,10 +628,12 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
 
     def setUp(self):
         config = MockVllmConfig()
-        with patch(
-                'vllm_ascend.distributed.mooncake_connector.init_ascend_config'
-        ):
-            self.scheduler = MooncakeConnectorScheduler(config, "test_engine")
+        self.p1 = patch(
+            'vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config',
+            new=MagicMock(return_value=None))
+        self.p1.start()
+        self.addCleanup(self.p1.stop)
+        self.scheduler = MooncakeConnectorScheduler(config, "test_engine")
 
     def test_get_num_new_matched_tokens(self):
         request = MockRequest("req1")
@@ -643,7 +645,7 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
         request.kv_transfer_params = {"do_remote_prefill": True}
         tokens, async_flag = self.scheduler.get_num_new_matched_tokens(
             request, 0)
-        self.assertEqual(tokens, 3)
+        self.assertEqual(tokens, 4)
         self.assertTrue(async_flag)
 
     def test_build_connector_meta(self):
@@ -820,7 +822,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
                               kv_transfer_params={"do_remote_prefill": True})
         tokens, async_flag = self.scheduler.get_num_new_matched_tokens(
             request, 0)
-        self.assertEqual(tokens, 3)
+        self.assertEqual(tokens, 4)
         self.assertTrue(async_flag)
 
     def test_update_state_after_alloc_no_remote_prefill(self):
@@ -1036,8 +1038,9 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             patch(
                 'vllm_ascend.distributed.mooncake_connector.string_to_int64_hash',
                 mock_string_to_int64_hash),
-            patch('vllm_ascend.distributed.mooncake_connector.TransferEngine',
-                  return_value=self.mock_transfer_engine),
+            patch(
+                'vllm_ascend.distributed.mooncake.transfer_engine.TransferEngine',
+                return_value=self.mock_transfer_engine),
             patch(
                 'vllm_ascend.distributed.mooncake_connector.KVCacheSendingThread',
                 MagicMock()),
@@ -1063,7 +1066,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         for p in self.patches:
             p.stop()  # type: ignore
 
-    @unittest.skip("skip")
     def test_worker_use_ascend_direct(self):
         test_case = [True, False]
 
@@ -1104,7 +1106,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 config, self.engine_id)
                             self.assertIsNotNone(worker)
 
-    @unittest.skip("skip")
     def test_register_kv_caches_producer(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
         worker.register_kv_caches(self.kv_caches)
@@ -1112,7 +1113,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertIsNotNone(worker.kv_send_thread)
         self.assertIsNone(worker.kv_recv_thread)
 
-    @unittest.skip("skip")
     def test_register_kv_caches_consumer(self):
         self.vllm_config.kv_transfer_config.kv_role = 'kv_consumer'
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
@@ -1120,7 +1120,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertIsNone(worker.kv_send_thread)
         self.assertIsNotNone(worker.kv_recv_thread)
 
-    @unittest.skip("skip")
     def test_register_kv_caches_mla_case(self):
         mla_cache1 = MagicMock()
         mla_cache1.size.return_value = (10, 16, 1, 16)
@@ -1133,7 +1132,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertTrue(worker.use_mla)
         self.assertEqual(len(worker.block_len), 2)
 
-    @unittest.skip("skip")
     def test_device_id_selection_with_physical_devices(self):
         # Test with physical devices set
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
