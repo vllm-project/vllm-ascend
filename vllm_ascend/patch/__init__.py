@@ -146,17 +146,29 @@
 #       No, this need CANN add an aclnn shift operation
 #    Future Plan:
 #       Revert this when CANN support shift aclnn operation
+#
+# ** File: worker/patch_deepseek_mtp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer.__init__`
+#    Why:
+#       '__init__' func of DeepSeekMultiTokenPredictorLayer didn't pass prefix to SharedHead.
+#    How：
+#       Replace with a new __init__.
+#       Use a new SharedHead which passes prefix to ParallelLMHead.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/25805
+#    Future Plan:
+#       Remove this patch when adapted vllm version contains the above PR.
+#
+# ** File: worker/patch_attention_layer.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.attention.layer.Attention.forward`
 #    Why:
-#       There is a zerolike operator before the attention operation in each decoding stage. 
-#    How：
+#       There is a zerolike operator before the attention operation in each decoding stage.
+#    How
 #       Replace this zerolike operator with torch.empty
 #    Related PR (if no, explain why):
 #       - https://github.com/vllm-project/vllm/pull/26680
 #    Future Plan:
-#       Revert this to match the optimization supported in the VLLM version.
+#       Remove this to match the optimization supported in the VLLM version.
 #
-# * Worker Patch:
-# ===============
-# ** File: worker/patch_attention_layer.py **
