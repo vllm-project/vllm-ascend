@@ -38,7 +38,7 @@ defaults:
     shell: bash -el {0}
 
 concurrency:
-  group: ascend-nightly-${{ github.ref }}
+  group: ascend-nightly-${{ github.ref }}-a3
   cancel-in-progress: true
 
 jobs:

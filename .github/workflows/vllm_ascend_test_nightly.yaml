@@ -38,7 +38,7 @@ defaults:
 
 # only cancel in-progress runs of the same workflow
 concurrency:
-  group: ascend-nightly-${{ github.ref }}
+  group: ascend-nightly-${{ github.ref }}-a2
   cancel-in-progress: true
 
 jobs:
