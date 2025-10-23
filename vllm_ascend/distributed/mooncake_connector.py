@@ -342,8 +342,14 @@ class KVCacheRecvingThread(threading.Thread):
 
         # Full prefix cache hit: do not need to read remote blocks, just notify
         # P worker that we have the blocks we need.
-        if len(local_block_ids) == 0:
+        num_local_blocks = len(local_block_ids)
+        if num_local_blocks == 0:
             return
+
+        num_remote_blocks = len(remote_block_ids)
+        assert num_local_blocks <= num_remote_blocks
+        if num_local_blocks < num_remote_blocks:
+            remote_block_ids = remote_block_ids[-num_local_blocks:]
 
         # Check if we have the remote metadata cached.
         if remote_engine_id not in self.kv_caches_base_addr or \
@@ -736,15 +742,11 @@ class MooncakeConnectorScheduler:
             num_computed_tokens, params)
 
         if params is not None and params.get("do_remote_prefill"):
-            if num_computed_tokens != 0:
-                logger.warning(
-                    "Currently only support prefill with num_computed_tokens == 0."
-                )
-            # Assume that the request's KV cache is already fully prefilled and
-            # can be fetched entirely from the prefill node.
-            count = max(len(request.prompt_token_ids) - 1, 0)
-            if count > 0:
-                return count, True
+            # Remote prefill: get all prompt blocks from remote.
+            assert num_computed_tokens % self.block_size == 0
+            # Note: We use the full token count as transmit data here.
+            count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
+            return count, count > 0
 
         # No remote prefill for this request.
         return 0, False
