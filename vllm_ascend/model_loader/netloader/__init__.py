@@ -12,27 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# This file is a part of the vllm-ascend project.
 #
 
 
-def register():
-    """Register the NPU platform."""
-
-    return "vllm_ascend.platform.NPUPlatform"
-
-
-def register_model():
-
-    from .models import register_model
-    register_model()
-
-
-def register_connector():
-    from vllm_ascend.distributed import register_connector
-    register_connector()
-
-
-def register_model_loader():
-    from .model_loader.netloader import register_netloader
-    register_netloader()
+def register_netloader():
+    """Register the NetLoader plugin."""
+    from .netloader import ModelNetLoaderElastic  # noqa
