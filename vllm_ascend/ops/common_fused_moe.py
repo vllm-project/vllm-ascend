@@ -65,6 +65,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod,
               self).process_weights_after_loading(layer)
+        print("AscendUnquantizedFusedMoEMethod process_weights_after_loading")
         if self.transpose:
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(
                 1, 2).contiguous()
@@ -109,7 +110,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               enable_force_load_balance: bool = False,
               shared_experts: Optional[Any] = None,
               **kwargs) -> torch.Tensor:
-
+        print("AscendUnquantizedFusedMoEMethod apply")
         topk_weights, topk_ids, row_idx = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -131,6 +132,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if enable_force_load_balance and not self.use_aclgraph:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
+        print('w1=', layer.w13_weight)
         moe_comm_method = get_forward_context().moe_comm_method
         return moe_comm_method.fused_experts(
             hidden_states=x,
@@ -160,81 +162,6 @@ class AscendAFD(FusedMoE):
             self.use_aclgraph = (vllm_config.compilation_config.level
                                  == CompilationLevel.PIECEWISE and
                                  not vllm_config.model_config.enforce_eager)
-
-    # def __init__(
-    #     self,
-    #     num_experts: int,  # Global number of experts
-    #     top_k: int,
-    #     hidden_size: int,
-    #     renormalize: bool = True,
-    #     use_grouped_topk: bool = False,
-    #     num_expert_group: Optional[int] = None,
-    #     topk_group: Optional[int] = None,
-    #     quant_config: Optional[QuantizationConfig] = None,
-    #     tp_size: Optional[int] = None,
-    #     ep_size: Optional[int] = None,
-    #     dp_size: Optional[int] = None,
-    #     custom_routing_function: Optional[Callable] = None,
-    #     scoring_func: str = "softmax",
-    #     e_score_correction_bias: Optional[torch.Tensor] = None,
-    #     ):
-
-    #     ascend_config = get_ascend_config()
-    #     self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-    #     if ascend_config.torchair_graph_config.enabled:
-    #         self.use_aclgraph = False
-    #     else:
-    #         self.use_aclgraph = (vllm_config.compilation_config.level
-    #                              == CompilationLevel.PIECEWISE and
-    #                              not vllm_config.model_config.enforce_eager)
-
-    #     self.top_k = top_k
-    #     self.renormalize = renormalize
-    #     self.use_grouped_topk = use_grouped_topk
-    #     if self.use_grouped_topk:
-    #         assert num_expert_group is not None and topk_group is not None
-    #     self.num_expert_group = num_expert_group
-    #     self.topk_group = topk_group
-    #     self.custom_routing_function = custom_routing_function
-    #     self.scoring_func = scoring_func
-    #     self.e_score_correction_bias = e_score_correction_bias
-    #     self.local_num_experts = local_num_experts
-    #     tp_size_ = (tp_size if tp_size is not None else
-    #                 get_tensor_model_parallel_world_size())
-    #     dp_size_ = (dp_size
-    #                 if dp_size is not None else get_dp_group().world_size)
-    #     self.is_sequence_parallel = is_sequence_parallel
-    #     self.sp_size = tp_size_ if is_sequence_parallel else 1
-
-    #     self.moe_parallel_config: FusedMoEParallelConfig = (
-    #         FusedMoEParallelConfig.make(
-    #             tp_size_=tp_size_,
-    #             dp_size_=dp_size_,
-    #             vllm_parallel_config=vllm_config.parallel_config))
-
-    #     num_experts = kwargs["num_experts"]
-    #     self.global_num_experts = num_experts
-
-
-    #     moe = FusedMoEConfig(
-    #         num_experts=self.global_num_experts,
-    #         experts_per_token=top_k,
-    #         hidden_dim=hidden_size,
-    #         num_local_experts=self.local_num_experts,
-    #         moe_parallel_config=self.moe_parallel_config,
-    #         in_dtype=moe_in_dtype,
-    #         max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
-    #         has_bias=has_bias,
-    #     )
-    #     self.moe_config = moe
-
-    #     self.quant_config = quant_config
-    #     if self.quant_config is None:
-    #         self.quant_method = AscendUnquantizedFusedMoEMethod(
-    #             self.moe_config)
-    #     else:
-    #         self.quant_method = self.quant_config.get_quant_method(
-    #             self, self.layer_name)
 
 
     def gating(self,
@@ -428,7 +355,8 @@ class AscendFusedMoE(FusedMoE):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
-
+        print('fused_expert forward_impl')
+        print('w1=', self.w13_weight)
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
         quantized_x_for_share, dynamic_scale_for_share = None, None
 
@@ -571,6 +499,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         # Make sure the shared experts stream begins after hidden_states are ready.
+        print("shared_expert forward_impl")
         if self.multistream_overlap_shared_expert:
             self.shared_expert_stream.wait_stream(  # type: ignore
                 torch.npu.current_stream())
@@ -594,12 +523,10 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             torch.npu.current_stream().wait_stream(self.shared_expert_stream)
         return shared_out, fused_output
 
-    def gating(self,
-                hidden_states: torch.Tensor,
-                router_logits: torch.Tensor):
-        return AscendFusedMoE.gating(hidden_states, router_logits)
 
+    # TODO 这里的weight的传入有问题，目测是没加载对
     def afd_ffn_compute(self, 
+                layer,
                 hidden_states: torch.Tensor, 
                 topk_weights: torch.Tensor,
                 topk_ids: torch.Tensor,

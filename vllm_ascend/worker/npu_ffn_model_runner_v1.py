@@ -116,6 +116,10 @@ class NPUFFNModelRunner(NPUModelRunner):
                 moe_comm_type = ffn_need_forward_data.moe_comm_type
                 num_input_tokens = ffn_need_forward_data.num_input_tokens
                 total_num_scheduled_tokens = ffn_need_forward_data.total_num_scheduled_tokens
+                topk_weights = afdConnectorMetadata.topk_weights
+                topk_ids = afdConnectorMetadata.topk_ids
+                row_idx = afdConnectorMetadata.row_idx
+                print('execute_model')
                 with set_ascend_forward_context(
                         attn_metadata=None,
                         vllm_config=self.vllm_config,
@@ -170,9 +174,13 @@ class NPUFFNModelRunner(NPUModelRunner):
         return output_tensor[:actual_tokens].clone()
 
     def _execute_eager_mode(self, hidden_states: torch.Tensor,
-                            current_layer_idx: int):
+                            current_layer_idx: int,
+                            topk_weights: Optional[torch.Tensor] = None,
+                            topk_ids: Optional[torch.Tensor] = None,
+                            row_idx: Optional[torch.Tensor] = None,):
         """Execute FFN computation in eager mode (fallback)."""
         # Handle TP case: all-gather tensors from all TP ranks
+        print('_execute_eager_mode')
         tp_world_size = get_tensor_model_parallel_world_size()
         if tp_world_size > 1:
             # All-gather hidden states from all TP ranks

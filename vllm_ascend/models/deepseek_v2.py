@@ -682,10 +682,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if 'mlp.gate.' in name:
-                print('name before replace:%s', name)
+            if self.role and 'mlp.gate.' in name:
                 name = name.replace("mlp.gate.", "gate.")
-                print('name after replace:%s', name)
             if "rotary_emb.inv_freq" in name:
                 continue
             if "module" in name:
