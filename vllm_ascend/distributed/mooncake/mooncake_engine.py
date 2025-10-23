@@ -37,6 +37,8 @@ class MooncakeEngine:
         self.tp_rank = parallel_config.rank
         self.tp_size = parallel_config.tensor_parallel_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        self.register_buffer = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "register_buffer", False)
         self.block_size = vllm_config.cache_config.block_size
         self.current_layer = 0
         # self.use_mla = first_kv_cache_tuple[0].size(
@@ -110,12 +112,18 @@ class MooncakeEngine:
                 for i, cache in enumerate(cache_or_caches, 0):
                     base_addr = cache.data_ptr()
                     self.kv_caches_base_addr.append(base_addr)
+                    if self.register_buffer:
+                        region_len = self.num_blocks * self.block_len[i % 2]
+                        self._register(base_addr, region_len)
             else:
                 cache_list = [cache_or_caches
                               ] if self.use_mla else cache_or_caches
                 for cache in cache_list:
                     base_addr = cache.data_ptr()
                     self.kv_caches_base_addr.append(base_addr)
+                    if self.register_buffer:
+                        region_len = self.num_blocks * self.block_len[0]
+                        self._register(base_addr, region_len)
 
         if self.use_layerwise:
             self.get_event = threading.Event()
@@ -150,6 +158,15 @@ class MooncakeEngine:
             self.kv_recv_thread.start()
             ready_event.wait()
 
+    def _register(self, ptr, length):
+        logger.debug(
+            "Registering KV cache: ptr=0x%x, length=%d, num_blocks=%d, "
+            "block_lens=%s", ptr, length, self.num_blocks, self.block_len)
+        try:
+            self.m_store.register_buffer(ptr, length)
+        except Exception as e:
+            logger.error(f"Mooncake memory registration failed. Error is  {e}")
+                
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         self.current_layer = 0
         self.layerwise_retrievers = []
