@@ -167,7 +167,6 @@ class MooncakeEngine:
         except Exception as e:
             raise RuntimeError(
                 f"Mooncake memory registration failed. Error is: {e}")
-               
                 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         self.current_layer = 0
