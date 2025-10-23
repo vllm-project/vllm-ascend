@@ -1,6 +1,7 @@
 import logging
 import os
 import subprocess
+from dataclasses import dataclass
 from typing import Optional
 
 import regex as re
@@ -17,43 +18,49 @@ logger = logging.getLogger(__name__)
 DISAGGREGATED_PREFILL_PROXY_SCRIPT = "examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py"
 
 
+@dataclass
+class NodeInfo:
+    index: int
+    ip: str
+    server_cmd: str
+    headless: bool
+    server_port: int
+
+
 class MultiNodeConfig:
 
     def __init__(self,
                  model: str,
                  test_name: str,
-                 num_nodes: int = 2,
                  npu_per_node: int = 16,
                  server_port: int = 8080,
-                 headless: bool = False,
                  disaggregated_prefill: Optional[dict] = None,
                  envs: Optional[dict] = None,
-                 server_cmd: str = "",
+                 nodes_info: Optional[list[NodeInfo]] = None,
                  perf_cmd: Optional[str] = None,
                  acc_cmd: Optional[str] = None):
         self.test_name = test_name
         self.model = model
-        self.num_nodes = num_nodes
+        self.nodes_info = nodes_info or []
+        self.num_nodes = len(self.nodes_info)
         self.npu_per_node = npu_per_node
-        self.envs = envs if envs is not None else {}
         self.server_port = server_port
-        if disaggregated_prefill:
-            self.proxy_port = get_avaliable_port()
-        self.headless = headless
-        self.server_cmd = server_cmd
+        self.envs = envs if envs is not None else {}
+        self.proxy_port = get_avaliable_port()
         self.perf_cmd = perf_cmd
         self.acc_cmd = acc_cmd
         assert perf_cmd is not None, "perf_cmd must be provided"
         assert acc_cmd is not None, "acc_cmd must be provided"
-        assert server_cmd is not None, "server_cmd must be provided"
 
         self.cur_index = os.getenv("LWS_WORKER_INDEX", 0)
         self.cur_ip = get_cur_ip()
         self.nic_name = get_net_interface(self.cur_ip)
-        self.cluster_ips = get_cluster_ips(num_nodes)
+        self.cluster_ips = get_cluster_ips(self.num_nodes)
         self.disaggregated_prefill = disaggregated_prefill
+        self.cur_node_info: NodeInfo = self.nodes_info[int(self.cur_index)]
         self._init_dist_env()
-        self.server_cmd = self._expand_env_vars(self.server_cmd, self.envs)
+        self.server_cmd = self._expand_env_vars(self.cur_node_info.server_cmd,
+                                                self.envs)
 
     def _init_dist_env(self):
         self.envs["HCCL_IF_IP"] = self.cur_ip
@@ -172,15 +179,21 @@ class MultiNodeConfig:
         deployments = config_data.get("deployment", [])
         assert len(deployments) == num_nodes, \
             f"Number of deployments ({len(deployments)}) must match num_nodes ({num_nodes})"
-        for deployment in deployments:
-            if deployment.get("local_index") == int(
-                    os.getenv("LWS_WORKER_INDEX", 0)):
-                envs_extend = deployment.get("env_extend", {})
-                if envs_extend:
-                    envs.update(envs_extend)
-                server_cmd = deployment.get("server_cmd")
-                headless = deployment.get("headless", False)
-                break
+
+        cluster_ips = get_cluster_ips(num_nodes)
+        nodes_info = []
+
+        for index, deployment in enumerate(deployments):
+            # after assert len(deployments) == num_nodes, we can assume that this will must have a match
+            server_cmd = deployment.get("server_cmd", "")
+            headless = "--headless" in server_cmd
+            nodes_info.append(
+                NodeInfo(ip=cluster_ips[index],
+                         index=index,
+                         headless=headless,
+                         server_port=server_port,
+                         server_cmd=server_cmd))
+
         benchmarks = config_data.get("benchmarks", {})
         assert benchmarks is not None, "benchmarks must be provided"
         perf_cmd = benchmarks["perf"]
@@ -188,13 +201,11 @@ class MultiNodeConfig:
 
         return cls(model=model,
                    test_name=test_name,
-                   num_nodes=num_nodes,
                    npu_per_node=npu_per_node,
                    envs=envs,
                    server_port=server_port,
-                   headless=headless,
                    disaggregated_prefill=disaggregated_prefill,
-                   server_cmd=server_cmd,
+                   nodes_info=nodes_info,
                    perf_cmd=perf_cmd,
                    acc_cmd=acc_cmd)
 

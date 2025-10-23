@@ -1,7 +1,47 @@
 #!/bin/bash
 set -euo pipefail
 
-export SRC_DIR="$WORKSPACE/source_code"
+# Color definitions
+GREEN="\033[0;32m"
+BLUE="\033[0;34m"
+YELLOW="\033[0;33m"
+RED="\033[0;31m"
+NC="\033[0m" # No Color
+
+# Configuration
+GOVER=1.23.8
+LOG_DIR="/root/.cache/tests/logs"
+OVERWRITE_LOGS=true
+SRC_DIR="$WORKSPACE/source_code"
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+
+# Function to print section headers
+print_section() {
+    echo -e "\n${BLUE}=== $1 ===${NC}"
+}
+
+# Function to print success messages
+print_success() {
+    echo -e "${GREEN}✓ $1${NC}"
+}
+
+# Function to print error messages and exit
+print_error() {
+    echo -e "${RED}✗ ERROR: $1${NC}"
+    exit 1
+}
+
+# Function to check command success
+check_success() {
+    if [ $? -ne 0 ]; then
+        print_error "$1"
+    fi
+}
+
+if [ $(id -u) -ne 0 ]; then
+	print_error "Require root permission, try sudo ./dependencies.sh"
+fi
+
 
 check_npu_info() {
     echo "====> Check NPU info"
@@ -29,11 +69,6 @@ checkout_src() {
     if [ ! -d "$SRC_DIR/vllm" ]; then
         git clone -b $VLLM_VERSION https://github.com/vllm-project/vllm.git "$SRC_DIR/vllm"
     fi
-
-    #mooncake
-    if [ ! -d "$SRC_DIR/Mooncake" ]; then
-        git clone -b pooling_async_memecpy_v1 https://github.com/AscendTransport/Mooncake "$SRC_DIR/Mooncake"
-    fi
 }
 
 install_sys_dependencies() {
@@ -57,28 +92,55 @@ install_vllm() {
     pip install -r "$SRC_DIR/vllm-ascend/requirements-dev.txt"
 }
 
-install_mooncake() {
-    echo "====> Install mooncake"
-    apt-get update -y
-    apt-get install -y --no-install-recommends mpich libmpich-dev
-    cd $SRC_DIR/Mooncake
-    bash dependencies.sh --yes
-    apt purge mpich libmpich-dev -y
-    apt purge openmpi-bin -y
-    apt purge openmpi-bin libopenmpi-dev -y
-    apt install mpich libmpich-dev -y
-    export CPATH=/usr/lib/aarch64-linux-gnu/mpich/include/:$CPATH
-    export CPATH=/usr/lib/aarch64-linux-gnu/openmpi/lib:$CPATH
+download_go() {
+    ARCH=$(uname -m)
+    GOVER=1.23.8
+    if [ "$ARCH" = "aarch64" ]; then
+        ARCH="arm64"
+    elif [ "$ARCH" = "x86_64" ]; then
+        ARCH="amd64"
+    else
+        echo "Unsupported architecture: $ARCH"
+        exit 1
+    fi
+    # Download Go
+    echo "Downloading Go $GOVER..."
+    wget -q --show-progress https://golang.google.cn/dl/go$GOVER.linux-$ARCH.tar.gz
+    check_success "Failed to download Go $GOVER"
 
-    mkdir build
-    cd -
-    cd $SRC_DIR/Mooncake/build
-    cmake ..
-    make -j
-    make install
-    cp mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/libascend_transport_mem.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
-    cp mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
-    cd -
+    # Install Go
+    echo "Installing Go $GOVER..."
+    tar -C /usr/local -xzf go$GOVER.linux-$ARCH.tar.gz
+    check_success "Failed to install Go $GOVER"
+
+    # Clean up downloaded file
+    rm -f go$GOVER.linux-$ARCH.tar.gz
+    check_success "Failed to clean up Go installation file"
+
+    print_success "Go $GOVER installed successfully"
+}
+
+install_go() {
+    # Check if Go is already installed
+    if command -v go &> /dev/null; then
+        GO_VERSION=$(go version | awk '{print $3}')
+        if [[ "$GO_VERSION" == "go$GOVER" ]]; then
+            echo -e "${YELLOW}Go $GOVER is already installed. Skipping...${NC}"
+        else
+            echo -e "${YELLOW}Found Go $GO_VERSION. Will install Go $GOVER...${NC}"
+            download_go
+        fi
+    else
+        download_go
+    fi
+
+    # Add Go to PATH if not already there
+    if ! grep -q "export PATH=\$PATH:/usr/local/go/bin" ~/.bashrc; then
+        echo -e "${YELLOW}Adding Go to your PATH in ~/.bashrc${NC}"
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+        echo -e "${YELLOW}Please run 'source ~/.bashrc' or start a new terminal to use Go${NC}"
+    fi
+    export PATH=$PATH:/usr/local/go/bin
 }
 
 kill_npu_processes() {
@@ -89,8 +151,33 @@ kill_npu_processes() {
 }
 
 run_tests() {
-    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
-    kill_npu_processes
+    echo "====> Run tests"
+
+    shopt -s nullglob
+    set +e
+    for file in tests/e2e/nightly/multi_node/config/models/*.yaml; do
+        export CONFIG_YAML_PATH="$file"
+        echo -e "${GREEN}Running test with config: $CONFIG_YAML_PATH"
+
+        config_name=$(basename "$file" .yaml)
+        log_file="${LOG_DIR}/test_${config_name}_node${LWS_WORKER_INDEX}.log"
+
+        if [ -f "$log_file" ]; then
+            if [ "${OVERWRITE_LOGS:-true}" = "true" ]; then
+                echo "Overwriting existing log file: $log_file"
+                > "$log_file"
+            else
+                local timestamp=$(date +%H%M%S)
+                log_file="${LOG_DIR}/test_${config_name}_${timestamp}.log"
+                echo "Log file exists, using: $log_file"
+            fi
+        fi
+
+        pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee "$log_file"
+        kill_npu_processes
+    done
+    set -e
+    shopt -u nullglob
 }
 
 main() {
@@ -99,7 +186,12 @@ main() {
     checkout_src
     install_sys_dependencies
     install_vllm
-    install_mooncake
+    # to speed up mooncake build process, install Go here
+    install_go
+    cd "$WORKSPACE/source_code"
+    . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
+    pooling_async_memecpy_v1 9d96b2e1dd76cc601d76b1b4c5f6e04605cd81d3
+    cd "$WORKSPACE/source_code/vllm-ascend"
     run_tests
 }
 
