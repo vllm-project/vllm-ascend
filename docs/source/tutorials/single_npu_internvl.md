@@ -50,7 +50,6 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 `max_split_size_mb` prevents the native allocator from splitting blocks larger than this size (in MB). This can reduce fragmentation and may allow some borderline workloads to complete without running out of memory. You can find more details [<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html).
 :::
 
-
 Run the following script to execute offline inference on a single NPU:
 
 #### Single Image Inference
