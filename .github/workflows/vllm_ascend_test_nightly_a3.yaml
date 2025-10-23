@@ -68,7 +68,6 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/multi_node_test.yaml
     with:
-      vllm: v0.11.0
       soc_version: a3
       image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml
@@ -79,7 +78,6 @@ jobs:
     needs: multi-node-deepseek
     uses: ./.github/workflows/multi_node_test.yaml
     with:
-      vllm: v0.11.0
       soc_version: a3
       image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A3B.yaml
