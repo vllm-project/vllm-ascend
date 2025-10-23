@@ -1139,10 +1139,12 @@ class MooncakeConnectorWorker:
 
         if self.kv_send_thread is not None:
             for req_id, delay_start_time in metadata.requests_to_send.items():
-                if self.tp_rank in np.array(
-                        self._get_remote_tp_ranks_for_req(req_id)):
+                if self.tp_rank in self._prefill_get_remote_tp_rank(req_id):
                     self.kv_send_thread.add_delayed_request(
                         req_id, delay_start_time)
+
+    def _prefill_get_remote_tp_rank(self, req_id: str) -> List[int]:
+        return sum(self._get_remote_tp_ranks_for_req(req_id), [])
 
     def _get_remote_tp_rank(self, req_id: str) -> List[int]:
         return self._get_remote_tp_ranks_for_req(req_id)[self.tp_rank]
@@ -1179,8 +1181,8 @@ class MooncakeConnectorWorker:
         else:
             group_size = self._prefill_tp_size // self._decode_tp_size
             for i in range(self._decode_tp_size):
-                slice = ori_data[i * group_size:(i + 1) * group_size]
-                sampled_nums.append(slice)
+                ori_data_slice = ori_data[i * group_size:(i + 1) * group_size]
+                sampled_nums.append(ori_data_slice.tolist())
         return sampled_nums
 
 
