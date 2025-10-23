@@ -66,7 +66,7 @@ from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.layers.sfa import AscendSFAModules, Indexer
-from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
+from vllm_ascend.ops.fused_moe.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.linear import AscendLinearBase
 from vllm_ascend.utils import vllm_version_is
 
