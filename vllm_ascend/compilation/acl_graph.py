@@ -374,11 +374,6 @@ def update_graph_params_workspaces(num_tokens: int, workspace: int):
     if _graph_params is not None:
         _graph_params.workspaces[num_tokens] = weak_ref_tensors(workspace)
 
-def update_graph_params_workspaces(num_tokens: int, workspace: int):
-    global _graph_params
-    if _graph_params is not None:
-        _graph_params.workspaces[num_tokens] = workspace
-
 
 def get_graph_params():
     return _graph_params
