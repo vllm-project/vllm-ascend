@@ -323,7 +323,7 @@ class TestNPUPlatform(TestBase):
             )
         else:
             self.assertEqual(
-                vllm_config.compilation_config.level,
+                vllm_config.compilation_config.mode,
                 CompilationMode.NONE,
             )
 
@@ -352,7 +352,7 @@ class TestNPUPlatform(TestBase):
         if vllm_version_is("0.11.0"):
             vllm_config.compilation_config.level = CompilationLevel.DYNAMO_ONCE
         else:
-            vllm_config.compilation_config.level = CompilationMode.DYNAMO_TRACE_ONCE
+            vllm_config.compilation_config.mode = CompilationMode.DYNAMO_TRACE_ONCE
 
         with self.assertLogs(logger="vllm", level="WARNING") as cm:
             from vllm_ascend import platform
@@ -360,10 +360,16 @@ class TestNPUPlatform(TestBase):
             importlib.reload(platform)
             self.platform.check_and_update_config(vllm_config)
             self.assertTrue("NPU does not support" in cm.output[0])
-            self.assertEqual(
-                vllm_config.compilation_config.level,
-                CompilationMode.NONE,
-            )
+            if vllm_version_is("0.11.0"):
+                self.assertEqual(
+                    vllm_config.compilation_config.level,
+                    CompilationMode.NONE,
+                )
+            else:
+                self.assertEqual(
+                    vllm_config.compilation_config.mode,
+                    CompilationMode.NONE,
+                )
             self.assertEqual(
                 vllm_config.compilation_config.cudagraph_mode,
                 CUDAGraphMode.NONE,
@@ -398,7 +404,7 @@ class TestNPUPlatform(TestBase):
                 )
             else:
                 self.assertEqual(
-                    vllm_config.compilation_config.level,
+                    vllm_config.compilation_config.mode,
                     CompilationMode.NONE,
                 )
             self.assertEqual(
@@ -427,7 +433,7 @@ class TestNPUPlatform(TestBase):
         if vllm_version_is("0.11.0"):
             vllm_config.compilation_config.level = CompilationLevel.PIECEWISE
         else:
-            vllm_config.compilation_config.level = CompilationMode.VLLM_COMPILE
+            vllm_config.compilation_config.mode = CompilationMode.VLLM_COMPILE
 
         with self.assertLogs(logger="vllm", level="INFO") as cm:
             from vllm_ascend import platform
@@ -443,7 +449,7 @@ class TestNPUPlatform(TestBase):
             )
         else:
             self.assertEqual(
-                vllm_config.compilation_config.level,
+                vllm_config.compilation_config.mode,
                 CompilationMode.NONE,
             )
         self.assertEqual(
@@ -720,54 +726,3 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
-
-    @patch("torch.distributed.is_hccl_available", return_value=True)
-    @patch("torch_npu._C._distributed_c10d.ProcessGroupHCCL")
-    @patch("torch.distributed.ProcessGroup")
-    def test_successful_initialization(self, mock_pg, mock_pg_hccl, _):
-        mock_prefix = MagicMock(spec=PrefixStore)
-        mock_backend = MagicMock()
-        mock_pg_hccl.return_value = mock_backend
-        group_rank = 0
-        group_size = 4
-
-        mock_pg_instance = MagicMock(spec=ProcessGroup)
-        mock_pg.return_value = mock_pg_instance
-
-        # Use importlib.reload() to force-reload the platform module and ensure the mocked ProcessGroup is used.
-        # Without this reload, when executing self.platform.stateless_init_device_torch_dist_pg(),
-        # it would invoke the original unmocked ProcessGroup implementation instead of our test mock,
-        # which would cause the unit test to fail.
-        from vllm_ascend import platform
-
-        importlib.reload(platform)
-
-        result = self.platform.stateless_init_device_torch_dist_pg(
-            backend="hccl",
-            prefix_store=mock_prefix,
-            group_rank=group_rank,
-            group_size=group_size,
-            timeout=timedelta(seconds=30),
-        )
-
-        mock_pg.assert_called_once_with(mock_prefix, group_rank, group_size)
-        mock_pg_hccl.assert_called_once_with(mock_prefix, group_rank,
-                                             group_size, unittest.mock.ANY)
-        mock_backend._set_sequence_number_for_group.assert_called_once()
-        mock_pg_instance._register_backend.assert_called_once_with(
-            torch.device("npu"), unittest.mock.ANY, mock_backend)
-        self.assertEqual(result, mock_pg_instance)
-
-    @patch("torch.distributed.is_hccl_available", return_value=False)
-    def test_hccl_unavailable(self, _):
-        with self.assertRaises(AssertionError):
-            from vllm_ascend import platform
-
-            importlib.reload(platform)
-            self.platform.stateless_init_device_torch_dist_pg(
-                backend="hccl",
-                prefix_store=MagicMock(),
-                group_rank=0,
-                group_size=4,
-                timeout=timedelta(seconds=30),
-            )

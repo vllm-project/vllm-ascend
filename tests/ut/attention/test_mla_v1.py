@@ -308,6 +308,7 @@ class TestAscendMLAImpl(TestBase):
             "qk_rope_head_dim": 32,
             "qk_head_dim": 96,
             "v_head_dim": 128,
+            "q_lora_rank": 64,
             "q_proj": MagicMock(),
             "q_b_proj": MagicMock(),
             "kv_b_proj": MagicMock(),
@@ -315,6 +316,7 @@ class TestAscendMLAImpl(TestBase):
             "kv_a_proj_with_mqa": MagicMock(),
             "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": kv_a_layernorm,
+            "rotary_emb": MagicMock(),
         }
 
         self.impl = AscendMLAImpl(num_heads=num_heads,
