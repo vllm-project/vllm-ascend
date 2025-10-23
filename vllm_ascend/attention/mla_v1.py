@@ -110,6 +110,7 @@ class AscendMLAPrefillMetadata:
         max_seq_lens: list[int]
         workspace: torch.Tensor
         chunk_seq_lens: torch.Tensor
+        chunk_seq_lens_npu: torch.Tensor
 
     attn_mask: torch.Tensor
     query_lens: torch.Tensor
@@ -449,6 +450,7 @@ class AscendMLAMetadataBuilder:
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     chunk_seq_lens=chunk_seq_lens,
+                    chunk_seq_lens_npu=chunk_seq_lens.to(device, non_blocking=True),
                     workspace=self.chunked_prefill_workspace,
                 )
             prefill_input_positions = input_positions[tokens_start:]
@@ -897,6 +899,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
             seq_len2 = prefill_metadata.chunked_context.chunk_seq_lens[i]
+            seq_len2_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[
+                i]
             seq_len = torch.stack([seq_len1, seq_len2])
             kv_c_normed = torch.empty(toks,
                                       num_heads,
@@ -913,7 +917,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
-                seq_len2.to(q_nope.device),
+                seq_len2_npu,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,
