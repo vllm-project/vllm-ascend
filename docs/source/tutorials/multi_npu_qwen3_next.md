@@ -13,6 +13,7 @@ Run docker container:
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
+--shm-size=1g \
 --name vllm-ascend-qwen3 \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
