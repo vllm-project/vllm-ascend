@@ -1113,7 +1113,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
         self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
@@ -1121,7 +1121,8 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         num_actual_toks = attn_metadata.num_actual_tokens
         if k_pe is None and not self.running_in_graph:
             if self.fused_qkv_a_proj is not None:
-                qkv_lora = self.fused_qkv_a_proj(hidden_states_or_kv_c_normed)[0]
+                qkv_lora = self.fused_qkv_a_proj(
+                    hidden_states_or_kv_c_normed)[0]
                 _, kv = qkv_lora.split(
                     [
                         self.q_lora_rank,

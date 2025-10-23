@@ -207,6 +207,9 @@ class NPUWorker(WorkerBase):
         return device
 
     def init_device(self):
+        # NOTE: KEEP device the member of `NPUWorker`, as it will be checked
+        # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
+        # for more details
         self.device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = NPUModelRunner(self.vllm_config, self.device)

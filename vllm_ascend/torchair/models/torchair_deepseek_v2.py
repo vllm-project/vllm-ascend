@@ -536,6 +536,7 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.o_proj")
 
+        print(30 * "=", f"q_lora_rank: {q_lora_rank}")
         if self.q_lora_rank is not None:
             self.fused_qkv_a_proj = MergedColumnParallelLinear(
                 self.hidden_size,
@@ -1257,14 +1258,20 @@ class TorchairDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         """"""
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-            ("fused_qkv_a_proj", "q_a_proj", 0),
-            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
-        ]
-
+        if self.config.q_lora_rank is not None:
+            stacked_params_mapping = [
+                # (param_name, shard_name, shard_id)
+                ("gate_up_proj", "gate_proj", 0),
+                ("gate_up_proj", "up_proj", 1),
+                ("fused_qkv_a_proj", "q_a_proj", 0),
+                ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
+            ]
+        else:
+            stacked_params_mapping = [
+                # (param_name, shard_name, shard_id)
+                ("gate_up_proj", "gate_proj", 0),
+                ("gate_up_proj", "up_proj", 1),
+            ]
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = TorchairAscendFusedMoE.make_expert_params_mapping(

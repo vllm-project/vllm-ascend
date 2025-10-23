@@ -992,7 +992,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         if attn_metadata.prefill is not None:
             assert attn_metadata.num_decodes is not None and \
