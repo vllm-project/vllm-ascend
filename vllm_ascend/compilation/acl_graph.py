@@ -201,89 +201,47 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
             graph_params.handles[runtime_shape],
             graph_params.events[runtime_shape],
     ):
-        if torch.version.cann.startswith("8.3"):
-            (
-                query,
-                key_cache,
-                value,
-                block_tables,
-                attn_mask,
-                block_size,
-                seq_lens,
-                query_start_loc,
-                num_kv_heads,
-                num_heads,
-                scale,
-                attn_output,
-                softmax_lse
-            ) = param
+        (
+            query,
+            key_cache,
+            value,
+            block_tables,
+            attn_mask,
+            block_size,
+            seq_lens,
+            query_start_loc,
+            num_kv_heads,
+            num_heads,
+            scale,
+            attn_output,
+            softmax_lse
+        ) = param
 
-            seq_lens = forward_context.attn_metadata[key].seq_lens
-            query_start_loc = forward_context.attn_metadata[key].query_start_loc[1:].cpu().int().tolist()
+        seq_lens = forward_context.attn_metadata[key].seq_lens
+        query_start_loc = forward_context.attn_metadata[key].query_start_loc[1:].cpu().int().tolist()
 
-            with torch.npu.stream(update_stream):
-                torch.npu.graph_task_update_begin(update_stream, handle)
-                torch_npu.npu_fused_infer_attention_score.out(
-                    query=query,
-                    key=key_cache,
-                    value=value,
-                    block_table=block_tables,
-                    atten_mask=attn_mask,
-                    input_layout="TND",
-                    block_size=block_size,
-                    actual_seq_lengths=query_start_loc,
-                    actual_seq_lengths_kv=seq_lens,
-                    num_key_value_heads=num_kv_heads,
-                    num_heads=num_heads,
-                    scale=scale,
-                    sparse_mode=3,
-                    workspace=graph_params.workspaces.get(runtime_shape),
-                    out=[attn_output, softmax_lse],
-                )
-                torch.npu.graph_task_update_end(update_stream)
+        with torch.npu.stream(update_stream):
+            torch.npu.graph_task_update_begin(update_stream, handle)
+            torch_npu.npu_fused_infer_attention_score.out(
+                query=query,
+                key=key_cache,
+                value=value,
+                block_table=block_tables,
+                atten_mask=attn_mask,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=query_start_loc,
+                actual_seq_lengths_kv=seq_lens,
+                num_key_value_heads=num_kv_heads,
+                num_heads=num_heads,
+                scale=scale,
+                sparse_mode=3,
+                workspace=graph_params.workspaces.get(runtime_shape),
+                out=[attn_output, softmax_lse],
+            )
+            torch.npu.graph_task_update_end(update_stream)
 
-                event.record(update_stream)
-        else:
-            (
-                query,
-                key_cache,
-                value_cache,
-                num_kv_heads,
-                num_heads,
-                scale,
-                block_table,
-                seq_lens,
-                output,
-            ) = param
-            # block_table = forward_context.attn_metadata[key].block_tables
-            seq_lens = forward_context.attn_metadata[key].seq_lens
-            torch_npu_check = version_check()
-
-            with torch.npu.stream(update_stream):
-                torch.npu.graph_task_update_begin(update_stream, handle)
-                if torch_npu_check:
-                    torch_npu._npu_paged_attention(
-                        query=query,
-                        key_cache=key_cache,
-                        value_cache=value_cache,
-                        num_kv_heads=num_kv_heads,
-                        num_heads=num_heads,
-                        scale_value=scale,
-                        block_table=block_table,
-                        context_lens=seq_lens,
-                        out=output,
-                        workspace=graph_params.workspaces.get(runtime_shape))
-                else:
-                    torch_npu._npu_paged_attention(query=query,
-                                                key_cache=key_cache,
-                                                value_cache=value_cache,
-                                                num_kv_heads=num_kv_heads,
-                                                num_heads=num_heads,
-                                                scale_value=scale,
-                                                block_table=block_table,
-                                                context_lens=seq_lens,
-                                                out=output)
-                torch.npu.graph_task_update_end(update_stream)
+            event.record(update_stream)
 
 
 def update_mla_attn_params(update_stream, forward_context, runtime_shape,
