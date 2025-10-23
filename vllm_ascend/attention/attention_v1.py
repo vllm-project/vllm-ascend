@@ -372,19 +372,44 @@ class AscendAttentionBackendImpl(AttentionImpl):
         compress_mask = attn_metadata.attn_mask
         batch_size = attn_metadata.query_lens.shape[0]
         block_table = attn_metadata.block_tables[:batch_size, :]
+        num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
 
-        torch_npu._npu_flash_attention_qlens(
-            query=query,
-            key_cache=self.key_cache,
-            value_cache=self.value_cache,
-            block_table=block_table,
-            mask=compress_mask,
-            seq_len=attn_metadata.query_lens,
-            context_lens=attn_metadata.seq_lens,
-            num_kv_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale_value=self.scale,
-            out=output)
+        if torch.version.cann.startswith("8.3") and block_size == 128:
+            # TODO:The npu_fused_infer_attention_score op is planned to
+            # be utilized in a wider range in upcoming versions.
+            key = self.key_cache.view(  # type: ignore
+                num_block, block_size, -1)
+            value = self.value_cache.view(  # type: ignore
+                num_block, block_size, -1)
+
+            output, _ = torch_npu.npu_fused_infer_attention_score(
+                query=query,
+                key=key,
+                value=value,
+                atten_mask=compress_mask,
+                block_table=block_table,
+                input_layout="TND",
+                block_size=block_size,
+                actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
+                actual_seq_lengths_kv=attn_metadata.seq_lens_list,
+                num_key_value_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale=self.scale,
+                sparse_mode=3,
+            )
+        else:
+            torch_npu._npu_flash_attention_qlens(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                block_table=block_table,
+                mask=compress_mask,
+                seq_len=attn_metadata.query_lens,
+                context_lens=attn_metadata.seq_lens,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                out=output)
         return output
 
     def _forward_decode_only(
