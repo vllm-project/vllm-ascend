@@ -89,13 +89,8 @@ kill_npu_processes() {
 }
 
 run_tests() {
-    echo "====> Run tests"
-    shopt -s nullglob
-
     pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
     kill_npu_processes
-
-    shopt -u nullglob
 }
 
 main() {
