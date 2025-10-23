@@ -1,6 +1,6 @@
 import sys
 import vllm.distributed.utils
-from vllm.platforms import Platform, CpuArchEnum
+from vllm.platforms import CpuArchEnum, Platform
 
 is_arm = (Platform.get_cpu_architecture() == CpuArchEnum.ARM)
 
