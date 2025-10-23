@@ -26,7 +26,6 @@ on:
     branches:
       - 'main'
       - '*-dev'
-    types: [labeled,opened,synchronize]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -80,7 +79,10 @@ jobs:
     if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
       matrix:
+        # should add A3 chip runner when available
         os: [ linux-aarch64-a3-16 ]
+    # Note (yikun): If CI resource are limited we can split job into two chain jobs
+    # only trigger e2e test after lint passed and the change is e2e related with pull request.
     uses: ./.github/workflows/_e2e_nightly.yaml
     with:
       vllm: v0.11.0
@@ -91,15 +93,18 @@ jobs:
     if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
       matrix:
+        # should add A3 chip runner when available
         os: [ linux-aarch64-a3-16 ]
+    # Note (yikun): If CI resource are limited we can split job into two chain jobs
+    # only trigger e2e test after lint passed and the change is e2e related with pull request.
     uses: ./.github/workflows/_e2e_nightly.yaml
     with:
       vllm: v0.11.0
       runner: ${{ matrix.os }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
-  qwen2-5-vl-7b:
-    if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
+  qwen3-32b-int8-a3-feature-stack3:
+    # if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
       matrix:
         os: [ linux-aarch64-a3-4 ]
@@ -108,15 +113,4 @@ jobs:
       vllm: v0.11.0
       runner: ${{ matrix.os }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
-      tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
-  deepseek-r1-0528-w8a8:
-    if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
-    strategy:
-      matrix:
-        os: [ linux-aarch64-a3-16 ]
-    uses: ./.github/workflows/_e2e_nightly.yaml
-    with:
-      vllm: v0.11.0
-      runner: ${{ matrix.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
-      tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8.py
+      tests: tests/e2e/nightly/features/test_qwen3_32b_int8_a3_feature_stack3.py
