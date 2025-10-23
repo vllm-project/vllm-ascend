@@ -102,6 +102,7 @@ class TorchairDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer
         hidden_states = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
+        del inputs_embeds, previous_hidden_states
         replace_allreduce = hidden_states.shape[0] % self.tp_size == 0
 
         hidden_states, residual = self.mtp_block(
