@@ -272,6 +272,7 @@ class TestUtils(TestBase):
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
 
         test_vllm_config.speculative_config = mock.MagicMock()
+        test_vllm_config.speculative_config.num_speculative_tokens = 2
         test_vllm_config.speculative_config.draft_model_config = mock.MagicMock(
         )
         test_vllm_config.speculative_config.draft_model_config.hf_config = mock.MagicMock(
