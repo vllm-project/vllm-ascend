@@ -5,6 +5,6 @@ tasks:
 - name: "mmmu_val"
   metrics:
   - name: "acc,none"
-    value: 0.50
+    value: 0.54
 max_model_len: 8192
 gpu_memory_utilization: 0.7
