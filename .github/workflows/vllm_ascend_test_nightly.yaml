@@ -26,6 +26,7 @@ on:
     branches:
       - 'main'
       - '*-dev'
+    types: [labeled,opened,synchronize]
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -99,7 +100,7 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
   qwen3-32b-int8-a3-feature-stack3:
-    # if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
+    if: contains(github.event.pull_request.labels.*.name, 'run-nightly')
     strategy:
       matrix:
         os: [ linux-aarch64-a3-4 ]
