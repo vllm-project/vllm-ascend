@@ -90,46 +90,12 @@ kill_npu_processes() {
 
 run_tests() {
     echo "====> Run tests"
-
     shopt -s nullglob
-    declare -A results
-    local total=0
-    local passed=0
-    local failed=0
 
-    local REPORT_FILE="/root/.cache/test_summary.md"
-    echo "#Nightly Multi-node Test Summary" > "$REPORT_FILE"
-    echo "" >> "$REPORT_FILE"
-    echo "| Config File | Result |" >> "$REPORT_FILE"
-    echo "|--------------|---------|" >> "$REPORT_FILE"
+    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
+    kill_npu_processes
 
-    for file in tests/e2e/nightly/multi_node/config/models/*.yaml; do
-        export CONFIG_YAML_PATH="$file"
-        echo "Running test with config: $CONFIG_YAML_PATH"
-
-        if pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py; then
-            results["$file"]="✅ PASS"
-            ((passed++))
-        else
-            results["$file"]="❌ FAIL"
-            ((failed++))
-        fi
-        ((total++))
-
-        echo "| \`$file\` | ${results[$file]} |" >> "$REPORT_FILE"
-        echo "------------------------------------------"
-        kill_npu_processes
-    done
     shopt -u nullglob
-
-    echo "" >> "$REPORT_FILE"
-    echo "## Summary" >> "$REPORT_FILE"
-    echo "- **Total:** $total" >> "$REPORT_FILE"
-    echo "- **Passed:** $passed ✅" >> "$REPORT_FILE"
-    echo "- **Failed:** $failed ❌" >> "$REPORT_FILE"
-
-    echo
-    echo "✅ Markdown report written to: $REPORT_FILE"
 }
 
 main() {
