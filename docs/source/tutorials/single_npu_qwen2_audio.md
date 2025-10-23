@@ -155,9 +155,9 @@ You can find this template at `vllm-ascend/examples/chat_templates/template_qwen
 
 Run docker container to start the vLLM server on a single NPU:
 
-```bash
+```{code-block} bash
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
 --device /dev/davinci0 \
