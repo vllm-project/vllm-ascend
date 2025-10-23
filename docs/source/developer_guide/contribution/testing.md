@@ -66,6 +66,7 @@ export DEVICE=/dev/davinci0
 export IMAGE=quay.io/ascend/vllm-ascend:main
 docker run --rm \
     --name vllm-ascend \
+    --shm-size=1g \
     --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
@@ -101,6 +102,7 @@ pip install -r requirements-dev.txt
 export IMAGE=quay.io/ascend/vllm-ascend:main
 docker run --rm \
     --name vllm-ascend \
+    --shm-size=1g \
     --device /dev/davinci0 \
     --device /dev/davinci1 \
     --device /dev/davinci2 \

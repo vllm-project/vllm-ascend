@@ -17,6 +17,7 @@ Run docker container:
 export IMAGE=quay.io/ascend/vllm-ascend:v0.10.0rc1-310p
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
