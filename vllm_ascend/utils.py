@@ -58,6 +58,7 @@ _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
 _ENABLE_SP = None
+_HAS_LAYER_IDX = None
 
 
 def is_310p():
@@ -778,3 +779,12 @@ def version_check():
         if full_date >= "20250919":
             return True
     return False
+
+
+def has_layer_idx(model_instance: torch.nn.Module) -> bool:
+    global _HAS_LAYER_IDX
+    if _HAS_LAYER_IDX is None:
+        _HAS_LAYER_IDX = model_instance is not None and \
+            hasattr(model_instance, "model") and \
+            hasattr(model_instance.model, "start_layer")
+    return _HAS_LAYER_IDX
