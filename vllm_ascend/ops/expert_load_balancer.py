@@ -3,6 +3,7 @@ import random
 from typing import Dict, List
 
 import torch
+import torch.distributed as dist
 
 
 class ExpertLoadBalancer(object):
@@ -97,3 +98,20 @@ class ExpertLoadBalancer(object):
             len(self.expert_map_tensor[0][0]) * self.ranks_num -
             self.global_expert_num)
         return global_redundant_expert_num
+
+    def check_expert_map_tensor(self):
+        if dist.is_initialized():
+            try:
+                rank = dist.get_rank()
+                world_size = dist.get_world_size()
+                all_expert_maps = [None for _ in range(world_size)]
+                dist.all_gather_object(all_expert_maps, self.tensor_data)
+                for rank_id, expert_map_tensor in enumerate(all_expert_maps):
+                    if self.tensor_data != expert_map_tensor:
+                        raise ValueError(
+                            f"The expert map of rank{rank} is not equal to rank{rank_id}"
+                        )
+                return True
+            except Exception as e:
+                raise ValueError(
+                    f"The expert maps of all ranks are inconsistency: {e}")
