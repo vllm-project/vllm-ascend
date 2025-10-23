@@ -6,13 +6,13 @@ Since 0.9.0rc2 version, quantization feature is experimentally supported in vLLM
 
 ## Install modelslim
 
-To quantize a model, users should install [ModelSlim](https://gitee.com/ascend/msit/blob/master/msmodelslim/README.md) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
+To quantize a model, users should install [ModelSlim](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/README.md) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
 
 Install modelslim:
 
 ```bash
 # The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
-git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitee.com/ascend/msit
+git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitcode.com/Ascend/msit
 
 cd msit/msmodelslim
 
@@ -29,8 +29,8 @@ This conversion process will require a larger CPU memory, please ensure that the
 :::
 
 ### Adapts and change
-1. Ascend does not support the `flash_attn` library. To run the model, you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and comment out certain parts of the code in `modeling_deepseek.py` located in the weights folder.
-2. The current version of transformers does not support loading weights in FP8 quantization format. you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and delete the quantization related fields from `config.json` in the weights folder
+1. Ascend does not support the `flash_attn` library. To run the model, you need to follow the [guide](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and comment out certain parts of the code in `modeling_deepseek.py` located in the weights folder.
+2. The current version of transformers does not support loading weights in FP8 quantization format. you need to follow the [guide](https://gitcode.com/Ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and delete the quantization related fields from `config.json` in the weights folder
 
 ### Generate the w8a8 weights
 
