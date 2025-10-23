@@ -43,13 +43,12 @@ class AisbenchRunner:
         if self.task_type == "accuracy":
             aisbench_cmd = [
                 'ais_bench', '--models', f'{self.request_conf}_custom',
-                '--datasets', f'{dataset_conf}', '--debug'
+                '--datasets', f'{dataset_conf}'
             ]
         if self.task_type == "performance":
             aisbench_cmd = [
                 'ais_bench', '--models', f'{self.request_conf}_custom',
-                '--datasets', f'{dataset_conf}_custom', '--debug', '--mode',
-                'perf'
+                '--datasets', f'{dataset_conf}_custom', '--mode', 'perf'
             ]
             if self.num_prompts:
                 aisbench_cmd.extend(['--num-prompts', str(self.num_prompts)])
@@ -64,9 +63,11 @@ class AisbenchRunner:
                  port: int,
                  aisbench_config: dict,
                  verify=True):
-        self.result_line = None
         self.dataset_path = snapshot_download(aisbench_config["dataset_path"],
                                               repo_type='dataset')
+        self.model = model
+        self.model_path = snapshot_download(model)
+        self.port = port
         self.task_type = aisbench_config["case_type"]
         self.request_conf = aisbench_config["request_conf"]
         self.dataset_conf = aisbench_config.get("dataset_conf")
@@ -74,10 +75,13 @@ class AisbenchRunner:
         self.max_out_len = aisbench_config["max_out_len"]
         self.batch_size = aisbench_config["batch_size"]
         self.request_rate = aisbench_config.get("request_rate", 0)
-        self.model = model
-        self.model_path = snapshot_download(model)
-        self.port = port
+        self.temperature = aisbench_config.get("temperature")
+        self.top_k = aisbench_config.get("top_k")
+        self.top_p = aisbench_config.get("top_p")
+        self.seed = aisbench_config.get("seed")
+        self.repetition_penalty = aisbench_config.get("repetition_penalty")
         self.exp_folder = None
+        self.result_line = None
         self._init_dataset_conf()
         self._init_request_conf()
         self._run_aisbench_task()
@@ -138,6 +142,19 @@ class AisbenchRunner:
             content = re.sub(
                 r"temperature.*",
                 "temperature = 0.6,\n            ignore_eos = False,", content)
+        if self.temperature:
+            content = re.sub(r"temperature.*",
+                             f"temperature = {self.temperature}", content)
+        if self.top_p:
+            content = re.sub(r"#?top_p.*", f"top_p = {self.top_p}", content)
+        if self.top_k:
+            content = re.sub(r"#top_k.*", f"top_k = {self.top_k}", content)
+        if self.seed:
+            content = re.sub(r"#seed.*", f"seed = {self.seed}", content)
+        if self.repetition_penalty:
+            content = re.sub(
+                r"#repetition_penalty.*",
+                f"repetition_penalty = {self.repetition_penalty}", content)
         conf_path_new = os.path.join(REQUEST_CONF_DIR,
                                      f'{self.request_conf}_custom.py')
         with open(conf_path_new, 'w', encoding='utf-8') as f:
