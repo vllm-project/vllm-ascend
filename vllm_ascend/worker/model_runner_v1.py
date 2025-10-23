@@ -652,7 +652,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # (such as a single node of A2). self.mc2_tokens_capacity falls
             # back to 0.
             self.mc2_tokens_capacity = 0
-        
+
         self.reserved_mc2_mask = torch.zeros(
             self.mc2_tokens_capacity,
             dtype=torch.bool,
