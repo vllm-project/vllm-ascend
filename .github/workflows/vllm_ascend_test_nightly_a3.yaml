@@ -15,9 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-# This workflow related to the resources atlas 800 A2
-# We will not limit the concurrency of jobs on A2
-name: 'ascend test / nightly-a2'
+# This workflow related to the resources atlas 800 A3
+# **Please note**: current A3 resource pool's maximum allowed concurrency is 5*16 NPUs
+# We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
+name: 'ascend test / nightly-a3'
 
 on:
   schedule:
@@ -36,7 +37,6 @@ defaults:
   run:
     shell: bash -el {0}
 
-# only cancel in-progress runs of the same workflow
 concurrency:
   group: ascend-nightly-${{ github.ref }}
   cancel-in-progress: true
@@ -47,14 +47,41 @@ jobs:
     strategy:
       matrix:
         test_config:
-          - name: qwen3-32b
-            os: linux-aarch64-a2-4
-            tests: tests/e2e/nightly/models/test_qwen3_32b.py
-          - name: qwen3-32b-in8-a2
-            os: linux-aarch64-a2-4
+          - name: qwen3-32b-in8-a3
+            os: linux-aarch64-a3-4
             tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
+          - name: qwen3-235b-a22b-w8a8-eplb
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/models/test_qwen3_235b_a22b_w8a8_eplb.py
+          - name: deepseek-r1-w8a8-eplb
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
     uses: ./.github/workflows/_e2e_nightly.yaml
     with:
       vllm: v0.11.0
       runner: ${{ matrix.test_config.os }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: ${{ matrix.test_config.tests }}
+
+  multi-node-deepseek:
+    needs: single-node-tests
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/multi_node_test.yaml
+    with:
+      vllm: v0.11.0
+      soc_version: a3
+      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml
+      replicas: 1
+      size: 2
+
+  multi-node-qwen3:
+    needs: multi-node-deepseek
+    uses: ./.github/workflows/multi_node_test.yaml
+    with:
+      vllm: v0.11.0
+      soc_version: a3
+      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A3B.yaml
+      replicas: 1
+      size: 2
