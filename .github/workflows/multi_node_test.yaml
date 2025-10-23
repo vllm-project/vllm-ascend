@@ -3,10 +3,6 @@ name: 'e2e nightly test multi_node'
 on:
   workflow_call:
     inputs:
-      vllm:
-        required: true
-        type: string
-        description: vllm version to pin
       soc_version:
         required: true
         type: string
