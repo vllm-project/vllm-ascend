@@ -11,8 +11,10 @@ class ExpertLoadBalancer(object):
     def __init__(self, expert_map_path, global_expert_num):
         self.expert_map_path = expert_map_path
         self.global_expert_num = global_expert_num
+        self.tensor_data = []
         self.expert_map_tensor, self.layers_num, self.ranks_num = (
             self._expert_file_to_tensor())
+        self.expert_placement_map = self.generate_expert_placement_map()
 
     def _expert_file_to_tensor(self):
         with open(self.expert_map_path, "r") as f:
@@ -20,13 +22,12 @@ class ExpertLoadBalancer(object):
         layers_num = data["moe_layer_count"]
         gpus_num = data["layer_list"][0]["device_count"]
 
-        tensor_data = []
         for layer in data["layer_list"]:
             device_data = []
             for device in layer["device_list"]:
                 device_data.append(device["device_expert"])
-            tensor_data.append(device_data)
-        expert_map_tensor = torch.tensor(tensor_data, dtype=torch.int32)
+            self.tensor_data.append(device_data)
+        expert_map_tensor = torch.tensor(self.tensor_data, dtype=torch.int32)
         return expert_map_tensor, layers_num, gpus_num
 
     def generate_index_dicts(self, tensor_2d):
@@ -82,8 +83,7 @@ class ExpertLoadBalancer(object):
         return log2phy_map
 
     def get_rank_placement_map(self, layer_id, rank_id):
-        expert_placement_map = self.generate_expert_placement_map()
-        layer_expert_map = expert_placement_map[layer_id]
+        layer_expert_map = self.expert_placement_map[layer_id]
         rank_expert_map = layer_expert_map[rank_id].to(
             torch.npu.current_device())
         rank_local_expert_num = torch.sum(torch.ne(rank_expert_map, -1)).item()
