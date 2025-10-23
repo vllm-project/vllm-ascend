@@ -65,9 +65,6 @@ class Mooncakestore():
             logger.error(msg)
             raise RuntimeError(msg)
 
-    def set_kv_caches(self, kvcache):
-        self.kvcache = list(kvcache)
-
     def exists(self, key: MooncakeEngineKey) -> bool:
         return self.store.is_exist(key.to_string()) == 1
 

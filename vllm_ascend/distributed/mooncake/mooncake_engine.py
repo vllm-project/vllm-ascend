@@ -104,7 +104,6 @@ class MooncakeEngine:
                     self.use_mla, first_kv_cache.shape)
 
         self.kv_caches = kv_caches
-        self.m_store.set_kv_caches(kv_caches.values())
         self.kv_caches_base_addr = []
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
@@ -148,8 +147,8 @@ class MooncakeEngine:
                 ready_event = threading.Event()
                 self.kv_recv_thread = KVCacheStoreRecvingThread(
                     self.tp_rank, self.tp_size, self.m_store,
-                    self.kv_caches_base_addr, self.token_database, self.block_len,
-                    self.block_size, ready_event)
+                    self.kv_caches_base_addr, self.token_database,
+                    self.block_len, self.block_size, ready_event)
                 self.kv_recv_thread.start()
                 ready_event.wait()
 
@@ -203,11 +202,13 @@ class MooncakeEngine:
                             addr_list.append(addr)
                             size_list.append(size)
                             blockIds.append(block_id)
-                        self.m_store.get_batch(key_list, addr_list, size_list, blockIds)
+                        self.m_store.get_batch(key_list, addr_list, size_list,
+                                               blockIds)
                     else:
                         for start, end, key in self.token_database.process_tokens(
                                 tokens, token_mask):
-                            addr, size, _ = self.prepare_value(start, end, request.block_ids)
+                            addr, size, _ = self.prepare_value(
+                                start, end, request.block_ids)
                             self.m_store.get(key, addr, size)
 
     def prepare_value(self, start: int, end: int, block_ids: list[int]):
