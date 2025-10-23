@@ -9,8 +9,6 @@ from vllm.config import (CUDAGraphMode, VllmConfig,
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model_loader
-from vllm.model_executor.model_loader.utils import (
-    process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.model_executor.model_loader.utils import \
     process_weights_after_loading
