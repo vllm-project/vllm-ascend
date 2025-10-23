@@ -146,3 +146,17 @@
 #       No, this need CANN add an aclnn shift operation
 #    Future Plan:
 #       Revert this when CANN support shift aclnn operation
+#
+# ** File: worker/patch_deepseek_mtp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer.__init__`
+#    Why:
+#       '__init__' func of DeepSeekMultiTokenPredictorLayer didn't pass prefix to SharedHead.
+#    How：
+#       Replace with a new __init__.
+#       Use a new SharedHead which passes prefix to ParallelLMHead.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/25805
+#    Future Plan:
+#       Remove this patch when adapted vllm version contains the above PR.
+#
