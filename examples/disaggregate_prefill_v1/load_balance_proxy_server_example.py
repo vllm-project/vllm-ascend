@@ -16,6 +16,7 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from vllm.logger import init_logger
+import json
 
 logger = init_logger(__name__)
 
@@ -456,6 +457,22 @@ async def _handle_completions(api: str, request: Request):
         released_kv = False
 
         async def generate_stream():
+            nonlocal response
+            prefill_content = json.loads(response.content.decode("utf-8"))
+            prefill_choice = prefill_content["choices"][0]
+            if "message" in prefill_choice:
+                prefill_choice["delta"] = prefill_choice["message"]
+                del prefill_choice["message"]
+            content = {"id": prefill_content["id"], "object": prefill_content["object"], "created": prefill_content["created"], "model": prefill_content["model"],
+                      "choices": [prefill_choice], "usage": None }
+            content_str = "data: " + json.dumps(content) + "\n\n"
+            idx = 0
+            logger.debug(f"generating chunk {idx}: {content_str}")
+            nonlocal req_data
+            if 'stream' not in req_data:
+                req_data['stream'] = False
+            if req_data['stream']:
+                yield content_str.encode("utf-8")
             nonlocal released_kv
             # Only one await per chunk, minimal logic in loop
             try:
@@ -470,6 +487,10 @@ async def _handle_completions(api: str, request: Request):
                         proxy_state.release_prefiller_kv(
                             prefiller_idx, prefiller_score)
                         released_kv = True
+                    idx += 1
+                    if idx == 1 and req_data['stream']:
+                        continue
+                    logger.debug(f"generating chunk {idx}: {chunk}")
                     yield chunk
             except Exception as e:
                 logger.error(
