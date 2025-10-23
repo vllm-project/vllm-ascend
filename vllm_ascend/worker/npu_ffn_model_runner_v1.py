@@ -174,21 +174,23 @@ class NPUFFNModelRunner(NPUModelRunner):
         """Execute FFN computation in eager mode (fallback)."""
         # Handle TP case: all-gather tensors from all TP ranks
         tp_world_size = get_tensor_model_parallel_world_size()
-        if tp_world_size > 1:
-            # All-gather hidden states from all TP ranks
-            gathered_hidden_states = tensor_model_parallel_all_gather(
-                hidden_states, dim=0)
-            ffn_output = self.model.compute_ffn_output(current_layer_idx,
-                                                       gathered_hidden_states)
-            # Extract the output corresponding to current rank
-            start_idx = hidden_states.shape[
-                0] * get_tensor_model_parallel_rank()
-            end_idx = start_idx + hidden_states.shape[0]
-            rank_ffn_output = ffn_output[start_idx:end_idx, :]
-        else:
-            # Single TP case
-            rank_ffn_output = self.model.compute_ffn_output(
-                current_layer_idx, hidden_states)
+        # if tp_world_size > 1:
+        #     # All-gather hidden states from all TP ranks
+        #     print(f'hidden_states in _execute_eager_mode shape is {hidden_states.shape}')
+        #     gathered_hidden_states = tensor_model_parallel_all_gather(
+        #         hidden_states, dim=0)
+        #     print(f'gathered_hidden_states in _execute_eager_mode shape is {gathered_hidden_states.shape}')
+        #     ffn_output = self.model.compute_ffn_output(current_layer_idx,
+        #                                                gathered_hidden_states)
+        #     # Extract the output corresponding to current rank
+        #     start_idx = hidden_states.shape[
+        #         0] * get_tensor_model_parallel_rank()
+        #     end_idx = start_idx + hidden_states.shape[0]
+        #     rank_ffn_output = ffn_output[start_idx:end_idx, :]
+        # else:
+        # Single TP case
+        rank_ffn_output = self.model.compute_ffn_output(
+            current_layer_idx, hidden_states)
 
         return rank_ffn_output
 
