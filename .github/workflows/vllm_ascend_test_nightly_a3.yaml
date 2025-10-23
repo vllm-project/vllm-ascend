@@ -56,6 +56,12 @@ jobs:
           - name: deepseek-r1-w8a8-eplb
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
+          - name: qwen2-5-vl-7b
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
+          - name: deepseek-r1-0528-w8a8
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8.py
     uses: ./.github/workflows/_e2e_nightly.yaml
     with:
       vllm: v0.11.0
