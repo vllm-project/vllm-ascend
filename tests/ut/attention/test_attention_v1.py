@@ -242,27 +242,6 @@ class TestAscendAttentionBackendImpl(TestBase):
             attn_type=self.attention_type.DECODER,
             kv_sharing_target_layer_name=None)
 
-    @patch('torch.ops.vllm.unified_ascend_attention_with_output')
-    def test_forward_trace_flag_true(self, mock_unified_attention):
-        """Test forward pass when trace_flag is True"""
-        query = torch.randn(10, 8 * 64)
-        key = torch.randn(10, 8 * 64)
-        value = torch.randn(10, 8 * 64)
-        kv_cache = torch.empty(2, 0, 0, 8, 64)
-        metadata = self.attn_metadata
-        layer = self.layer
-
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata,
-                                   trace_flag=True)
-
-        mock_unified_attention.assert_called_once()
-        assert output.shape == (10, 8 * 64)
-
     @patch('torch_npu._npu_paged_attention_splitfuse')
     def test_forward_with_quant_method(self, mock_paged_attention):
         """Test forward pass when layer has quant_method"""
@@ -284,13 +263,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer.quant_method = MagicMock()
         layer.quant_method.apply.return_value = ret_value
 
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata,
-                                   trace_flag=False)
+        output = self.impl.forward(layer, query, key, value, kv_cache,
+                                   metadata)
 
         layer.quant_method.apply.assert_called_once()
         assert output.shape == (10, 8 * 64)
@@ -303,13 +277,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         kv_cache = torch.empty(2, 0, 0, 8, 64)
         layer = self.layer_no_quant
 
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   None,
-                                   trace_flag=False)
+        output = self.impl.forward(layer, query, key, value, kv_cache, None)
 
         assert output.shape == (10, 8 * 64)
 
@@ -331,13 +299,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
         # layer.quant_method.apply.return_value = metadata
         print(self.layer_no_quant._v_scale_float)
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata,
-                                   trace_flag=False)
+        output = self.impl.forward(layer, query, key, value, kv_cache,
+                                   metadata)
 
         mock_reshape_cache.assert_called_once()
         mock_flash_attention.assert_called_once()
@@ -362,13 +325,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         layer = self.layer_no_quant
 
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata,
-                                   trace_flag=False)
+        output = self.impl.forward(layer, query, key, value, kv_cache,
+                                   metadata)
 
         mock_flash_attention_qlens.assert_called_once()
         assert output.shape == (10, 8 * 64)
@@ -394,13 +352,8 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata,
-                                   trace_flag=False)
+        output = self.impl.forward(layer, query, key, value, kv_cache,
+                                   metadata)
 
         mock_paged_attention.assert_called_once()
         assert output.shape == (10, 8 * 64)
@@ -501,13 +454,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_get_forward_context.return_value = MagicMock(capturing=True)
         mock_get_graph_params.return_value = graph_params
 
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata,
-                                   trace_flag=False)
+        output = self.impl.forward(layer, query, key, value, kv_cache,
+                                   metadata)
 
         mock_paged_attention.assert_called_once()
         self.assertEqual(len(graph_params.handles[num_tokens]), 0)
@@ -530,13 +478,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
         mock_fused_infer_attention_score.return_value = (torch.ones(10, 8,
                                                                     64), 1)
-        output = self.impl_swa.forward(layer,
-                                       query,
-                                       key,
-                                       value,
-                                       kv_cache,
-                                       metadata,
-                                       trace_flag=False)
+        output = self.impl_swa.forward(layer, query, key, value, kv_cache,
+                                       metadata)
         print(output.shape)
         mock_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8 * 64)
@@ -566,13 +509,8 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         mock_get_forward_context.return_value = MagicMock(capturing=False)
 
-        output = self.impl_swa.forward(self.layer_no_quant,
-                                       query,
-                                       key,
-                                       value,
-                                       kv_cache,
-                                       metadata,
-                                       trace_flag=False)
+        output = self.impl_swa.forward(self.layer_no_quant, query, key, value,
+                                       kv_cache, metadata)
 
         mock_paged_attention.assert_called_once()
         mock_fused_infer_attention_score.assert_not_called()
@@ -601,13 +539,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
         mock_vanilla_prefill.return_value = MagicMock()
 
-        output = self.impl_192.forward(layer,
-                                       query,
-                                       key,
-                                       value,
-                                       kv_cache,
-                                       metadata,
-                                       trace_flag=False)
+        output = self.impl_192.forward(layer, query, key, value, kv_cache,
+                                       metadata)
 
         mock_vanilla_prefill.assert_called_once()
         assert output.shape == (10, 8 * 192)
@@ -630,13 +563,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.slot_mapping = torch.zeros(10, dtype=torch.long)
         layer = self.layer_no_quant
 
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata,
-                                   trace_flag=False)
+        output = self.impl.forward(layer, query, key, value, kv_cache,
+                                   metadata)
 
         mock_paged_attention.assert_called_once()
         assert output.shape == (10, 8 * 64)
@@ -663,13 +591,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
 
         mock_npu_format_cast.return_value = metadata.attn_mask
-        output = self.impl.forward(layer,
-                                   query,
-                                   key,
-                                   value,
-                                   kv_cache,
-                                   metadata,
-                                   trace_flag=False)
+        output = self.impl.forward(layer, query, key, value, kv_cache,
+                                   metadata)
 
         mock_paged_attention.assert_called_once()
         assert output.shape == (10, 8 * 64)
@@ -690,10 +613,5 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
 
         with self.assertRaises(NotImplementedError):
-            self.impl_error.forward(layer,
-                                    query,
-                                    key,
-                                    value,
-                                    kv_cache,
-                                    metadata,
-                                    trace_flag=False)
+            self.impl_error.forward(layer, query, key, value, kv_cache,
+                                    metadata)
