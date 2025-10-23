@@ -530,7 +530,7 @@ class MooncakeEngine:
                 for i in range(1, self.tp_size):
                     for item in keys:
                         new_str = item.replace("@0", f"@{i}",
-                                               1)  # type: ignore[attr-type]
+                                               1)  # type: ignore[attr-defined]
                         multi_tp_keys.append(new_str)
                 res = self.m_store.batch_exists(
                     multi_tp_keys)  # type: ignore[assignment]
