@@ -238,17 +238,14 @@ class NPUPlatform(Platform):
                 vllm_config.compilation_config.init_with_cudagraph_sizes(
                     sp_aclgraph_sizes)
 
-        # TODO: Full graph is fully supported later, and the default value will be set to full graph.
-        if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
-            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-
         if vllm_version_is("0.11.0"):
             if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 compilation_config.level = CompilationLevel.NO_COMPILATION
-            elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE or \
+                compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
                 logger.info(
-                    "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
-                    "using only ACL Graph mode")
+                    f"{compilation_config.cudagraph_mode} compilation enabled on NPU. use_inductor not supported - "
+                    f"using only ACL Graph mode")
                 assert compilation_config.level == CompilationLevel.PIECEWISE, \
                     "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
                 compilation_config.set_splitting_ops_for_v1()
@@ -285,7 +282,8 @@ class NPUPlatform(Platform):
         else:
             if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 compilation_config.mode = CompilationMode.NONE
-            elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE or \
+                compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
                 logger.info(
                     "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                     "using only ACL Graph mode")
