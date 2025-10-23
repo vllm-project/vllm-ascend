@@ -21,7 +21,7 @@ Run the docker container:
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
---name vllm-ascend-internvl \
+--name vllm-ascend \
 --device /dev/davinci0 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
@@ -238,7 +238,7 @@ Run a docker container to start the vLLM server on a single NPU:
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
---name vllm-ascend-internvl \
+--name vllm-ascend \
 --device /dev/davinci0 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
