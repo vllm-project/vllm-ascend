@@ -14,6 +14,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -26,7 +27,6 @@ from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata,
                                         npu_stream_switch, npu_wait_tensor)
-from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput

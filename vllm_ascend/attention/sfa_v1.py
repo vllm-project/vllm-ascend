@@ -14,6 +14,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -22,7 +23,6 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
-from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput

@@ -94,6 +94,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (AttentionGroup, bind_kv_cache,
@@ -133,7 +134,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                enable_sp, get_ascend_soc_version, is_310p,
                                is_enable_nz, lmhead_tp_enable)
-from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -373,9 +373,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens = torch.zeros(self.max_num_reqs,
                                     dtype=torch.int32,
                                     device=self.device)
-        self.slot_mapping = torch.zeros(self.max_num_tokens,
-                                        dtype=torch.int32,
-                                        device=self.device)
 
         if self.vllm_config.model_config.use_mla and \
             self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
@@ -439,11 +436,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                          pin_memory=True)
         self.positions_np = self.positions_cpu.numpy()
 
-        self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
-                                            dtype=torch.int32,
-                                            device="cpu",
-                                            pin_memory=True)
-        self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                                dtype=torch.int32,
                                                device="cpu",
@@ -524,7 +516,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
-            kernel_block_sizes=[[self.vllm_config.cache_config.block_size]],
         )
         self.num_accepted_tokens = self._make_buffer(self.max_num_reqs,
                                                      dtype=torch.int64)
@@ -642,9 +633,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 to_update = model.pooler.get_pooling_updates(task)
                 to_update.apply(pooling_params)
 
-            backward_kwargs = {}
-            backward_kwargs["mm_features"] = new_req_data.mm_features
-
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
@@ -655,8 +643,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
-                **backward_kwargs,
-            )
+                mm_features=new_req_data.mm_features)
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
@@ -1478,14 +1465,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 )
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
-                blk_table_tensor = blk_table.get_device_tensor()
-                slot_mapping = blk_table.slot_mapping_cpu[:
+                blk_table_tensor = blk_table.get_device_tensor(num_reqs)
+                slot_mapping = blk_table.slot_mapping.gpu[:
                                                           total_num_scheduled_tokens]
-                self.slot_mapping[:total_num_scheduled_tokens].copy_(
-                    slot_mapping[:total_num_scheduled_tokens],
-                    non_blocking=True,
-                )
-                self.slot_mapping[total_num_scheduled_tokens:].fill_(0)
+                blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(
+                    -1)
 
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
@@ -1499,7 +1483,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
                 # TODO: change this to the right block table for linear attn
                 block_table_tensor=blk_table_tensor[:num_reqs],
-                slot_mapping=self.slot_mapping,
+                slot_mapping=slot_mapping,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 positions=self.positions,
                 attn_mask=self.attn_mask,
@@ -2241,7 +2225,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_actual_tokens=num_tokens,
                     actual_seq_lengths_q=self.actual_seq_lengths_q,
                     block_table_tensor=block_table_tensor[:num_reqs],
-                    slot_mapping=self.slot_mapping,
+                    slot_mapping=self.input_batch.block_table[
+                        kv_cache_group_id].slot_mapping.gpu[:num_tokens],
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     positions=self.positions,
                     attn_mask=self.attn_mask,
@@ -3121,7 +3106,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_speculative_tokens=(
                     self.vllm_config.speculative_config.num_speculative_tokens
                     if self.vllm_config.speculative_config else 0),
-                kernel_block_sizes=kernel_block_sizes,
             )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
