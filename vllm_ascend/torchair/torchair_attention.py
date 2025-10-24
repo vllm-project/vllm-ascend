@@ -349,7 +349,7 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             return output.view(num_tokens, self.hidden_size)
 
         if attn_metadata is None:
-            return output.view(num_tokens, self.hidden_size)
+            return output.view(num_tokens, self.hidden_size).fill_(0)
 
         output = output.view(-1, self.num_heads, self.head_size)
 
