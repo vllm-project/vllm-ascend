@@ -77,9 +77,6 @@ jobs:
 
            apt-get update -y && apt-get install -y git curl
 
-           TOKEN=`echo -n "x-access-token:${{ secrets.ADMIN_PTA }}" | base64`
-           git config --global http.https://gh-proxy.test.osinfra.cn/.extraheader "AUTHORIZATION: basic $TOKEN"
-
         - name: Install kubectl
           run: |
             # Install kubectl
