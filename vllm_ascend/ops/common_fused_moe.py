@@ -434,7 +434,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     def __init__(
         self,
         shared_experts: torch.nn.Module,
-        gate: torch.nn.Module | None = None,
+        gate: Optional[torch.nn.Module] = None,
         use_overlapped: bool = True,
         **kwargs,
     ):
