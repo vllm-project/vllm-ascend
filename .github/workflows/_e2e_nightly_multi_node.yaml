@@ -73,7 +73,7 @@ jobs:
            # configure apt and pip source
            sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
            pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-           pip install jinja2-cli -y
+           pip install jinja2-cli
 
            apt-get update -y && apt-get install -y git curl
 
