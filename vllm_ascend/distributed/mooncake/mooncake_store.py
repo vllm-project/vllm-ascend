@@ -73,7 +73,7 @@ class Mooncakestore():
 
     def batch_exists(self, keys: list[str]) -> list[bool]:
         return self.store.batch_is_exist(keys)
-    
+
     def register_buffer(self, ptr, length):
         return self.store.register_buffer(ptr, length)
 
