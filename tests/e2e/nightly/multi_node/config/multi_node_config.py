@@ -66,7 +66,8 @@ class MultiNodeConfig:
         self.num_prefillers = decode_start_index[0]
         self.num_decoders = self.num_nodes - self.num_prefillers
         self._init_dist_env()
-        self._gen_ranktable()
+        if self.disaggregated_prefill.get("ranktable_gen_path") is not None:
+            self._gen_ranktable()
         self.server_cmd = self._expand_env_vars(self.cur_node_info.server_cmd,
                                                 self.envs)
 
@@ -260,7 +261,7 @@ class MultiNodeConfig:
             "--local-host",
             local_host,
             "--prefill-device-cnt",
-            str(self.num_prefiller),
+            str(self.num_prefillers),
             "--decode-device-cnt",
             str(self.num_decoders),
         ]
@@ -268,5 +269,6 @@ class MultiNodeConfig:
         env = os.environ.copy()
         env["GLOO_SOCKET_IFNAME"] = self.nic_name
 
+        print(cmd)
         subprocess.run(cmd, env=env, check=True)
         assert os.path.exists(ranktable_path), "failed generate ranktable.json"

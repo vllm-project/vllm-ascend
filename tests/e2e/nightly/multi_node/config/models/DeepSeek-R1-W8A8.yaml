@@ -23,75 +23,133 @@ disaggregated_prefill:
 deployment:
   -
     server_cmd: >
-        vllm serve "vllm-ascend/DeepSeek-R1-0528-W8A8"
-        --host 0.0.0.0
-        --port $SERVER_PORT
-        --data-parallel-size 2
-        --data-parallel-size-local 2
-        --tensor-parallel-size 8
-        --seed 1024
-        --enforce-eager
-        --enable-expert-parallel
-        --max-num-seqs 16
-        --max-model-len 8192
-        --max-num-batched-tokens 8192
-        --quantization ascend
-        --trust-remote-code
-        --no-enable-prefix-caching
-        --gpu-memory-utilization 0.9
-        --kv-transfer-config
-        '{"kv_connector": "MooncakeConnector",
-        "kv_role": "kv_producer",
-        "kv_port": "30000",
-        "engine_id": "0",
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
-        "kv_connector_extra_config": {
-                  "prefill": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  },
-                  "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  }
-            }
-        }'
+      vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
+          --host 0.0.0.0
+          --port $2
+          --data-parallel-size $3
+          --data-parallel-rank $4
+          --data-parallel-address $5
+          --data-parallel-rpc-port $6
+          --tensor-parallel-size $7
+          --enforce-eager
+          --enable-expert-parallel
+          --seed 1024
+          --quantization ascend
+          --max-num-seqs 4
+          --served-model-name dsr1
+          --max-model-len 36864
+          --max-num-batched-tokens 16384
+          --trust-remote-code
+          --gpu-memory-utilization 0.9
+          --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+          --kv-transfer-config
+          '{"kv_connector": "LLMDataDistCMgrConnector",
+          "kv_buffer_device": "npu",
+          "kv_role": "kv_producer",
+          "kv_parallel_size": 1,
+          "kv_port": "20001",
+          "engine_id": "0",
+          "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+          }'
+          --additional-config
+          '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
 
   -
     server_cmd: >
-        vllm serve "vllm-ascend/DeepSeek-R1-0528-W8A8"
-        --host 0.0.0.0
-        --port $SERVER_PORT
-        --data-parallel-size 2
-        --data-parallel-size-local 2
-        --tensor-parallel-size 8
-        --seed 1024
-        --quantization ascend
-        --max-num-seqs 16
-        --max-model-len 8192
-        --max-num-batched-tokens 8192
-        --enable-expert-parallel
-        --trust-remote-code
-        --no-enable-prefix-caching
-        --gpu-memory-utilization 0.9
-        --additional-config '{"torchair_graph_config":{"enabled":true}}'
-        --kv-transfer-config
-        '{"kv_connector": "MooncakeConnector",
-        "kv_role": "kv_consumer",
-        "kv_port": "30200",
-        "engine_id": "1",
-        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
-        "kv_connector_extra_config": {
-                  "prefill": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  },
-                  "decode": {
-                          "dp_size": 2,
-                          "tp_size": 8
-                  }
-            }
-        }'
+      vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
+          --host 0.0.0.0
+          --port $2
+          --data-parallel-size $3
+          --data-parallel-rank $4
+          --data-parallel-address $5
+          --data-parallel-rpc-port $6
+          --tensor-parallel-size $7
+          --enforce-eager
+          --enable-expert-parallel
+          --seed 1024
+          --quantization ascend
+          --max-num-seqs 4
+          --served-model-name dsr1
+          --max-model-len 36864
+          --max-num-batched-tokens 16384
+          --trust-remote-code
+          --gpu-memory-utilization 0.9
+          --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+          --kv-transfer-config
+          '{"kv_connector": "LLMDataDistCMgrConnector",
+          "kv_buffer_device": "npu",
+          "kv_role": "kv_producer",
+          "kv_parallel_size": 1,
+          "kv_port": "20001",
+          "engine_id": "0",
+          "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+          }'
+          --additional-config
+          '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+  -
+    server_cmd: >
+      vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
+          --host 0.0.0.0
+          --port $2
+          --data-parallel-size $3
+          --data-parallel-rank $4
+          --data-parallel-address $5
+          --data-parallel-rpc-port $6
+          --tensor-parallel-size $7
+          --enforce-eager
+          --enable-expert-parallel
+          --seed 1024
+          --quantization ascend
+          --max-num-seqs 4
+          --served-model-name dsr1
+          --max-model-len 36864
+          --max-num-batched-tokens 16384
+          --trust-remote-code
+          --gpu-memory-utilization 0.9
+          --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+          --kv-transfer-config
+          '{"kv_connector": "LLMDataDistCMgrConnector",
+          "kv_buffer_device": "npu",
+          "kv_role": "kv_producer",
+          "kv_parallel_size": 1,
+          "kv_port": "20001",
+          "engine_id": "0",
+          "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+          }'
+          --additional-config
+          '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+  -
+    server_cmd: >
+      vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
+          --host 0.0.0.0
+          --port $2
+          --data-parallel-size $3
+          --data-parallel-rank $4
+          --data-parallel-address $5
+          --data-parallel-rpc-port $6
+          --tensor-parallel-size $7
+          --enforce-eager
+          --enable-expert-parallel
+          --seed 1024
+          --quantization ascend
+          --max-num-seqs 4
+          --served-model-name dsr1
+          --max-model-len 36864
+          --max-num-batched-tokens 16384
+          --trust-remote-code
+          --gpu-memory-utilization 0.9
+          --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+          --kv-transfer-config
+          '{"kv_connector": "LLMDataDistCMgrConnector",
+          "kv_buffer_device": "npu",
+          "kv_role": "kv_producer",
+          "kv_parallel_size": 1,
+          "kv_port": "20001",
+          "engine_id": "0",
+          "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+          }'
+          --additional-config
+          '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
 benchmarks:
   perf:
     case_type: performance
