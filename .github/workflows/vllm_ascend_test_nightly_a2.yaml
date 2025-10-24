@@ -44,6 +44,7 @@ jobs:
   single-node-tests:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
+      fail-fast: false
       matrix:
         test_config:
           - name: qwen3-32b

@@ -120,7 +120,6 @@ jobs:
               fi
             done
 
-
             jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
               -D size="$size" \
               -D replicas="$replicas" \
@@ -131,7 +130,6 @@ jobs:
               -D vllm_ascend_ref="$vllm_ascend_ref" \
               --outfile lws.yaml
 
-            sleep 10000
             kubectl apply -f ./lws.yaml
 
         - name: Waiting for pod ready

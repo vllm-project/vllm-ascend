@@ -44,6 +44,7 @@ jobs:
   single-node-tests:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
+      fail-fast: false
       matrix:
         test_config:
           - name: qwen3-32b-in8-a3
@@ -71,35 +72,27 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: ${{ matrix.test_config.tests }}
 
-  multi-node-deepseek-pd:
+  multi-node-tests:
     needs: single-node-tests
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config:
+          - name: multi-node-deepseek-pd
+            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml
+            size: 2
+          - name: multi-node-qwen3-dp
+            config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A3B.yaml
+            size: 2
+          - name: multi-node-dpsk-4node-pd
+            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
+            size: 4
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
       image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
-      config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml
       replicas: 1
-      size: 2
-
-  multi-node-qwen3-dp:
-    needs: multi-node-deepseek-pd
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: a3
-      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
-      config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A3B.yaml
-      replicas: 1
-      size: 2
-
-  multi-node-dpsk-4node-pd:
-    if: ${{ github.event_name == 'pull_request' }}
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: a3
-      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
-      config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
-      replicas: 1
-      size: 4
-      vllm_ascend_ref: ${{ github.head_ref }}
-      vllm_ascend_remote_url: https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git
+      size: ${{ matrix.test_config.size }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
