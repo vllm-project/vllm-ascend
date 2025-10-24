@@ -17,13 +17,10 @@
 
 import gc
 import os
-from datetime import timedelta
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import vllm.envs as envs_vllm
-from torch.distributed import ProcessGroup
-from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -33,7 +30,7 @@ from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
                                prefill_context_parallel_enable,
-                               update_aclgraph_sizes)
+                               update_aclgraph_sizes, vllm_version_is)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -121,7 +118,11 @@ class NPUPlatform(Platform):
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 
-        from vllm.config import CompilationLevel  # noqa: E402
+        if vllm_version_is("0.11.0"):
+            from vllm.config import CompilationLevel
+        else:
+            from vllm.config import CompilationMode  # noqa: E402
+
         compilation_config = vllm_config.compilation_config
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
@@ -176,17 +177,29 @@ class NPUPlatform(Platform):
         from vllm.config.compilation import CUDAGraphMode
         if enforce_eager:
             logger.info("Compilation disabled, using eager mode by default")
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+            if vllm_version_is("0.11.0"):
+                compilation_config.level = CompilationLevel.NO_COMPILATION
+            else:
+                compilation_config.mode = CompilationMode.NONE
 
         compilation_config.cudagraph_num_of_warmups = 1
 
-        if compilation_config.level not in [
-                CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE
-        ]:
-            logger.warning(
-                "NPU does not support %s compilation level. Setting CUDAGraphMode to NONE",
-                compilation_config.level)
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        if vllm_version_is("0.11.0"):
+            if compilation_config.level not in [
+                    CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE
+            ]:
+                logger.warning(
+                    "NPU does not support %s compilation level. Setting CUDAGraphMode to NONE",
+                    compilation_config.level)
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        else:
+            if compilation_config.mode not in [
+                    CompilationMode.NONE, CompilationMode.VLLM_COMPILE
+            ]:
+                logger.warning(
+                    "NPU does not support %s compilation mode. Setting CUDAGraphMode to NONE",
+                    compilation_config.mode)
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # set CUDAGraphMode to None when torchair is enabled, no mather what compilation_config.level is.
         if ascend_config.torchair_graph_config.enabled:
@@ -229,44 +242,86 @@ class NPUPlatform(Platform):
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
             compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            compilation_config.level = CompilationLevel.NO_COMPILATION
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-            logger.info(
-                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
-                "using only ACL Graph mode")
-            assert compilation_config.level == CompilationLevel.PIECEWISE, \
-                "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
-            compilation_config.set_splitting_ops_for_v1()
-            compilation_config.use_inductor = False
-            compilation_config.splitting_ops.extend([
-                "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
-            ])
-            update_aclgraph_sizes(vllm_config)
-        elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-            logger.info(
-                "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
-                "using only ACL Graph mode")
-            compilation_config.use_inductor = False
-            warning_message = """\033[91m
-            **********************************************************************************
-            * WARNING: You have enabled the *full graph* feature.
-            * This is an early experimental stage and may involve various unknown issues.
-            * A known problem is that capturing too many batch sizes can lead to OOM
-            * (Out of Memory) errors or inference hangs. If you encounter such issues,
-            * consider reducing `gpu_memory_utilization` or manually specifying a smaller
-            * batch size for graph capture.
-            * For more details, please refer to:
-            * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
-            **********************************************************************************\033[0m
-            """
-            logger.warning(warning_message)
+        if vllm_version_is("0.11.0"):
+            if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+                compilation_config.level = CompilationLevel.NO_COMPILATION
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+                logger.info(
+                    "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
+                    "using only ACL Graph mode")
+                assert compilation_config.level == CompilationLevel.PIECEWISE, \
+                    "When enabling piecewise aclgraph, please make sure compilation_config.level == CompilationLevel.PIECEWISE and compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE"
+                compilation_config.set_splitting_ops_for_v1()
+                compilation_config.use_inductor = False
+                compilation_config.splitting_ops.extend([
+                    "vllm.unified_ascend_attention_with_output",
+                    "vllm.mla_forward"
+                ])
+                update_aclgraph_sizes(vllm_config)
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+                logger.info(
+                    "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
+                    "using only ACL Graph mode")
+                compilation_config.use_inductor = False
+                warning_message = """\033[91m
+                **********************************************************************************
+                * WARNING: You have enabled the *full graph* feature.
+                * This is an early experimental stage and may involve various unknown issues.
+                * A known problem is that capturing too many batch sizes can lead to OOM
+                * (Out of Memory) errors or inference hangs. If you encounter such issues,
+                * consider reducing `gpu_memory_utilization` or manually specifying a smaller
+                * batch size for graph capture.
+                * For more details, please refer to:
+                * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
+                **********************************************************************************\033[0m
+                """
+                logger.warning(warning_message)
+            else:
+                logger.info(
+                    "%s cudagraph_mode is not support on NPU. falling back to NONE",
+                    compilation_config.cudagraph_mode)
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+                compilation_config.level = CompilationLevel.NO_COMPILATION
         else:
-            logger.info(
-                "%s cudagraph_mode is not support on NPU. falling back to NONE",
-                compilation_config.cudagraph_mode)
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+            if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+                compilation_config.mode = CompilationMode.NONE
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE:
+                logger.info(
+                    "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
+                    "using only ACL Graph mode")
+                assert compilation_config.mode == CompilationMode.VLLM_COMPILE, \
+                    "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
+                compilation_config.set_splitting_ops_for_v1()
+                compilation_config.use_inductor = False
+                compilation_config.splitting_ops.extend([
+                    "vllm::unified_ascend_attention_with_output",
+                    "vllm::mla_forward"
+                ])
+                update_aclgraph_sizes(vllm_config)
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+                logger.info(
+                    "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
+                    "using only ACL Graph mode")
+                compilation_config.use_inductor = False
+                warning_message = """\033[91m
+                **********************************************************************************
+                * WARNING: You have enabled the *full graph* feature.
+                * This is an early experimental stage and may involve various unknown issues.
+                * A known problem is that capturing too many batch sizes can lead to OOM
+                * (Out of Memory) errors or inference hangs. If you encounter such issues,
+                * consider reducing `gpu_memory_utilization` or manually specifying a smaller
+                * batch size for graph capture.
+                * For more details, please refer to:
+                * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
+                **********************************************************************************\033[0m
+                """
+                logger.warning(warning_message)
+            else:
+                logger.info(
+                    "%s cudagraph_mode is not support on NPU. falling back to NONE",
+                    compilation_config.cudagraph_mode)
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+                compilation_config.mode = CompilationMode.NONE
 
         # TODO: Remove this check when ACL Graph supports ASCEND_LAUNCH_BLOCKING=1
         # Then, we will have to discuss the error handling strategy and user experience
@@ -378,7 +433,10 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"
+        if vllm_version_is("0.11.0"):
+            return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU0110"
+        else:
+            return "vllm_ascend.lora.punica_npu.PunicaWrapperNPU"
 
     @classmethod
     def get_current_memory_usage(cls,
@@ -401,42 +459,6 @@ class NPUPlatform(Platform):
         Get piecewise backend class for piecewise graph.
         """
         return "vllm_ascend.compilation.acl_graph.ACLGraphWrapper"  # noqa
-
-    @classmethod
-    def stateless_init_device_torch_dist_pg(
-        cls,
-        backend: str,
-        prefix_store: PrefixStore,
-        group_rank: int,
-        group_size: int,
-        timeout: timedelta,
-    ) -> ProcessGroup:
-        from torch.distributed import is_hccl_available
-        from torch_npu._C._distributed_c10d import ProcessGroupHCCL
-
-        assert is_hccl_available()
-
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-        )
-
-        backend_options = ProcessGroupHCCL.Options()
-        backend_options._timeout = timeout
-
-        backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size,
-                                         backend_options)
-        device = torch.device("npu")
-        # TODO(Yizhou): Like we mentioned above, _set_default_backend is not
-        # implemented in the 2.5.1 version of PyTorch. But we need to set it
-        # after the latest version is released.
-        # pg._set_default_backend(backend_type)
-        backend_class._set_sequence_number_for_group()
-        backend_type = ProcessGroup.BackendType.CUSTOM
-
-        pg._register_backend(device, backend_type, backend_class)
-        return pg
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
