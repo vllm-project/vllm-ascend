@@ -25,18 +25,15 @@ deployment:
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
           --host 0.0.0.0
-          --port $2
-          --data-parallel-size $3
-          --data-parallel-rank $4
-          --data-parallel-address $5
-          --data-parallel-rpc-port $6
-          --tensor-parallel-size $7
+          --port $SERVER_PORT
+          --data-parallel-size 2
+          --data-parallel-size-local 2
+          --tensor-parallel-size 8
           --enforce-eager
           --enable-expert-parallel
           --seed 1024
           --quantization ascend
           --max-num-seqs 4
-          --served-model-name dsr1
           --max-model-len 36864
           --max-num-batched-tokens 16384
           --trust-remote-code
@@ -58,18 +55,15 @@ deployment:
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
           --host 0.0.0.0
-          --port $2
-          --data-parallel-size $3
-          --data-parallel-rank $4
-          --data-parallel-address $5
-          --data-parallel-rpc-port $6
-          --tensor-parallel-size $7
+          --port $SERVER_PORT
+          --data-parallel-size 2
+          --data-parallel-size-local 2
+          --tensor-parallel-size 8
           --enforce-eager
           --enable-expert-parallel
           --seed 1024
           --quantization ascend
           --max-num-seqs 4
-          --served-model-name dsr1
           --max-model-len 36864
           --max-num-batched-tokens 16384
           --trust-remote-code
@@ -89,67 +83,64 @@ deployment:
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
-          --host 0.0.0.0
-          --port $2
-          --data-parallel-size $3
-          --data-parallel-rank $4
-          --data-parallel-address $5
-          --data-parallel-rpc-port $6
-          --tensor-parallel-size $7
-          --enforce-eager
-          --enable-expert-parallel
-          --seed 1024
-          --quantization ascend
-          --max-num-seqs 4
-          --served-model-name dsr1
-          --max-model-len 36864
-          --max-num-batched-tokens 16384
-          --trust-remote-code
-          --gpu-memory-utilization 0.9
-          --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
-          --kv-transfer-config
-          '{"kv_connector": "LLMDataDistCMgrConnector",
-          "kv_buffer_device": "npu",
-          "kv_role": "kv_producer",
-          "kv_parallel_size": 1,
-          "kv_port": "20001",
-          "engine_id": "0",
-          "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
-          }'
-          --additional-config
-          '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --data-parallel-size 32
+        --data-parallel-size-local 16
+        --data-parallel-start-rank 0
+        --data-parallel-address $LOCAL_IP
+        --data-parallel-rpc-port 13389
+        --tensor-parallel-size 1
+        --enable-expert-parallel
+        --seed 1024
+        --quantization ascend
+        --max-num-seqs 28
+        --max-model-len 36864
+        --max-num-batched-tokens 256
+        --trust-remote-code
+        --gpu-memory-utilization 0.9
+        --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+        --kv-transfer-config
+        '{"kv_connector": "LLMDataDistCMgrConnector",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_consumer",
+        "kv_parallel_size": 1,
+        "kv_port": "20001",
+        "engine_id": "0",
+        "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+        }'
+        --additional-config
+        '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"graph_batch_sizes":[28],"use_cached_graph":true,"enable_super_kernel":false},"multistream_overlap_shared_expert":true}'
   -
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-R1-0528-W8A8
-          --host 0.0.0.0
-          --port $2
-          --data-parallel-size $3
-          --data-parallel-rank $4
-          --data-parallel-address $5
-          --data-parallel-rpc-port $6
-          --tensor-parallel-size $7
-          --enforce-eager
-          --enable-expert-parallel
-          --seed 1024
-          --quantization ascend
-          --max-num-seqs 4
-          --served-model-name dsr1
-          --max-model-len 36864
-          --max-num-batched-tokens 16384
-          --trust-remote-code
-          --gpu-memory-utilization 0.9
-          --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
-          --kv-transfer-config
-          '{"kv_connector": "LLMDataDistCMgrConnector",
-          "kv_buffer_device": "npu",
-          "kv_role": "kv_producer",
-          "kv_parallel_size": 1,
-          "kv_port": "20001",
-          "engine_id": "0",
-          "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
-          }'
-          --additional-config
-          '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false,"enable_multistream_shared_expert":false},"enable_prefill_optimizations":true,"enable_weight_nz_layout":true}'
+        --headless
+        --data-parallel-size 32
+        --data-parallel-size-local 16
+        --data-parallel-start-rank 16
+        --data-parallel-address $MASTER_IP
+        --data-parallel-rpc-port 13389
+        --tensor-parallel-size 1
+        --enable-expert-parallel
+        --seed 1024
+        --quantization ascend
+        --max-num-seqs 28
+        --max-model-len 36864
+        --max-num-batched-tokens 256
+        --trust-remote-code
+        --gpu-memory-utilization 0.9
+        --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+        --kv-transfer-config
+        '{"kv_connector": "LLMDataDistCMgrConnector",
+        "kv_buffer_device": "npu",
+        "kv_role": "kv_consumer",
+        "kv_parallel_size": 1,
+        "kv_port": "20001",
+        "engine_id": "0",
+        "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+        }'
+        --additional-config
+        '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_mla":true,"graph_batch_sizes":[28],"use_cached_graph":true,"enable_super_kernel":false},"multistream_overlap_shared_expert":true}'
 benchmarks:
   perf:
     case_type: performance

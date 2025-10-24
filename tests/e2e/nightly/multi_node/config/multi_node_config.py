@@ -57,19 +57,25 @@ class MultiNodeConfig:
         self.cur_ip = get_cur_ip()
         self.nic_name = get_net_interface(self.cur_ip)
         self.cluster_ips = get_cluster_ips(self.num_nodes)
-        self.disaggregated_prefill = disaggregated_prefill
         self.cur_node_info: NodeInfo = self.nodes_info[int(self.cur_index)]
-        decode_start_index = self.disaggregated_prefill.get(
-            "decoder_host_index")
-        if not decode_start_index:
-            raise RuntimeError("got empty decode_start_index")
-        self.num_prefillers = decode_start_index[0]
-        self.num_decoders = self.num_nodes - self.num_prefillers
+        self.disaggregated_prefill = disaggregated_prefill
+        self._init_disaggregated_prefill()
+
         self._init_dist_env()
-        if self.disaggregated_prefill.get("ranktable_gen_path") is not None:
-            self._gen_ranktable()
         self.server_cmd = self._expand_env_vars(self.cur_node_info.server_cmd,
                                                 self.envs)
+
+    def _init_disaggregated_prefill(self):
+        if self.disaggregated_prefill:
+            self.decode_start_index: list[
+                int] = self.disaggregated_prefill.get("decoder_host_index")
+            if not self.decode_start_index:
+                raise RuntimeError("got empty decode_start_index")
+            self.num_prefillers = self.decode_start_index[0]
+            self.num_decoders = self.num_nodes - self.num_prefillers
+            if self.disaggregated_prefill.get(
+                    "ranktable_gen_path") is not None:
+                self._gen_ranktable()
 
     def _init_dist_env(self):
         self.envs["HCCL_IF_IP"] = self.cur_ip
@@ -78,11 +84,17 @@ class MultiNodeConfig:
         self.envs["HCCL_SOCKET_IFNAME"] = self.nic_name
         self.envs["LOCAL_IP"] = self.cur_ip
         self.envs["NIC_NAME"] = self.nic_name
-        self.envs["MASTER_IP"] = self.cluster_ips[0]
+
         if self.disaggregated_prefill:
             self.envs[
                 "DISAGGREGATED_PREFILL_RANK_TABLE_PATH"] = self.disaggregated_prefill.get(
                     "ranktable_path")
+            if self.cur_index < self.decode_start_index:
+                self.envs["MASTER_IP"] = self.cluster_ips[0]
+            else:
+                self.envs["MASTER_IP"] = self.cluster_ips[
+                    self.decode_start_index[0]]
+
         ascend_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages"
         self.envs[
             "LD_LIBRARY_PATH"] = f"{ascend_path}:{self.envs.get('LD_LIBRARY_PATH', os.environ.get('LD_LIBRARY_PATH', ''))}"

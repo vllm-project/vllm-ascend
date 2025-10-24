@@ -71,7 +71,7 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: ${{ matrix.test_config.tests }}
 
-  multi-node-deepseek:
+  multi-node-deepseek-pd:
     needs: single-node-tests
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/multi_node_test.yaml
@@ -82,8 +82,8 @@ jobs:
       replicas: 1
       size: 2
 
-  multi-node-qwen3:
-    needs: multi-node-deepseek
+  multi-node-qwen3-dp:
+    needs: multi-node-deepseek-pd
     uses: ./.github/workflows/multi_node_test.yaml
     with:
       soc_version: a3
