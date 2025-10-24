@@ -47,12 +47,10 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d, nd_to_nz_spec, version_check,
-                               vllm_version_is,
-                               nd_to_nz_2d, nd_to_nz_spec,
+                               vllm_version_is, nd_to_nz_2d, nd_to_nz_spec,
                                prefill_context_parallel_enable, version_check)
 
 from ..utils import weak_ref_tensors
-
 
 if vllm_version_is("0.11.0"):
     from vllm.utils import direct_register_custom_op
@@ -65,6 +63,7 @@ if prefill_context_parallel_enable():
                                   get_prefill_context_model_parallel_world_size
                                   )
 # isort:on
+
 
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
