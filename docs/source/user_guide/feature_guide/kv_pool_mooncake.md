@@ -41,7 +41,7 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "use_ascend_direct": true,
     "alloc_in_same_node": true,
     "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": "1GB/1024MB/1048576KB/1073741824B" or 1073741824
+    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
 }
 ```
 

@@ -2,7 +2,6 @@ import array
 import hashlib
 import json
 import os
-from typing import Union
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -437,9 +436,11 @@ class MooncakeStoreConfig:
             local_hostname=config.get("local_hostname"),
             metadata_server=config.get("metadata_server"),
             global_segment_size=_parse_global_segment_size(
-                config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
+                config.get("global_segment_size",
+                           DEFAULT_GLOBAL_SEGMENT_SIZE)
             ),
-            local_buffer_size=config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE),
+            local_buffer_size=config.get("local_buffer_size",
+                                         DEFAULT_LOCAL_BUFFER_SIZE),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
@@ -484,10 +485,10 @@ def _parse_global_segment_size(value) -> int:
         raise ValueError("global segment size cannot be empty.")
 
     UNIT_MULTIPLIERS = {
-        'gb': 1024 ** 3,  # 1 GB = 1024^3 bytes
-        'mb': 1024 ** 2,  # 1 MB = 1024^2 bytes
-        'kb': 1024,       # 1 KB = 1024 bytes
-        'b': 1            # 1 B = 1 byte
+        'gb': 1024**3,  # 1 GB = 1024^3 bytes
+        'mb': 1024**2,  # 1 MB = 1024^2 bytes
+        'kb': 1024,  # 1 KB = 1024 bytes
+        'b': 1  # 1 B = 1 byte
     }
     # Check for unit suffixes
     for unit, multiplier in UNIT_MULTIPLIERS.items():
@@ -502,7 +503,7 @@ def _parse_global_segment_size(value) -> int:
     return _convert_to_bytes(cleaned_input, 1, value)
 
 
-def _convert_to_bytes(number_str: str, multiplier: int, 
+def _convert_to_bytes(number_str: str, multiplier: int,
                       original_input: str) -> int:
     """
     Convert numeric string to byte count
@@ -522,8 +523,7 @@ def _convert_to_bytes(number_str: str, multiplier: int,
         numeric_value = float(number_str)
     except ValueError:
         raise ValueError(
-            f"Invalid numeric value '{number_str}' in: '{original_input}'"
-        )
+            f"Invalid numeric value '{number_str}' in: '{original_input}'")
     # Calculate byte count
     try:
         byte_count = int(numeric_value * multiplier)
