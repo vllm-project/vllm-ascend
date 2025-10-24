@@ -44,15 +44,16 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d, nd_to_nz_spec,
-                               prefill_context_parallel_enable, version_check)
+                               prefill_context_parallel_enable, version_check,
+                               weak_ref_tensors)
 
-from ..utils import weak_ref_tensors
-
+# isort: off
 if prefill_context_parallel_enable():
-    from vllm.distributed import (
-        get_pcp_group, get_prefill_context_model_parallel_rank,
-        get_prefill_context_model_parallel_world_size)
-# isort:on
+    from vllm.distributed import (get_pcp_group,
+                                  get_prefill_context_model_parallel_rank,
+                                  get_prefill_context_model_parallel_world_size
+                                  )
+# isort: on
 
 
 class AscendAttentionBackend(AttentionBackend):
@@ -1065,6 +1066,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if self.pcp_size * self.dcp_size > 1:
             output = self._forward_pcp_dcp(query, key, value, attn_metadata,
                                            output)
+
+            # NOTE: This path already writes directly to `output`.
+            return output
         elif attn_type == AttentionType.ENCODER_ONLY:
             # TODO(zzzwwjj): Deal with this `cum_seq_len` more elegantly.
             cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
