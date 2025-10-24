@@ -479,7 +479,8 @@ class MooncakeLookupServer:
             while self.running:
                 frames = self.socket.recv_multipart(copy=False)
                 token_ids = self.decoder.decode(frames)
-                result = self.mooncake_engine.lookup(token_ids, use_layerwise)
+                result = self.mooncake_engine.lookup_scheduler(
+                    token_ids, use_layerwise)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 
