@@ -998,7 +998,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             has_decode = attn_metadata.num_decodes > 0
             has_prefill = attn_metadata.num_prefills > 0
 
-            num_actual_tokens = attn_metadata.num_actual_tokens
             assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
             attn_type = self.attn_type
             if attn_type != AttentionType.DECODER and attn_type != AttentionType.ENCODER_ONLY:
