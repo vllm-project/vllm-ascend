@@ -53,11 +53,11 @@ class MultiNodeConfig:
         assert perf_cmd is not None, "perf_cmd must be provided"
         assert acc_cmd is not None, "acc_cmd must be provided"
 
-        self.cur_index = os.getenv("LWS_WORKER_INDEX", 0)
+        self.cur_index = int(os.getenv("LWS_WORKER_INDEX", 0))
         self.cur_ip = get_cur_ip()
         self.nic_name = get_net_interface(self.cur_ip)
         self.cluster_ips = get_cluster_ips(self.num_nodes)
-        self.cur_node_info: NodeInfo = self.nodes_info[int(self.cur_index)]
+        self.cur_node_info: NodeInfo = self.nodes_info[self.cur_index]
         self.disaggregated_prefill = disaggregated_prefill
         self._init_disaggregated_prefill()
 
@@ -67,11 +67,12 @@ class MultiNodeConfig:
 
     def _init_disaggregated_prefill(self):
         if self.disaggregated_prefill:
-            self.decode_start_index: list[
-                int] = self.disaggregated_prefill.get("decoder_host_index")
-            if not self.decode_start_index:
-                raise RuntimeError("got empty decode_start_index")
-            self.num_prefillers = self.decode_start_index[0]
+            decode_host_index = self.disaggregated_prefill.get(
+                "decoder_host_index")
+            if not decode_host_index:
+                raise RuntimeError("got empty decode_host_index")
+            self.decode_start_index: int = decode_host_index[0]
+            self.num_prefillers = self.decode_start_index
             self.num_decoders = self.num_nodes - self.num_prefillers
             if self.disaggregated_prefill.get(
                     "ranktable_gen_path") is not None:
@@ -93,7 +94,7 @@ class MultiNodeConfig:
                 self.envs["MASTER_IP"] = self.cluster_ips[0]
             else:
                 self.envs["MASTER_IP"] = self.cluster_ips[
-                    self.decode_start_index[0]]
+                    self.decode_start_index]
 
         ascend_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages"
         self.envs[
@@ -240,7 +241,7 @@ class MultiNodeConfig:
 
     @property
     def is_master(self):
-        return int(self.cur_index) == 0
+        return self.cur_index == 0
 
     def _gen_ranktable(self):
         cluster_ip = self.cluster_ips
@@ -252,6 +253,8 @@ class MultiNodeConfig:
         ranktable_gen_path = self.disaggregated_prefill.get(
             "ranktable_gen_path")
         ranktable_path = self.disaggregated_prefill.get("ranktable_path")
+        if os.path.exists(ranktable_path):
+            return
 
         local_host = self.cur_ip
 
@@ -273,9 +276,9 @@ class MultiNodeConfig:
             "--local-host",
             local_host,
             "--prefill-device-cnt",
-            str(self.num_prefillers),
+            str(self.npu_per_node * self.num_prefillers),
             "--decode-device-cnt",
-            str(self.num_decoders),
+            str(self.npu_per_node * self.num_decoders),
         ]
 
         env = os.environ.copy()
