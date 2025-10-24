@@ -419,7 +419,7 @@ class MooncakeStoreConnectorV1Scheduler:
         if self.kv_role == "kv_consumer":
             return False, None
         tracker = self._request_trackers.get(request.request_id)
-        if tracker is None or tracker.num_saved_tokens <= 0:
+        if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
         delay_free_blocks = len(block_ids) > 0
         if delay_free_blocks:
