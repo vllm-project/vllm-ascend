@@ -471,7 +471,7 @@ def sample_recovered_tokens_pytorch(
     num_tokens = len(draft_token_ids)
     device = output_token_ids.device
 
-    diff = torch.diff(cu_num_draft_tokens, 
+    diff = torch.diff(cu_num_draft_tokens,
                       prepend=torch.tensor([0], device=device))
     q_value_new = torch.repeat_interleave(q, diff, dim=0)
 
