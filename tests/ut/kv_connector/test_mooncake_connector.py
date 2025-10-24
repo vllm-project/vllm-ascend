@@ -11,7 +11,6 @@ from typing import Any, Dict, OrderedDict
 from unittest.mock import MagicMock, patch
 
 import msgspec
-import pytest
 import zmq
 
 from vllm_ascend.utils import vllm_version_is
