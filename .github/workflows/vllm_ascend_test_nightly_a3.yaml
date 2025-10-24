@@ -91,3 +91,12 @@ jobs:
       config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A3B.yaml
       replicas: 1
       size: 2
+
+  multi-node-dpsk-4node-pd:
+    uses: ./.github/workflows/multi_node_test.yaml
+    with:
+      soc_version: a3
+      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
+      replicas: 1
+      size: 4

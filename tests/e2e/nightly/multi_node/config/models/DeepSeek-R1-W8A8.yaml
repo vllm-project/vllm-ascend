@@ -16,7 +16,7 @@ env_common:
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0, 1]
-  decoder_host_index: [2, 3]
+  decoder_host_index: [2]
   ranktable_gen_path: "examples/disaggregated_prefill_v1/gen_ranktable.py"
   ranktable_path: "/tmp/ranktable.json"
 
