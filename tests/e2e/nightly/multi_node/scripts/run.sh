@@ -62,7 +62,7 @@ checkout_src() {
 
     # vllm-ascend
     if [ ! -d "$SRC_DIR/vllm-ascend" ]; then
-        git clone --depth 1 -b $VLLM_ASCEND_VERSION https://github.com/vllm-project/vllm-ascend.git "$SRC_DIR/vllm-ascend"
+        git clone --depth 1 -b $VLLM_ASCEND_VERSION $VLLM_ASCEND_REMOTE_URL "$SRC_DIR/vllm-ascend"
     fi
 
     # vllm

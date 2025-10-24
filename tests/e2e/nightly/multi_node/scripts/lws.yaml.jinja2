@@ -25,7 +25,9 @@ spec:
               - name: VLLM_VERSION
                 value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
-                value: "main"
+                value: {{ vllm_ascend_ref | default("main") }}
+              - name: VLLM_ASCEND_REMOTE_URL
+                value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
             command:
               - sh
               - -c
@@ -80,7 +82,9 @@ spec:
               - name: VLLM_VERSION
                 value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
-                value: "main"
+                value: {{ vllm_ascend_ref | default("main") }}
+              - name: VLLM_ASCEND_REMOTE_URL
+                value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
             command:
               - sh
               - -c

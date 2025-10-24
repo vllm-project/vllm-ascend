@@ -64,7 +64,7 @@ jobs:
           - name: deepseek-r1-0528-w8a8
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8.py
-    uses: ./.github/workflows/_e2e_nightly.yaml
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       vllm: v0.11.0
       runner: ${{ matrix.test_config.os }}
@@ -74,7 +74,7 @@ jobs:
   multi-node-deepseek-pd:
     needs: single-node-tests
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    uses: ./.github/workflows/multi_node_test.yaml
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
       image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
@@ -84,7 +84,7 @@ jobs:
 
   multi-node-qwen3-dp:
     needs: multi-node-deepseek-pd
-    uses: ./.github/workflows/multi_node_test.yaml
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
       image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
@@ -93,10 +93,13 @@ jobs:
       size: 2
 
   multi-node-dpsk-4node-pd:
-    uses: ./.github/workflows/multi_node_test.yaml
+    if: ${{ github.event_name == 'pull_request' }}
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
       image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
       replicas: 1
       size: 4
+      vllm_ascend_ref: ${{ github.head_ref }}
+      vllm_ascend_remote_url: https://github.com/${{ github.event.pull_request.head.repo.full_name }}.git

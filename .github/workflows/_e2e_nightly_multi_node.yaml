@@ -26,6 +26,21 @@ on:
         default: "2"
         type: string
         description: how many pods will be pulled up via lws.yaml, indicates number of nodes we need
+      vllm_version:
+        required: false
+        default: "v0.11.0"
+        type: string
+        description: vllm version to use
+      vllm_ascend_remote_url:
+        required: false
+        default: https://github.com/vllm-project/vllm-ascend.git
+        type: string
+        description: used for pr level tests
+      vllm_ascend_ref:
+        required: false
+        default: main
+        type: string
+        description: used for pr level tests
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -96,6 +111,9 @@ jobs:
             replicas="${{ inputs.replicas }}"
             image="${{ inputs.image }}"
             config_file_path="${{ inputs.config_file_path }}"
+            vllm_version="${{ inputs.vllm_version }}"
+            vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
+            vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
 
             required_params=("size" "replicas" "image" "config_file_path")
             for param in "${required_params[@]}"; do
@@ -111,6 +129,9 @@ jobs:
               -D replicas="$replicas" \
               -D image="$image" \
               -D config_file_path="$config_file_path" \
+              -D vllm_version="$vllm_version" \
+              -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
+              -D vllm_ascend_ref="$vllm_ascend_ref" \
               --outfile lws.yaml
 
             kubectl apply -f ./lws.yaml
