@@ -839,6 +839,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
         wd_qkv = torch.cat((kv_a_proj_wt, self.q_a_proj.weight.data.clone()),
                            dim=-1)
+
         wd_qkv = wd_qkv.t().contiguous()
         wd_qkv = transdata(wd_qkv,
                            block_size=(16, 32)).unsqueeze(0).contiguous()
@@ -951,6 +952,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         decode_q_pe = decode_q_pe.view(bsz, self.num_heads, -1)
 
         hidden_states = self.decoder_layer.input_layernorm(hidden_states)
+
         decode_kq = self.q_a_proj(hidden_states)  # q down
         decode_q_c = self.q_a_layernorm(decode_kq)  # q down layernorm
 
@@ -982,7 +984,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         if attn_metadata.prefill is not None:
             assert attn_metadata.num_decodes is not None and \
@@ -993,10 +995,12 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
 
             hidden_states_prefill = hidden_states
             prefill_slot_mapping = attn_metadata.slot_mapping
+
             prefill_kq = self.q_a_proj(hidden_states_prefill)  # q down
             prefill_q_c = self.q_a_layernorm(prefill_kq)  # q down layernorm
             prefill_kv_no_split = self.kv_a_proj_with_mqa(
                 hidden_states_prefill)  # c_kv
+
             if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
                 prefill_kv_no_split = get_tp_group().all_gather(
                     prefill_kv_no_split,
@@ -1110,6 +1114,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             else:
                 q_len = 1
                 hidden_states_decode = hidden_states
+
                 decode_kq = self.q_a_proj(hidden_states_decode)  # q down
                 decode_q_c = self.q_a_layernorm(decode_kq)  # q down layernorm
                 decode_kv_no_split = self.kv_a_proj_with_mqa(

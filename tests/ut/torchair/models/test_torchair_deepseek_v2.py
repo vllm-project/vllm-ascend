@@ -235,7 +235,8 @@ def test_torchair_deepseek_v2_mlp(mock_distributed, base_config):
                                 hidden_act="silu",
                                 quant_config=None)
     assert isinstance(mlp.act_fn, TorchairDeepseekV2SiluAndMul)
-
+    ascend_config = MagicMock()
+    ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
     with patch(
             "vllm_ascend.torchair.models.torchair_deepseek_v2.QuantizationConfig"
     ) as mock_quant_config:
