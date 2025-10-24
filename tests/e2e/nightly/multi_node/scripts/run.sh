@@ -151,33 +151,8 @@ kill_npu_processes() {
 }
 
 run_tests() {
-    echo "====> Run tests"
-
-    shopt -s nullglob
-    set +e
-    for file in tests/e2e/nightly/multi_node/config/models/*.yaml; do
-        export CONFIG_YAML_PATH="$file"
-        echo -e "${GREEN}Running test with config: $CONFIG_YAML_PATH"
-
-        config_name=$(basename "$file" .yaml)
-        log_file="${LOG_DIR}/test_${config_name}_node${LWS_WORKER_INDEX}.log"
-
-        if [ -f "$log_file" ]; then
-            if [ "${OVERWRITE_LOGS:-true}" = "true" ]; then
-                echo "Overwriting existing log file: $log_file"
-                > "$log_file"
-            else
-                local timestamp=$(date +%H%M%S)
-                log_file="${LOG_DIR}/test_${config_name}_${timestamp}.log"
-                echo "Log file exists, using: $log_file"
-            fi
-        fi
-
-        pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee "$log_file"
-        kill_npu_processes
-    done
-    set -e
-    shopt -u nullglob
+    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
+    kill_npu_processes
 }
 
 main() {
