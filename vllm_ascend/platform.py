@@ -418,17 +418,8 @@ class NPUPlatform(Platform):
 
     @classmethod
     def import_kernels(cls) -> None:
-        try:
-            # isort: off
-            # register custom ops into torch_library here
-            import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
-            # register the meta implementation for custom kernel if necessary
-            import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
-            # isort: on
-        except ImportError:
-            logger.warning(
-                "Warning: Failed to register custom ops, all custom ops will be disabled"
-            )
+        from vllm_ascend.utils import enable_custom_op
+        enable_custom_op()
 
     @classmethod
     def get_attn_backend_cls(
