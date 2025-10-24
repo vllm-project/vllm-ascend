@@ -153,30 +153,6 @@ class AscendSparseFlashAttention(MultiHeadLatentAttentionWrapper):
                 o_proj=mla_modules.o_proj,
             )
 
-        else:
-            self.sfa_attn = MLAAttention(
-                num_heads=self.num_local_heads,
-                scale=self.scaling,
-                qk_nope_head_dim=self.qk_nope_head_dim,
-                qk_rope_head_dim=self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                q_lora_rank=self.q_lora_rank,
-                kv_lora_rank=self.kv_lora_rank,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.attn",
-                kv_b_proj=sfa_modules.kv_b_proj,
-                use_sparse=self.is_sparse,
-                indexer=self.indexer,
-                q_proj=sfa_modules.q_proj,
-                o_proj=sfa_modules.o_proj,
-                kv_a_proj_with_mqa=sfa_modules.kv_a_proj_with_mqa,
-                kv_a_layernorm=sfa_modules.kv_a_layernorm,
-                q_a_proj=sfa_modules.q_a_proj,
-                q_a_layernorm=sfa_modules.q_a_layernorm,
-                rotary_emb=sfa_modules.rotary_emb,
-            )
-
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")

@@ -99,7 +99,6 @@ def test_mtp_torchair_correctness_piecewise(
     mtp_torchair_correctness(sampling_config, model_name)
 
 
-@pytest.mark.skip("TODO: revert this skip")
 def test_mtp_torchair_correctness_full(
     sampling_config: SamplingParams,
     model_name: str,
