@@ -52,6 +52,7 @@ _IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
+_SHARED_EXPERTS_CALCULATION_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -257,6 +258,15 @@ def prefetch_stream() -> torch.npu.Stream:
         # we return the default stream.
         _PREFETCH_STREAM = torch_npu.npu.Stream()
     return _PREFETCH_STREAM
+
+
+def shared_experts_calculation_stream() -> torch.npu.Stream:
+    global _SHARED_EXPERTS_CALCULATION_STREAM
+    if _SHARED_EXPERTS_CALCULATION_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
+    return _SHARED_EXPERTS_CALCULATION_STREAM
 
 
 def adapt_patch(is_global_patch: bool = False):
@@ -646,6 +656,10 @@ def enable_sp(vllm_config=None) -> bool:
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp()
+
+
+def prefill_context_parallel_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
 
 
 def is_moe_model(vllm_config: VllmConfig):

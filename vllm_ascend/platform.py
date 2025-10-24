@@ -32,6 +32,7 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
+                               prefill_context_parallel_enable,
                                update_aclgraph_sizes)
 
 if TYPE_CHECKING:
@@ -131,7 +132,8 @@ class NPUPlatform(Platform):
 
         if (model_config is not None and not model_config.use_mla
                 and not scheduler_config.async_scheduling
-                and model_config.runner_type != "pooling"):
+                and model_config.runner_type != "pooling"
+                and not prefill_context_parallel_enable()):
             logger.info(
                 "Non-MLA LLMs forcibly disable the chunked prefill feature,"
                 "as the performance of operators supporting this feature "
@@ -319,6 +321,16 @@ class NPUPlatform(Platform):
             )
             vllm_config.scheduler_config.chunked_prefill_enabled = True
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
+
+        if vllm_config.kv_transfer_config is not None and \
+            prefill_context_parallel_enable() and \
+            cache_config.block_size != parallel_config.cp_kv_cache_interleave_size and \
+            parallel_config.decode_context_parallel_size * parallel_config.prefill_context_parallel_size > 1:
+            raise AssertionError(
+                f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
+                f"and block_size({cache_config.block_size}) "
+                "needs to be equal if use cp or dcp > 1 in P/D disaggregate scenario."
+            )
 
     @classmethod
     def get_attn_backend_cls(
