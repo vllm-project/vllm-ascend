@@ -356,7 +356,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                        num_kv_heads=self.num_kv_heads,
                                        out=output)
         assert output is not None
-        return output[:num_tokens, :, :]
+        return output[:num_tokens]
 
     def _forward_prefill_cache_hit(
         self,
@@ -676,6 +676,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             intermediate_output = self._forward_v1_style(
                 query, attn_metadata, output)
 
-        output[:num_tokens, :, :] = intermediate_output[:num_tokens, :, :]
+        output[:num_tokens] = intermediate_output[:num_tokens]
 
         return output
