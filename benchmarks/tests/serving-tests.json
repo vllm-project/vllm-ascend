@@ -18,7 +18,7 @@
     },
     "client_parameters": {
       "model": "Qwen/Qwen2.5-VL-7B-Instruct",
-      "endpoint_type": "openai-chat",
+      "backend": "openai-chat",
       "dataset_name": "hf",
       "hf_split": "train",
       "endpoint": "/v1/chat/completions",
@@ -45,7 +45,7 @@
     },
     "client_parameters": {
       "model": "Qwen/Qwen3-8B",
-      "endpoint_type": "vllm",
+      "backend": "vllm",
       "dataset_name": "sharegpt",
       "dataset_path": "/github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json",
       "num_prompts": 200
@@ -69,7 +69,7 @@
     },
     "client_parameters": {
       "model": "Qwen/Qwen2.5-7B-Instruct",
-      "endpoint_type": "vllm",
+      "backend": "vllm",
       "dataset_name": "sharegpt",
       "dataset_path": "/github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json",
       "num_prompts": 200
