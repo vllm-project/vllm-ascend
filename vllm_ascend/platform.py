@@ -323,6 +323,20 @@ class NPUPlatform(Platform):
             vllm_config.scheduler_config.SLO_limits_for_dynamic_batch = ascend_config.SLO_limits_for_dynamic_batch
 
     @classmethod
+    def import_kernels(cls) -> None:
+        try:
+            # isort: off
+            # register custom ops into torch_library here
+            import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+            # register the meta implementation for custom kernel if necessary
+            import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+            # isort: on
+        except ImportError:
+            logger.warning(
+                "Warning: Failed to register custom ops, all custom ops will be disabled"
+            )
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend,
