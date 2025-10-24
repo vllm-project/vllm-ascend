@@ -284,7 +284,7 @@ class MooncakeStoreConnectorV1Scheduler:
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
-            self._unfinished_request_ids.remove(finished_req_id)
+            self._unfinished_request_ids.discard(finished_req_id)
 
         meta = MooncakeConnectorMetadata(self._unfinished_request_ids)
 
@@ -418,7 +418,8 @@ class MooncakeStoreConnectorV1Scheduler:
         """
         if self.kv_role == "kv_consumer":
             return False, None
-        if self._request_trackers[request.request_id].num_saved_tokens <= 0:
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
         delay_free_blocks = len(block_ids) > 0
         if delay_free_blocks:
