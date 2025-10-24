@@ -39,7 +39,7 @@ _MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
 
 def get_moe_comm_method(
         moe_comm_type: Optional[MoECommType]) -> Optional[MoECommMethod]:
-    return _MoECommMethods.get(moe_comm_type)
+    return _MoECommMethods.get(moe_comm_type, None)
 
 
 def setup_moe_comm_method(moe_config):
