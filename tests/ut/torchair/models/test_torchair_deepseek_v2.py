@@ -13,7 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
@@ -100,6 +100,11 @@ def mock_distributed():
     pp_group.rank_in_group = 0
     pp_group.world_size = 1
 
+    dcp_group = MagicMock(spec=GroupCoordinator)
+    dcp_group.rank_in_group = 0
+    dcp_group.world_size = 1
+    dcp_group.device_group = MagicMock()
+
     mlp_tp_group = Mock(spec=GroupCoordinator)
     mlp_tp_group.rank_in_group = 0
     mlp_tp_group.world_size = 1
@@ -117,6 +122,9 @@ def mock_distributed():
             patch("vllm_ascend.torchair.models.torchair_deepseek_v2.get_pp_group", return_value=pp_group), \
             patch("vllm_ascend.torchair.models.torchair_deepseek_v2.get_pp_group",
                   return_value=Mock(is_first_rank=False, is_last_rank=False)), \
+            patch('vllm.distributed.parallel_state.get_dcp_group', return_value=dcp_group), \
+            patch('vllm.distributed.parallel_state._DCP', new_callable=lambda: MagicMock(spec=GroupCoordinator)), \
+            patch("vllm.distributed.get_decode_context_model_parallel_world_size", return_value=1),\
             patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
             patch.dict("vllm.distributed.parallel_state.__dict__", _TP=tp_group, _EP=ep_group, _DP=dp_group,
                        _PP=pp_group), \

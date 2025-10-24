@@ -648,6 +648,10 @@ def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp()
 
 
+def prefill_context_parallel_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
+
+
 def is_moe_model(vllm_config: VllmConfig):
     global _IS_MOE_MODEL
     if _IS_MOE_MODEL is None:

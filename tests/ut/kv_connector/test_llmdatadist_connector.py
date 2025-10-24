@@ -80,6 +80,8 @@ def test_read_agent_metadata():
         worker.local_ip = worker_local_ip
         worker.tp_rank = worker_tp_rank
         worker.llm_datadist_role = LLMRole.PROMPT
+        worker.pcp_rank = 0
+        worker.tp_size = worker_tp_rank + 1
         os.environ["ASCEND_RT_VISIBLE_DEVICES"] = worker_visible_devices
         agent_metadata = LLMDataDistCMgrConnectorWorker.read_agent_metadata(
             worker, rank_table)
