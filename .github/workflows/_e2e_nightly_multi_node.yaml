@@ -98,7 +98,7 @@ jobs:
         - name: Prepare scripts
           run: |
             # prepare for lws entrypoint scripts
-            install -D tests/e2e/multi_node/scripts/run.sh /root/.cache/tests/run.sh
+            install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
 
         - name: Launch cluster
           run: |
