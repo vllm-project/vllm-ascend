@@ -68,7 +68,7 @@ class Mooncakestore():
     def exists(self, key: MooncakeEngineKey) -> bool:
         return self.store.is_exist(key.to_string()) == 1
 
-    def batch_exists(self, keys: list[str]) -> list[bool]:
+    def batch_exists(self, keys: list[str]) -> list[int]:
         return self.store.batch_is_exist(keys)
 
     def register_buffer(self, ptr, length):
