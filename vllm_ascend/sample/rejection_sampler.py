@@ -471,7 +471,8 @@ def sample_recovered_tokens_pytorch(
     num_tokens = len(draft_token_ids)
     device = output_token_ids.device
 
-    diff = torch.diff(cu_num_draft_tokens, prepend=torch.tensor([0], device=device))
+    diff = torch.diff(cu_num_draft_tokens, 
+                      prepend=torch.tensor([0], device=device))
     q_value_new = torch.repeat_interleave(q, diff, dim=0)
 
     token_positions = torch.arange(num_tokens, device=device)
@@ -484,15 +485,16 @@ def sample_recovered_tokens_pytorch(
         draft_p = draft_probs[token_positions].clone()
         target_p = target_probs[token_positions].clone()
         prob = torch.maximum(target_p - draft_p,
-                                torch.tensor(0.0, device=target_p.device))
+                            torch.tensor(0.0, device=target_p.device))
 
     q_values = torch.full((num_tokens, vocab_size),
-                                  float('-inf'),
-                                  device=q.device)
+                        float('-inf'),
+                        device=q.device)
     q_values[:vocab_size] = q_value_new[token_positions, :vocab_size]
 
     recovered_id = torch.argmax(prob / q_values, dim=-1)
-    output_token_ids[token_positions] = recovered_id.to(dtype=output_token_ids.dtype)
+    output_token_ids[token_positions] = recovered_id.to(
+        dtype=output_token_ids.dtype)
     
     if IS_NGRAM:
         target_probs[token_positions, draft_token_ids] = orig_prob
