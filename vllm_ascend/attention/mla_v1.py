@@ -450,7 +450,7 @@ class AscendMLAMetadataBuilder:
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     chunk_seq_lens=chunk_seq_lens,
-                    chunk_seq_lens_npu=chunk_seq_lens.to(device, non_blocking=True),
+                    chunk_seq_lens_npu=chunk_seq_lens.to(device),
                     workspace=self.chunked_prefill_workspace,
                 )
             prefill_input_positions = input_positions[tokens_start:]
