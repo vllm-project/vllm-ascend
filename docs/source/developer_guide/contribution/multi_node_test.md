@@ -65,3 +65,35 @@ From the workflow perspective, we can see how the final test script is executed,
     acc:
         # fill with accuracy test kwargs
     ```
+  
+3. Add the case to nightly workflow
+currently, the multi-node test workflow defined in the [vllm_ascend_test_nightly_a2/a3.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test_nightly_a3.yaml)
+
+   ```yaml
+    multi-node-tests:
+        needs: single-node-tests
+        if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        strategy:
+        fail-fast: false
+        max-parallel: 1
+        matrix:
+            test_config:
+            - name: multi-node-deepseek-pd
+                config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml
+                size: 2
+            - name: multi-node-qwen3-dp
+                config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A3B.yaml
+                size: 2
+            - name: multi-node-dpsk-4node-pd
+                config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
+                size: 4
+        uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+        with:
+        soc_version: a3
+        image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+        replicas: 1
+        size: ${{ matrix.test_config.size }}
+        config_file_path: ${{ matrix.test_config.config_file_path }}
+   ```
+  
+The matrix above defines all the parameters required to add a multi-machine use case, The parameters worth paying attention to (I mean if you are adding a new use case) are size and the path to the yaml configuration file. The former defines the number of nodes required for your use case, and the latter defines the path to the configuration file you have completed in step 2.
