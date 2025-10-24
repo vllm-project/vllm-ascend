@@ -349,15 +349,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                              self.block_size,
                                              use_mla=self.model_config.use_mla,
                                              use_sparse=self.use_sparse)
+        pooler_config = self.model_config.pooler_config
+        tril = self.model_config.runner_type == "generate" or (
+            pooler_config is not None
+            and pooler_config.pooling_type.lower() == "last")
         if self.pcp_size > 1:
             self.attn_mask_builder = None
         elif torch.version.cann.startswith("8.3"):
             self.attn_mask_builder = AttentionMaskBuilder(
                 self.scheduler_config.max_num_batched_tokens, self.dtype,
-                self.device)
+                self.device, tril)
         else:
             self.attn_mask_builder = AttentionMaskBuilder(
-                self.model_config.max_model_len, self.dtype)
+                self.model_config.max_model_len, self.dtype, tril=tril)
 
         # Set up speculative decoding.
         self.spec_attn_mask = None
@@ -960,11 +964,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return None
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
-        # Pooling situation.
-        if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
-            return self.attn_mask_builder.get_pooling_mask(self.device)
         # Chunk Prefill situation.
-        elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
+        if attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
             if self.dcp_size > 1:
                 max_seq_len = max(seq_lens.max().item(), 0)
                 return self.attn_mask_builder.get_attn_mask(
@@ -1728,8 +1729,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 common_prefix_len = 0
                 extra_attn_metadata_args = {}
                 builder = attn_group.get_metadata_builder()
-                if isinstance(builder, GDNAttentionMetadataBuilder
-                              ) or self.model_config.runner_type == "pooling":
+                if isinstance(builder, GDNAttentionMetadataBuilder):
                     if use_spec_decode:
                         extra_attn_metadata_args = dict(
                             num_accepted_tokens=self.num_accepted_tokens.
@@ -1737,6 +1737,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             num_draft_tokens=self.num_draft_tokens.
                             gpu[:num_reqs],
                         )
+                    attn_metadata_i = builder.build(
+                        common_prefix_len=common_prefix_len,
+                        common_attn_metadata=common_attn_metadata,
+                        **extra_attn_metadata_args)
+                elif self.model_config.runner_type == "pooling":
                     attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
                         common_attn_metadata=common_attn_metadata,
@@ -1763,18 +1768,52 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 input_ids, inputs_embeds, intermediate_tensors,
                 max_num_scheduled_tokens)
 
+    def _init_model_kwargs(self):
+        model_kwargs = dict[str, Any]()
+        num_reqs = self.input_batch.num_reqs
+
+        num_pooling_reqs = len(self.input_batch.pooling_params)
+
+        if num_pooling_reqs == 0:
+            return model_kwargs
+
+        pooling_params = self.input_batch.pooling_metadata.pooling_params
+
+        assert num_pooling_reqs == num_reqs
+
+        token_type_id_requests = dict[int, Any]()
+        for i, param in enumerate(pooling_params):
+            if param.extra_kwargs is not None and \
+            (token_types := param.extra_kwargs.get(
+                "compressed_token_type_ids")) is not None:
+                token_type_id_requests[i] = token_types
+
+        if len(token_type_id_requests) == 0:
+            return model_kwargs
+
+        seq_lens = self.seq_lens[:num_reqs]
+        token_type_ids = []
+
+        for i in range(num_reqs):
+            pos = token_type_id_requests.get(i, seq_lens[i])
+            ids = (torch.arange(seq_lens[i]) >= pos).int()
+            token_type_ids.append(ids)
+
+        model_kwargs["token_type_ids"] = torch.concat(token_type_ids).to(
+            device=self.device)
+        return model_kwargs
+
     def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill,
                                              maybe_padded_num_tokens,
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds):
         assert self.model is not None
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
+        hidden_states = self.model(input_ids=input_ids,
+                                   positions=positions,
+                                   intermediate_tensors=intermediate_tensors,
+                                   inputs_embeds=inputs_embeds,
+                                   **self._init_model_kwargs())
 
         forward_context = get_forward_context()
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
@@ -1804,7 +1843,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
         ascend_config = get_ascend_config()
-        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
+        if self.model_config.runner_type == "pooling":
+            if isinstance(
+                    self.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+                    EncoderOnlyAttentionSpec):
+                attn_state = AscendAttentionState.PrefillNoCache
+            else:
+                attn_state = AscendAttentionState.PrefillCacheHit
+        elif np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
