@@ -2038,6 +2038,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 lse=softmax_lse)
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
+        else:
             attn_output = torch.empty_like(q_nope)
             softmax_lse = torch.empty((num_tokens, num_heads, 1),
                                     dtype=q_nope.dtype,
