@@ -40,7 +40,8 @@ from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
-                               shared_expert_dp_enabled)
+                               shared_expert_dp_enabled,
+                               shared_experts_compute_stream)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -419,8 +420,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         self.shared_expert_stream = None
         ascend_config = get_ascend_config()
         self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert
-        if self.multistream_overlap_shared_expert:
-            self.shared_expert_stream = torch.npu.Stream()
         if enable_sp():
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
@@ -442,19 +441,15 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                      router_logits: torch.Tensor):
         # Make sure the shared experts stream begins after hidden_states are ready.
         if self.multistream_overlap_shared_expert:
-            self.shared_expert_stream.wait_stream(  # type: ignore
+            shared_experts_compute_stream().wait_stream(  # type: ignore
                 torch.npu.current_stream())
-        with npu_stream_switch(self.shared_expert_stream,
+        with npu_stream_switch(shared_experts_compute_stream(),
                                enabled=self.multistream_overlap_shared_expert):
             # Use a separate stream to run shared experts.
+            # Note that currently we only support calculations in separate streams with aclgraph.
+            # Communication operations in another stream might cause unknown errors.
             shared_out = self._shared_experts(hidden_states)
 
-            # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
-            forward_context = get_forward_context()
-            moe_comm_type = forward_context.moe_comm_type
-            if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2} \
-                    and not shared_expert_dp_enabled():
-                shared_out = tensor_model_parallel_all_reduce(shared_out)
         fused_output = AscendFusedMoE.forward_impl(
             self,
             hidden_states=hidden_states,
@@ -462,5 +457,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         )
         # Make sure the default stream waits for the shared experts stream to finish.
         if self.multistream_overlap_shared_expert:
-            torch.npu.current_stream().wait_stream(self.shared_expert_stream)
+            torch.npu.current_stream().wait_stream(
+                shared_experts_compute_stream())
+        # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
+        forward_context = get_forward_context()
+        moe_comm_type = forward_context.moe_comm_type
+        if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2} \
+                and not shared_expert_dp_enabled():
+            shared_out = tensor_model_parallel_all_reduce(shared_out)
         return shared_out, fused_output
