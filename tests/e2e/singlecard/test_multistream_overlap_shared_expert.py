@@ -28,7 +28,7 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
-    "Qwen/Qwen3-0.6B",
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8",
 ]
 
 
