@@ -32,7 +32,8 @@ from vllm.v1.request import Request, RequestStatus
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import (AscendSocVersion, get_ascend_soc_version,
-                               prefill_context_parallel_enable, vllm_version_is)
+                               prefill_context_parallel_enable,
+                               vllm_version_is)
 
 if prefill_context_parallel_enable():
     from vllm.distributed.parallel_state import \

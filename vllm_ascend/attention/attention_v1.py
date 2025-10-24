@@ -52,7 +52,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
 # isort: off
 from ..utils import weak_ref_tensors
 
-
 if vllm_version_is("0.11.0"):
     from vllm.utils import direct_register_custom_op
 else:
