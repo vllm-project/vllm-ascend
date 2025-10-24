@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 from vllm.model_executor.models.roberta import (
@@ -71,11 +71,14 @@ def roberta_embedding_forward(
     self,
     input_ids: torch.Tensor,
     position_ids: torch.Tensor,
+    inputs_embeds: Union[torch.Tensor, None] = None,
 ) -> torch.Tensor:
 
     token_type_ids = _decode_token_type_ids(input_ids)
 
-    inputs_embeds = self.word_embeddings(input_ids)
+    if inputs_embeds is None:
+        inputs_embeds = self.word_embeddings(input_ids)
+
     position_embeddings = self.position_embeddings(position_ids)
 
     token_type_embeddings = self.token_type_embeddings(token_type_ids)
