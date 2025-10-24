@@ -4029,18 +4029,3 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 long_seq_metadata.pcp_prefill_mask = self.extra_long_seq_kwargs[
                     'pcp_prefill_mask']
         return long_seq_metadata
-
-    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
-        # This is a short term mitigation for issue mentioned in
-        # https://github.com/vllm-project/vllm/issues/22754.
-        # `tolist` would trigger a npu wise stream sync, which
-        # would block other copy ops from other npu streams.
-        # A npu event sync would avoid such a situation. Since
-        # this is in the critical path of every single model
-        # forward loop, this has caused perf issue for a disagg
-        # setup.
-        pinned = self.sampled_token_ids_pinned_cpu[:sampled_token_ids.shape[0]]
-        pinned.copy_(sampled_token_ids, non_blocking=True)
-        self.transfer_event.record()
-        self.transfer_event.synchronize()
-        return pinned.tolist()
