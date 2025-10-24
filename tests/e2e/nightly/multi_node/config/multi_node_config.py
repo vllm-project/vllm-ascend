@@ -250,10 +250,11 @@ class MultiNodeConfig:
         node_rank = self.cur_index
         master_addr = cluster_ip[0]
         master_port = DISAGGEGATED_PREFILL_PORT
+        assert self.disaggregated_prefill is not None
         ranktable_gen_path = self.disaggregated_prefill.get(
             "ranktable_gen_path")
         ranktable_path = self.disaggregated_prefill.get("ranktable_path")
-        if os.path.exists(ranktable_path):
+        if os.path.exists(str(ranktable_path)):
             return
 
         local_host = self.cur_ip
@@ -272,7 +273,7 @@ class MultiNodeConfig:
             str(master_port),
             ranktable_gen_path,
             "--ranktable-path",
-            ranktable_path,
+            str(ranktable_path),
             "--local-host",
             local_host,
             "--prefill-device-cnt",
@@ -284,6 +285,6 @@ class MultiNodeConfig:
         env = os.environ.copy()
         env["GLOO_SOCKET_IFNAME"] = self.nic_name
 
-        print(cmd)
         subprocess.run(cmd, env=env, check=True)
-        assert os.path.exists(ranktable_path), "failed generate ranktable.json"
+        assert os.path.exists(
+            str(ranktable_path)), "failed generate ranktable.json"
