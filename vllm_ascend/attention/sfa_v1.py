@@ -633,6 +633,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dim=-1,
             )
             decode_q_c = self.q_a_layernorm(decode_q_c)  # q down layernorm
+            decode_kv_no_split = decode_kv_no_split.contiguous()
 
             # decode_q_c = q_c[:num_decode_tokens]
             decode_slot_mapping = attn_metadata.slot_mapping[:
@@ -719,6 +720,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dim=-1,
             )
             prefill_q_c = self.q_a_layernorm(prefill_q_c)  # q down layernorm
+            prefill_kv_no_split = prefill_kv_no_split.contiguous()
 
             # prefill_q_c = q_c[
             #     num_decode_tokens:num_actual_tokens]

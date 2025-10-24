@@ -344,7 +344,6 @@ class TestCoreFunctionality(unittest.TestCase):
         self.engine.batch_transfer_sync_read.return_value = 0
         self.thread.remote_te_port = {"remote_engine": {6666: 7777}}
 
-    @pytest.mark.skip("TODO: revert me after test_handle_request is fixed")
     @patch.object(KVCacheRecvingThread, '_transfer_kv_cache')
     @patch.object(KVCacheRecvingThread, '_send_done_recv_signal')
     def test_handle_request(self, mock_send, mock_transfer):
