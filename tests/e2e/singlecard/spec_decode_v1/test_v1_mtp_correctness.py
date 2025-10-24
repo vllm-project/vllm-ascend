@@ -98,7 +98,6 @@ def test_mtp2_correctness_piecewise_graph(
     mtp_correctness(sampling_config, model_name, 2)
 
 
-@pytest.mark.skip("TODO(cmq): Revert me when mtp aclgraph is fixed")
 def test_mtp1_correctness_full_graph(
     sampling_config: SamplingParams,
     model_name: str,
@@ -106,7 +105,6 @@ def test_mtp1_correctness_full_graph(
     mtp_correctness(sampling_config, model_name, 1, CUDAGraphMode.FULL)
 
 
-@pytest.mark.skip("TODO(cmq): Revert me when mtp aclgraph is fixed")
 def test_mtp2_correctness_full_graph(
     sampling_config: SamplingParams,
     model_name: str,

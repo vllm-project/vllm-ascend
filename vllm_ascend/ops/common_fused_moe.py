@@ -40,7 +40,8 @@ from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
                                shared_expert_dp_enabled,
-                               shared_experts_calculation_stream, vllm_version_is)
+                               shared_experts_calculation_stream,
+                               vllm_version_is)
 
 if vllm_version_is("0.11.0"):
     from vllm.config import CompilationLevel

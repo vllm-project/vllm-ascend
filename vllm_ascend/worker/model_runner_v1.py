@@ -135,7 +135,8 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
                                enable_sp, get_ascend_soc_version, is_310p,
                                is_enable_nz, lmhead_tp_enable,
-                               prefill_context_parallel_enable, vllm_version_is)
+                               prefill_context_parallel_enable,
+                               vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if prefill_context_parallel_enable():
@@ -1235,7 +1236,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
 
-        # is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
+        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
 
