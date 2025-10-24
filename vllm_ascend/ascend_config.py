@@ -34,7 +34,6 @@ class AscendConfig:
 
     def __init__(self, vllm_config):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
-
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
         self.torchair_graph_config = TorchairGraphConfig(

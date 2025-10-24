@@ -988,7 +988,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         else:
             if attn_metadata is None:
-                return output.view(num_tokens, self.hidden_size)
+                return output.view(num_tokens, self.hidden_size).fill_(0)
             num_decode_tokens = attn_metadata.num_decode_tokens
             has_decode = attn_metadata.num_decodes > 0
             has_prefill = attn_metadata.num_prefills > 0
