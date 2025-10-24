@@ -4056,19 +4056,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return long_seq_metadata
 
 
-    def _num_scheduled_tokens_prefill_cp(self, num_tokens,
+    def _num_scheduled_tokens_pcp(self, num_tokens,
                                          num_computed_tokens,
-                                         cp_kv_recover_idx,
-                                         set_cp_kv_recover_idx: bool=True):
+                                         pcp_kv_recover_idx,
+                                         set_pcp_kv_recover_idx: bool=True):
         num_scheduled_tokens = num_tokens - num_computed_tokens
-        num_cp_padded_scheduled_tokens = cdiv(
+        num_pcp_padded_scheduled_tokens = cdiv(
             num_scheduled_tokens, 2 * self.pcp_size) * (2 * self.pcp_size
                                                        )
-        cp_pad = num_cp_padded_scheduled_tokens - num_scheduled_tokens
+        pcp_pad = num_pcp_padded_scheduled_tokens - num_scheduled_tokens
         full_indices = list(
             range(self.max_num_tokens * self.pcp_size * self.dcp_size +
                   self.pcp_size * self.dcp_size * self.max_num_reqs))
-        chunk_size = num_cp_padded_scheduled_tokens // (2 * self.pcp_size)
+        chunk_size = num_pcp_padded_scheduled_tokens // (2 * self.pcp_size)
 
         # split position_ids (and use split position_ids to split input_ids afterwards)
         req_position_cp = []
@@ -4076,21 +4076,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             full_indices[self.pcp_rank * chunk_size:(self.pcp_rank + 1) *
                                                    chunk_size])
         req_position_cp.extend(
-            full_indices[num_cp_padded_scheduled_tokens - (self.pcp_rank + 1) *
-                         chunk_size:num_cp_padded_scheduled_tokens -
+            full_indices[num_pcp_padded_scheduled_tokens - (self.pcp_rank + 1) *
+                         chunk_size:num_pcp_padded_scheduled_tokens -
                                     self.pcp_rank * chunk_size])
 
-        if set_cp_kv_recover_idx:
+        if set_pcp_kv_recover_idx:
             # used to recover kv order in cp prefill (after all-gather kv and before storing kv_cache)
-            num_added_recover_tokens = len(cp_kv_recover_idx[0]) * self.pcp_size
+            num_added_recover_tokens = len(pcp_kv_recover_idx[0]) * self.pcp_size
             for rank in range(self.pcp_size):
-                cp_kv_recover_idx[rank].extend(
+                pcp_kv_recover_idx[rank].extend(
                     full_indices[rank * chunk_size +
                                 num_added_recover_tokens:(rank + 1) * chunk_size +
                                                         num_added_recover_tokens])
-                cp_kv_recover_idx[rank].extend(full_indices[
-                                            num_cp_padded_scheduled_tokens - (rank + 1) * chunk_size +
-                                            num_added_recover_tokens:num_cp_padded_scheduled_tokens -
+                pcp_kv_recover_idx[rank].extend(full_indices[
+                                            num_pcp_padded_scheduled_tokens - (rank + 1) * chunk_size +
+                                            num_added_recover_tokens:num_pcp_padded_scheduled_tokens -
                                                                         rank * chunk_size + num_added_recover_tokens])
 
-        return req_position_cp, num_cp_padded_scheduled_tokens, cp_pad
+        return req_position_cp, num_pcp_padded_scheduled_tokens, pcp_pad
