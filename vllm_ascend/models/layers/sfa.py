@@ -30,7 +30,6 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.mla import MLAModules
-
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 from vllm_ascend.ascend_config import get_ascend_config

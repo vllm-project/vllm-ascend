@@ -653,9 +653,11 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                  dtype=hidden_states_or_q_c.dtype,
                                  device=hidden_states_or_q_c.device)
             forward_kwargs['output'] = output
-            output = self.mla_attn.mla_attn.impl.forward(
-                self.mla_attn, hidden_states_or_q_c, hidden_states, None,
-                kv_cache, attn_metadata, **forward_kwargs)
+            output = self.mla_attn.impl.forward(self.mla_attn,
+                                                hidden_states_or_q_c,
+                                                hidden_states, None, kv_cache,
+                                                attn_metadata,
+                                                **forward_kwargs)
             output = output.view(-1, output_shape[-1])
             return output
         else:
@@ -925,9 +927,8 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
         output = torch.empty(output_shape,
                              dtype=hidden_states.dtype,
                              device=hidden_states.device)
-        self.sfa_attn.sfa_attn.impl.forward(hidden_states, kv_cache,
-                                            attn_metadata, need_gather_q_kv,
-                                            output)
+        self.sfa_attn.impl.forward(hidden_states, kv_cache, attn_metadata,
+                                   need_gather_q_kv, output)
         output = output.view(-1, output_shape[-1])
         return output
 

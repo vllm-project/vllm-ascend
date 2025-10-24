@@ -37,7 +37,7 @@ from vllm_ascend.distributed.utils import (align_memory,
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.11.0"):
-    from vllm.utils import get_ip
+    from vllm.utils import get_ip, make_zmq_path, make_zmq_socket
 else:
     from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 
