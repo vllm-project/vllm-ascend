@@ -72,8 +72,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-
-from vllm.utils import (cdiv, is_pin_memory_available)
+from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -1243,7 +1242,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             mm_embeds.extend(mm_embeds_req)
             req_start_idx += num_scheduled_tokens
 
-        # is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
+        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
 
         return mm_embeds, is_mm_embed
 
