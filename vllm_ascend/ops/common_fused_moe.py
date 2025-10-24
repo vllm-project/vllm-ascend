@@ -408,6 +408,7 @@ class AscendFusedMoE(FusedMoE):
 
 
 class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
+    shared_expert_stream: Optional[torch.npu.Stream] = None
 
     def __init__(
         self,
@@ -418,15 +419,16 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         AscendFusedMoE.__init__(self, **kwargs)
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
-        self.shared_expert_stream = None
         ascend_config = get_ascend_config()
-        self.multistream_overlap_shared_expert = ascend_config.multistream_overlap_shared_expert
-        if self.multistream_overlap_shared_expert:
-            self.shared_expert_stream = torch.npu.Stream()
+        self.multistream_overlap_shared_expert = \
+            ascend_config.multistream_overlap_shared_expert
+        if self.multistream_overlap_shared_expert \
+            and AscendSharedFusedMoE.shared_expert_stream is None:
+            AscendSharedFusedMoE.shared_expert_stream = torch.npu.Stream()
         if enable_sp():
             logger.info_once(
-                "Sequence parallelism is enabled, shared experts are replicated for best performance."
-            )
+                "Sequence parallelism is enabled, shared experts are "
+                "replicated for best performance.")
 
     def forward(
         self,
@@ -444,9 +446,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
                      router_logits: torch.Tensor):
         # Make sure the shared experts stream begins after hidden_states are ready.
         if self.multistream_overlap_shared_expert:
-            self.shared_expert_stream.wait_stream(  # type: ignore
+            AscendSharedFusedMoE.shared_expert_stream.wait_stream(  # type: ignore
                 torch.npu.current_stream())
-        with npu_stream_switch(self.shared_expert_stream,
+        with npu_stream_switch(AscendSharedFusedMoE.shared_expert_stream,
                                enabled=self.multistream_overlap_shared_expert):
             # Use a separate stream to run shared experts.
             shared_out = self._shared_experts(hidden_states)
@@ -464,5 +466,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         )
         # Make sure the default stream waits for the shared experts stream to finish.
         if self.multistream_overlap_shared_expert:
-            torch.npu.current_stream().wait_stream(self.shared_expert_stream)
+            torch.npu.current_stream().wait_stream(
+                AscendSharedFusedMoE.shared_expert_stream)
         return shared_out, fused_output
