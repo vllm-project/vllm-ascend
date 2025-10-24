@@ -11,7 +11,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import enable_sp, is_moe_model, version_check
+from vllm_ascend.utils import FlashcommEnable, version_check
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
@@ -113,20 +113,16 @@ def set_ascend_forward_context(
         # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
-        if is_moe_model(vllm_config):
-            sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and num_tokens is not None
-        else:
-            sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and \
-                num_tokens is not None and num_tokens > 1000
+        forward_context.num_tokens = num_tokens
+        flashcomm_checker = FlashcommEnable(vllm_config, tp_world_size,
+                                            num_tokens)
+        forward_context.is_any_flashcomm_enabled = flashcomm_checker.is_any_flashcomm_enabled(
+        )
 
-        if sp_enabled:
+        if forward_context.is_any_flashcomm_enabled:
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
-        forward_context.sp_enabled = sp_enabled
-        forward_context.num_tokens = num_tokens
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
@@ -182,7 +178,7 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             max_tokens_across_dp = \
                 forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
-            if sp_enabled:
+            if forward_context.is_any_flashcomm_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size -
                                  1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens

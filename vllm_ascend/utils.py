@@ -796,3 +796,56 @@ def version_check():
         if full_date >= "20250919":
             return True
     return False
+
+
+def flashcomm2_enable() -> bool:
+    #TODO: add logic for flashcomm2
+    return False
+
+
+class FlashcommEnable:
+    """Flashcomm enable status checking class"""
+
+    def __init__(self, vllm_config, tp_world_size, num_tokens):
+        self.vllm_config = vllm_config
+        self.tp_world_size = tp_world_size
+        self.num_tokens = num_tokens
+        self.is_moe = is_moe_model(vllm_config)
+
+    @classmethod
+    def _flashcomm1_enable(cls, vllm_config):
+        """Check if SP is enabled"""
+        return enable_sp(vllm_config)
+
+    @classmethod
+    def _flashcomm2_enable(cls):
+        """Check if Flashcomm2 is enabled"""
+        return flashcomm2_enable()
+
+    def _check_base_conditions(self):
+        """Check basic conditions: tp_world_size > 1 and num_tokens exists"""
+        return self.tp_world_size > 1 and self.num_tokens is not None
+
+    def is_flashcomm_v1_enabled(self):
+        if not self._check_base_conditions():
+            return False
+
+        base_enabled = self._flashcomm1_enable(self.vllm_config)
+        if not base_enabled:
+            return False
+
+        # Apply different token conditions based on whether it's an MoE model
+        if self.is_moe:
+            return True
+        else:
+            return self.num_tokens > 1000
+
+    def is_flashcomm_v2_enabled(self):
+        if not self._check_base_conditions():
+            return False
+
+        return self._flashcomm2_enable()
+
+    def is_any_flashcomm_enabled(self):
+        """Check if any flashcomm strategy is enabled"""
+        return self.is_flashcomm_v1_enabled() or self.is_flashcomm_v2_enabled()
