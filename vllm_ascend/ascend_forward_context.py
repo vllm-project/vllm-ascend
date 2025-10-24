@@ -115,25 +115,22 @@ def set_ascend_forward_context(
         # the performance may degrade due to the switching of communication methods.
         mmrs_fusion = True
         if is_moe_model(vllm_config):
-            sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and num_tokens is not None
             mmrs_fusion = False
-        else:
-            sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and \
-                num_tokens is not None and num_tokens > 1000
         forward_context.mmrs_fusion = mmrs_fusion
-        flashcomm_v2_enabled = flashcomm2_enable() and \
-            tp_world_size > 1 and num_tokens is not None
+        forward_context.num_tokens = num_tokens
+        flashcomm_checker = FlashcommEnable(vllm_config, tp_world_size,
+                                            num_tokens)
+        forward_context.sp_enabled = flashcomm_checker.is_flashcomm_v1_enabled(
+        )
+        forward_context.flashcomm_v2_enabled = flashcomm_checker.is_flashcomm_v2_enabled(
+        )
+        forward_context.is_any_flashcomm_enabled = flashcomm_checker.is_any_flashcomm_enabled(
+        )
 
-        if sp_enabled or flashcomm_v2_enabled:
+        if forward_context.is_any_flashcomm_enabled:
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
-
-        forward_context.sp_enabled = sp_enabled
-        forward_context.num_tokens = num_tokens
-        forward_context.flashcomm_v2_enabled = flashcomm_v2_enabled
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
@@ -185,7 +182,7 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             max_tokens_across_dp = \
                 forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
-            if sp_enabled or flashcomm_v2_enabled:
+            if forward_context.is_any_flashcomm_enabled:
                 padded_length = (max_tokens_across_dp + tp_world_size -
                                  1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens

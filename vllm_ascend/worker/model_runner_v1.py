@@ -1911,8 +1911,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     update_attn_params(self.update_stream, forward_context,
                                        maybe_padded_num_tokens)
 
-        if get_forward_context().sp_enabled or get_forward_context(
-        ).flashcomm_v2_enabled:
+        if get_forward_context().is_any_flashcomm_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             pad_size = get_forward_context().pad_size
             if pad_size > 0:

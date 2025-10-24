@@ -130,34 +130,10 @@ class AscendConfig:
                     "Only support P node tp size lagger then D node tp size")
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
-        import vllm_ascend.envs as envs_ascend
-        self.flashcomm2_oproj_tensor_parallel_size = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2
-        if self.flashcomm2_oproj_tensor_parallel_size > 0:
-            global_tp_size = vllm_config.parallel_config.tensor_parallel_size
-            logger.info(
-                f"Enable Flashcomm2 with flashcomm2_oproj_tensor_parallel_size={self.flashcomm2_oproj_tensor_parallel_size} and global_tp_size={global_tp_size}"
-            )
-            if envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
-                logger.warning_once(
-                    "Enabling both FLASHCOMM1 and FLASHCOMM2 will default to using the optimizations of FLASHCOMM2."
-                )
-            if self.oproj_tensor_parallel_size is not None:
-                raise AssertionError(
-                    "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
-                )
-            if global_tp_size <= self.flashcomm2_oproj_tensor_parallel_size:
-                raise AssertionError(
-                    f"flashcomm2_oproj_tensor_parallel_size ({self.flashcomm2_oproj_tensor_parallel_size}) cannot exceed global tensor parallel size ({global_tp_size})"
-                )
-            if global_tp_size % self.flashcomm2_oproj_tensor_parallel_size != 0:
-                raise AssertionError(
-                    f"Global tensor parallel size ({global_tp_size}) must be divisible by flashcomm2_oproj_tensor_parallel_size ({self.flashcomm2_oproj_tensor_parallel_size})"
-                )
-            if vllm_config.kv_transfer_config is None or vllm_config.kv_transfer_config.is_kv_consumer:
-                raise AssertionError(
-                    "flashcomm2 primarily targets P-scenario deployments, "
-                    "with additional support for hybrid deployment scenarios. "
-                    "It is not applicable in D-scenario environments.")
+        from vllm_ascend.utils import \
+            get_flashcomm2_oproj_tp_size_and_validate_config
+        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
+            self, vllm_config)
 
 
 class TorchairGraphConfig:

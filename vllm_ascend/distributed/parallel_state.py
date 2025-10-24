@@ -8,7 +8,8 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_dp_group,
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.utils import prefill_context_parallel_enable, flashcomm2_enable
+from vllm_ascend.utils import (flashcomm2_enable,
+                               prefill_context_parallel_enable)
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
@@ -178,6 +179,7 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                           backend,
                                           group_name="lmheadtp")
 
+    # TODO: Extract and unify the logic across different communication group.
     if flashcomm2_enable():
         flashcomm2_otp_size = get_ascend_config(
         ).flashcomm2_oproj_tensor_parallel_size
