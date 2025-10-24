@@ -283,6 +283,7 @@ class MultiNodeConfig:
         ]
 
         env = os.environ.copy()
+        assert self.nic_name is not None
         env["GLOO_SOCKET_IFNAME"] = self.nic_name
 
         subprocess.run(cmd, env=env, check=True)
