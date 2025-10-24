@@ -3801,7 +3801,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.parallel_config.cp_kv_cache_interleave_size,
                 ).numpy(),
                 num_computed_tokens_of_cp_sp_accum=self.input_batch.num_computed_tokens_of_cp_sp_accum[
-                                                   :self.input_batch.num_reqs],
+                                                    # :self.input_batch.num_reqs],
+                                                    num_decodes:num_reqs],
             )
             if self.cp_size > 1:
                 q_head_idx, q_tail_idx = [], []

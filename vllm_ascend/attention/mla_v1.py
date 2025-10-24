@@ -675,6 +675,42 @@ class AscendMLAImpl(MLAAttentionImpl):
         # self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)
         # self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
 
+    def reorder_by_req(self, num_tokens_per_req_per_rank):
+        num_tokens_per_rank_per_req = [list(i) for i in zip(*num_tokens_per_req_per_rank)]      # transpose to [rank, req]
+        num_ranks = len(num_tokens_per_rank_per_req)
+        num_reqs = len(num_tokens_per_rank_per_req[0])
+        assert all(len(x)==num_reqs for x in num_tokens_per_rank_per_req)
+
+        # calc each rank's start offset
+        offsets = []
+        offset = 0
+        for rank_tokens in num_tokens_per_rank_per_req:
+            offsets.append(offset)
+            offset += sum(rank_tokens)
+
+        reordered = []
+        for req_idx in range(num_reqs):
+            for rank_idx in range(num_ranks):
+                start = offsets[rank_idx] + sum(num_tokens_per_rank_per_req[rank_idx][:req_idx])
+                end = start + num_tokens_per_rank_per_req[rank_idx][req_idx]
+                reordered.extend(range(start, end))
+
+        return torch.tensor(reordered, dtype=torch.int32)
+
+    def extract_req_dcp_by_chunk_cp(self, lst, chunk_idx, fill_value=0):
+        num_reqs = len(lst)
+    
+        results: List[List[int]] = []
+
+        for i in range(num_reqs):
+            if len(lst[i]) == 0 or chunk_idx >= len(lst[i]):
+                # empty req or this req has no corresponding chunk, fill 0
+                results.append([fill_value] * self.dcp_size)
+                continue
+            dcp_values = lst[i][chunk_idx][self.cp_rank]
+            results.append(dcp_values)
+        return results
+
     def _compute_prefill_context(
         self,
         q_nope: torch.Tensor,
@@ -689,7 +725,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_metadata = attn_metadata.prefill
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
-
+        if self.cp_size > 1:
+            prefix_output = torch.zeros(
+                q_nope.shape[0],
+                self.num_heads,
+                self.v_head_dim,
+                dtype=q_nope.dtype,
+                device=q_nope.device)
+            prefix_lse = torch.zeros(self.num_heads,
+                                        q_pe.shape[0],
+                                        dtype=torch.float32,
+                                        device=q_pe.device)
+        
         iters = len(prefill_metadata.chunked_context.seq_tot)
 
         cache_kv_c = kv_c_and_k_pe_cache[0]
@@ -699,16 +746,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         # token -> request mapping for building per-token masks when CP>1
         num_tokens_all = q_nope.size(0)
         seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32, device=q_nope.device)
+        seq_len1_rank = seq_len1.cpu()  # q for each cp rank
         seq_len1.mul_(self.cp_size)  # q_full: already padded, divisible by cp_size
-
-        # normalize prefix LSE to [bs, heads, 1] for stable updates
-        prefix_lse_bt = prefix_lse.permute(1, 0).unsqueeze(-1).contiguous() if prefix_lse is not None else None
-
-        if self.cp_size > 1:
-            req_ids = torch.repeat_interleave(
-                torch.arange(seq_len1.numel(), device=q_nope.device, dtype=torch.long),
-                seq_len1.to(torch.long).to(q_nope.device)
-            )
 
         # Select mask: prefer CP prefill mask from metadata; fallback to cached prefill_mask; create if needed.
         mask_local = None
@@ -731,6 +770,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 ## DCP mode: each rank processes its own (cp,dcp) historical context slice per request dimension
                 seq_len2_all = prefill_metadata.chunked_context.chunk_seq_lens[i]
                 num_requests = len(seq_len2_all)
+                assert num_requests == len(num_computed_tokens_of_cp_sp_accum)
                 # Before dealing with a new chunk, set to zero, and accumulate the start positions as chunk prefill step increases
                 context_starts_rank = torch.zeros(num_requests, dtype=torch.int32,
                                                   device=q_nope.device) if context_starts_rank is None else context_starts_rank
@@ -740,6 +780,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 total_toks = 0
 
                 for req_idx in range(num_requests):
+                    if i >= len(num_computed_tokens_of_cp_sp_accum[req_idx]):
+                        continue
                     n_computed_acc = num_computed_tokens_of_cp_sp_accum[req_idx][i]
                     total_toks += n_computed_acc[self.cp_rank][self.dcp_rank]
                     seq_len2_rank[req_idx] = n_computed_acc[self.cp_rank][self.dcp_rank]
@@ -776,6 +818,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
                 for req_idx in range(num_requests):
                     # Before dealing with a new chunk, set to zero, and accumulate the start positions as chunk prefill step increases
+                    if i >= len(num_computed_tokens_of_cp_sp_accum[req_idx]):
+                        continue
                     context_starts_rank[req_idx] += num_computed_tokens_of_cp_sp_accum[req_idx][i][self.cp_rank][
                         self.dcp_rank]
             else:
@@ -814,9 +858,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                                             dim=-1)  # [local_toks, latent_dim + rope_dim]
 
                 # Step 2: use all_gather_into_tensor_uneven (gather + cat)
-                output_split_sizes = num_computed_tokens_of_cp_sp_accum[req_idx][i][
-                    self.cp_rank]  # need to know num tokens of each rank in dcp group before using all_gather_into_tensor_uneven
-                total_toks = sum(output_split_sizes)
+                output_split_sizes = self.extract_req_dcp_by_chunk_cp(num_computed_tokens_of_cp_sp_accum, i)  # need to know num tokens of each rank in dcp group before all_gather     # [reqs, dcp]
+                assert len(output_split_sizes) == num_requests and all(len(dcp_arr) == self.dcp_size for dcp_arr in output_split_sizes)
+                total_toks = np.sum(np.array(output_split_sizes)) 
                 latent_rope_dim = kv_c_k_pe_local.size(-1)
                 kv_c_k_pe_full = torch.empty((total_toks, latent_rope_dim), device=kv_c_k_pe_local.device,
                                              dtype=kv_c_k_pe_local.dtype)
@@ -824,7 +868,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 torch_npu.distributed.all_gather_into_tensor_uneven(
                     kv_c_k_pe_full,
                     kv_c_k_pe_local,
-                    output_split_sizes=output_split_sizes,
+                    output_split_sizes=np.sum(np.array(output_split_sizes), axis=0).tolist(),
                     group=self.dcp_group,
                     async_op=False
                 )
@@ -837,7 +881,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
                 k_pe = k_pe_full.unsqueeze(1).expand((*k_nope.shape[:-1], -1))
 
-                seq_len2.mul_(self.dcp_size)  # chunk len: seq/(cp*dcp) -> seq/cp
+                seq_len2 = torch.tensor(np.sum(np.array(output_split_sizes), axis=1), dtype=torch.int32, device=q_nope.device)   # [reqs]
             else:
                 # Non-DCP mode: use TP-split projection
                 kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -849,14 +893,27 @@ class AscendMLAImpl(MLAAttentionImpl):
             if self.cp_size > 1:
                 # CP+DCP mode: first compute this rank's contribution to the chunk
                 # Case that no kv_cache has been stored on this rank, no need to do following computation.
-                block_out_local = torch.zeros(
-                    [num_tokens_all, self.num_heads, self.v_head_dim],
-                    dtype=q_nope.dtype,
-                    device=q_nope.device)
-                block_lse_local = torch.full((self.num_heads, num_tokens_all),
-                                             float('-inf'),
-                                             dtype=torch.float32,
-                                             device=q_nope.device)
+                if i == 0:
+                    torch_npu.atb.npu_ring_mla(
+                        q_nope=q_nope,
+                        q_rope=q_pe,
+                        k_nope=k_nope,
+                        k_rope=k_pe,
+                        value=v,
+                        mask=mask_local,
+                        seqlen=seq_len,
+                        head_num=self.num_heads,
+                        kv_head_num=self.num_heads,
+                        pre_out=None,
+                        prev_lse=None,
+                        qk_scale=self.scale,
+                        kernel_type="kernel_type_high_precision",
+                        mask_type="no_mask",
+                        input_layout="type_bsnd",
+                        calc_type="calc_type_first_ring",
+                        output=prefix_output,
+                        softmax_lse=prefix_lse)
+                    continue
 
                 torch_npu.atb.npu_ring_mla(
                     q_nope=q_nope,
@@ -868,49 +925,18 @@ class AscendMLAImpl(MLAAttentionImpl):
                     seqlen=seq_len,
                     head_num=self.num_heads,
                     kv_head_num=self.num_heads,
+                    pre_out=prefix_output,
+                    prev_lse=prefix_lse,
                     qk_scale=self.scale,
                     kernel_type="kernel_type_high_precision",
                     mask_type="no_mask",
                     input_layout="type_bsnd",
-                    calc_type="calc_type_first_ring",
-                    output=block_out_local,
-                    softmax_lse=block_lse_local)
-
-                block_lse_local_bt = block_lse_local.permute(1, 0).unsqueeze(-1)
-                out_lse_local = torch.cat([block_out_local, block_lse_local_bt], dim=-1)
-
-                # CP dimension all_gather and fusion
-                out_lse_list = [torch.empty_like(out_lse_local) for _ in range(self.cp_size)]
-                dist.all_gather(out_lse_list, out_lse_local, group=self.cp_group)
-                chunk_out_g = None
-                chunk_lse_g = None
-                for r in range(self.cp_size):
-                    out_lse_r = out_lse_list[r]
-                    out_r, lse_r = torch.split(out_lse_r, [self.v_head_dim, 1], dim=-1)
-                    token_mask = torch.ones([out_r.size(0)], dtype=torch.uint8, device=out_r.device)
-                    chunk_out_g, chunk_lse_g = self._update_out_and_lse(
-                        chunk_out_g, chunk_lse_g, out_r, lse_r, token_mask)
-
-                chunk_out_g = chunk_out_g[self.cp_rank * (num_tokens_all // self.cp_size):(self.cp_rank + 1) * (
-                            num_tokens_all // self.cp_size)]  # pick q result of cp rank
-                chunk_lse_g = chunk_lse_g[self.cp_rank * (num_tokens_all // self.cp_size):(self.cp_rank + 1) * (
-                            num_tokens_all // self.cp_size)]
-                if chunk_out_g is not None:
-                    if prefix_lse_bt is None:
-                        prefix_output = chunk_out_g.to(torch.float32)
-                        prefix_lse_bt = chunk_lse_g
-                    else:
-                        prefix_output, prefix_lse_bt = self._update_out_and_lse(
-                            prefix_output, prefix_lse_bt, chunk_out_g, chunk_lse_g)
+                    calc_type="calc_type_default",
+                    output=prefix_output,
+                    softmax_lse=prefix_lse)
 
             else:
-                # compute this chunk block then update prefix tensors to keep shapes consistent
-                block_out_local2 = torch.empty(
-                    num_tokens_all, self.num_heads, self.v_head_dim,
-                    dtype=q_nope.dtype, device=q_nope.device)
-                block_lse_local2 = torch.empty(
-                    self.num_heads, num_tokens_all,
-                    dtype=torch.float32, device=q_nope.device)
+                # compute this chunk block then update prefix tensors to keep shapes consistent                
                 torch_npu.atb.npu_ring_mla(
                     q_nope=q_nope,
                     q_rope=q_pe,
@@ -921,25 +947,50 @@ class AscendMLAImpl(MLAAttentionImpl):
                     seqlen=seq_len,
                     head_num=self.num_heads,
                     kv_head_num=self.num_heads,
+                    pre_out=prefix_output,
+                    prev_lse=prefix_lse,
                     qk_scale=self.scale,
                     kernel_type="kernel_type_high_precision",
                     mask_type="no_mask",
                     input_layout="type_bsnd",
-                    calc_type="calc_type_first_ring",
-                    output=block_out_local2,
-                    softmax_lse=block_lse_local2)
-                block_lse_local_bt2 = block_lse_local2.permute(1, 0).unsqueeze(-1)
+                    calc_type="calc_type_default",
+                    output=prefix_output,
+                    softmax_lse=prefix_lse)
 
-                if prefix_lse_bt is None:
-                    prefix_output = block_out_local2.to(torch.float32)
-                    prefix_lse_bt = block_lse_local_bt2
-                else:
-                    prefix_output, prefix_lse_bt = self._update_out_and_lse(
-                        prefix_output, prefix_lse_bt, block_out_local2, block_lse_local_bt2)
+        # CP dimension all_gather and fusion
+        if self.cp_size > 1:
+            # filter non-zero chunk part of prefix_output
+            mask_for_non_zero_chunk = (seq_len2.cpu() != 0)
+            seq_len1_cpu = seq_len1.cpu()
+            offsets = torch.cumsum(torch.cat([torch.tensor([0]), seq_len1_cpu[:-1]]), dim=0)
+            filtered_indices = torch.cat([
+                torch.arange(offsets[i], offsets[i] + seq_len1_cpu[i])
+                for i in range(len(mask_for_non_zero_chunk)) if mask_for_non_zero_chunk[i]
+            ])
+            prefix_output_filtered = prefix_output[filtered_indices,:,:]
+            prefix_lse_filtered = prefix_lse[:,filtered_indices]
 
-        # convert lse back to [heads, bs]
-        if prefix_lse_bt is not None:
-            prefix_lse = prefix_lse_bt.squeeze(-1).permute(1, 0).contiguous()
+            # normalize prefix LSE to [bs, heads, 1] for stable updates
+            prefix_lse_filtered_bt = prefix_lse_filtered.permute(1, 0).unsqueeze(-1).contiguous() if prefix_lse_filtered is not None else None
+            out_lse_local = torch.cat([prefix_output_filtered, prefix_lse_filtered_bt], dim=-1)
+            out_lse_list = [torch.empty_like(out_lse_local) for _ in range(self.cp_size)]
+            dist.all_gather(out_lse_list, out_lse_local, group=self.cp_group)
+            prefix_output_filtered = None
+            prefix_lse_filtered_bt = None
+            for r in range(self.cp_size):
+                out_lse_r = out_lse_list[r]
+                out_r, lse_r = torch.split(out_lse_r, [self.v_head_dim, 1], dim=-1)
+                token_mask = torch.ones([out_r.size(0)], dtype=torch.uint8, device=out_r.device)
+                prefix_output_filtered, prefix_lse_filtered_bt = self._update_out_and_lse(
+                    prefix_output_filtered, prefix_lse_filtered_bt, out_r, lse_r, token_mask)
+            # convert lse back to [heads, bs]
+            if prefix_lse_filtered_bt is not None:
+                prefix_lse_filtered = prefix_lse_filtered_bt.squeeze(-1).permute(1, 0).contiguous()
+
+            prefix_output[filtered_indices, :, :] = prefix_output_filtered.to(prefix_output.dtype)
+            prefix_lse[:, filtered_indices] = prefix_lse_filtered.to(prefix_lse.dtype)
+
+            return prefix_output, prefix_lse, mask_for_non_zero_chunk
         return prefix_output, prefix_lse
 
     def _forward_prefill(
@@ -1456,15 +1507,47 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_nope_full = torch.index_select(q_nope_full, 0, attn_metadata.prefill.cp_kv_recover_idx_for_chunk)
             q_pe_full = torch.index_select(q_pe_full, 0, attn_metadata.prefill.cp_kv_recover_idx_for_chunk)
             attn_output_pre = output.view(num_tokens, self.num_heads, self.v_head_dim)
-            attn_output_pre, attn_lse = self._compute_prefill_context(
+            attn_output_pre_full, attn_lse_full, mask_for_non_zero_chunk = self._compute_prefill_context( 
                 q_nope_full,
                 q_pe_full,
                 kv_c_and_k_pe_cache,
                 self.qk_rope_head_dim,
                 attn_metadata,
-                attn_output_pre,
-                attn_lse,
+                None,
+                None,
             )
+            # reorder back && extract output + lse result of each cp rank
+            inverse_idx = torch.argsort(attn_metadata.prefill.cp_kv_recover_idx_for_chunk)
+            attn_output_pre_full = torch.index_select(attn_output_pre_full, 0, inverse_idx)
+            attn_lse_full = torch.index_select(attn_lse_full, 1, inverse_idx)
+            attn_output_pre_new = attn_output_pre_full[self.cp_rank*num_tokens:(self.cp_rank+1)*num_tokens,:,:]
+            attn_lse_new = attn_lse_full[:,self.cp_rank*num_tokens:(self.cp_rank+1)*num_tokens]
+            
+            # update(output_origin, output_new)
+            assert attn_output_pre_new.shape == attn_output_pre.shape and attn_lse_new.shape == attn_lse.shape
+            seq_len = torch.tensor(attn_metadata.prefill.query_lens, dtype=torch.int32)
+            offsets = torch.cumsum(torch.cat([torch.tensor([0]), seq_len[:-1]]), dim=0)
+            filtered_indices = torch.cat([
+                torch.arange(offsets[i], offsets[i] + seq_len[i])
+                for i in range(len(mask_for_non_zero_chunk)) if mask_for_non_zero_chunk[i]
+            ])
+            attn_output_pre_filtered = attn_output_pre[filtered_indices,:,:]
+            attn_lse_filtered = attn_lse[:,filtered_indices]
+            attn_output_pre_new = attn_output_pre_new[filtered_indices,:,:]
+            attn_lse_new = attn_lse_new[:,filtered_indices]
+            
+            # normalize prefix LSE to [bs, heads, 1] for stable updates
+            attn_lse_filtered = attn_lse_filtered.permute(1, 0).unsqueeze(-1)
+            attn_lse_new = attn_lse_new.permute(1, 0).unsqueeze(-1)
+            token_mask = torch.ones([attn_lse_new.size(0)], dtype=torch.uint8, device=attn_lse_new.device)
+            attn_output_pre_filtered, attn_lse_filtered = self._update_out_and_lse(
+                    attn_output_pre_filtered, attn_lse_filtered, attn_output_pre_new, attn_lse_new, token_mask)
+            # convert lse back to [heads, bs]
+            attn_lse_filtered = attn_lse_filtered.squeeze(-1).permute(1, 0).contiguous()
+            
+            attn_output_pre[filtered_indices, :, :] = attn_output_pre_filtered.to(attn_output_pre.dtype)
+            attn_lse[:, filtered_indices] = attn_lse_filtered.to(attn_lse.dtype)
+            
             attn_output_pre = attn_output_pre.to(q_nope.dtype)
             output = attn_output_pre.reshape([
                 num_tokens, self.num_heads * self.v_head_dim
