@@ -35,7 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import \
     KVConnectorStats
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
@@ -55,7 +55,7 @@ from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import ConstantList
 
-logger = init_logger(__name__)
+from vllm_ascend.utils import vllm_version_is
 
 
 class RecomputeScheduler(SchedulerInterface):
@@ -67,6 +67,7 @@ class RecomputeScheduler(SchedulerInterface):
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
+        block_size: Optional[int] = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
@@ -586,9 +587,14 @@ class RecomputeScheduler(SchedulerInterface):
             self.kv_cache_config.kv_cache_groups)
         if self.running:
             any_request = self.running[0]
-            num_common_prefix_blocks = (
-                self.kv_cache_manager.get_num_common_prefix_blocks(
-                    any_request, len(self.running)))
+            if vllm_version_is("0.11.0"):
+                num_common_prefix_blocks = (
+                    self.kv_cache_manager.get_num_common_prefix_blocks(
+                        any_request, len(self.running)))
+            else:
+                num_common_prefix_blocks = (
+                    self.kv_cache_manager.get_num_common_prefix_blocks(
+                        any_request.request_id))
 
         # Construct the scheduler output.
         new_reqs_data = [

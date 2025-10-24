@@ -207,9 +207,12 @@ class NPUWorker(WorkerBase):
         return device
 
     def init_device(self):
-        device = self._init_device()
+        # NOTE: KEEP device the member of `NPUWorker`, as it will be checked
+        # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
+        # for more details
+        self.device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = NPUModelRunner(self.vllm_config, device)
+        self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of

@@ -656,8 +656,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         self.qk_head_dim = kwargs['qk_head_dim']
         self.v_head_dim = kwargs['v_head_dim']
         self.rotary_emb = kwargs['rotary_emb']
-        self.q_proj = kwargs['q_proj'] if self.q_lora_rank is None else kwargs[
-            'q_b_proj']
+        self.q_proj = kwargs['q_proj']
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
@@ -1098,7 +1097,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
         self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
