@@ -254,6 +254,7 @@ class MultiNodeConfig:
         ranktable_gen_path = self.disaggregated_prefill.get(
             "ranktable_gen_path")
         ranktable_path = self.disaggregated_prefill.get("ranktable_path")
+        assert ranktable_gen_path is not None and ranktable_path is not None
         if os.path.exists(str(ranktable_path)):
             return
 
