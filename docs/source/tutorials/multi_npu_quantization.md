@@ -11,6 +11,7 @@ w8a8 quantization feature is supported by v0.8.4rc2 or higher
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
@@ -36,7 +37,7 @@ see https://www.modelscope.cn/models/vllm-ascend/QwQ-32B-W8A8
 
 ```bash
 # (Optional)This tag is recommended and has been verified
-git clone https://gitee.com/ascend/msit -b modelslim-VLLM-8.1.RC1.b020_001
+git clone https://gitcode.com/Ascend/msit -b modelslim-VLLM-8.1.RC1.b020_001
 
 cd msit/msmodelslim
 # Install by run this script

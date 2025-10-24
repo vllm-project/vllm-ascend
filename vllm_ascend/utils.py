@@ -52,6 +52,7 @@ _IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
+_SHARED_EXPERTS_CALCULATION_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -259,6 +260,15 @@ def prefetch_stream() -> torch.npu.Stream:
     return _PREFETCH_STREAM
 
 
+def shared_experts_calculation_stream() -> torch.npu.Stream:
+    global _SHARED_EXPERTS_CALCULATION_STREAM
+    if _SHARED_EXPERTS_CALCULATION_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
+    return _SHARED_EXPERTS_CALCULATION_STREAM
+
+
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
@@ -409,6 +419,26 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "No adjustment needed for ACL graph batch sizes: %s model (layers: %d) with %d sizes",
             vllm_config.model_config.architectures[0], num_hidden_layers,
             len(original_sizes))
+
+    # default or defined cudagraph_capture_sizes may not consider num_speculative_tokens>1 scenario
+    # the maximum size cudagraph_capture_sizes[0] should be greater or equal than
+    # (num_speculative_tokens+1)*max_num_seqs, otherwise draft model will run in eager mode
+    if vllm_config.speculative_config is not None and \
+        vllm_config.speculative_config.num_speculative_tokens > 1:
+        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        original_sizes, compilation_config.cudagraph_capture_sizes = \
+            compilation_config.cudagraph_capture_sizes, None
+        assert len(original_sizes) > 0
+        if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
+            enlarged_sizes = [(num_speculative_tokens + 1) * size
+                              for size in original_sizes]
+            compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            logger.info(
+                "Adjusted ACL graphs: %s → %s for speculative decoding",
+                original_sizes, enlarged_sizes)
+        else:
+            compilation_config.cudagraph_capture_sizes = original_sizes
 
 
 # TODO(wxy): Move to ops module
@@ -626,6 +656,10 @@ def enable_sp(vllm_config=None) -> bool:
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp()
+
+
+def prefill_context_parallel_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
 
 
 def is_moe_model(vllm_config: VllmConfig):
