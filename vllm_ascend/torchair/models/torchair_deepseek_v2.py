@@ -328,14 +328,22 @@ class TorchairDeepseekV2MoE(nn.Module):
             ascend_config.multistream_overlap_shared_expert and \
             self.torchair_graph_enabled
 
+        self.enable_super_kernel = ascend_config.torchair_graph_config.enable_super_kernel
+        self.params_dtype = torch.float32 if self.enable_super_kernel else \
+            torch.get_default_dtype()
+        # Converting gate weight to fp32 is to adapt to the super kernel feature.
+        # Super kernel feature currently cannot fuse operators such as cast, stridedslice, and add.
+        # In the moe stage, Cast will interrupt the fusion of the super kernel. To avoid this problem,
+        # modifications will be made in the initialization stage.
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
                                      bias=False,
                                      quant_config=None,
+                                     params_dtype=self.params_dtype,
                                      prefix=f"{prefix}.gate")
         if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
+                torch.empty(config.n_routed_experts, dtype=self.params_dtype))
         else:
             self.gate.e_score_correction_bias = None
 
@@ -570,7 +578,8 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             rotary_emb=self.rotary_emb,
-            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
+            q_proj=self.q_proj if self.q_lora_rank is None else None,
+            q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
@@ -791,7 +800,7 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_mla=True,
-            use_sfa=True,
+            use_sparse=True,
             # SFA Args
             q_lora_rank=self.q_lora_rank,
             kv_lora_rank=self.kv_lora_rank,
@@ -879,12 +888,12 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
         self.use_mla = False
-        self.use_sfa = False
+        self.use_sparse = False
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
-            if ascend_config.use_sfa:
+            if hasattr(model_config.hf_config, "index_topk"):
                 attn_cls = TorchairDeepseekV2SFAAttention
-                self.use_sfa = True
+                self.use_sparse = True
             else:
                 attn_cls = TorchairDeepseekV2MLAAttention  # type: ignore[assignment]
             self.use_mla = True
@@ -950,7 +959,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         forward_context = get_forward_context()
         if attn_metadata is not None:
             decoding_condition_met = (
-                not attn_metadata.is_prefill if self.use_sfa else
+                not attn_metadata.is_prefill if self.use_sparse else
                 not forward_context.with_prefill if self.use_mla else False)
             mla_moe_communication = decoding_condition_met and self.mla_moe_communication and replace_allreduce
         else:
@@ -975,7 +984,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 # to save npu memory because they're no longer used.
                 dispose_tensor(previous_hidden_states)
                 dispose_tensor(previous_residual)
-        if mla_moe_communication and self.layer_idx > self.first_k_dense_replace:
+        if mla_moe_communication and self.layer_idx > self.first_k_dense_replace and self.layer_idx < self.layers:
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
 
@@ -1034,7 +1043,7 @@ class TorchairDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             # The scaling of DeepseekV2MOE output would be done in the forward
             # of DeepseekV2MOE
             hidden_states *= 1. / self.routed_scaling_factor
-        if mla_moe_communication and self.layer_idx == self.layers - 1:
+        if mla_moe_communication and self.layer_idx >= self.layers - 1:
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
             residual = tensor_model_parallel_all_gather(residual, dim=0)

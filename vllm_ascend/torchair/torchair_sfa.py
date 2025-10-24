@@ -24,6 +24,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
+from vllm_ascend.utils import is_enable_nz
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -737,7 +738,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-        self.enable_prefetch = ascend_config.enable_prefetch
+        self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         if ascend_config.torchair_graph_config.enabled:
             self.graph_batch_size = ascend_config.torchair_graph_config.graph_batch_sizes[
@@ -841,7 +842,8 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         wd_qkv = wd_qkv.t().contiguous()
         wd_qkv = transdata(wd_qkv,
                            block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
+        if is_enable_nz():
+            self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
 
         kv_a_proj_deq_scl = self.kv_a_proj_with_mqa.deq_scale.clone()
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(
@@ -874,7 +876,8 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim),
             -1)
         wu_q = transdata(wu_q, block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
+        if is_enable_nz():
+            self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
 
         qb_deq_scl = self.q_proj.deq_scale.data.clone()
         qb_deq_scl = qb_deq_scl.reshape(

@@ -18,6 +18,7 @@ export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
 --net=host \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
@@ -37,6 +38,7 @@ docker run --rm \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
 --device /dev/hisi_hdc \
+--shm-size 256g \
 -v /usr/local/dcmi:/usr/local/dcmi \
 -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
 -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
@@ -59,7 +61,7 @@ node0
 ```shell
 #!/bin/sh
 # this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip
+# nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
 local_ip="xxxx"
 
@@ -97,8 +99,12 @@ node1
 ```shell
 #!/bin/sh
 
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
 local_ip="xxxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
 node0_ip="xxxx"
 
 export HCCL_IF_IP=$local_ip

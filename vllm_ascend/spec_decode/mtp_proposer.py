@@ -5,12 +5,13 @@ import torch.nn as nn
 import torchair
 from torchair import patch_for_hcom
 from vllm.attention.layer import Attention
-from vllm.config import (VllmConfig, get_layers_from_vllm_config,
-                         set_current_vllm_config)
+from vllm.config import (CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
+from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -18,7 +19,6 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
@@ -67,6 +67,8 @@ class MtpProposer(Proposer):
                                    1,
                                    device=self.runner.device,
                                    dtype=torch.int32)
+        self.use_sparse = hasattr(vllm_config.model_config.hf_config,
+                                  "index_topk")
 
     def load_model(self, model) -> None:
         loader = get_model_loader(self.vllm_config.load_config)
@@ -86,7 +88,7 @@ class MtpProposer(Proposer):
                 self.model = TorchairDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
             else:
-                self.model = CustomDeepSeekMTP(
+                self.model = DeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
 
         draft_attn_layer_names = (
@@ -109,7 +111,9 @@ class MtpProposer(Proposer):
                   with_prefill: bool = False,
                   skip_attn: bool = False,
                   num_reqs: int = 0,
-                  num_tokens_across_dp=None) -> None:
+                  num_tokens_across_dp=None,
+                  aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+                  batch_descriptor=None) -> None:
         if not self.torchair_graph_enabled:
             # TODO: adapt enable_dbo later
             (num_tokens, num_tokens_across_dp, with_prefill,
@@ -151,7 +155,9 @@ class MtpProposer(Proposer):
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
                     in_profile_run=self.runner.in_profile_run,
-                    num_actual_tokens=0):
+                    num_actual_tokens=0,
+                    aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor):
                 if is_running_torchair:
                     assert attn_metadata is not None
                     torch._dynamo.mark_static(input_ids)
@@ -171,7 +177,7 @@ class MtpProposer(Proposer):
                     torchair_compiled_model(
                         input_ids=input_ids,
                         positions=positions,
-                        previous_hidden_states=previous_hidden_states,
+                        hidden_states=previous_hidden_states,
                         inputs_embeds=None,
                         intermediate_tensors=None,
                         attn_metadata=attn_metadata,
@@ -180,7 +186,7 @@ class MtpProposer(Proposer):
                 else:
                     self.model(input_ids=input_ids,
                                positions=positions,
-                               previous_hidden_states=previous_hidden_states)
+                               hidden_states=previous_hidden_states)
             if with_prefill:
                 break
 
@@ -442,6 +448,7 @@ class MtpProposer(Proposer):
                     reserved_mc2_mask=self.runner.reserved_mc2_mask,
                     moe_comm_type=moe_comm_type,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
                     in_profile_run=self.runner.in_profile_run,
                     num_actual_tokens=num_tokens):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
@@ -455,7 +462,7 @@ class MtpProposer(Proposer):
                         hidden_states = torchair_compiled_model(
                             input_ids=self.input_ids[:num_input_tokens],
                             positions=self.positions[:num_input_tokens],
-                            previous_hidden_states=self.
+                            hidden_states=self.
                             hidden_states[:num_input_tokens],
                             inputs_embeds=None,
                             intermediate_tensors=None,
@@ -465,9 +472,8 @@ class MtpProposer(Proposer):
                         hidden_states = self.model(
                             input_ids=self.input_ids[:num_input_tokens],
                             positions=self.positions[:num_input_tokens],
-                            previous_hidden_states=self.
-                            hidden_states[:num_input_tokens],
-                            kv_caches=self.runner.kv_caches[-1:])
+                            hidden_states=self.hidden_states[:num_input_tokens]
+                        )
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
@@ -480,7 +486,7 @@ class MtpProposer(Proposer):
                     (0, max_num_reqs_across_dp - num_indices))
 
             sample_hidden_states = hidden_states[last_token_indices]
-            logits = self.model.compute_logits(sample_hidden_states, None)
+            logits = self.model.compute_logits(sample_hidden_states)
             if lmhead_tp_enable() and num_indices < logits.shape[0]:
                 logits = logits[:num_indices]
             draft_token_ids = logits.argmax(dim=-1)
@@ -496,7 +502,7 @@ class MtpProposer(Proposer):
 
             # prepare next mtp inputs
             # mtp>1: prefill skip or decode skip last loop
-            if with_prefill and self.torchair_graph_enabled:
+            if with_prefill:
                 for _ in range(self.num_speculative_tokens - 1):
                     draft_token_ids_list.append(draft_token_ids)
             if step == self.num_speculative_tokens - 1 or with_prefill:
@@ -613,7 +619,7 @@ class MtpProposer(Proposer):
             npu_backend = torchair.get_npu_backend(compiler_config=config)
             self.torchair_compiled_model = torch.compile(
                 self.model,
-                dynamic=not get_ascend_config().use_sfa,
+                dynamic=not self.use_sparse,
                 fullgraph=True,
                 backend=npu_backend)
             return self.torchair_compiled_model
@@ -636,7 +642,7 @@ class MtpProposer(Proposer):
             self.torchair_compiled_models[
                 batch_size] = torchair.inference.cache_compile(
                     self.model.__dict__[forward_proxy_name],
-                    dynamic=not get_ascend_config().use_sfa,
+                    dynamic=not self.use_sparse,
                     fullgraph=True,
                     cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,

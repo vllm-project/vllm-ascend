@@ -5,10 +5,10 @@ import torch
 from vllm.distributed import get_dcp_group
 from vllm.utils import cdiv
 
-from vllm_ascend.utils import context_parallel_enable
+from vllm_ascend.utils import prefill_context_parallel_enable
 
-if context_parallel_enable():
-    from vllm.distributed import get_cp_group
+if prefill_context_parallel_enable():
+    from vllm.distributed import get_pcp_group, get_prefill_context_model_parallel_world_size
 
 
 class BlockTable:
@@ -86,16 +86,18 @@ class BlockTable:
                                         dtype=torch.int64,
                                         device=self.device)
         try:
-            self.cp_world_size = get_cp_group().world_size if context_parallel_enable() else 1
-            self.cp_rank = get_cp_group().rank_in_group if self.cp_world_size > 1 else 0
+            self.pcp_world_size = get_pcp_group(
+            ).world_size if prefill_context_parallel_enable() else 1
+            self.pcp_rank = get_pcp_group(
+            ).rank_in_group if self.pcp_world_size > 1 else 0
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-            self.cp_world_size = 1
-            self.cp_rank = 0
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
         self.kernel_sizes = kernel_sizes
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
@@ -143,14 +145,14 @@ class BlockTable:
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
 
-        if self.dcp_world_size * self.cp_world_size > 1:
+        if self.dcp_world_size * self.pcp_world_size > 1:
             # Note(hc): The DCP implement store kvcache with an interleave
             # style, the kvcache for the token whose token_idx is i is
             # always stored on the GPU whose dcp_rank equals i % cp_world_size:
 
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
-            virtual_block_size = self.block_size * self.dcp_world_size * self.cp_world_size
+            virtual_block_size = self.block_size * self.dcp_world_size * self.pcp_world_size
 
             # IMPORTANT: In hybrid mode, positions are in logical block space,
             # but we need to map them to the correct logical block table indices
@@ -168,12 +170,13 @@ class BlockTable:
             # Use virtual_block_size for mask calculation, which marks local
             # tokens.
             virtual_block_offsets = positions % virtual_block_size
-            self.current_rank = self.dcp_world_size * self.cp_rank + self.dcp_rank
+            self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
             mask = (virtual_block_offsets // self.cp_kv_cache_interleave_size %
-                    (self.dcp_world_size * self.cp_world_size) == self.current_rank)
+                    (self.dcp_world_size *
+                     self.pcp_world_size) == self.current_rank)
             # Calculate local block_offsets
             block_offsets = virtual_block_offsets \
-                // (self.dcp_world_size * self.cp_world_size * self.cp_kv_cache_interleave_size) \
+                // (self.dcp_world_size * self.pcp_world_size * self.cp_kv_cache_interleave_size) \
                 * self.cp_kv_cache_interleave_size + virtual_block_offsets % self.cp_kv_cache_interleave_size
             # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
@@ -265,7 +268,8 @@ class MultiGroupBlockTable:
         # must be multiplied by dcp_world_size.
         try:
             dcp_world_size = get_dcp_group().world_size
-            cp_world_size = get_cp_group().world_size if context_parallel_enable() else 1
+            cp_world_size = get_pcp_group(
+            ).world_size if prefill_context_parallel_enable() else 1
         except AssertionError:
             # DCP might not be initialized in testing
             dcp_world_size = 1
@@ -285,9 +289,12 @@ class MultiGroupBlockTable:
         self.block_tables = [
             BlockTable(
                 block_size, max_num_reqs,
-                max(cdiv(max_model_len, block_size * dcp_world_size * cp_world_size),
+                max(
+                    cdiv(max_model_len,
+                         block_size * dcp_world_size * cp_world_size),
                     1 + num_speculative_tokens), max_num_batched_tokens,
-                pin_memory, device, kernel_size_list, cp_kv_cache_interleave_size)
+                pin_memory, device, kernel_size_list,
+                cp_kv_cache_interleave_size)
             for block_size, kernel_size_list in zip(block_sizes, kernel_sizes)
         ]
 
@@ -337,7 +344,7 @@ class MultiGroupBlockTable:
         Returns:
             List of [cp_size][dcp_size] distribution for each request
         """
-        self.cp_world_size = get_cp_group().world_size if context_parallel_enable() else 1
+        self.cp_world_size = get_pcp_group().world_size if prefill_context_parallel_enable() else 1
         self.dcp_world_size = get_dcp_group().world_size
         num_requests = len(num_computed_tokens)
         if request_ids is None:

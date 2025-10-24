@@ -24,18 +24,31 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+import torch_npu
 from torch.nn.parameter import Parameter
+from vllm.config import get_current_vllm_config
 from vllm.distributed import divide
 from vllm.model_executor.layers.linear import (  # noqa
     WEIGHT_LOADER_V2_SUPPORTED, ColumnParallelLinear, LinearBase,
     MergedColumnParallelLinear, QKVParallelLinear, QuantizeMethodBase,
-    RowParallelLinear, UnquantizedLinearMethod)
+    ReplicatedLinear, RowParallelLinear, UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ops.linear_op import (get_column_parallel_op,
-                                       get_row_parallel_op)
+from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
+
+
+class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
+    """Linear method without quantization"""
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        super().process_weights_after_loading(layer)
+        if (is_enable_nz() and torch.version.cann.startswith("8.3") and
+                layer.weight.data.dtype in [torch.float16, torch.bfloat16]):
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
 
 
 # TODO(realliujiaxu): Remove this class after linear of vllm supports custom comm group
@@ -66,7 +79,7 @@ class AscendLinearBase(LinearBase):
         self.prefix = prefix
         if quant_config is None:
             self.quant_method: Optional[
-                QuantizeMethodBase] = UnquantizedLinearMethod()
+                QuantizeMethodBase] = AscendUnquantizedLinearMethod()
         else:
             self.quant_method = quant_config.get_quant_method(self,
                                                               prefix=prefix)
@@ -100,8 +113,8 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_op, _, tp_size = get_column_parallel_op(
-            disable_tp, prefix, self)
+        self.custom_op, _, tp_size = get_parallel_op(disable_tp, prefix, self,
+                                                     "column")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         self.hidden_size = hidden_size
         self.head_size = head_size
@@ -173,8 +186,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_op, self.tp_rank, self.tp_size = get_column_parallel_op(
-            disable_tp, prefix, self)
+        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
+            disable_tp, prefix, self, "column")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         self.output_sizes = output_sizes
         assert all(output_size % self.tp_size == 0
@@ -222,8 +235,15 @@ class AscendRowParallelLinear(RowParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_op, self.tp_rank, self.tp_size = get_row_parallel_op(
-            disable_tp, prefix, self)
+        compilation_config = get_current_vllm_config().compilation_config
+        # TODO(shaopeng-666): Remove the visual check after the mm model reconstruction is complete.
+        if prefix in compilation_config.static_forward_context and \
+            "visual" not in prefix:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
+        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
+            disable_tp, prefix, self, "row")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         # Divide the weight matrix along the first dimension.
         self.input_size_per_partition = divide(input_size, self.tp_size)
@@ -304,8 +324,8 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
         disable_tp: bool = False,
     ):
-        self.custom_op, self.tp_rank, self.tp_size = get_column_parallel_op(
-            disable_tp, prefix, self)
+        self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
+            disable_tp, prefix, self, "column")
         # TODO(realliujiaxu): Replace the initialization code below with super().__init__ after linear of vllm supports custom comm group
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
@@ -347,6 +367,84 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
             self.bias = Parameter(
                 torch.empty(self.output_size_per_partition,
                             dtype=params_dtype))
+            set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "weight_loader": self.weight_loader,
+            })
+        else:
+            self.register_parameter("bias", None)
+
+        if self.custom_op is not None:
+            self.custom_op.update_attrs()
+
+    def forward(
+        self,
+        input_,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        if self.custom_op is not None:
+            return self.custom_op.apply(input_)
+
+        return super().forward(input_)
+
+
+class AscendReplicatedLinear(ReplicatedLinear):
+    """Ascend Replicated linear layer.
+
+    Args:
+        input_size: input dimension of the linear layer.
+        output_size: output dimension of the linear layer.
+        bias: If true, add bias.
+        skip_bias_add: If true, skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        quant_config: Quantization configure.
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
+        disable_tp: Take no effect for replicated linear layers.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+        disable_tp: bool = False,
+    ):
+        self.custom_op = get_replicated_op(disable_tp, prefix, self)
+        # If MergedReplicatedLinear, use output size of each partition.
+        if hasattr(self, "output_sizes"):
+            self.output_partition_sizes = self.output_sizes
+        else:
+            self.output_partition_sizes = [output_size]
+
+        AscendLinearBase.__init__(self,
+                                  input_size,
+                                  output_size,
+                                  skip_bias_add,
+                                  params_dtype,
+                                  quant_config,
+                                  prefix=prefix,
+                                  return_bias=return_bias,
+                                  disable_tp=disable_tp)
+
+        # All the linear layer supports quant method.
+        assert self.quant_method is not None
+        self.quant_method.create_weights(self,
+                                         self.input_size, [self.output_size],
+                                         self.input_size,
+                                         self.output_size,
+                                         self.params_dtype,
+                                         weight_loader=self.weight_loader)
+
+        if bias:
+            self.bias = Parameter(
+                torch.empty(self.output_size, dtype=self.params_dtype))
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
                 "weight_loader": self.weight_loader,

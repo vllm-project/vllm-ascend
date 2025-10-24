@@ -4,11 +4,15 @@ from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm import config
 
+from tests.ut.base import TestBase
 from vllm_ascend import ascend_config
 from vllm_ascend.distributed import parallel_state
 from vllm_ascend.ops.linear import (AscendMergedColumnParallelLinear,
-                                    AscendRowParallelLinear)
+                                    AscendReplicatedLinear,
+                                    AscendRowParallelLinear,
+                                    AscendUnquantizedLinearMethod)
 
 
 class BaseLinearTest(unittest.TestCase):
@@ -49,6 +53,44 @@ class BaseLinearTest(unittest.TestCase):
             p.stop()
 
 
+class TestAscendUnquantizedLinearMethod(TestBase):
+
+    def setUp(self):
+        self.method = AscendUnquantizedLinearMethod()
+        self.layer = mock.MagicMock()
+        mock_dtype = mock.PropertyMock(return_value=torch.float16)
+        type(self.layer.weight.data).dtype = mock_dtype
+
+    @mock.patch("vllm_ascend.ops.linear.is_enable_nz")
+    @mock.patch("torch_npu.npu_format_cast")
+    @mock.patch("torch.version")
+    def test_process_weights_after_loading_is_8_3_enable_nz(
+            self, mock_version, mock_format_cast, mock_is_nz):
+        mock_version.cann = "8.3.RC1"
+        mock_is_nz.return_value = 1
+        self.method.process_weights_after_loading(self.layer)
+        mock_format_cast.assert_called_once()
+
+    @mock.patch("vllm_ascend.ops.linear.is_enable_nz")
+    @mock.patch("torch_npu.npu_format_cast")
+    @mock.patch("torch.version")
+    def test_process_weights_after_loading_is_8_3_disable_nz(
+            self, mock_version, mock_format_cast, mock_is_nz):
+        mock_version.cann = "8.3.RC1"
+        mock_is_nz.return_value = 0
+        self.method.process_weights_after_loading(self.layer)
+        mock_format_cast.assert_not_called()
+
+    @mock.patch("vllm_ascend.ops.linear.is_enable_nz")
+    @mock.patch("torch.version")
+    def test_process_weights_after_loading_not_8_3(self, mock_version,
+                                                   mock_is_nz):
+        mock_version.cann = "8.2.RC1"
+        mock_is_nz.return_value = 1
+        # Should not raise exception
+        self.method.process_weights_after_loading(self.layer)
+
+
 class TestAscendRowParallelLinear(BaseLinearTest):
 
     def test_mlp_optimize(self):
@@ -65,6 +107,9 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         linear(input_tensor)
 
     def test_oproj_tp(self):
+
+        config._current_vllm_config = MagicMock()
+
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.oproj_tensor_parallel_size = 2
 
@@ -90,6 +135,25 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
             prefix="gate_up_proj",
         )
         self.assertEqual(linear.custom_op.comm_group, parallel_state._MLP_TP)
+
+
+class TestAscendReplicatedLinear(BaseLinearTest):
+
+    def test_init_disable_tp(self):
+        linear = AscendReplicatedLinear(
+            input_size=16,
+            output_size=8,
+        )
+        self.assertTrue(
+            isinstance(linear.quant_method, AscendUnquantizedLinearMethod))
+
+    def test_init_without_disable_tp(self):
+        linear = AscendReplicatedLinear(
+            input_size=16,
+            output_size=8,
+        )
+        self.assertTrue(
+            isinstance(linear.quant_method, AscendUnquantizedLinearMethod))
 
 
 if __name__ == '__main__':

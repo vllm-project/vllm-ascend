@@ -17,19 +17,15 @@ import torch
 
 def _generate_attn_mask(max_seq_len, dtype):
     # Construct lower triangle matrix.
-    mask_flag = torch.tril(
-        torch.ones((max_seq_len, max_seq_len),
-                   dtype=torch.bool)).view(max_seq_len, max_seq_len)
+    mask_flag = torch.ones((max_seq_len, max_seq_len),
+                           dtype=torch.bool).tril_()
     # Create upper triangle matrix used to mark mask positions.
     mask_flag = ~mask_flag
     # Currently for fp16 dtype, the mask value should be set to -inf.
     # TODO: Eliminate this part in the future.
-    if dtype == torch.float16:
-        mask_value = torch.finfo(torch.float32).min
-    else:
-        mask_value = 1
-    attn_mask = torch.masked_fill(torch.zeros(size=(max_seq_len, max_seq_len)),
-                                  mask_flag, mask_value).to(dtype)
+    mask_value = float('-inf') if dtype == torch.float16 else 1
+    attn_mask = torch.zeros(size=(max_seq_len, max_seq_len), dtype=dtype) \
+        .masked_fill_(mask_flag, mask_value)
     return attn_mask
 
 
@@ -50,6 +46,7 @@ class AttentionMaskBuilder:
         self._seq_len_cached = attn_mask.shape[0]
         self.attn_mask_cache = attn_mask
         self.device = device
+        self.pooling_mask = None
         if torch.version.cann.startswith("8.3"):
             assigned_mask_dim = 2048
             self.chunked_prefill_attn_mask = torch.triu(
@@ -74,6 +71,14 @@ class AttentionMaskBuilder:
         self._update_attn_cache(max_seq_len, dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
         ).to(device, non_blocking=True)
+
+    def get_pooling_mask(self, device):
+        if self.pooling_mask is None:
+            # the compressed attention mask for npu_fusion_attention sparse mode 4
+            self.pooling_mask = torch.triu(torch.ones(
+                2048, 2048), diagonal=1).to(torch.bool).to(device,
+                                                           non_blocking=True)
+        return self.pooling_mask
 
     def get_splitfuse_attn_mask(
         self,

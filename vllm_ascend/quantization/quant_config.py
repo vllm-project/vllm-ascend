@@ -24,8 +24,7 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
-                                               RowParallelLinear,
-                                               UnquantizedLinearMethod)
+                                               RowParallelLinear)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
@@ -33,11 +32,13 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod, VocabParallelEmbedding)
+from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
                                                     get_otp_group)
 from vllm_ascend.ops.common_fused_moe import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, mlp_tp_enable,
                                oproj_tp_enable)
 
@@ -55,6 +56,14 @@ class AscendQuantConfig(QuantizationConfig):
     def __init__(self, quant_config: Dict[str, Any]):
         super().__init__()
         self.quant_description = quant_config
+        # TODO(whx): remove this adaptation after adding "shared_head"
+        # to prefix of DeepSeekShareHead in vLLM.
+        extra_quant_dict = {}
+        for k in self.quant_description.keys():
+            if "shared_head" in k:
+                new_k = k.replace(".shared_head.", ".")
+                extra_quant_dict[new_k] = self.quant_description[k]
+        self.quant_description.update(extra_quant_dict)
 
     def __repr__(self) -> str:
         return "AscendQuantConfig:\n" + super().__repr__()
@@ -100,7 +109,7 @@ class AscendQuantConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
-                return UnquantizedLinearMethod()
+                return AscendUnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping)
         elif isinstance(layer, Attention) and \
@@ -175,9 +184,16 @@ packed_modules_model_mapping = {
     "deepseek_v2": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
     },
     "deepseek_v3": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"]
+    },
+    "deepseek_v32": {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
@@ -250,22 +266,38 @@ class AscendLinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ) -> None:
         output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
 
         weight_dict = self.quant_method.get_weight(input_size_per_partition,
                                                    output_size_per_partition,
                                                    params_dtype)
+
+        # Extract packing information (if present)
+        packed_dim = weight_dict.pop("_packed_dim", None)
+        packed_factor = weight_dict.pop("_packed_factor", None)
+
         for weight_name, weight_param in weight_dict.items():
             param = torch.nn.Parameter(weight_param, requires_grad=False)
             set_weight_attrs(param, {"input_dim": 1, "output_dim": 0})
+
+            # Set packing attributes if the weight is packed
+            if packed_dim is not None and packed_factor is not None:
+                set_weight_attrs(param, {
+                    "packed_dim": packed_dim,
+                    "packed_factor": packed_factor
+                })
+
             layer.register_parameter(weight_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
         pertensor_dict = self.quant_method.get_pertensor_param(params_dtype)
         for pertensor_name, pertensor_param in pertensor_dict.items():
-            param = torch.nn.Parameter(pertensor_param, requires_grad=False)
+            param = PerTensorScaleParameter(data=pertensor_param,
+                                            weight_loader=weight_loader)
             # disable warning
             param.ignore_warning = True
             layer.register_parameter(pertensor_name, param)
+            param.weight_loader = extra_weight_attrs.get("weight_loader")
 
         perchannel_dict = self.quant_method.get_perchannel_param(
             output_size_per_partition, params_dtype)
@@ -275,8 +307,17 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(perchannel_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
+        # NOTE: In w4a8 quantization implementation,
+        # for down_proj and o_proj scale_bias shape is [output_size, 16],
+        # others are [output_size, 1]
+        layer_type = "row" if isinstance(layer,
+                                         RowParallelLinear) else "others"
+
         pergroup_dict = self.quant_method.get_pergroup_param(
-            input_size_per_partition, output_size_per_partition, params_dtype)
+            input_size_per_partition,
+            output_size_per_partition,
+            params_dtype,
+            layer_type=layer_type)
         for pergroup_name, pergroup_param in pergroup_dict.items():
             param = torch.nn.Parameter(pergroup_param, requires_grad=False)
             set_weight_attrs(param, {"output_dim": 0})

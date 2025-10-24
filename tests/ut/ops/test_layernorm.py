@@ -7,12 +7,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 
 from tests.ut.base import PytestBase
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
-
-
-def mock_maybe_chunk_residual(x, residual):
-    if x.size(0) != residual.size(0):
-        return residual[:4]
-    return residual
+from vllm_ascend.utils import version_check
 
 
 def mock_rms_norm(x, weight, eps):
@@ -24,7 +19,16 @@ def mock_add_rms_norm(x, residual, weight, eps):
 
 
 def mock_add_rms_norm_quant(x, residual, weight, quant_scale, quant_offset,
-                            beta, epsilon):
+                            epsilon):
+    x_out = 2 * x
+    residual_out = 2 * residual
+    x_out_quant = x_out.to(torch.int8)
+    residual_out_quant = residual_out.to(torch.int8)
+    return x_out_quant, None, residual_out_quant
+
+
+def mock_add_rms_norm_quant_with_bias(x, residual, weight, quant_scale,
+                                      quant_offset, beta, epsilon):
     x_out = 2 * x
     residual_out = 2 * residual
     x_out_quant = x_out.to(torch.int8)
@@ -36,13 +40,13 @@ class TestAscendRMSNorm(PytestBase):
 
     @pytest.fixture(autouse=True)
     def context(self, mocker: MockerFixture):
-        mocker.patch("torch.ops.vllm.maybe_chunk_residual",
-                     side_effect=mock_maybe_chunk_residual)
         mocker.patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
         mocker.patch("torch_npu.npu_add_rms_norm",
                      side_effect=mock_add_rms_norm)
+        torch_npu_check = version_check()
+        arnq_side_effect = mock_add_rms_norm_quant_with_bias if torch_npu_check else mock_add_rms_norm_quant
         mocker.patch("torch_npu.npu_add_rms_norm_quant",
-                     side_effect=mock_add_rms_norm_quant)
+                     side_effect=arnq_side_effect)
         mocker.patch("torch.ops.vllm.maybe_wait_prefetch_done",
                      side_effect=lambda x: None)
 
@@ -66,21 +70,6 @@ class TestAscendRMSNorm(PytestBase):
 
             assert torch.allclose(x_out, x_out_expected)
 
-    # Test case for flashcomm_v1 scenario
-    def test_forward_oot_with_flashcomm_v1(self):
-        layer = RMSNorm(hidden_size=512, eps=1e-05)
-        x = torch.randn(4, 512, dtype=torch.bfloat16)
-        residual = torch.randn(16, 512, dtype=torch.bfloat16)
-
-        x_out, residual_out = layer.forward_oot(x, residual)
-
-        x_out_expected = 2 * x
-        residual_out_expected = 2 * residual[:4]
-
-        assert residual_out.size(0) == 4
-        assert torch.allclose(x_out, x_out_expected)
-        assert torch.allclose(residual_out, residual_out_expected)
-
     # Test case for addrmsnorm + w8a8 quant fusion
     def test_forward_oot_with_quant_fusion(self, mocker: MockerFixture):
         mock_is_310p = mocker.patch("vllm_ascend.utils.is_310p")
@@ -93,8 +82,10 @@ class TestAscendRMSNorm(PytestBase):
 
         mock_model_instance = mocker.MagicMock()
         mock_forward_context.model_instance = mock_model_instance
+        torch_npu_check = version_check()
+        num_hidden_layers = 3 if torch_npu_check else 2
         mock_model_instance.model.layers = [
-            mocker.MagicMock() for _ in range(3)
+            mocker.MagicMock() for _ in range(num_hidden_layers)
         ]
 
         mock_layer_0 = mock_model_instance.model.layers[0]
@@ -124,8 +115,9 @@ class TestAscendRMSNorm(PytestBase):
         mock_forward_context.addrmsnorm_quant_fusion_enabled = True
         mock_forward_context.prefetch_mlp_enabled = False
         mock_forward_context.layer_idx = 0
-        mock_forward_context.num_hidden_layers = 3
+        mock_forward_context.num_hidden_layers = num_hidden_layers
         mock_forward_context.fusion_linear = "gate_up_dense"
+        mock_forward_context.weight_prefetch_method = None
 
         # Ensure fusion and layer_idx increment are handled correctly
         x = torch.randn(4, 8, dtype=torch.float16)
@@ -134,39 +126,44 @@ class TestAscendRMSNorm(PytestBase):
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 1
+        assert mock_get_forward_context.call_count == 2
         assert mock_forward_context.fusion_linear == "qkv_dense"
         assert mock_forward_context.layer_idx == 1
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 2
+        assert mock_get_forward_context.call_count == 4
         assert mock_forward_context.fusion_linear == "gate_up_dense"
         assert mock_forward_context.layer_idx == 1
 
-        mock_forward_context.fusion_linear = "gate_moe"
+        if torch_npu_check:
+            mock_forward_context.fusion_linear = "gate_moe"
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 3
-        assert mock_forward_context.fusion_linear == "qkv_moe"
+        assert mock_get_forward_context.call_count == 6
+        fusion_linear_expected = "qkv_moe" if torch_npu_check else "qkv_dense"
+        assert mock_forward_context.fusion_linear == fusion_linear_expected
         assert mock_forward_context.layer_idx == 2
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 4
-        assert mock_forward_context.fusion_linear == "gate_moe"
+        assert mock_get_forward_context.call_count == 7
+        fusion_linear_expected = "gate_moe" if torch_npu_check else "qkv_dense"
+        assert mock_forward_context.fusion_linear == fusion_linear_expected
         assert mock_forward_context.layer_idx == 2
 
+        if not torch_npu_check:
+            return
         # last layer returned directly
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 5
+        assert mock_get_forward_context.call_count == 8
         assert mock_forward_context.fusion_linear == "qkv_moe"
         assert mock_forward_context.layer_idx == 3
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 6
+        assert mock_get_forward_context.call_count == 9
         assert mock_forward_context.fusion_linear == "qkv_moe"
         assert mock_forward_context.layer_idx == 3
 

@@ -58,6 +58,7 @@ The details of each config option are as follows:
 | `graph_batch_sizes` | list[int] | `[]` | The batch size for torchair graph cache |
 | `graph_batch_sizes_init` | bool | `False` | Init graph batch size dynamically if `graph_batch_sizes` is empty |
 | `enable_kv_nz`| bool | `False` | Whether to enable kvcache NZ layout. This option only takes effects on models using MLA (e.g., DeepSeek). |
+| `enable_super_kernel` | bool | `False` | Whether to enable super kernel to fuse operators in deepseek moe layers. This option only takes effects on moe models using dynamic w8a8 quantization.|
 
 **ascend_scheduler_config**
 
@@ -73,10 +74,10 @@ ascend_scheduler_config also support the options from [vllm scheduler config](ht
 
 **weight_prefetch_config**
 
-| Name             | Type | Default                            | Description                        |
-|------------------|------|------------------------------------|------------------------------------|
-| `enabled`        | bool | `False`                            | Whether to enable weight prefetch. |
-| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}}` | Prefetch ratio of each weights.    |
+| Name             | Type | Default                                                     | Description                        |
+|------------------|------|-------------------------------------------------------------|------------------------------------|
+| `enabled`        | bool | `False`                                                     | Whether to enable weight prefetch. |
+| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}}` | Prefetch ratio of each weights.    |
 
 ### Example
 
@@ -104,6 +105,9 @@ An example of additional configuration is as follows:
                 "qkv": 1.0,
                 "o": 1.0,
             },
+            "moe": {
+                "gate_up": 0.8
+            }
         },
     },
     "multistream_overlap_shared_expert": True,

@@ -13,7 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import torch
@@ -100,6 +100,11 @@ def mock_distributed():
     pp_group.rank_in_group = 0
     pp_group.world_size = 1
 
+    dcp_group = MagicMock(spec=GroupCoordinator)
+    dcp_group.rank_in_group = 0
+    dcp_group.world_size = 1
+    dcp_group.device_group = MagicMock()
+
     mlp_tp_group = Mock(spec=GroupCoordinator)
     mlp_tp_group.rank_in_group = 0
     mlp_tp_group.world_size = 1
@@ -117,6 +122,9 @@ def mock_distributed():
             patch("vllm_ascend.torchair.models.torchair_deepseek_v2.get_pp_group", return_value=pp_group), \
             patch("vllm_ascend.torchair.models.torchair_deepseek_v2.get_pp_group",
                   return_value=Mock(is_first_rank=False, is_last_rank=False)), \
+            patch('vllm.distributed.parallel_state.get_dcp_group', return_value=dcp_group), \
+            patch('vllm.distributed.parallel_state._DCP', new_callable=lambda: MagicMock(spec=GroupCoordinator)), \
+            patch("vllm.distributed.get_decode_context_model_parallel_world_size", return_value=1),\
             patch("vllm_ascend.torchair.ops.torchair_fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
             patch.dict("vllm.distributed.parallel_state.__dict__", _TP=tp_group, _EP=ep_group, _DP=dp_group,
                        _PP=pp_group), \
@@ -130,6 +138,33 @@ def mock_forward_context():
     with patch(
             "vllm_ascend.torchair.models.torchair_deepseek_v2.get_forward_context",
             return_value=forward_context):
+        yield
+
+
+@pytest.fixture
+def patch_attention_init():
+    try:
+        from vllm_ascend.torchair.models.torchair_deepseek_v2 import \
+            DeepseekV2Attention
+        original_init = DeepseekV2Attention.__init__
+
+        def patched_init(self, *args, **kwargs):
+            kwargs.pop("decoder_layer", None)
+            if 'vllm_config' not in kwargs:
+                mock_vllm_config = Mock()
+                mock_vllm_config.model_config = Mock()
+                mock_vllm_config.model_config.hf_config = Mock()
+                mock_vllm_config.model_config.hf_config.hidden_size = 128
+                mock_vllm_config.model_config.dtype = torch.float32
+                mock_vllm_config.model_config.quant_config = None
+                mock_vllm_config.cache_config = CacheConfig()
+                kwargs['vllm_config'] = mock_vllm_config
+            return original_init(self, *args, **kwargs)
+
+        DeepseekV2Attention.__init__ = patched_init
+        yield
+        DeepseekV2Attention.__init__ = original_init
+    except ImportError:
         yield
 
 
@@ -276,13 +311,11 @@ def test_torchair_deepseek_v2_mla_attention(mock_rms_norm, mock_distributed,
 @patch("torch_npu.npu_add_rms_norm")
 @patch("torch_npu.npu_rms_norm")
 @patch("torch.ops.vllm.maybe_wait_prefetch_done", side_effect=lambda x: None)
-@patch("torch.ops.vllm.maybe_chunk_residual",
-       side_effect=lambda x, residual: residual)
-def test_torchair_deepseek_v2_decoder_layer(mock_maybe_chunk_residual,
-                                            mock_maybe_wait_prefetch_done,
+def test_torchair_deepseek_v2_decoder_layer(mock_maybe_wait_prefetch_done,
                                             mock_rms_norm, mock_add_norm,
                                             mock_distributed, base_config,
-                                            vllm_config, mock_forward_context):
+                                            vllm_config, mock_forward_context,
+                                            patch_attention_init):
     mock_rms_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128))
     mock_add_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128),
                                   torch.randn(2, 128))
@@ -312,7 +345,8 @@ def test_torchair_deepseek_v2_decoder_layer(mock_maybe_chunk_residual,
     assert isinstance(layer.mlp, TorchairDeepseekV2MLP)
 
 
-def test_torchair_deepseek_v2_for_causal_lm(mock_distributed, vllm_config):
+def test_torchair_deepseek_v2_for_causal_lm(mock_distributed, vllm_config,
+                                            patch_attention_init):
     model = TorchairDeepseekV2ForCausalLM(vllm_config=vllm_config)
 
     input_ids = torch.randint(0, 10000, (2, 4))
