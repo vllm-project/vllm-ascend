@@ -1177,14 +1177,12 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         decode_q_nope = torch.empty(
-            (hidden_states.shape[0], self.W_UK_T.shape[0],
-             decode_k_nope.shape[-1]),
+            (bsz, self.W_UK_T.shape[0], decode_k_nope.shape[-1]),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
         decode_q_pe = torch.empty(
-            (hidden_states.shape[0], self.W_UK_T.shape[0],
-             decode_k_pe.shape[-1]),
+            (bsz, self.W_UK_T.shape[0], decode_k_pe.shape[-1]),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
