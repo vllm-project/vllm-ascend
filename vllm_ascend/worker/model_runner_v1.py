@@ -132,9 +132,10 @@ from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
-                               enable_sp, get_ascend_soc_version, is_310p,
-                               is_enable_nz, lmhead_tp_enable,
-                               prefill_context_parallel_enable, flashcomm2_enable)
+                               enable_sp, flashcomm2_enable,
+                               get_ascend_soc_version, is_310p, is_enable_nz,
+                               lmhead_tp_enable,
+                               prefill_context_parallel_enable)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if prefill_context_parallel_enable():
@@ -1656,8 +1657,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 update_attn_params(self.update_stream, forward_context,
                                    maybe_padded_num_tokens)
 
-        if get_forward_context().sp_enabled or get_forward_context(
-        ).flashcomm_v2_enabled:
+        if get_forward_context().is_any_flashcomm_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             pad_size = get_forward_context().pad_size
             if pad_size > 0:
