@@ -71,6 +71,9 @@ class Mooncakestore():
     def batch_exists(self, keys: list[str]) -> list[bool]:
         return self.store.batch_is_exist(keys)
 
+    def register_buffer(self, ptr, length):
+        return self.store.register_buffer(ptr, length)
+
     def get_batch(self, keys: list[str], addrs: list[list[int]],
                   sizes: list[list[int]], block_ids: list[int]):
         try:
