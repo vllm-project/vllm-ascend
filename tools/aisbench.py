@@ -205,15 +205,16 @@ class AisbenchRunner:
                                        f"{dataset_type}dataset.csv")
         result_json_file = os.path.join(result_dir,
                                         f"{dataset_type}dataset.json")
-        self.result_csv = pd.read_csv(result_csv_file)
+        self.result_csv = pd.read_csv(result_csv_file, index_col=0)
         print("Getting performance results from file: ", result_json_file)
         with open(result_json_file, 'r', encoding='utf-8') as f:
             self.result_json = json.load(f)
+        self.result = [self.result_csv, self.result_json]
 
     def _get_result_accuracy(self):
         acc_file = re.search(r'write csv to (.*)', self.result_line).group(1)
         df = pd.read_csv(acc_file)
-        return float(df.loc[0][-1])
+        self.result = float(df.loc[0][-1])
 
     def _performance_verify(self):
         self._get_result_performance()
@@ -224,17 +225,20 @@ class AisbenchRunner:
         ) >= self.threshold * self.baseline, f"Performance verification failed. The current Output Token Throughput is {output_throughput} token/s, which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
 
     def _accuracy_verify(self):
-        acc_value = self._get_result_accuracy()
+        self._get_result_accuracy()
+        acc_value = self.result
         assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, f"Accuracy verification failed. The accuracy of {self.dataset_path} is {acc_value}, which is not within {self.threshold} relative to baseline {self.baseline}."
 
 
 def run_aisbench_cases(model, port, aisbench_cases):
+    aisbench_results = []
     aisbench_errors = []
     for aisbench_case in aisbench_cases:
         try:
-            with AisbenchRunner(model, port, aisbench_case):
-                pass
+            with AisbenchRunner(model, port, aisbench_case) as aisbench:
+                aisbench_results.append(aisbench.result)
         except Exception as e:
+            aisbench_results.append("")
             aisbench_errors.append([aisbench_case, e])
             print(e)
     for failed_case, error_info in aisbench_errors:
@@ -242,3 +246,9 @@ def run_aisbench_cases(model, port, aisbench_cases):
             f"The following aisbench case failed: {failed_case}, reason is {error_info}."
         )
     assert not aisbench_errors, "some aisbench cases failed, info were shown above."
+    return aisbench_results
+
+
+def get_TTFT(result):
+    TTFT = result[0][0].loc["TTFT", "Average"][:-3]
+    return float(TTFT)
