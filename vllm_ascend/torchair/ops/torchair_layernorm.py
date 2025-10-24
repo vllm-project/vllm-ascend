@@ -18,6 +18,29 @@
 from typing import Optional, Tuple, Union
 
 import torch
+from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.layernorm import RMSNorm
+
+_original_re_init = RMSNorm.__init__
+
+
+def torchair_rmsnorm_init_(
+    self,
+    hidden_size: int,
+    eps: float = 1e-6,
+    var_hidden_size: Optional[int] = None,
+    has_weight: bool = True,
+    dtype: Optional[torch.dtype] = None,
+) -> None:
+    _original_re_init(self, hidden_size, eps, var_hidden_size, has_weight,
+                      dtype)
+    vllm_config = get_current_vllm_config()
+    self.bias = None
+    # quantization with anti_method m4 will generate none-zero norm bias
+    if vllm_config.quant_config is not None and \
+            any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
+        self.bias = torch.nn.Parameter(torch.zeros(hidden_size),
+                                       requires_grad=False)
 
 
 def torchair_rmsnorm_forward_oot(
@@ -45,7 +68,11 @@ def torchair_rmsnorm_forward_oot(
         else:
             x, _, residual = torch_npu.npu_add_rms_norm(
                 x, residual, self.weight, self.variance_epsilon)
+        if self.bias is not None:
+            x.add_(self.bias)
         return x, residual
 
     x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
+    if self.bias is not None:
+        x.add_(self.bias)
     return x

@@ -19,11 +19,19 @@
 
 import contextlib
 import gc
+import json
 import os
+import shlex
+import subprocess
+import sys
+import time
 from typing import Any, List, Optional, Tuple, TypeVar, Union
 
+import httpx
 import numpy as np
+import openai
 import pytest
+import requests
 import torch
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
@@ -32,10 +40,12 @@ from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
-from vllm.config import TaskOption, _get_and_verify_dtype
+from vllm.config.model import TaskOption, _get_and_verify_dtype
 from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.utils import get_open_port
 
 from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
@@ -74,6 +84,155 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+class RemoteOpenAIServer:
+    DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
+
+    def _start_server(self, model: str, server_cmd: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        """Subclasses override this method to customize server process launch
+        """
+        env = os.environ.copy()
+        # the current process might initialize npu,
+        # to be safe, we should use spawn method
+        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        if env_dict is not None:
+            env.update(env_dict)
+        self.proc: subprocess.Popen = subprocess.Popen(
+            server_cmd,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+
+    def __init__(self,
+                 model: str,
+                 vllm_serve_args: Union[list[str], str],
+                 *,
+                 server_host: str = "0.0.0.0",
+                 server_port: int = 8080,
+                 env_dict: Optional[dict[str, str]] = None,
+                 seed: Optional[int] = None,
+                 auto_port: bool = True,
+                 max_wait_seconds: Optional[float] = None,
+                 override_hf_configs: Optional[dict[str, Any]] = None) -> None:
+        if isinstance(vllm_serve_args, str):
+            vllm_serve_args = shlex.split(vllm_serve_args)
+        else:
+            vllm_serve_args = ["vllm", "serve", model, *vllm_serve_args]
+        if auto_port:
+            if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
+                raise ValueError("You have manually specified the port "
+                                 "when `auto_port=True`.")
+
+            # No need for a port if using unix sockets
+            if "--uds" not in vllm_serve_args:
+                # Don't mutate the input args
+                vllm_serve_args = vllm_serve_args + [
+                    "--port", str(get_open_port())
+                ]
+        if seed is not None:
+            if "--seed" in vllm_serve_args:
+                raise ValueError("You have manually specified the seed "
+                                 f"when `seed={seed}`.")
+
+            vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
+
+        if override_hf_configs is not None:
+            vllm_serve_args = vllm_serve_args + [
+                "--hf-overrides",
+                json.dumps(override_hf_configs)
+            ]
+        self.host = str(server_host)
+        self.port = int(server_port)
+
+        self._start_server(model, vllm_serve_args, env_dict)
+        max_wait_seconds = max_wait_seconds or 7200
+        self._wait_for_server(url=self.url_for("health"),
+                              timeout=max_wait_seconds)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.proc.terminate()
+        try:
+            self.proc.wait(8)
+        except subprocess.TimeoutExpired:
+            # force kill if needed
+            self.proc.kill()
+
+    def _poll(self) -> Optional[int]:
+        """Subclasses override this method to customize process polling"""
+        return self.proc.poll()
+
+    def hang_until_terminated(self) -> None:
+        """
+        Wait until the server process terminates.
+        This is for headless mode, where the api server
+        process only exists in the leader node.
+        """
+        client = requests
+        try:
+            while True:
+                try:
+                    resp = client.get(self.url_for("health"), timeout=5)
+                    if resp.status_code != 200:
+                        break
+                    time.sleep(5)
+                except Exception:
+                    break
+        finally:
+            if isinstance(client, httpx.Client):
+                client.close()
+
+    def _wait_for_server(self, *, url: str, timeout: float):
+        # run health check
+        start = time.time()
+        client = requests
+        while True:
+            try:
+                if client.get(url).status_code == 200:
+                    break
+            except Exception:
+                # this exception can only be raised by requests.get,
+                # which means the server is not ready yet.
+                # the stack trace is not useful, so we suppress it
+                # by using `raise from None`.
+                result = self._poll()
+                if result is not None and result != 0:
+                    raise RuntimeError("Server exited unexpectedly.") from None
+
+                time.sleep(5)
+                if time.time() - start > timeout:
+                    raise RuntimeError(
+                        "Server failed to start in time.") from None
+
+    @property
+    def url_root(self) -> str:
+        return f"http://{self.host}:{self.port}"
+
+    def url_for(self, *parts: str) -> str:
+        return self.url_root + "/" + "/".join(parts)
+
+    def get_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return openai.OpenAI(
+            base_url=self.url_for("v1"),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
+
+    def get_async_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return openai.AsyncOpenAI(base_url=self.url_for("v1"),
+                                  api_key=self.DUMMY_API_KEY,
+                                  max_retries=0,
+                                  **kwargs)
 
 
 class VllmRunner:
@@ -289,7 +448,6 @@ class VllmRunner:
 class HfRunner:
 
     def get_default_device(self):
-        from vllm.platforms import current_platform
 
         return ("cpu"
                 if current_platform.is_cpu() else current_platform.device_type)

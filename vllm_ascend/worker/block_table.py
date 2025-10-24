@@ -5,6 +5,11 @@ import torch
 from vllm.distributed import get_dcp_group
 from vllm.utils import cdiv
 
+from vllm_ascend.utils import prefill_context_parallel_enable
+
+if prefill_context_parallel_enable():
+    from vllm.distributed import get_pcp_group
+
 
 class BlockTable:
 
@@ -15,7 +20,8 @@ class BlockTable:
                  max_num_batched_tokens: int,
                  pin_memory: bool,
                  device: torch.device,
-                 kernel_sizes: Union[list[int], None] = None):
+                 kernel_sizes: Union[list[int], None] = None,
+                 cp_kv_cache_interleave_size: int = 1):
         self.max_num_reqs = max_num_reqs
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -80,13 +86,20 @@ class BlockTable:
                                         dtype=torch.int64,
                                         device=self.device)
         try:
+            self.pcp_world_size = get_pcp_group(
+            ).world_size if prefill_context_parallel_enable() else 1
+            self.pcp_rank = get_pcp_group(
+            ).rank_in_group if self.pcp_world_size > 1 else 0
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
         self.kernel_sizes = kernel_sizes
+        self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
     def append_row(
         self,
@@ -132,14 +145,14 @@ class BlockTable:
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
 
-        if self.dcp_world_size > 1:
+        if self.dcp_world_size * self.pcp_world_size > 1:
             # Note(hc): The DCP implement store kvcache with an interleave
             # style, the kvcache for the token whose token_idx is i is
             # always stored on the GPU whose dcp_rank equals i % cp_world_size:
 
             # Use a "virtual block" which equals to world_size * block_size
             # for block_table_indices calculation.
-            virtual_block_size = self.block_size * self.dcp_world_size
+            virtual_block_size = self.block_size * self.dcp_world_size * self.pcp_world_size
 
             # IMPORTANT: In hybrid mode, positions are in logical block space,
             # but we need to map them to the correct logical block table indices
@@ -157,9 +170,14 @@ class BlockTable:
             # Use virtual_block_size for mask calculation, which marks local
             # tokens.
             virtual_block_offsets = positions % virtual_block_size
-            mask = virtual_block_offsets % self.dcp_world_size == self.dcp_rank
+            self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
+            mask = (virtual_block_offsets // self.cp_kv_cache_interleave_size %
+                    (self.dcp_world_size *
+                     self.pcp_world_size) == self.current_rank)
             # Calculate local block_offsets
-            block_offsets = virtual_block_offsets // self.dcp_world_size
+            block_offsets = virtual_block_offsets \
+                // (self.dcp_world_size * self.pcp_world_size * self.cp_kv_cache_interleave_size) \
+                * self.cp_kv_cache_interleave_size + virtual_block_offsets % self.cp_kv_cache_interleave_size
             # Calculate slot_mapping
             slot_mapping = block_numbers * self.block_size + block_offsets
             # Write final slots, use -1 for not-local
@@ -167,8 +185,7 @@ class BlockTable:
                 mask, slot_mapping, -1)
         else:
             assert self.kernel_sizes is not None
-            if self.block_size == self.kernel_sizes[0] or self.kernel_sizes[
-                    0] == 0:
+            if self.block_size == self.kernel_sizes[0]:
                 # IMPORTANT: In hybrid mode, positions are in logical block space,
                 # but we need to map them to the correct logical block table indices
                 logical_block_idx = positions // self.block_size
@@ -243,16 +260,20 @@ class MultiGroupBlockTable:
                  device: torch.device,
                  block_sizes: list[int],
                  num_speculative_tokens: int = 0,
-                 kernel_sizes: Optional[list[list[int]]] = None) -> None:
+                 kernel_sizes: Optional[list[list[int]]] = None,
+                 cp_kv_cache_interleave_size: int = 1) -> None:
         # Note(hc): each dcp rank only store
         # (max_model_len//dcp_world_size) tokens in kvcache,
         # so the block_size which used for calc max_num_blocks_per_req
         # must be multiplied by dcp_world_size.
         try:
             dcp_world_size = get_dcp_group().world_size
+            cp_world_size = get_pcp_group(
+            ).world_size if prefill_context_parallel_enable() else 1
         except AssertionError:
             # DCP might not be initialized in testing
             dcp_world_size = 1
+            cp_world_size = 1
 
         if kernel_sizes is None:
             kernel_sizes = [[0]] * len(block_sizes)
@@ -268,9 +289,12 @@ class MultiGroupBlockTable:
         self.block_tables = [
             BlockTable(
                 block_size, max_num_reqs,
-                max(cdiv(max_model_len, block_size * dcp_world_size),
+                max(
+                    cdiv(max_model_len,
+                         block_size * dcp_world_size * cp_world_size),
                     1 + num_speculative_tokens), max_num_batched_tokens,
-                pin_memory, device, kernel_size_list)
+                pin_memory, device, kernel_size_list,
+                cp_kv_cache_interleave_size)
             for block_size, kernel_size_list in zip(block_sizes, kernel_sizes)
         ]
 

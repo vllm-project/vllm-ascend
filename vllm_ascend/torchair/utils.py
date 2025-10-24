@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import torch
 import torch_npu
+from torchair.scope import super_kernel as _super_kernel
 
 try:
     # Recent release of torchair has moved these ops to `.scope`.
@@ -14,6 +15,7 @@ try:
 except ImportError:
     from torchair.ops import NpuStreamSwitch as _npu_stream_switch
     from torchair.ops import npu_wait_tensor as _npu_wait_tensor
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 KV_CACHE_BYTES_CACHE_PATH_NAME = ".kv_cache_bytes"
 KV_CACHE_BYTES_CACHE_FILE_NAME = "kv_cache_bytes"
@@ -141,6 +143,9 @@ def converting_weight_acl_format(model, format):
         if isinstance(module, FusedMoE):
             if torch_npu.get_npu_format(module.w13_weight.data) == format:
                 return
+            if format == ACL_FORMAT_FRACTAL_NZ \
+                    and not is_enable_nz():
+                return
             module.w13_weight.data = torch_npu.npu_format_cast(
                 module.w13_weight.data, format)
             module.w2_weight.data = torch_npu.npu_format_cast(
@@ -162,6 +167,11 @@ def register_torchair_model():
 
     ModelRegistry.register_model(
         "DeepseekV3ForCausalLM",
+        "vllm_ascend.torchair.models.torchair_deepseek_v3:TorchairDeepseekV3ForCausalLM"
+    )
+
+    ModelRegistry.register_model(
+        "DeepseekV32ForCausalLM",
         "vllm_ascend.torchair.models.torchair_deepseek_v3:TorchairDeepseekV3ForCausalLM"
     )
 
@@ -203,11 +213,15 @@ def torchair_ops_patch():
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+    from vllm_ascend.ops.vocab_parallel_embedding import \
+        AscendVocabParallelEmbedding
     from vllm_ascend.torchair.ops import (torchair_activation,
                                           torchair_layernorm)
     from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
         deepseek_rope_init_func, native_rope_deepseek_forward,
         qwen_rope_init_func, rope_forward)
+    from vllm_ascend.torchair.ops.torchair_vocab_parallel_embedding import \
+        vocab_embedding_forward
 
     AscendRotaryEmbedding.__init__ = qwen_rope_init_func  # type: ignore[method-assign]
     AscendRotaryEmbedding.forward_oot = rope_forward  # type: ignore[method-assign]
@@ -215,5 +229,12 @@ def torchair_ops_patch():
     AscendDeepseekScalingRotaryEmbedding.__init__ = deepseek_rope_init_func  # type: ignore[method-assign]
     AscendDeepseekScalingRotaryEmbedding.forward = native_rope_deepseek_forward  # type: ignore[method-assign]
 
+    AscendRMSNorm.__init__ = torchair_layernorm.torchair_rmsnorm_init_  # type: ignore[method-assign]
     AscendRMSNorm.forward_oot = torchair_layernorm.torchair_rmsnorm_forward_oot  # type: ignore[method-assign]
+
     AscendSiluAndMul.forward_oot = torchair_activation.torchair_silu_and_mul_forward_oot  # type: ignore[method-assign]
+    AscendVocabParallelEmbedding.forward = vocab_embedding_forward  # type: ignore[method-assign]
+
+
+def super_kernel(prefix: str, option: str, enabled: bool = True):
+    return _super_kernel(prefix, option) if enabled else nullcontext()

@@ -15,5 +15,21 @@
 # limitations under the License.
 #
 
-from vllm_ascend.patch.worker import patch_common  # noqa: F401
-from vllm_ascend.patch.worker import patch_main  # noqa: F401
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    import vllm_ascend.patch.worker.patch_triton
+
+# isort: off
+import vllm_ascend.patch.platform.patch_sched_yield  # noqa
+import vllm_ascend.patch.worker.patch_distributed  # noqa
+import vllm_ascend.patch.worker.patch_logits  # noqa
+import vllm_ascend.patch.worker.patch_roberta  # noqa
+import vllm_ascend.patch.worker.patch_weight_loader  # noqa
+import vllm_ascend.patch.worker.patch_multimodal_merge  # noqa
+import vllm_ascend.patch.worker.patch_minicpm  # noqa
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa

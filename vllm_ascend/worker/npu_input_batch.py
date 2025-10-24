@@ -24,8 +24,9 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import (MultiModalKwargs, MultiModalKwargsItem,
-                                    PlaceholderRange)
+from vllm.multimodal.inputs import (MultiModalFeatureSpec,
+                                    MultiModalKwargsItem,
+                                    MultiModalKwargsItems, PlaceholderRange)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
@@ -46,9 +47,6 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
-    mm_kwargs: list[MultiModalKwargsItem]
-    mm_positions: list[PlaceholderRange]
-    mm_hashes: list[str]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
@@ -59,6 +57,12 @@ class CachedRequestState:
 
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
+
+    mm_features: Optional[list[MultiModalFeatureSpec]] = None
+    # for back-compatibility, will be removed in next major release
+    mm_kwargs: Optional[list[MultiModalKwargsItem]] = None
+    mm_positions: Optional[list[PlaceholderRange]] = None
+    mm_hashes: Optional[list[PlaceholderRange]] = None
 
     lora_request: Optional[LoRARequest] = None
 
@@ -73,8 +77,12 @@ class CachedRequestState:
     @property
     @deprecated("`mm_inputs` is superseded by `mm_kwargs` and will be "
                 "removed in v0.13. Please use `mm_kwargs` instead.")
-    def mm_inputs(self) -> list[MultiModalKwargs]:
-        return [MultiModalKwargs([item]) for item in self.mm_kwargs]
+    def mm_inputs(self) -> list[MultiModalKwargsItems]:
+        assert self.mm_features is not None
+        return [
+            MultiModalKwargsItems.from_seq([f.data]) for f in self.mm_features
+            if f.data is not None
+        ]
 
     def get_token_id(self, idx: int) -> int:
         if idx < self.num_prompt_tokens:
@@ -86,19 +94,21 @@ class CachedRequestState:
 class InputBatch:
 
     def __init__(
-            self,
-            max_num_reqs: int,
-            max_model_len: int,
-            max_num_batched_tokens: int,
-            device: torch.device,
-            pin_memory: bool,
-            vocab_size: int,
-            block_sizes: list[int],  # The block_size of each kv cache group
-            logitsprocs: Optional[LogitsProcessors] = None,
-            is_spec_decode: bool = False,
-            is_pooling_model: bool = False,
-            num_speculative_tokens: int = 0,
-            kernel_block_sizes: Optional[list[list[int]]] = None):
+        self,
+        max_num_reqs: int,
+        max_model_len: int,
+        max_num_batched_tokens: int,
+        device: torch.device,
+        pin_memory: bool,
+        vocab_size: int,
+        block_sizes: list[int],  # The block_size of each kv cache group
+        logitsprocs: Optional[LogitsProcessors] = None,
+        is_spec_decode: bool = False,
+        is_pooling_model: bool = False,
+        num_speculative_tokens: int = 0,
+        kernel_block_sizes: Optional[list[list[int]]] = None,
+        cp_kv_cache_interleave_size: int = 1,
+    ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
@@ -143,7 +153,9 @@ class InputBatch:
             device=device,
             block_sizes=block_sizes,
             num_speculative_tokens=num_speculative_tokens,
-            kernel_sizes=kernel_block_sizes)
+            kernel_sizes=kernel_block_sizes,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        )
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ),

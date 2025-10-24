@@ -21,13 +21,13 @@ import atexit
 import functools
 import math
 import os
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import torch
-import torch_npu  # noqa: F401  # noqa: F401
+import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
@@ -40,14 +40,6 @@ if TYPE_CHECKING:
 else:
     VllmConfig = None
 
-# NOTE: Currently, we can only capture 1800 graphs at most,
-# due to the limitation of ACL graph. This number is bounded by
-# the number of streams, which is 2048, we save 248 streams
-# as a buffer.
-# Maximum number of graphs that can be captured by ACL Graph
-# TODO: Find out whether we need to solve allreduce function
-MAX_CAPTURE_SIZE = 1800
-
 ASCEND_QUANTIZATION_METHOD = "ascend"
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 REGISTERED_ASCEND_OPS = {}
@@ -59,7 +51,13 @@ _CUSTOM_OP_ENABLED = None
 _IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
+_PREFETCH_STREAM = None
+_SHARED_EXPERTS_CALCULATION_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
+_DEFAULT_BUFFER_SIZE = 200
+_MIN_DP_BUFFER_SIZE = 50
+_IS_MOE_MODEL = None
+_ENABLE_SP = None
 
 
 def is_310p():
@@ -68,6 +66,10 @@ def is_310p():
         from vllm_ascend import _build_info  # type: ignore
         _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
     return _IS_310P
+
+
+def is_enable_nz():
+    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
 
 
 def sleep_mode_enabled():
@@ -249,6 +251,24 @@ def current_stream() -> torch.npu.Stream:
     return _CURRENT_STREAM
 
 
+def prefetch_stream() -> torch.npu.Stream:
+    global _PREFETCH_STREAM
+    if _PREFETCH_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _PREFETCH_STREAM = torch_npu.npu.Stream()
+    return _PREFETCH_STREAM
+
+
+def shared_experts_calculation_stream() -> torch.npu.Stream:
+    global _SHARED_EXPERTS_CALCULATION_STREAM
+    if _SHARED_EXPERTS_CALCULATION_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
+    return _SHARED_EXPERTS_CALCULATION_STREAM
+
+
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
@@ -293,6 +313,14 @@ def get_max_hidden_layers(hf_config) -> int:
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
+    # NOTE: Currently, we can only capture 1800 graphs at most,
+    # due to the limitation of ACL graph. This number is bounded by
+    # the number of streams, which is 2048, we save 248 streams
+    # as a buffer.
+    # Maximum number of graphs that can be captured by ACL Graph
+    # TODO: Find out whether we need to solve allreduce function
+    MAX_CAPTURE_SIZE = 1800
+
     # Store original configuration and temporarily clear it
     compilation_config = vllm_config.compilation_config
     original_sizes, compilation_config.cudagraph_capture_sizes = \
@@ -321,9 +349,16 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     if os.getenv("HCCL_OP_EXPANSION_MODE") == 'AIV':
         # TODO: Find out whether we need to take into account the pp_size
         parallel_factor = 1 + num_comm_groups + int(
-            parallel_config.enable_expert_parallel)
+            parallel_config.enable_expert_parallel) + int(
+                vllm_config.additional_config.get(
+                    "multistream_overlap_shared_expert", False))
         if is_moe_model(vllm_config):
             parallel_factor += (parallel_config.data_parallel_size > 1)
+        else:
+            # When AIV mode is enabled, the allreduce operator of the dense
+            # layer model will occupy additional streams, which are buffered here.
+            MAX_CAPTURE_SIZE = MAX_CAPTURE_SIZE - parallel_factor * resources_per_graph
+
         # Calculate maximum supported batch sizes considering model architecture on the A2 Hardware Device
         # Assume the following case:
         # MAX_CAPTURE_SIZE = 1920, num_hidden_layers = 48, data_parallel_size is 1, tensor_parallel_size is 4,
@@ -385,6 +420,26 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             vllm_config.model_config.architectures[0], num_hidden_layers,
             len(original_sizes))
 
+    # default or defined cudagraph_capture_sizes may not consider num_speculative_tokens>1 scenario
+    # the maximum size cudagraph_capture_sizes[0] should be greater or equal than
+    # (num_speculative_tokens+1)*max_num_seqs, otherwise draft model will run in eager mode
+    if vllm_config.speculative_config is not None and \
+        vllm_config.speculative_config.num_speculative_tokens > 1:
+        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        original_sizes, compilation_config.cudagraph_capture_sizes = \
+            compilation_config.cudagraph_capture_sizes, None
+        assert len(original_sizes) > 0
+        if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
+            enlarged_sizes = [(num_speculative_tokens + 1) * size
+                              for size in original_sizes]
+            compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            logger.info(
+                "Adjusted ACL graphs: %s → %s for speculative decoding",
+                original_sizes, enlarged_sizes)
+        else:
+            compilation_config.cudagraph_capture_sizes = original_sizes
+
 
 # TODO(wxy): Move to ops module
 def dispose_tensor(x: torch.Tensor):
@@ -439,20 +494,6 @@ class ProfileExecuteDuration:
         return durations
 
 
-# TODO(wxy): Move to ops module
-def npu_prefetch(input: torch.Tensor,
-                 dependency: torch.Tensor,
-                 max_size: int = 0,
-                 *,
-                 enabled: bool = True):
-    if not enabled:
-        return
-    input_size = input.element_size() * input.numel()
-    if max_size <= 0 or max_size > input_size:
-        max_size = input_size
-    torch_npu.npu_prefetch(input, dependency, max_size)
-
-
 # TODO(ttanzhiqiang): rm_router_logits
 # dp>1 will trigger
 # In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
@@ -496,14 +537,18 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.common_fused_moe import AscendFusedMoE
-    from vllm_ascend.ops.layernorm import AscendQuantRMSNorm, AscendRMSNorm
+    from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
+                                                  AscendSharedFusedMoE)
+    from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
+                                           AscendQuantRMSNorm, AscendRMSNorm)
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
+                                        AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding,
+        AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -515,20 +560,25 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "RotaryEmbedding": AscendRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
+        "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
         "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
         "QKVParallelLinear": AscendQKVParallelLinear,
+        "ReplicatedLinear": AscendReplicatedLinear,
         "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
         "VocabParallelEmbedding": AscendVocabParallelEmbedding,
         "ParallelLMHead": AscendParallelLMHead,
         "LogitsProcessor": AscendLogitsProcessor,
         "RMSNorm": AscendRMSNorm,
+        "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
+        "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
 
     if vllm_config is not None and \
         vllm_config.quant_config is not None and \
-        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()):
+        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()) and \
+            not version_check():
         REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
@@ -586,9 +636,39 @@ def dense_optim_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE
 
 
+def enable_sp(vllm_config=None) -> bool:
+    global _ENABLE_SP
+    if _ENABLE_SP is None:
+        if vllm_config is None:
+            from vllm.config import get_current_vllm_config
+            vllm_config = get_current_vllm_config()
+        _ENABLE_SP = (
+            vllm_config.compilation_config.pass_config.
+            enable_sequence_parallelism
+            or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+
+    return _ENABLE_SP
+
+
+# TODO remove it after vllm has this func
+def shared_expert_dp_enabled() -> bool:
+    return get_ascend_config().enable_shared_expert_dp or enable_sp()
+
+
+def prefill_context_parallel_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
+
+
 def is_moe_model(vllm_config: VllmConfig):
-    config = vllm_config.model_config.hf_config
-    return any('experts' in key.lower() for key in config.to_dict())
+    global _IS_MOE_MODEL
+    if _IS_MOE_MODEL is None:
+        config = vllm_config.model_config.hf_config
+        _IS_MOE_MODEL = any('experts' in key.lower()
+                            for key in config.to_dict())
+    return _IS_MOE_MODEL
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -617,3 +697,87 @@ def weak_ref_tensors(
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
     raise ValueError("Invalid type for tensors")
+
+
+def npu_stream_switch(target_stream: torch.npu.Stream,
+                      *,
+                      enabled: bool = True):
+    """
+    Switch to the target stream if enabled is True.
+    Otherwise, do nothing.
+    """
+    if not enabled:
+        return nullcontext()
+    assert target_stream is not None
+    return torch.npu.stream(target_stream)
+
+
+def create_hccl_pg_options(group_name: str):
+    options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
+    hccl_config = get_hccl_config_for_pg_options(group_name)
+    if hccl_config is not None:
+        options.hccl_config = hccl_config
+    return options
+
+
+def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
+    """
+    Get HCCL process group options for the given communication group name.
+
+    Args:
+        group_name: Name of the communication group
+
+    Returns:
+        HCCL pg_options or None for mc2 group
+    """
+    # FIXME: Current mc2 operators only perform communication space partitioning
+    # based on HCCL_BUFFSIZE configuration. Using pg_options with mc2 group would
+    # result in memory misalignment problems.
+    if group_name and "mc2" in group_name:
+        return None
+    hccl_config_map = {
+        "dp": {
+            "hccl_buffer_size": calculate_dp_buffer_size()
+        },
+    }
+    return hccl_config_map.get(group_name, get_default_buffer_config())
+
+
+def get_default_buffer_config() -> dict:
+    return {"hccl_buffer_size": _DEFAULT_BUFFER_SIZE}
+
+
+def calculate_dp_buffer_size() -> int:
+    """
+    formula of dp buffer size:
+    dp_size + 2 (flags: with_prefill and enable_dbo)
+    """
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    dp_size = vllm_config.parallel_config.data_parallel_size
+    int32_size = torch.iinfo(torch.int32).bits // 8
+    dp_buffer_size = math.ceil((dp_size + 2) * int32_size / (1024 * 1024))
+    return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
+
+
+# Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
+# and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
+# significantly improve communication performance of MC2 ops dispatch/combine.
+def is_hierarchical_communication_enabled():
+    return (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
+            and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
+
+
+@functools.cache
+def version_check():
+    """check if torch_npu version >= dev20250919"""
+    import re
+    torch_npu_version = torch_npu.version.__version__
+    date_pattern = r'dev(\d{8})'
+
+    match = re.search(date_pattern, torch_npu_version)
+    if match:
+        full_date = match.group(1)
+        if full_date >= "20250919":
+            return True
+    return False

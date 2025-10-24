@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.9.1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2643)
-- [[v0.10.2rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2874)
+- [[v0.11.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/3222)
 
 ## General FAQs
 
@@ -15,7 +15,7 @@ Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b)，Atlas A3 series(
 - Atlas 800I A2 Inference series (Atlas 800I A2)
 - Atlas A3 Training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 Inference series (Atlas 800I A3)
-- [Experimental] Atlas 300I Inference series (Atlas 300I Duo)
+- [Experimental] Atlas 300I Inference series (Atlas 300I Duo). Currently for 310I Duo the stable version is vllm-ascend v0.10.0rc1.
 
 Below series are NOT supported yet:
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet
@@ -196,3 +196,21 @@ export ATB_LLM_LCOC_ENABLE=0
 ### 19. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？
 The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met `pip install qwen-omni-utils`,
 this package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring audio processing functionality works correctly.
+
+### 20. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
+
+```
+error example in detail: 
+ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph sizes capture fail: RuntimeError:
+ERROR 09-26 10:48:07 [model_runner_v1.py:3029] ACLgraph has insufficient available streams to capture the configured number of sizes.Please verify both the availability of adequate streams and the appropriateness of the configured size count.
+```
+
+Recommended mitigation strategies:
+1. Manually configure the compilation_config parameter with a reduced size set: '{"cudagraph_capture_sizes":[size1, size2, size3, ...]}'.
+2. Employ ACLgraph's full graph mode as an alternative to the piece-wise approach.
+
+Root cause analysis:
+The current stream requirement calculation for size captures only accounts for measurable factors including: data parallel size, tensor parallel size, expert parallel configuration, piece graph count, multistream overlap shared expert settings, and HCCL communication mode (AIV/AICPU). However, numerous unquantifiable elements - such as operator characteristics and specific hardware features - consume additional streams outside of this calculation framework, resulting in stream resource exhaustion during size capture operations.
+
+### 21. Installing vllm-ascend will overwrite the existing torch-npu package？
+Installing vllm-ascend will overwrite the existing torch-npu package. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after installing vllm-ascend.

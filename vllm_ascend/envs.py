@@ -133,8 +133,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
     # Whether to enable FlashComm optimization when tensor parallel is enabled.
     # This feature will get better performance when concurrency is large.
-    "VLLM_ASCEND_ENABLE_FLASHCOMM":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))),
+    "VLLM_ASCEND_ENABLE_FLASHCOMM1":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))),
     # Whether to enable MLP weight prefetch, only used in small concurrency.
     "VLLM_ASCEND_ENABLE_PREFETCH_MLP":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", '0'))),
@@ -159,11 +159,22 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # caused by the initialization of the Mooncake connector.
     "PHYSICAL_DEVICES":
     lambda: os.getenv("PHYSICAL_DEVICES", None),
+    # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
+    "MSMONITOR_USE_DAEMON":
+    lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
     # Timeout (in seconds) for delayed KVCache block release. In the prefill
     # node, if a request is marked for delayed KV block release and the blocks
     # are not freed within this timeout, they will be forcibly released.
     "VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT":
     lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
+    "VLLM_ASCEND_ENABLE_MLAPO":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '0'))),
+    # Whether to enable transpose weight and cast format to FRACTAL_NZ.
+    "VLLM_ASCEND_ENABLE_NZ":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
+    # Decide whether we should enable CP parallelism.
+    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", '0')))
 }
 
 # end-env-vars-definition

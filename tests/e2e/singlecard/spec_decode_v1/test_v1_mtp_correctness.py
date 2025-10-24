@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import os
-
 import pytest
 from vllm import SamplingParams
+from vllm.config import CompilationConfig, CUDAGraphMode
 
 from tests.e2e.conftest import VllmRunner
-
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 @pytest.fixture
@@ -24,6 +21,7 @@ def mtp_correctness(
     sampling_config: SamplingParams,
     model_name: str,
     num_speculative_tokens: int,
+    graph_mode: CUDAGraphMode = CUDAGraphMode.PIECEWISE,
 ):
     example_prompts = [
         "Hello, my name is",
@@ -39,8 +37,12 @@ def mtp_correctness(
                     tensor_parallel_size=1,
                     gpu_memory_utilization=0.7,
                     max_model_len=256,
-                    enforce_eager=True) as ref_llm:
+                    enforce_eager=False) as ref_llm:
         ref_outputs = ref_llm.generate(example_prompts, sampling_config)
+
+    graph_mode_str = "PIECEWISE"
+    if graph_mode == CUDAGraphMode.FULL:
+        graph_mode_str = "FULL"
 
     with VllmRunner(
             model_name,
@@ -53,8 +55,10 @@ def mtp_correctness(
                 "method": "deepseek_mtp",
                 "num_speculative_tokens": num_speculative_tokens,
             },
-            enforce_eager=True,
+            enforce_eager=False,
             max_model_len=2000,
+            compilation_config=CompilationConfig(
+                cudagraph_mode=graph_mode_str),
             additional_config={"ascend_scheduler_config": {
                 "enabled": False
             }}) as spec_llm:
@@ -78,15 +82,29 @@ def mtp_correctness(
     del spec_llm
 
 
-def test_mtp1_correctness(
+def test_mtp1_correctness_piecewise_graph(
     sampling_config: SamplingParams,
     model_name: str,
 ):
     mtp_correctness(sampling_config, model_name, 1)
 
 
-def test_mtp2_correctness(
+def test_mtp2_correctness_piecewise_graph(
     sampling_config: SamplingParams,
     model_name: str,
 ):
     mtp_correctness(sampling_config, model_name, 2)
+
+
+def test_mtp1_correctness_full_graph(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 1, CUDAGraphMode.FULL)
+
+
+def test_mtp2_correctness_full_graph(
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    mtp_correctness(sampling_config, model_name, 2, CUDAGraphMode.FULL)

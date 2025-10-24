@@ -295,7 +295,11 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         mock_group.rank_in_group = 0
         mock_group.world_size = 2
         mocker.patch(
-            "vllm_ascend.ops.linear.get_tp_group",
+            "vllm_ascend.ops.linear_op.get_tp_group",
+            return_value=mock_group,
+        )
+        mocker.patch(
+            "vllm.distributed.parallel_state.get_tp_group",
             return_value=mock_group,
         )
 
@@ -366,6 +370,10 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
+        mocker.patch(
+            "torch_npu.npu_format_cast",
+            return_value=torch.rand((384, 300)),
+        )
         res = attention.pad_qkv_weight(torch.rand((300, 300)))
         assert res.shape == (384, 300)
 
@@ -374,6 +382,10 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
+        mocker.patch(
+            "torch_npu.npu_format_cast",
+            return_value=torch.rand((300, 384)),
+        )
         res = attention.pad_proj_weight(torch.rand((300, 300)))
         assert res.shape == (300, 384)
 

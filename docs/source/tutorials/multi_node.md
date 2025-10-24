@@ -70,6 +70,7 @@ export NAME=vllm-ascend
 docker run --rm \
 --name $NAME \
 --net=host \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
@@ -103,7 +104,7 @@ Before launch the inference server, ensure the following environment variables a
 #!/bin/sh
 
 # this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip
+# nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
 local_ip="xxxx"
 
@@ -144,8 +145,13 @@ vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 ```shell
 #!/bin/sh
 
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxx"
 local_ip="xxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxxx"
 
 export VLLM_USE_MODELSCOPE=True
 export HCCL_IF_IP=$local_ip
@@ -164,7 +170,7 @@ vllm serve vllm-ascend/DeepSeek-V3.1-W8A8 \
 --data-parallel-size 4 \
 --data-parallel-size-local 2 \
 --data-parallel-start-rank 2 \
---data-parallel-address { node0 ip } \
+--data-parallel-address $node0_ip \
 --data-parallel-rpc-port 13389 \
 --tensor-parallel-size 4 \
 --seed 1024 \

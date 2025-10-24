@@ -53,6 +53,7 @@ export DEVICE=/dev/davinci7
 export IMAGE=quay.io/ascend/cann:|cann_image_tag|
 docker run --rm \
     --name vllm-ascend-env \
+    --shm-size=1g \
     --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
@@ -141,8 +142,12 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 ```{code-block} bash
    :substitutions:
 
-# Install vllm-project/vllm from pypi
-pip install vllm==|pip_vllm_version|
+# Install vllm-project/vllm. The newest supported version is |vllm_version|.
+# Because the version |vllm_version| has not been archived in pypi, so you need to install from source.
+git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
+cd vllm
+VLLM_TARGET_DEVICE=empty pip install -v -e .
+cd ..
 
 # Install vllm-project/vllm-ascend from pypi.
 pip install vllm-ascend==|pip_vllm_ascend_version|
@@ -203,6 +208,7 @@ export DEVICE=/dev/davinci7
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend-env \
+    --shm-size=1g \
     --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \

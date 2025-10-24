@@ -70,10 +70,9 @@ run_tests_for_model() {
   # Start prefill instance
   PREFILL_PORT=8001
 
-  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=0 VLLM_LLMDD_RPC_PORT=5559 vllm serve $model_name \
+  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=0 VLLM_ASCEND_LLMDD_RPC_PORT=5559 vllm serve $model_name \
   --port $PREFILL_PORT \
   --seed 1024 \
-  --enforce-eager \
   --disable-log-requests \
   --gpu-memory-utilization 0.8 \
   --kv-transfer-config '{\"kv_connector\":\"LLMDataDistCMgrConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"npu\",\"kv_parallel_size\":\"1\",\"kv_port\":\"20001\",\"engine_id\":\"0\",\"kv_connector_module_path\":\"vllm_ascend.distributed.llmdatadist_c_mgr_connector\"}'"
@@ -90,10 +89,9 @@ run_tests_for_model() {
   DECODE_PORT=8002
 
   # Build the command with or without model-specific args
-  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=1 VLLM_LLMDD_RPC_PORT=6000 vllm serve $model_name \
+  BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=1 VLLM_ASCEND_LLMDD_RPC_PORT=6000 vllm serve $model_name \
   --port $DECODE_PORT \
   --seed 1024 \
-  --enforce-eager \
   --disable-log-requests \
   --gpu-memory-utilization 0.8 \
   --kv-transfer-config '{\"kv_connector\":\"LLMDataDistCMgrConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"npu\",\"kv_parallel_size\":\"1\",\"kv_port\":\"20001\",\"engine_id\":\"0\",\"kv_connector_module_path\":\"vllm_ascend.distributed.llmdatadist_c_mgr_connector\"}'"

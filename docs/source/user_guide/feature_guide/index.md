@@ -10,4 +10,7 @@ quantization
 sleep_mode
 structured_output
 lora
+eplb_swift_balancer
+netloader
+dynamic_batch
 :::
