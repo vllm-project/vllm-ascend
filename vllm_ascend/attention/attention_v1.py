@@ -936,13 +936,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def _forward_pcp_dcp(self, query: torch.Tensor, key: torch.Tensor,
                          value: torch.Tensor, attn_metadata: AscendMetadata,
-                         output: Optional[torch.Tensor]) -> torch.Tensor:
+                         output: torch.Tensor) -> torch.Tensor:
         assert attn_metadata is not None
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
-        if output is None:
-            raise ValueError("Output buffer is required")
+
         if has_decode:
             decode_query = query[:num_decode_tokens]
             output_decode = self._forward_decode_pcp_dcp(
@@ -1064,11 +1063,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                  num_actual_tokens_pcp_padded])
 
         if self.pcp_size * self.dcp_size > 1:
-            output = self._forward_pcp_dcp(query, key, value, attn_metadata,
-                                           output)
-
-            # NOTE: This path already writes directly to `output`.
-            return output
+            intermediate_output = self._forward_pcp_dcp(
+                query, key, value, attn_metadata, output)
         elif attn_type == AttentionType.ENCODER_ONLY:
             # TODO(zzzwwjj): Deal with this `cum_seq_len` more elegantly.
             cum_seq_len = attn_metadata.query_start_loc[1:].tolist()

@@ -91,5 +91,5 @@ class TestAscendAttentionTorchairBackendImpl(TestBase):
                                    torch.ones(1))
 
         result = self.impl.forward(layer, query, key, value, kv_cache,
-                                   metadata, output, False)
+                                   metadata, output)
         self.assertEqual(result.shape[0], num_tokens)
