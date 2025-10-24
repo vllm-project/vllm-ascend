@@ -67,6 +67,7 @@ jobs:
         KUBECTL: /root/.cache/.kube/kubectl
         NAMESPACE: vllm-project
         LEADER_POD: vllm-0
+        RESULT_FILE: /root/.cache/tests/ret/test_result.txt
     steps:
         - name: Install system denpendencies
           run: |
@@ -100,6 +101,10 @@ jobs:
             # prepare for lws entrypoint scripts
             install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
 
+        - name: Clear result ret
+          run: |
+            rm -f $RESULT_FILE
+
         - name: Launch cluster
           run: |
             set -e
@@ -111,6 +116,7 @@ jobs:
             vllm_version="${{ inputs.vllm_version }}"
             vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
             vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
+            result_file_path="$RESULT_FILE"
 
             required_params=("size" "replicas" "image" "config_file_path")
             for param in "${required_params[@]}"; do
@@ -128,6 +134,7 @@ jobs:
               -D vllm_version="$vllm_version" \
               -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
               -D vllm_ascend_ref="$vllm_ascend_ref" \
+              -D result_file_path="$result_file_path" \
               --outfile lws.yaml
 
             kubectl apply -f ./lws.yaml
@@ -141,7 +148,7 @@ jobs:
               READY_STATUS=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}')
 
               if [[ "$READY_STATUS" == "true" ]]; then
-                echo "✅ Pod [$LEADER_POD] is Ready!"
+                echo "Pod [$LEADER_POD] is Ready!"
                 break
               else
                 echo "Pod [$LEADER_POD] not ready, waiting..."
@@ -149,38 +156,31 @@ jobs:
               fi
             done
 
-        - name: Stream logs and monitor pod health
+        - name: Stream logs
           run: |
-            set -euo pipefail
+            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE"
 
-            echo "🚀 Start streaming logs for Pod [$LEADER_POD] ..."
-            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" &
-            LOG_PID=$!
-
-            echo "Start monitoring Pod [$LEADER_POD] status ..."
-            while true; do
-              STATUS=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}')
-              if [[ "$STATUS" != "Running" && "$STATUS" != "Succeeded" ]]; then
-                echo "❌ Pod [$LEADER_POD] exited abnormally with status: $STATUS"
-                kubectl describe pod "$LEADER_POD" -n "$NAMESPACE" || true
-                kubectl logs "$LEADER_POD" -n "$NAMESPACE" --previous --all-containers || true
-                kill $LOG_PID || true
+        - name: Determine is success
+          run: |
+            TIMEOUT=600
+            ELAPSED=0
+            while [ ! -f "$RESULT_FILE" ]; do
+              sleep 5
+              ELAPSED=$((ELAPSED + 5))
+              if [ $ELAPSED -ge $TIMEOUT ]; then
+                echo "Timeout waiting for test result file"
                 exit 1
               fi
-              sleep 5
-            done &
+            done
 
-            MONITOR_PID=$!
-            wait $LOG_PID || true
-            kill $MONITOR_PID || true
+            RET=$(cat "$RESULT_FILE")
+            echo "Test result: $RET"
 
-        - name: Generate summary
-          if: always()
-          run: |
-            if [ -f "/root/.cache/test_summary.md" ]; then
-              cat /root/.cache/test_summary.md >> "$GITHUB_STEP_SUMMARY"
+            if [ "$RET" -ne 0 ]; then
+              echo "Test failed"
+              exit 1
             else
-              echo "No summary file found." >> "$GITHUB_STEP_SUMMARY"
+              echo "Test succeeded"
             fi
 
         - name: Post process

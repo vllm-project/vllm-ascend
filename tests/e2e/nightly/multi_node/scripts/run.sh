@@ -153,6 +153,12 @@ kill_npu_processes() {
 run_tests() {
     pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
     kill_npu_processes
+    ret=$?
+    if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
+        mkdir -p "$(dirname "$RESULT_PATH")"
+        echo $ret > "$RESULT_PATH"
+    fi
+    return $ret
 }
 
 main() {

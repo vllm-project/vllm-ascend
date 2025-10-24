@@ -28,12 +28,13 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: RESULT_FILE_PATH
+                value: {{ result_file_path | default("/root/.cache/tests/ret/test_result.txt") }}
             command:
               - sh
               - -c
               - |
                 bash /root/.cache/tests/run.sh
-                tail -f /dev/null
             resources:
               limits:
                 huawei.com/ascend-1980: "16"
@@ -85,12 +86,13 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: RESULT_FILE_PATH
+                value: {{ result_file_path | default("/root/.cache/tests/ret/test_result.txt") }}
             command:
               - sh
               - -c
               - |
                 bash /root/.cache/tests/run.sh
-                tail -f /dev/null
             resources:
               limits:
                 huawei.com/ascend-1980: "16"
