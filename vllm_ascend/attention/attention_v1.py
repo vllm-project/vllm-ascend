@@ -213,9 +213,6 @@ class AscendMetadata:
     # (num_tokens,)
     slot_mapping: torch.Tensor = None
 
-    # *************************** Other Properties *************************** #
-    enable_dbo_across_dp: bool = False
-
     prefill: Optional[AscendMetadataForPrefill] = None
 
     decode_meta: Optional[AscendMetadataForDecode] = None
@@ -374,7 +371,6 @@ class AscendAttentionMetadataBuilder:
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
-            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
             num_prefills=num_prefills,
             num_decodes=num_decodes,
             prefill=prefill_metadata,

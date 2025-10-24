@@ -623,11 +623,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
     @patch('vllm_ascend.attention.mla_v1.get_forward_context')
-    @patch("torch.npu.stream")
-    @patch("vllm_ascend.attention.mla_v1.get_multistream_comm_context")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode(self, mock_npu_fused_infer_attention_score,
-                            mock_get_multistream_comm_context, mock_npu_stream,
                             mock_get_forward_context):
         B = 2
         N = self.impl.num_kv_heads
@@ -651,24 +648,7 @@ class TestAscendMLAImpl(TestBase):
         mock_npu_fused_infer_attention_score.return_value = [
             torch.randn(B, N, self.impl.kv_lora_rank), None
         ]
-        mock_get_multistream_comm_context.return_value = None
-
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
-                                           attn_metadata)
-
-        self.assertEqual(result.shape[0], B)
-        self.assertEqual(result.shape[1], N)
-        self.assertEqual(result.shape[2], HD)
-
-        self.impl.enable_kv_nz = False
-        attn_metadata.attn_state = None
-        mock_return_value = MagicMock()
-        mock_get_multistream_comm_context.return_value = mock_return_value
-        mock_return_value.before_comm_event = MagicMock()
-        mock_return_value.comm_stream = MagicMock()
-        mock_npu_stream.return_value = MagicMock()
-
         result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
                                            attn_metadata)
 
