@@ -279,16 +279,16 @@ class AscendMLAMetadataBuilder:
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
-        self.cp_size = get_prefill_context_model_parallel_world_size(
+        self.pcp_size = get_prefill_context_model_parallel_world_size(
         ) if prefill_context_parallel_enable() else 1
         self.cp_rank = get_prefill_context_model_parallel_rank(
-        ) if self.cp_size > 1 else 0
+        ) if self.pcp_size > 1 else 0
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
         decode_max_num_seqs = getattr(scheduler_config, 'decode_max_num_seqs', 0)
         max_num_seqs = max(scheduler_config.max_num_seqs, decode_max_num_seqs)
-        self.seq_mask_cp_buf = torch.empty(max_num_seqs, self.cp_size,
+        self.seq_mask_cp_buf = torch.empty(max_num_seqs, self.pcp_size,
             dtype=torch.uint8,
             device=device)
         self.seq_mask_dcp_buf = torch.empty(max_num_seqs, self.dcp_size,
@@ -503,7 +503,7 @@ class AscendMLAMetadataBuilder:
             seq_lens_list = seq_lens.tolist()
 
             if num_computed_tokens_of_pcp_dcp is not None:
-                num_computed_tokens_of_cp_dcp_array = np.array(num_computed_tokens_of_pcp_dcp)[:num_decodes]  # [bs, cp_size, sp_size]
+                num_computed_tokens_of_cp_dcp_array = np.array(num_computed_tokens_of_pcp_dcp)[:num_decodes]  # [bs, pcp_size, dcp_size]
                 seq_mask_cp = torch.where(
                     torch.tensor(num_computed_tokens_of_cp_dcp_array.sum(2)) == 0, 0,
                     1).to(torch.uint8)
