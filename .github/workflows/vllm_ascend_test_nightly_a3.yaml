@@ -71,7 +71,6 @@ jobs:
           - name: qwen-qwq-32b-a3-4
             os: linux-aarch64-a3-4
             tests: tests/e2e/nightly/models/test_qwen3_qwq_32b.py
-
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       vllm: v0.11.0
