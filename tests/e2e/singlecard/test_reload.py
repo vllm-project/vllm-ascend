@@ -97,7 +97,7 @@ def model_runner():
 model_runner_2 = model_runner
 
 
-def test_update_config(model_runner):
+def test_update_config(dist_init, model_runner):
     # Simple update
     model_runner.update_config({"load_config": {"load_format": "dummy"}})
     assert model_runner.load_config.load_format == "dummy"
