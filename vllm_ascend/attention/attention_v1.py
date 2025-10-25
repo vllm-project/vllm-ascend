@@ -47,10 +47,12 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                prefill_context_parallel_enable, version_check,
                                weak_ref_tensors)
 
+# isort: off
 if prefill_context_parallel_enable():
-    from vllm.distributed import (
-        get_pcp_group, get_prefill_context_model_parallel_rank,
-        get_prefill_context_model_parallel_world_size)
+    from vllm.distributed import (get_pcp_group,
+                                  get_prefill_context_model_parallel_rank,
+                                  get_prefill_context_model_parallel_world_size
+                                  )
 # isort: on
 
 
