@@ -72,8 +72,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
-                        get_dtype_size, is_pin_memory_available)
+from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -144,6 +143,13 @@ if prefill_context_parallel_enable():
     from vllm.distributed.parallel_state import (
         get_prefill_context_model_parallel_rank,
         get_prefill_context_model_parallel_world_size)
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
+                            get_dtype_size)
+else:
+    from vllm.utils.mem_utils import DeviceMemoryProfiler
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
 # yapf: enable
 
