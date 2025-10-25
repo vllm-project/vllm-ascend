@@ -24,9 +24,11 @@ from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.common_fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.ops.moe.moe_mlp import cumsum_group_list, unified_apply_mlp
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.fused_moe import (
+    AscendFusedMoE, AscendUnquantizedFusedMoEMethod)
+from vllm_ascend.ops.fused_moe.moe_mlp import (cumsum_group_list,
+                                               unified_apply_mlp)
 from vllm_ascend.utils import AscendSocVersion, adapt_patch
 
 adapt_patch(True)
@@ -69,10 +71,11 @@ def setup_vllm_config_mock(mocker: MockerFixture):
     mock_vllm_config.scheduler_config = MagicMock(max_num_seqs=4)
     mock_vllm_config.model_config.max_model_len = 2048
 
-    mocker.patch('vllm_ascend.ops.common_fused_moe.get_current_vllm_config',
+    mocker.patch('vllm_ascend.ops.fused_moe.fused_moe.get_current_vllm_config',
                  return_value=mock_vllm_config)
-    mocker.patch('vllm_ascend.ops.moe.moe_comm_method.get_current_vllm_config',
-                 return_value=mock_vllm_config)
+    mocker.patch(
+        'vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config',
+        return_value=mock_vllm_config)
 
 
 @pytest.fixture
@@ -105,37 +108,37 @@ def mock_dist_env(mocker: MockerFixture):
 
     with patch('torch.distributed.get_rank', return_value=0), \
         patch('torch.distributed.get_world_size', return_value=4), \
-        patch('vllm_ascend.ops.common_fused_moe.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
-        patch('vllm_ascend.ops.moe.token_dispatcher.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
-        patch('vllm_ascend.ops.common_fused_moe.get_mc2_group', return_value=mock_ep_and_mc2_group(mocker)), \
-        patch('vllm_ascend.ops.common_fused_moe.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
+        patch('vllm_ascend.ops.fused_moe.fused_moe.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
+        patch('vllm_ascend.ops.fused_moe.token_dispatcher.get_ep_group', return_value=mock_ep_and_mc2_group(mocker)), \
+        patch('vllm_ascend.ops.fused_moe.fused_moe.get_mc2_group', return_value=mock_ep_and_mc2_group(mocker)), \
+        patch('vllm_ascend.ops.fused_moe.fused_moe.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm.distributed.parallel_state.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
-        patch('vllm_ascend.ops.common_fused_moe.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
+        patch('vllm_ascend.ops.fused_moe.fused_moe.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm.model_executor.layers.fused_moe.layer.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
         patch('vllm.model_executor.layers.fused_moe.config.get_dp_group',
             return_value=mock_dp_and_tp_group(mocker)), \
-        patch('vllm_ascend.ops.common_fused_moe.get_ascend_config',
+        patch('vllm_ascend.ops.fused_moe.fused_moe.get_ascend_config',
             return_value=MagicMock(
                 torchair_graph_config=MagicMock(enabled=False),
                 enable_multistream_moe=False,
                 expert_map_path=None
             )), \
-        patch('vllm_ascend.ops.common_fused_moe.determine_expert_map',
+        patch('vllm_ascend.ops.fused_moe.fused_moe.determine_expert_map',
             return_value=(3, torch.tensor([0, 1, 2, -1, -1, -1, -1, -1]))), \
-        patch('vllm_ascend.ops.common_fused_moe.get_forward_context',
+        patch('vllm_ascend.ops.fused_moe.fused_moe.get_forward_context',
             return_value=mock_forward_context_obj), \
-        patch('vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_forward_context',
+        patch('vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context',
             return_value=mock_forward_context_obj), \
         patch("vllm_ascend.utils.get_ascend_soc_version", return_value=AscendSocVersion.A3), \
-        patch('vllm_ascend.ops.moe.moe_mlp.get_forward_context',
+        patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context',
                 return_value=mock_forward_context_obj), \
-        patch('vllm_ascend.ops.moe.moe_comm_method.MC2CommImpl._get_token_dispatcher',
+        patch('vllm_ascend.ops.fused_moe.moe_comm_method.MC2CommImpl._get_token_dispatcher',
               return_value=None), \
-        patch('vllm_ascend.ops.moe.moe_comm_method.AlltoAllCommImpl._get_token_dispatcher',
+        patch('vllm_ascend.ops.fused_moe.moe_comm_method.AlltoAllCommImpl._get_token_dispatcher',
               return_value=None), \
-        patch('vllm_ascend.ops.moe.moe_comm_method.AllGatherCommImpl._get_token_dispatcher',
+        patch('vllm_ascend.ops.fused_moe.moe_comm_method.AllGatherCommImpl._get_token_dispatcher',
               return_value=None), \
-        patch('vllm_ascend.ops.moe.experts_selector.get_forward_context',
+        patch('vllm_ascend.ops.fused_moe.experts_selector.get_forward_context',
               return_value=mock_forward_context_obj):
 
         yield {
@@ -319,8 +322,8 @@ class TestCumsumGroupList(TestBase):
 
 class TestUnifiedApplyMLP(TestBase):
 
-    @patch('vllm_ascend.ops.moe.moe_mlp.get_forward_context')
-    @patch('vllm_ascend.ops.moe.moe_mlp.is_310p')
+    @patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context')
+    @patch('vllm_ascend.ops.fused_moe.moe_mlp.is_310p')
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_dynamic_quant')
     @patch('torch_npu.npu_dequant_swiglu_quant')
@@ -384,7 +387,7 @@ class TestUnifiedApplyMLP(TestBase):
 
         self.assertEqual(result.dtype, torch.bfloat16)
 
-    @patch('vllm_ascend.ops.moe.moe_mlp.is_310p')
+    @patch('vllm_ascend.ops.fused_moe.moe_mlp.is_310p')
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_swiglu')
     @patch('torch_npu.npu_dynamic_quant')
@@ -426,7 +429,7 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertEqual(result.shape, hidden_states.shape)
         self.assertEqual(result.dtype, torch.float16)
 
-    @patch('vllm_ascend.ops.moe.moe_mlp.get_forward_context')
+    @patch('vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context')
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_swiglu')
     @patch('torch_npu.npu_dynamic_quant')
@@ -486,7 +489,7 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertEqual(result.shape, hidden_states.shape)
         self.assertEqual(result.dtype, torch.bfloat16)
 
-    @patch('vllm_ascend.ops.moe.moe_mlp.is_310p')
+    @patch('vllm_ascend.ops.fused_moe.moe_mlp.is_310p')
     @patch('torch_npu.npu_grouped_matmul')
     @patch('torch_npu.npu_swiglu')
     @patch('torch_npu.npu_dynamic_quant')
@@ -531,7 +534,7 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertEqual(result.shape, hidden_states.shape)
         self.assertEqual(result.dtype, torch.float16)
 
-    @patch("vllm_ascend.ops.moe.moe_mlp.get_forward_context")
+    @patch("vllm_ascend.ops.fused_moe.moe_mlp.get_forward_context")
     @patch("torch_npu.npu_grouped_matmul")
     @patch("torch_npu.npu_swiglu")
     @patch("torch_npu.npu_grouped_matmul_swiglu_quant")
@@ -595,3 +598,39 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertTrue(mock_forward_context.with_quant)
         self.assertEqual(result.shape, hidden_states.shape)
         self.assertEqual(result.dtype, torch.bfloat16)
+
+
+class TestLoadWeight(TestBase):
+
+    def test_load_w13_transpose(self):
+        with patch.object(AscendFusedMoE, "__init__",
+                          lambda self, *args, **kwargs: None):
+            moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
+
+            expert_data = torch.randn(128, 8)
+            loaded_weight = torch.randn(128, 4)
+            moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
+
+            expert_data = torch.randn(8, 128)
+            loaded_weight = torch.randn(128, 4)
+            moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
+
+            expert_data = torch.randn(128, 8)
+            loaded_weight = torch.randn(128, 4)
+            moe._load_w13(expert_data, 1, "w3", loaded_weight, 0)
+
+            expert_data = torch.randn(8, 128)
+            loaded_weight = torch.randn(128, 4)
+            moe._load_w13(expert_data, 1, "w3", loaded_weight, 0)
+
+    def test_load_w2_transpose(self):
+        with patch.object(AscendFusedMoE, "__init__",
+                          lambda self, *args, **kwargs: None):
+            moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
+            expert_data = torch.randn(128, 4)
+            loaded_weight = torch.randn(128, 8)
+            moe._load_w2(expert_data, 1, loaded_weight, 0)
+
+            expert_data = torch.randn(4, 128)
+            loaded_weight = torch.randn(128, 8)
+            moe._load_w2(expert_data, 1, loaded_weight, 0)
