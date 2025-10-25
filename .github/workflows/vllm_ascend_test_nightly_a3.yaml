@@ -68,7 +68,7 @@ jobs:
           - name: deepseek-r1-0528-w8a8-prefix-cache
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/features/test_prefix_cache_deepseek_r1_0528_w8a8.py
-          - name: qwen-qwq-32b-a3-4
+          - name: qwq-32b-a3
             os: linux-aarch64-a3-4
             tests: tests/e2e/nightly/models/test_qwen3_qwq_32b.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
