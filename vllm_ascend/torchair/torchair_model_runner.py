@@ -110,30 +110,28 @@ class NPUTorchairModelRunner(NPUModelRunner):
         self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
     def _sync_metadata_across_dp(
-            self, num_tokens: int, with_prefill: bool, enable_dbo: bool
-    ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
+            self, num_tokens: int,
+            with_prefill: bool) -> tuple[int, Optional[torch.Tensor], bool]:
         """Override from NPUModelRunner to pad num_tokens"""
         if self.enable_shared_expert_dp:
             # Padding is not required for shared_expert_dp cases in eager mode.
-            return num_tokens, None, with_prefill, enable_dbo
+            return num_tokens, None, with_prefill
         if self.dp_size == 1:
             if not with_prefill:
                 maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
                     num_tokens)
-                return maybe_padded_num_tokens, None, with_prefill, enable_dbo
-            return num_tokens, None, with_prefill, enable_dbo
+                return maybe_padded_num_tokens, None, with_prefill
+            return num_tokens, None, with_prefill
 
-        num_tokens_across_dp = torch.zeros(self.dp_size + 2,
+        num_tokens_across_dp = torch.zeros(self.dp_size + 1,
                                            dtype=torch.int32,
                                            device="npu")
         num_tokens_across_dp[self.dp_rank] = num_tokens
-        num_tokens_across_dp[-2] = int(with_prefill)
-        num_tokens_across_dp[-1] = int(not enable_dbo)
+        num_tokens_across_dp[-1] = int(with_prefill)
         dist.all_reduce(num_tokens_across_dp,
                         group=get_dp_group().device_group)
-        with_prefill = bool(num_tokens_across_dp[-2])
-        enable_dbo = not bool(num_tokens_across_dp[-1])
-        num_tokens_across_dp = num_tokens_across_dp[:-2]
+        with_prefill = bool(num_tokens_across_dp[-1])
+        num_tokens_across_dp = num_tokens_across_dp[:-1]
 
         if not with_prefill:
             max_num_token = num_tokens_across_dp.max().item()
@@ -146,7 +144,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         else:
             maybe_padded_num_tokens = num_tokens
 
-        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
+        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill
 
     def _build_dummy_attn_metadata(
         self,

@@ -264,8 +264,7 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
             max_query_len=common_attn_metadata.max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
-            attn_state=attn_state,
-            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp)
+            attn_state=attn_state)
         return attn_metadata
 
 

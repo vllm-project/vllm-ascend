@@ -35,8 +35,8 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
                                               determine_default_log2phy_map)
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
-from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
                                shared_expert_dp_enabled,
@@ -435,10 +435,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     def __init__(
         self,
         shared_experts: torch.nn.Module,
+        gate: Optional[torch.nn.Module] = None,
         use_overlapped: bool = True,
         **kwargs,
     ):
         AscendFusedMoE.__init__(self, **kwargs)
+
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
@@ -448,6 +450,16 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
             )
+
+        self._gate = gate
+
+    @property
+    def gate(self) -> Optional[torch.nn.Module]:
+        return self._gate if self.use_overlapped else None
+
+    @property
+    def is_internal_router(self) -> bool:
+        return False
 
     def forward(
         self,
