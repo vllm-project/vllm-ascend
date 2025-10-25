@@ -22,6 +22,7 @@ Run `pytest tests/multicard/test_torchair_ge_graph_mode.py`.
 import os
 from typing import Dict
 
+
 import pytest
 
 from tests.e2e.conftest import VllmRunner
