@@ -111,8 +111,6 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
     original_load_format = model_runner_2.load_config.load_format
     model_runner_2.update_config({"load_config": {"load_format": "dummy"}})
     model_runner_2.load_model()  # Initial model loading with dummy weights
-    # assert str(model_runner.get_model().state_dict()) != str(
-    #     model_runner_2.get_model().state_dict())
     model_runner_2.update_config(
         {"load_config": {
             "load_format": original_load_format
