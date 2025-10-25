@@ -99,9 +99,6 @@ class AscendSchedulerConfig(SchedulerConfig):
             raise NotImplementedError(
                 f"currently AscendScheduler only supports fcfs policy, got {self.policy}"
             )
-        if self.send_delta_data:
-            raise NotImplementedError(
-                "currently AscendScheduler doesn't support send_delta_data.")
         if getattr(self, "scheduler_delay_factor", 0) > 0:
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support scheduler_delay_factor."

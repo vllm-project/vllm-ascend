@@ -24,6 +24,9 @@ import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+# todo: please remove it when solve cuda hard code in vllm
+os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "True"
+
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
@@ -142,7 +145,6 @@ class NPUPlatform(Platform):
             if not model_config.is_multimodal_model and \
                 structured_outputs_config.backend == "auto" and \
                 not getattr(scheduler_config, "scheduler_delay_factor", 0) > 0 and \
-                not scheduler_config.send_delta_data and \
                 scheduler_config.policy == "fcfs":
                 ascend_scheduler_config.enabled = True
                 chunked_prefill_enabled_in_ascend_scheduler = getattr(

@@ -78,21 +78,6 @@ class TestAscendSchedulerConfig(TestBase):
             str(context.exception),
         )
 
-    def test_not_implemented_send_delta_data(self):
-        with self.assertRaises(NotImplementedError) as context:
-            AscendSchedulerConfig.initialize_from_config(
-                self.basic_scheduler_config,
-                AscendSchedulerConfig(
-                    send_delta_data=True,
-                    max_num_batched_tokens=2048,
-                    max_model_len=2048,
-                ),
-            )
-        self.assertIn(
-            "currently AscendScheduler doesn't support send_delta_data",
-            str(context.exception),
-        )
-
     def test_no_override(self):
         ascend_config = AscendSchedulerConfig.initialize_from_config(
             self.basic_scheduler_config, {})
