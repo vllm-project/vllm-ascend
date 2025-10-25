@@ -87,7 +87,8 @@ def set_ascend_forward_context(
     ):
         forward_context = get_forward_context()
 
-        from vllm_ascend.ops.moe.moe_comm_method import get_moe_comm_method
+        from vllm_ascend.ops.fused_moe.moe_comm_method import \
+            get_moe_comm_method
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
 

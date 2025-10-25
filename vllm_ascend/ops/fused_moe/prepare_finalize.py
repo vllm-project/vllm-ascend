@@ -30,7 +30,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.utils import enable_sp, get_rm_router_logits_state
 
 
-class FusedMoEPrepareAndFinalize(ABC):
+class PrepareAndFinalize(ABC):
     """
     Abstract base class for MoE (Mixture-of-Experts) tensor preparation and finalization
     in distributed environments. Subclasses implement specific communication strategies
@@ -103,7 +103,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         raise NotImplementedError("Finalize function not implemented.")
 
 
-class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
+class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
     """
     MoE communication strategy using All-to-All style slicing.
     Similar to MC2 but does not use mc2_mask; instead pads to TP size for uniform slicing.
@@ -195,7 +195,7 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
         return hidden_states
 
 
-class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalizeWithAll2All):
+class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     """
     MoE communication strategy using MC2, which is based on All2All. Hence, it inherits
     All2All and share the same finalize method.
@@ -275,7 +275,7 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalizeWithAll2All):
         return hidden_states, router_logits, mc2_mask, context_metadata
 
 
-class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
+class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     """
     MoE communication strategy using All-Gather + Reduce-Scatter on EP group.
     There are two sets of prepare and finalize:
@@ -429,7 +429,7 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
         return hidden_states
 
 
-class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
+class PrepareAndFinalizeWithNaiveMulticast(PrepareAndFinalize):
     """
     MoE communication strategy using Naive Multicast (point-to-point broadcast).
     Will be used in prefill when using allgather in decode. Each DP rank broadcasts its slice to all others.
