@@ -3169,7 +3169,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         tensor = self._align_memory(
                             tensor, alignment)[:kv_cache_tensor.size]
                     for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
+                        # shared the kvcache between the linear_attn specs in the same group
                         if "linear_attn" in layer_name_inner:
                             kv_cache_raw_tensors[layer_name_inner] = tensor
                 elif "attn" in layer_name and layer_name not in kv_cache_raw_tensors.keys(
