@@ -565,7 +565,7 @@ async def _handle_completions(api: str, request: Request):
                             chunk_json = json.loads(chunk_str)
                         except json.JSONDecodeError:
                             # if chunk is [done], skip it.
-                            logger.warning(
+                            logger.debug(
                                 f"Skipping chunk: {chunk_str}")
                             yield chunk
                             continue
