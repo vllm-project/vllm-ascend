@@ -52,6 +52,7 @@ _IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
+_SHARED_EXPERTS_CALCULATION_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
@@ -257,6 +258,15 @@ def prefetch_stream() -> torch.npu.Stream:
         # we return the default stream.
         _PREFETCH_STREAM = torch_npu.npu.Stream()
     return _PREFETCH_STREAM
+
+
+def shared_experts_calculation_stream() -> torch.npu.Stream:
+    global _SHARED_EXPERTS_CALCULATION_STREAM
+    if _SHARED_EXPERTS_CALCULATION_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
+    return _SHARED_EXPERTS_CALCULATION_STREAM
 
 
 def adapt_patch(is_global_patch: bool = False):
@@ -526,9 +536,10 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
+    from vllm_ascend.models.layers.sfa import AscendSparseFlashAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
-                                                  AscendSharedFusedMoE)
+    from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
+                                                     AscendSharedFusedMoE)
     from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
                                            AscendQuantRMSNorm, AscendRMSNorm)
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
@@ -537,8 +548,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding,
-        AscendYaRNRotaryEmbedding)
+        AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
+        AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -548,6 +559,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
+        "MRotaryEmbedding": AscendMRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
         "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
@@ -562,7 +574,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
-        "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
 
     if vllm_config is not None and \
@@ -570,6 +581,13 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()) and \
             not version_check():
         REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
+    mla_to_register = "MultiHeadLatentAttention" if vllm_version_is(
+        "0.11.0") else "MultiHeadLatentAttentionWrapper"
+    if vllm_config and vllm_config.model_config and vllm_config.model_config.use_mla:
+        AscendMLAAttentionWarrper = AscendSparseFlashAttention if hasattr(
+            vllm_config.model_config.hf_config,
+            "index_topk") else AscendMultiHeadLatentAttention
+        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMLAAttentionWarrper
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -646,6 +664,10 @@ def enable_sp(vllm_config=None) -> bool:
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp or enable_sp()
+
+
+def prefill_context_parallel_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -757,7 +779,7 @@ def is_hierarchical_communication_enabled():
 @functools.cache
 def version_check():
     """check if torch_npu version >= dev20250919"""
-    import re
+    import re  # noqa
     torch_npu_version = torch_npu.version.__version__
     date_pattern = r'dev(\d{8})'
 

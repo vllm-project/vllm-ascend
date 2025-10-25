@@ -20,6 +20,8 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
+from vllm_ascend.utils import vllm_version_is
+
 EOS_TOKEN_ID = 50256
 os.environ["VLLM_USE_V1"] = "1"
 
@@ -106,12 +108,21 @@ def create_scheduler(
         ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    return Scheduler(
-        vllm_config=vllm_config,
-        kv_cache_config=kv_cache_config,
-        log_stats=True,
-        structured_output_manager=StructuredOutputManager(vllm_config),
-    )
+    if vllm_version_is("0.11.0"):
+        return Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+        )
+    else:
+        return Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            block_size=block_size,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+        )
 
 
 _none_hash_initialized = False
@@ -149,7 +160,9 @@ def create_request(
                                       range(num_remote_blocks)),
                                   remote_host="my-host",
                                   remote_port=1234,
-                                  remote_tp_size=1)
+                                  remote_tp_size=1,
+                                  remote_cp_size=1,
+                                  remote_dcp_size=1)
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)

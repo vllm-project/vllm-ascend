@@ -130,6 +130,7 @@ class TestAscendMLADecodeMetadata(TestBase):
 class TestAscendMLAMetadata(TestBase):
 
     def test_ascend_mla_metadata_default(self):
+        num_actual_tokens_pcp_padded = 100
         num_actual_tokens = 100
         slot_mapping = torch.randn(100, 4, 1024)
         query_start_loc = torch.tensor([1, 2, 3, 4])
@@ -150,12 +151,11 @@ class TestAscendMLAMetadata(TestBase):
         decode = None
         prefill = None
 
-        metadata = AscendMLAMetadata(num_actual_tokens, slot_mapping,
-                                     query_start_loc, seq_lens, block_tables,
-                                     num_decodes, num_decode_tokens,
-                                     num_prefills, num_input_tokens,
-                                     query_lens, head_dim, attn_mask,
-                                     attn_state, decode, prefill)
+        metadata = AscendMLAMetadata(
+            num_actual_tokens_pcp_padded, num_actual_tokens, slot_mapping,
+            query_start_loc, seq_lens, block_tables, num_decodes,
+            num_decode_tokens, num_prefills, num_input_tokens, query_lens,
+            head_dim, attn_mask, attn_state, decode, prefill)
 
         self.assertEqual(metadata.num_actual_tokens, num_actual_tokens)
         self.assertIs(metadata.slot_mapping, slot_mapping)
@@ -266,6 +266,10 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
 class TestAscendMLAImpl(TestBase):
 
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
     @patch('vllm.distributed.parallel_state._TP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm.distributed.get_tensor_model_parallel_world_size",
@@ -273,8 +277,13 @@ class TestAscendMLAImpl(TestBase):
     @patch("vllm_ascend.attention.mla_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
     def setUp(self, ascend_config, get_current_vllm_config, mock_get_tp_size,
-              mock_tp):
+              mock_tp, mock_get_dcp_size, mock_dcp):
         mock_tp.world_size = 2
+        mock_tp.rank_in_group = MagicMock()
+        mock_tp.device_group = MagicMock()
+        mock_dcp.world_size = 1
+        mock_dcp.rank_in_group = MagicMock()
+        mock_dcp.device_group = MagicMock()
         vllm_config = MagicMock()
         speculative_config = MagicMock()
         model_config = MagicMock()
@@ -294,13 +303,12 @@ class TestAscendMLAImpl(TestBase):
         kv_a_layernorm.weight = torch.randn(96)
         kv_a_layernorm.variance_epsilon = 1e-6
         kwargs = {
-            "q_lora_rank": 64,
             "kv_lora_rank": 32,
             "qk_nope_head_dim": 64,
             "qk_rope_head_dim": 32,
             "qk_head_dim": 96,
             "v_head_dim": 128,
-            "rotary_emb": MagicMock(),
+            "q_lora_rank": 64,
             "q_proj": MagicMock(),
             "q_b_proj": MagicMock(),
             "kv_b_proj": MagicMock(),
@@ -308,6 +316,7 @@ class TestAscendMLAImpl(TestBase):
             "kv_a_proj_with_mqa": MagicMock(),
             "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": kv_a_layernorm,
+            "rotary_emb": MagicMock(),
         }
 
         self.impl = AscendMLAImpl(num_heads=num_heads,
@@ -329,13 +338,11 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.scale, 0.1)
         self.assertEqual(self.impl.num_kv_heads, 8)
         self.assertEqual(self.impl.kv_cache_dtype, "auto")
-        self.assertEqual(self.impl.q_lora_rank, 64)
         self.assertEqual(self.impl.kv_lora_rank, 32)
         self.assertEqual(self.impl.qk_nope_head_dim, 64)
         self.assertEqual(self.impl.qk_rope_head_dim, 32)
         self.assertEqual(self.impl.qk_head_dim, 96)
         self.assertEqual(self.impl.v_head_dim, 128)
-        self.assertIsNotNone(self.impl.rotary_emb)
         self.assertIsNotNone(self.impl.q_proj)
         self.assertIsNotNone(self.impl.kv_b_proj)
         self.assertIsNotNone(self.impl.o_proj)

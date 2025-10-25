@@ -11,10 +11,6 @@ env_common:
 
 deployment:
   -
-    local_index: 0
-    master_index: 0
-    headless: false
-    env_extend:
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --host 0.0.0.0
@@ -33,10 +29,6 @@ deployment:
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
   -
-    local_index: 1
-    master_index: 0
-    headless: true
-    env_extend:
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
         --headless

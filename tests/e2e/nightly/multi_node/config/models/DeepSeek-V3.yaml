@@ -26,10 +26,6 @@ disaggregated_prefill:
 
 deployment:
   -
-    local_index: 0
-    master_index: 0
-    headless: false
-    env_extend:
     server_cmd: >
         vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
         --host 0.0.0.0
@@ -66,10 +62,6 @@ deployment:
         }'
 
   -
-    local_index: 1
-    master_index: 0
-    headless: true
-    env_extend:
     server_cmd: >
         vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
         --host 0.0.0.0
