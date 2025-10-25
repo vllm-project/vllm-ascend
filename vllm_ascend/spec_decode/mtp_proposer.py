@@ -122,10 +122,11 @@ class MtpProposer(Proposer):
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                   batch_descriptor=None) -> None:
         if not self.torchair_graph_enabled:
-            # TODO: adapt enable_dbo later
-            (num_tokens, num_tokens_across_dp, with_prefill,
-             _) = self.runner._sync_metadata_across_dp(num_tokens,
-                                                       with_prefill, False)
+            (
+                num_tokens,
+                num_tokens_across_dp,
+                with_prefill,
+            ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
 
         moe_comm_type = self.runner._select_moe_comm_method(
             num_tokens, with_prefill)
@@ -429,10 +430,9 @@ class MtpProposer(Proposer):
 
         if not self.torchair_graph_enabled:
             # torch mode need to update num_tokens_across_dp
-            # TODO: adapt enable_dbo later
-            (num_input_tokens, num_tokens_across_dp, with_prefill,
-             _) = self.runner._sync_metadata_across_dp(
-                 num_input_tokens, self.runner.with_prefill, False)
+            (num_input_tokens, num_tokens_across_dp,
+             with_prefill) = self.runner._sync_metadata_across_dp(
+                 num_input_tokens, self.runner.with_prefill)
         else:
             # torchair mode can reuse self.runner.num_tokens_across_dp
             num_tokens_across_dp = self.runner.num_tokens_across_dp

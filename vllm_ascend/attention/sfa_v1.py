@@ -17,11 +17,8 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
-from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
-from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -138,7 +135,6 @@ class AscendSFAMetadata:
 
     decode: Optional[AscendSFADecodeMetadata] = None
     prefill: Optional[AscendSFAPrefillMetadata] = None
-    enable_dbo_across_dp: bool = False
 
     def __post_init__(self):
         pass
@@ -148,17 +144,6 @@ class AscendSFAMetadata:
         #     raise ValueError(
         #         f"Only {supported_head_sizes} are supported for head_dim,",
         #         f"received {self.head_dim}.")
-
-    def split_metadata_for_multistream(
-        self,
-        ms_split_config: MSAttentionMetadataSplitConfig,
-    ) -> list["AscendSFAMetadata"]:
-        """Split metadata for multi-stream with AscendSFAMetadata"""
-        return model_input_split_v1_mla_attn(
-            ms_split_config=ms_split_config,
-            attn_metadata=self,
-            _metadata_cls=AscendMLAMetadata,
-        )
 
 
 M = TypeVar("M", bound=AscendSFAMetadata)
@@ -434,7 +419,6 @@ class AscendSFAMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
-            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
         )
 
 
