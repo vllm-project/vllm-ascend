@@ -222,8 +222,8 @@ class MultiNodeConfig:
 
         benchmarks = config_data.get("benchmarks", {})
         assert benchmarks is not None, "benchmarks must be provided"
-        perf_cmd = benchmarks["perf"]
-        acc_cmd = benchmarks["acc"]
+        perf_cmd = benchmarks.get("perf")
+        acc_cmd = benchmarks.get("acc")
 
         return cls(model=model,
                    test_name=test_name,

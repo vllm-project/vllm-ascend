@@ -52,7 +52,9 @@ async def test_multi_node() -> None:
                 choices: list[openai.types.CompletionChoice] = batch.choices
                 assert choices[0].text, "empty response"
                 # aisbench test
-                run_aisbench_cases(config.model, port, acc_cmd)
-                run_aisbench_cases(config.model, port, perf_cmd)
+                if acc_cmd:
+                    run_aisbench_cases(config.model, port, acc_cmd)
+                if perf_cmd:
+                    run_aisbench_cases(config.model, port, perf_cmd)
             else:
                 remote_server.hang_until_terminated()
