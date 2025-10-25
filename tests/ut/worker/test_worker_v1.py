@@ -41,6 +41,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker_v1._register_atb_extensions")
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
+    @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
@@ -53,6 +54,7 @@ class TestNPUWorker(TestBase):
         mock_try_register_lib,
         mock_init_ascend_soc_version,
         mock_init_ascend_config,
+        mock_get_ascend_config,
         mock_register_ascend_customop,
         mock_register_atb_extensions,
         mock_ops,
@@ -61,6 +63,9 @@ class TestNPUWorker(TestBase):
         """Test NPUWorker normal initialization"""
         # Setup mock behavior
         mock_ops.register_dummy_fusion_op.return_value = None
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_cpu_binding = False
+        mock_get_ascend_config.return_value = mock_ascend_config
 
         # Import and create NPUWorker instance
         from vllm_ascend.worker.worker_v1 import NPUWorker
@@ -98,6 +103,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker_v1._register_atb_extensions")
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
+    @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
@@ -110,6 +116,7 @@ class TestNPUWorker(TestBase):
         mock_try_register_lib,
         mock_init_ascend_soc_version,
         mock_init_ascend_config,
+        mock_get_ascend_config,
         mock_register_ascend_customop,
         mock_register_atb_extensions,
         mock_ops,
@@ -119,6 +126,9 @@ class TestNPUWorker(TestBase):
         # Set trust_remote_code=True
         self.model_config_mock.trust_remote_code = True
         mock_ops.register_dummy_fusion_op.return_value = None
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_cpu_binding = False
+        mock_get_ascend_config.return_value = mock_ascend_config
 
         # Create NPUWorker instance
         from vllm_ascend.worker.worker_v1 import NPUWorker
@@ -138,6 +148,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker_v1._register_atb_extensions")
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
+    @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
@@ -150,6 +161,7 @@ class TestNPUWorker(TestBase):
         mock_try_register_lib,
         mock_init_ascend_soc_version,
         mock_init_ascend_config,
+        mock_get_ascend_config,
         mock_register_ascend_customop,
         mock_register_atb_extensions,
         mock_ops,
@@ -159,6 +171,9 @@ class TestNPUWorker(TestBase):
         # Set custom cache_dtype
         self.cache_config_mock.cache_dtype = "float32"
         mock_ops.register_dummy_fusion_op.return_value = None
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_cpu_binding = False
+        mock_get_ascend_config.return_value = mock_ascend_config
 
         # Create NPUWorker instance
         from vllm_ascend.worker.worker_v1 import NPUWorker
