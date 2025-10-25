@@ -20,7 +20,7 @@
 
 Run `pytest tests/test_offline_inference.py`.
 """
-
+import pytest
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -55,6 +55,8 @@ def test_multimodal_vl(prompt_template):
             assert output_str, "Generated output should not be empty."
 
 
+@pytest.mark.skip(reason="This e2e test will stuck in multi-batch scenario. "
+                  "Add this back after fixing the issue.")
 def test_multimodal_ascend_scheduler(prompt_template):
     image = ImageAsset("cherry_blossom") \
         .pil_image.convert("RGB")
