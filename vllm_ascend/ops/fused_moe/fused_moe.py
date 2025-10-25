@@ -440,6 +440,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         **kwargs,
     ):
         AscendFusedMoE.__init__(self, **kwargs)
+
         self._shared_experts = shared_experts
         self.use_overlapped = use_overlapped
         self.shared_expert_stream = None
@@ -449,6 +450,16 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
             )
+
+        self._gate = gate
+
+    @property
+    def gate(self) -> torch.nn.Module | None:
+        return self._gate if self.use_overlapped else None
+
+    @property
+    def is_internal_router(self) -> bool:
+        return self.gate is not None
 
     def forward(
         self,
