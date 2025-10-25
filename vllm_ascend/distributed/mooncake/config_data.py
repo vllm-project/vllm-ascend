@@ -437,8 +437,7 @@ class MooncakeStoreConfig:
             metadata_server=config.get("metadata_server"),
             global_segment_size=_parse_global_segment_size(
                 config.get("global_segment_size",
-                           DEFAULT_GLOBAL_SEGMENT_SIZE)
-            ),
+                           DEFAULT_GLOBAL_SEGMENT_SIZE)),
             local_buffer_size=config.get("local_buffer_size",
                                          DEFAULT_LOCAL_BUFFER_SIZE),
             protocol=config.get("protocol", "tcp"),
