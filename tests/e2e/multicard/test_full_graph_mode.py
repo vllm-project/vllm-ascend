@@ -70,3 +70,50 @@ def test_models_distributed_Qwen3_MOE_TP2_WITH_FULLGRAPH():
         name_0="vllm_eager_outputs",
         name_1="vllm_fullgraph_outputs",
     )
+
+
+def test_models_distributed_DeepSeek_v32_MOE_TP4_WITH_FULLGRAPH():
+    if 'HCCL_OP_EXPANSION_MODE' in os.environ:
+        del os.environ['HCCL_OP_EXPANSION_MODE']
+    prompts = [
+        "Hello, my name is", "The president of the United States is",
+        "The capital of France is", "The future of AI is"
+    ]
+    model = "vllm-ascend/DeepSeek-V3.2-Exp-W8A8"
+    sampling_params = SamplingParams(max_tokens=32, temperature=0.0)
+    with VllmRunner(model,
+                    max_model_len=5120,
+                    tensor_parallel_size=4,
+                    enforce_eager=False,
+                    additional_config={
+                        "ascend_scheduler_config": {"enable": True},
+                        "enable_shared_expert_dp": False,
+                    },
+                    compilation_config={"cudagraph_mode":
+                                        "FULL_DECODE_ONLY"}) as runner:
+        vllm_fullgraph_outputs = runner.model.generate(prompts,
+                                                       sampling_params)
+
+    with VllmRunner(
+            model,
+            max_model_len=1024,
+            enforce_eager=True,
+    ) as runner:
+        vllm_eager_outputs = runner.model.generate(prompts, sampling_params)
+
+    vllm_fullgraph_outputs_list = []
+    for output in vllm_fullgraph_outputs:
+        vllm_fullgraph_outputs_list.append(
+            (output.outputs[0].index, output.outputs[0].text))
+
+    vllm_eager_outputs_list = []
+    for output in vllm_eager_outputs:
+        vllm_eager_outputs_list.append(
+            (output.outputs[0].index, output.outputs[0].text))
+
+    check_outputs_equal(
+        outputs_0_lst=vllm_eager_outputs_list,
+        outputs_1_lst=vllm_fullgraph_outputs_list,
+        name_0="vllm_eager_outputs",
+        name_1="vllm_fullgraph_outputs",
+    )

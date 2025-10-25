@@ -152,7 +152,7 @@ M = TypeVar("M", bound=AscendSFAMetadata)
 class AscendSFAMetadataBuilder:
     # Does this backend/builder support ACL Graphs for attention (default: no).
     aclgraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.NEVER
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     """
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
@@ -421,6 +421,26 @@ class AscendSFAMetadataBuilder:
             seq_lens=seq_lens,
         )
 
+    def build_for_graph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
+        model: Optional[nn.Module] = None,
+    ):
+        if attn_state == AscendAttentionState.DecodeOnly:
+            attn_metadata = self.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+                model=model,
+            )
+        else:
+            raise NotImplementedError(
+                "Currently we only support building dummy metadata for DecodeOnly state"
+            )
+
+        attn_metadata.attn_state = attn_state
+        return attn_metadata
+    
 
 class PrefillSFAPreprocessResult(NamedTuple):
     q_nope: Optional[torch.Tensor] = None
