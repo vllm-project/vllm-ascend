@@ -25,9 +25,10 @@ on:
       # Run test at 24:00 Beijing time (UTC+8)
       - cron: "0 16 * * *"
   workflow_dispatch:
-  pull_request: 
+  pull_request_target: 
     branches:
       - 'main'
+    types: [labeled]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -89,6 +90,25 @@ jobs:
           - name: multi-node-dpsk-4node-pd
             config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
             size: 4
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: a3
+      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      replicas: 1
+      size: ${{ matrix.test_config.size }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+
+  multi-node-tests-with-pull_request_target:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config:
+          - name: multi-node-dpsk-4node-pd
+            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
+            size: 4
+            vllm_ascend_ref: ${{ github.event.pull_request.head.ref }}
+            vllm_ascend_remote_url: ${{ github.event.pull_request.head.repo.full_name }}
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
