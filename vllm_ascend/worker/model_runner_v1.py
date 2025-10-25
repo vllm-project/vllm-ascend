@@ -543,7 +543,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.compilation_config.cudagraph_capture_sizes:
             max_num_tokens = self.compilation_config.cudagraph_capture_sizes[0]
         else:
-            max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
+            # NOTE: To save memory, we cap the max number of tokens to 512.
+            max_num_tokens = min(
+                self.max_num_reqs * self.uniform_decode_query_len, 512)
         tp_size = self.parallel_config.tensor_parallel_size
         # Use integer arithmetic for ceiling division.
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
