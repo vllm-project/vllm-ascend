@@ -389,6 +389,11 @@ class NPUPlatform(Platform):
             )
 
     @classmethod
+    def import_kernels(cls) -> None:
+        from vllm_ascend.utils import enable_custom_op
+        enable_custom_op()
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend,
