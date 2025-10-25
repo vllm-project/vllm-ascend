@@ -125,7 +125,6 @@ class CustomQwen2Attention(Qwen2Attention):
                                                  v,
                                                  kv_cache=kv_cache,
                                                  attn_metadata=attn_metadata,
-                                                 trace_flag=False,
                                                  **forward_kwargs)
             output, _ = self.o_proj(attn_output)
             return output
