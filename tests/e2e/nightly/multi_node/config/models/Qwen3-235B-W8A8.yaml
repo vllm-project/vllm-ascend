@@ -1,16 +1,5 @@
-# For disaggregated mode, set is_disaggregated: true, and set the following parameters:
-# Prefiller_index: the hosts index of the node running prefiller
-# Decoder_index: the hosts index of the node running decoder
-# Suppose we have **4 nodes** running a 2P1D setup (2 Prefillers + 1 Decoder):
-#   ┌───────────────┬───────────────┬───────────────┬───────────────┐
-#   │   node0       │   node1       │   node2       │   node3       │
-#   │ Prefiller #1  │ Prefiller #2  │   Decoder     │   Decoder     │
-#   └───────────────┴───────────────┴───────────────┴───────────────┘
-# For the prefiller nodes. the hosts should be node0 and node1
-# For the decoder nodes. we only have 1 decoder node(dp+tp+ep across node2 and node3. Where node3 is running with headless mode)
-# So the prefiller_host_index is [0, 1], and the decoder_host_index is [2]
-test_name: "test DeepSeek-V3 disaggregated_prefill"
-model: "vllm-ascend/DeepSeek-V3-W8A8"
+test_name: "test Qwen3-235B-A22B-W8A8 disaggregated_prefill"
+model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
 num_nodes: 2
 npu_per_node: 16
 env_common:
@@ -27,14 +16,13 @@ disaggregated_prefill:
 deployment:
   -
     server_cmd: >
-        vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
+        vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 2
         --data-parallel-size-local 2
         --tensor-parallel-size 8
         --seed 1024
-        --enforce-eager
         --enable-expert-parallel
         --max-num-seqs 16
         --max-model-len 8192
@@ -63,7 +51,7 @@ deployment:
 
   -
     server_cmd: >
-        vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
+        vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 2
@@ -78,7 +66,6 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --additional-config '{"torchair_graph_config":{"enabled":true}}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnector",
         "kv_role": "kv_consumer",
