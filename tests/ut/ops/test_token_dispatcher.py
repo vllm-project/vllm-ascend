@@ -21,7 +21,7 @@ import torch
 
 from tests.ut.base import TestBase
 
-from vllm_ascend.ops.moe.token_dispatcher import (  # isort: skip
+from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
     AscendSocVersion, TokenDispatcherWithAll2AllV,
     TokenDispatcherWithAllGather, TokenDispatcherWithMC2)
 
@@ -34,7 +34,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.mc2_group.rank_in_group = 0
         self.mc2_group.world_size = 8
         self.mc2_group_patch = patch(
-            "vllm_ascend.ops.moe.token_dispatcher.get_mc2_group",
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_mc2_group",
             return_value=self.mc2_group)
         self.mc2_group_patch.start()
 
@@ -52,7 +52,7 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         # Mock get_ascend_soc_version()
         self.ascend_soc_version_patch = patch(
-            "vllm_ascend.ops.moe.token_dispatcher.get_ascend_soc_version",
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_soc_version",
             return_value=AscendSocVersion.A3)
         self.ascend_soc_version_patch.start()
 
@@ -369,7 +369,8 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(8, 16)
 
         # Mock async_all_to_all
-        patcher6 = patch('vllm_ascend.ops.moe.comm_utils.async_all_to_all')
+        patcher6 = patch(
+            'vllm_ascend.ops.fused_moe.comm_utils.async_all_to_all')
         self.mock_async_all_to_all = patcher6.start()
         self.addCleanup(patcher6.stop)
         self.mock_async_all_to_all.return_value = (None, torch.randn(16, 16),
@@ -377,7 +378,7 @@ class TestTokenDispatcherWithAll2AllV(TestBase):
 
         # Mock gather_from_sequence_parallel_region
         patcher7 = patch(
-            'vllm_ascend.ops.moe.token_dispatcher.gather_from_sequence_parallel_region'
+            'vllm_ascend.ops.fused_moe.token_dispatcher.gather_from_sequence_parallel_region'
         )
         self.mock_gather_from_sequence_parallel_region = patcher7.start()
         self.addCleanup(patcher7.stop)

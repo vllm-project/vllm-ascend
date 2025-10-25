@@ -24,7 +24,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, is_enable_nz
 
 
