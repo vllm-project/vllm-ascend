@@ -1,5 +1,5 @@
-test_name: "test Qwen3-235B-A22B multi-dp"
-model: "Qwen/Qwen3-235B-A22B"
+test_name: "test GLM-4.5 multi-dp"
+model: "ZhipuAI/GLM-4.5"
 num_nodes: 2
 npu_per_node: 16
 env_common:
@@ -12,7 +12,7 @@ env_common:
 deployment:
   -
     server_cmd: >
-        vllm serve "Qwen/Qwen3-235B-A22B"
+        vllm serve "ZhipuAI/GLM-4.5"
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 4
@@ -30,7 +30,7 @@ deployment:
         --gpu-memory-utilization 0.9
   -
     server_cmd: >
-        vllm serve "Qwen/Qwen3-235B-A22B"
+        vllm serve "ZhipuAI/GLM-4.5"
         --headless
         --data-parallel-size 4
         --data-parallel-size-local 2
