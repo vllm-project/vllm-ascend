@@ -454,12 +454,12 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         self._gate = gate
 
     @property
-    def gate(self) -> torch.nn.Module | None:
+    def gate(self) -> Optional[torch.nn.Module]:
         return self._gate if self.use_overlapped else None
 
     @property
     def is_internal_router(self) -> bool:
-        return self.gate is not None
+        return False
 
     def forward(
         self,
