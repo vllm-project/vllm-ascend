@@ -2,12 +2,16 @@ import pytest
 from vllm.attention import Attention
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig, VllmConfig)
+from vllm.model_executor.layers.linear import WEIGHT_LOADER_V2_SUPPORTED
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheTensor)
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.npu_input_batch import InputBatch
+
+if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
+    WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
