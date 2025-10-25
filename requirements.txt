@@ -2,6 +2,7 @@
 cmake>=3.26
 decorator
 einops
+msserviceprofiler==1.1.4b1
 numpy<2.0.0
 packaging
 pip
