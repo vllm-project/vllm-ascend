@@ -260,8 +260,11 @@ class NPUPlatform(Platform):
                 f"{vllm_config.parallel_config.tensor_parallel_size}")
             if len(sp_aclgraph_sizes) != len(original_sizes):
                 compilation_config.cudagraph_capture_sizes = sp_aclgraph_sizes
-                vllm_config.compilation_config.init_with_cudagraph_sizes(
-                    sp_aclgraph_sizes)
+                if vllm_version_is("0.11.0"):
+                    compilation_config.init_with_cudagraph_sizes(
+                        sp_aclgraph_sizes)
+                else:
+                    vllm_config.compilation_config.post_init_cudagraph_sizes()
 
         # TODO: Full graph is fully supported later, and the default value will be set to full graph.
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:

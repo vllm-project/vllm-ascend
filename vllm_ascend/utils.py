@@ -402,7 +402,11 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         indices[0], indices[-1] = 0, len(original_sizes) - 1
 
         sampled_sizes = [original_sizes[i] for i in indices]
-        compilation_config.init_with_cudagraph_sizes(sampled_sizes)
+        if vllm_version_is("0.11.0"):
+            compilation_config.init_with_cudagraph_sizes(sampled_sizes)
+        else:
+            compilation_config.cudagraph_capture_sizes = sampled_sizes
+            compilation_config.post_init_cudagraph_sizes()
 
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
@@ -433,7 +437,11 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
             enlarged_sizes = [(num_speculative_tokens + 1) * size
                               for size in original_sizes]
-            compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            if vllm_version_is("0.11.0"):
+                compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            else:
+                compilation_config.cudagraph_capture_sizes = enlarged_sizes
+                compilation_config.post_init_cudagraph_sizes()
             logger.info(
                 "Adjusted ACL graphs: %s → %s for speculative decoding",
                 original_sizes, enlarged_sizes)
