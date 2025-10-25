@@ -207,7 +207,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
         if model is not None and (
             (self.listen_port and self.listen_port in range(1024, 65535)) or
             (self.listen_port is None)):
-            from vllm.utils import get_ip
+            if vllm_version_is("0.11.0"):
+                from vllm.utils import get_ip
+            else:
+                from vllm.utils.network_utils import get_ip
             driver_ip = get_ip()
 
             if driver_ip == '0.0.0.0':
