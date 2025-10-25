@@ -26,7 +26,7 @@ MAX_INT = 2147483647
 @dataclass
 class AscendSchedulerConfig(SchedulerConfig):
     enable_chunked_prefill: bool = False
-    max_long_partial_prefills: int = MAX_INT
+    max_long_partial_prefills: int = 1
     long_prefill_token_threshold: int = MAX_INT
     policy: str = "fcfs"
     scheduler_cls: Union[str, Type[object]] = (
@@ -73,9 +73,9 @@ class AscendSchedulerConfig(SchedulerConfig):
                 "max_num_batched_tokens and makes vLLM reject longer "
                 "sequences. Please increase max_num_batched_tokens or "
                 "decrease max_model_len.")
-        # concurrent partial prefills. Default is inf
+        # concurrent partial prefills. Default is 1 meaning not enabled.
         if self.max_long_partial_prefills is None:
-            self.max_long_partial_prefills = MAX_INT
+            self.max_long_partial_prefills = 1
             self.long_prefill_token_threshold = MAX_INT
 
         if self.long_prefill_token_threshold is None or \
