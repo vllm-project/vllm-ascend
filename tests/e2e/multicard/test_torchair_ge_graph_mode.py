@@ -17,7 +17,7 @@
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
-Run `pytest tests/multicard/test_torchair_graph_mode.py`.
+Run `pytest tests/multicard/test_torchair_ge_graph_mode.py`.
 """
 import os
 from typing import Dict
