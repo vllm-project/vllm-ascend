@@ -83,7 +83,7 @@ class BlockTable:
                                             pin_memory=self.pin_memory)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
         self.slot_mapping = torch.zeros(self.max_num_batched_tokens,
-                                        dtype=torch.int64,
+                                        dtype=torch.int32,
                                         device=self.device)
         try:
             self.pcp_world_size = get_pcp_group(
