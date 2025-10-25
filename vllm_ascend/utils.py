@@ -686,6 +686,13 @@ def weak_ref_tensors(
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
+
+    This function should be used in the following scenario:
+    When a tensor is created during graph capture, and it's held by a method
+    that's not part of the graph, we don't really need to store it, but we
+    **do need** its buffer pointer. If we don't handle this, it cannot
+    be garbage collected, leading to a memory leak. To avoid this,
+    we should create a weak reference to the tensor.
     """
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)

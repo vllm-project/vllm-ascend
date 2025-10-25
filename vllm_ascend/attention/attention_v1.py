@@ -443,7 +443,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             block_table=attn_metadata.block_tables,
                             context_lens=attn_metadata.seq_lens,
                             out=output)
-                        update_graph_params_workspaces(num_tokens, workspace)
+                        update_graph_params_workspaces(
+                            num_tokens, weak_ref_tensors(workspace))
 
                 # Handle graph capturing mode
                 stream = torch_npu.npu.current_stream()
@@ -459,7 +460,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     self.num_kv_heads,
                     self.num_heads,
                     self.scale,
-                    weak_ref_tensors(attn_metadata.block_tables),
+                    attn_metadata.block_tables,
                     attn_metadata.seq_lens,
                     weak_ref_tensors(output),
                 ))
