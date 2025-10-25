@@ -8,7 +8,10 @@ def test_multi_node() -> None:
     env_dict = config.envs
     # perf_cmd = config.perf_cmd
     # acc_cmd = config.acc_cmd
-    server_port = config.server_port if not config.disaggregated_prefill else config.proxy_port
+    nodes_info = config.nodes_info
+    disaggregated_prefill = config.disaggregated_prefill
+    server_port = config.server_port
+    proxy_port = config.proxy_port
     server_host = config.cluster_ips[0]
     with config.launch_server_proxy(DISAGGREGATED_PREFILL_PROXY_SCRIPT):
         with RemoteOpenAIServer(
@@ -18,6 +21,9 @@ def test_multi_node() -> None:
                 server_host=server_host,
                 env_dict=env_dict,
                 auto_port=False,
+                proxy_port=proxy_port,
+                disaggregated_prefill=disaggregated_prefill,
+                nodes_info=nodes_info,
                 max_wait_seconds=2000,
         ) as remote_server:
             # base_url = remote_server.url_root
