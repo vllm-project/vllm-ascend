@@ -10,7 +10,7 @@ Hence, KV Cache Pool is proposed to utilize various types of storages including 
 
 vLLM Ascend currently supports Mooncake (https://github.com/kvcache-ai/Mooncake): one of the most recognized KV Cache storage engine;
 
- While one can utilize mooncake store in vLLM V1 engine by setting it as a remote backend of LMCache, we find it would be better to integrate a connector that directly supports mooncake store and can utilize the data transfer strategy to one that is best fit to Huawei NPU hardware. Hence, we propose to integrate Mooncake Store with a brand new Mooncake Connector V1, which is indeed largly inspired by LMCache Connector V1.
+While one can utilize mooncake store in vLLM V1 engine by setting it as a remote backend of LMCache, we find it would be better to integrate a connector that directly supports mooncake store and can utilize the data transfer strategy to one that is best fit to Huawei NPU hardware. Hence, we propose to integrate Mooncake Store with a brand new Mooncake Connector V1, which is indeed largly inspired by LMCache Connector V1.
 
 
 
@@ -56,5 +56,5 @@ To Enable this feature, we need to setup both Mooncake Connector and Mooncake St
 
 1. Currently, Mooncake Store for vLLM-Ascend only supports DRAM as the storage for KV Cache pool.
 
-2. Currently, if we successfully looked up a key and found it exists, but failed to get it when calling KV Pool's get function, we just output a log indicating the get operation failed and keep going; hence, the accuracy of that specific request may be affected. We will handle this situation by falling back the request and re-compute everything assuming there's no prefix cache hit (or even better, revert only one block and keep using the Prefix Caches before that).
+2. For now, if we successfully looked up a key and found it exists, but failed to get it when calling KV Pool's get function, we just output a log indicating the get operation failed and keep going; hence, the accuracy of that specific request may be affected. We will handle this situation by falling back the request and re-compute everything assuming there's no prefix cache hit (or even better, revert only one block and keep using the Prefix Caches before that).
 
