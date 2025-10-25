@@ -203,13 +203,6 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
         spec_query_start_loc = attn_metadata.spec_query_start_loc
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
         spec_sequence_masks = attn_metadata.spec_sequence_masks
-        if vllm_version_is("0.11.0"):
-            spec_token_masks = attn_metadata.spec_token_masks
-            if spec_token_masks is not None:
-                spec_token_masks = spec_token_masks[:num_actual_tokens]
-        else:
-            spec_token_indx = attn_metadata.spec_token_indx
-            non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache[forward_context.virtual_engine]
@@ -221,6 +214,14 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
                              attn_metadata.num_decode_tokens +
                              attn_metadata.num_spec_decode_tokens)
         num_accepted_tokens = attn_metadata.num_accepted_tokens
+
+        if vllm_version_is("0.11.0"):
+            spec_token_masks = attn_metadata.spec_token_masks
+            if spec_token_masks is not None:
+                spec_token_masks = spec_token_masks[:num_actual_tokens]
+        else:
+            spec_token_indx = attn_metadata.spec_token_indx
+            non_spec_token_indx = attn_metadata.non_spec_token_indx
 
         # 1. Set up dimensions for reshapes later
         projected_states, _ = self.in_proj(hidden_states[:num_actual_tokens])
