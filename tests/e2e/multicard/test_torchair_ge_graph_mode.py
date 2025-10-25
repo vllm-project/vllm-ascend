@@ -28,7 +28,6 @@ from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
-
 def _qwen_torchair_test_fixture(
     additional_config: Dict,
     *,
