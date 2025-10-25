@@ -3,13 +3,14 @@
 ## Why We Need EPLB?
 When using Expert Parallelism (EP), different experts are assigned to different GPUs/NPUs. Given that the load of various experts may vary depending on the current workload, it is crucial to maintain balanced loads across different GPUs/NPUs. We adopt a redundant experts strategy by duplicating heavily-loaded experts. Then, we heuristically pack these duplicated experts onto GPUs to ensure load balancing across them. Moreover, thanks to the group-limited expert routing used in MoE models, we also attempt to place experts of the same group on the same node to reduce inter-node data traffic, whenever possible.
 
-To facilitate reproduction and deployment, we open-source our deployed EP load balancing algorithm in `eplb.py`. The algorithm computes a balanced expert replication and placement plan based on the estimated expert loads. Note that the exact method for predicting expert loads is outside the scope of this repository. A common method is to use a moving average of historical statistics.
+To facilitate reproduction and deployment, we open-source our deployed EP load balancing algorithm in `vllm_ascend/eplb/core/policy`. The algorithm computes a balanced expert replication and placement plan based on the estimated expert loads. Note that the exact method for predicting expert loads is outside the scope of this repository. A common method is to use a moving average of historical statistics.
 
+![eplb](./images/eplb.png)
 ## How to Use EPLB?
 Please refer to the EPLB section of the user guide for detailed information: [How to Use EPLB](../../user_guide/feature_guide/eplb_swift_balancer.md)
 
 ## How It Works?
-![eplb](./images/eplb.png)
+
 ### Default Algorithm
 #### Hierarchical Load Balancing
 When the number of server nodes evenly divides the number of expert groups, we use the hierarchical load balancing policy to leverage group-limited expert routing. We first pack the expert groups onto nodes evenly, ensuring balanced loads across different nodes. Then, we replicate the experts within each node. Finally, we pack the replicated experts onto individual GPUs to ensure load balancing across them. The hierarchical load balancing policy can be used in the prefilling stage with a smaller expert-parallel size.
@@ -18,8 +19,8 @@ When the number of server nodes evenly divides the number of expert groups, we u
 In other cases, we use the global load balancing policy, which replicates experts globally regardless of expert groups, and packs the replicated experts onto individual GPUs. This policy can be adopted in the decoding stage with a larger expert-parallel size.
 
 ### Add a New MoE Model
-When adding a new model, inherit or modify `VllmEplbAdaptor`. Add the processing logic for `num_dense_layers`, `global_expert_num`, and `num_roe_layers`, and synchronize the relevant logic within the `model_register` function.
-If you want to add MoE-related processing to the model, add corresponding methods to `VLLM/EPLB/utils` and add patch logic in the `model_register` function.
+When adding a new model, inherit or modify `vllm_ascend/eplb/adaptor/vllm_adaptor.py`. Add the processing logic for `num_dense_layers`, `global_expert_num`, and `num_roe_layers`, and synchronize the relevant logic within the `model_register` function.
+If you want to add MoE-related processing to the model, add corresponding methods to `vllm_ascend/eplb/utils.py` and add patch logic in the `model_register` function.
 
 ## DFX
 ### Parameter Validation
