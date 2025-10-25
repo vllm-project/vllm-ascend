@@ -1,0 +1,14 @@
+model_name: "LLM-Research/Phi-4-mini-instruct"
+runner: "linux-aarch64-a2-1"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.81
+  - name: "exact_match,flexible-extract"
+    value: 0.81
+trust_remote_code: True
+num_fewshot: 5
+batch_size: 32
+gpu_memory_utilization: 0.8
