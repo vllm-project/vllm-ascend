@@ -74,6 +74,20 @@ jobs:
       runner: ${{ matrix.test_config.os }}
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       tests: ${{ matrix.test_config.tests }}
+  single-node-tests1:
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          - name: qwen-qwq-32b-a3-4
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/models/test_qwen3_qwq_32b.py
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      vllm: v0.11.0
+      runner: ${{ matrix.test_config.os }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      tests: ${{ matrix.test_config.tests }}
 
   multi-node-tests:
     needs: single-node-tests
