@@ -91,8 +91,6 @@ class AscendCommonAttentionMetadata:
 
     attn_state: Any = None
 
-    enable_dbo_across_dp: bool = False
-
     is_only_prefill: bool = False
 
     graph_pad_size: int = -1
