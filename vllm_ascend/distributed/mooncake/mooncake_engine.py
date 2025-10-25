@@ -126,16 +126,6 @@ class MooncakeEngine:
                         region_len = self.num_blocks * self.block_len[0]
                         self._register(base_addr, region_len)
 
-    def _register(self, ptr, length):
-        logger.debug(
-            "Registering KV cache: ptr=0x%x, length=%d, num_blocks=%d, "
-            "block_lens=%s", ptr, length, self.num_blocks, self.block_len)
-        try:
-            self.m_store.register_buffer(ptr, length)
-        except Exception as e:
-            raise RuntimeError(
-                f"Mooncake memory registration failed. Error is: {e}")
-
         if self.use_layerwise:
             self.get_event = threading.Event()
             if self.kv_role in ['kv_producer', 'kv_both']:
@@ -169,6 +159,16 @@ class MooncakeEngine:
                     self.block_len, self.block_size, ready_event)
                 self.kv_recv_thread.start()
                 ready_event.wait()
+
+    def _register(self, ptr, length):
+        logger.debug(
+            "Registering KV cache: ptr=0x%x, length=%d, num_blocks=%d, "
+            "block_lens=%s", ptr, length, self.num_blocks, self.block_len)
+        try:
+            self.m_store.register_buffer(ptr, length)
+        except Exception as e:
+            raise RuntimeError(
+                f"Mooncake memory registration failed. Error is: {e}")
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         self.current_layer = 0
