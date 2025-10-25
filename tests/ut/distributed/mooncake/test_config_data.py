@@ -26,7 +26,7 @@ class TestParseGlobalSegmentSize(unittest.TestCase):
     
     def test_mb_unit(self):
         self.assertEqual(_parse_global_segment_size("512MB"), 512 * 1024**2)
-        self.assertEqual(_parse_global_segment_size("0.5MB"), 
+        self.assertEqual(_parse_global_segment_size("0.5MB"),
                          int(0.5 * 1024**2))
         self.assertEqual(_parse_global_segment_size("1024MB"), 1024 * 1024**2)
 
@@ -59,7 +59,7 @@ class TestParseGlobalSegmentSize(unittest.TestCase):
 class TestConvertToBytes(unittest.TestCase):
     def test_valid_conversion(self):
         self.assertEqual(_convert_to_bytes("10", 1, "10"), 10)
-        self.assertEqual(_convert_to_bytes("1.5", 1024, "1.5KB"), 
+        self.assertEqual(_convert_to_bytes("1.5", 1024, "1.5KB"),
                          int(1.5 * 1024))
         self.assertEqual(_convert_to_bytes("0", 1024**3, "0GB"), 0)
     
