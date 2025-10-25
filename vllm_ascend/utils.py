@@ -758,13 +758,13 @@ def get_default_buffer_config() -> dict:
 def calculate_dp_buffer_size() -> int:
     """
     formula of dp buffer size:
-    dp_size + 2 (flags: with_prefill and enable_dbo)
+    dp_size + 1 (flags: with_prefill)
     """
     from vllm.config import get_current_vllm_config
     vllm_config = get_current_vllm_config()
     dp_size = vllm_config.parallel_config.data_parallel_size
     int32_size = torch.iinfo(torch.int32).bits // 8
-    dp_buffer_size = math.ceil((dp_size + 2) * int32_size / (1024 * 1024))
+    dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
 
 
