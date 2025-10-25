@@ -541,7 +541,7 @@ async def _handle_completions(api: str, request: Request):
                             released_kv = True
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
-                        except Exception:
+                        except UnicodeDecodeError:
                             logger.debug(
                                 f"Skipping chunk: {chunk}")
                             yield chunk
