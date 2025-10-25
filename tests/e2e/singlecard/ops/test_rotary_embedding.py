@@ -107,16 +107,9 @@ class RotaryEmbedding(nn.Module):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
-    def forward_native(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward_native(self, positions: torch.Tensor, query: torch.Tensor,
+                       key: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """A PyTorch-native implementation of forward()."""
-        if offsets is not None:
-            positions = positions + offsets
         positions = positions.flatten()
         num_tokens = positions.shape[0]
         cos_sin = self.cos_sin_cache.index_select(0, positions)
@@ -230,12 +223,8 @@ class ModelwithRotaryEmbedding(nn.Module):
         )
         self.o_proj = nn.Linear(num_heads * head_size, hidden_size)
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def forward(self, positions: torch.Tensor,
+                hidden_states: torch.Tensor) -> torch.Tensor:
         # we simulated a simple attention layer to test if it can be seamlessly captured into aclgraph
         qkv = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(3, dim=-1)

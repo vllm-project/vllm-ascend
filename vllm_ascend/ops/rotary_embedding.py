@@ -35,13 +35,8 @@ def _custom_rotary_embedding_enabled(query, neox_style, head_size):
 
 
 def _rope_forward_oot(
-    self,
-    positions: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    is_neox_style: bool,
-    offsets: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
+        self, positions: torch.Tensor, query: torch.Tensor, key: torch.Tensor,
+        is_neox_style: bool) -> Tuple[torch.Tensor, torch.Tensor]:
     query_shape, key_shape = query.shape, key.shape
     if self.cos_sin_cache.device != query.device:
         self.cos_sin_cache = self.cos_sin_cache.to(query.device)
@@ -59,54 +54,50 @@ def _rope_forward_oot(
             is_neox_style,
         )
         return query.view(query_shape), key.view(key_shape)
-    if offsets is not None:
-        raise NotImplementedError(
-            "Batched rotary embedding is currently not supported on NPU.")
+
+    if self.cos is not None and \
+        self.sin is not None:
+        # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
+        # This method requires head_size and rotary_dim equal 128 and neox_style is True
+        query = query.contiguous().view(1, query.shape[0], -1, self.head_size)
+        key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
+        torch_npu.npu_apply_rotary_pos_emb(query, key, self.cos, self.sin)
+    elif self.rotary_dim < self.head_size:
+        num_tokens = query.shape[0]
+        query = query.view(num_tokens, -1, self.head_size)
+        key = key.view(num_tokens, -1, self.head_size)
+        q_rot = query[..., :self.rotary_dim]
+        q_pass = query[..., self.rotary_dim:]
+        k_rot = key[..., :self.rotary_dim]
+        k_pass = key[..., self.rotary_dim:]
+        q_rot = q_rot.contiguous().view(num_tokens, -1)
+        k_rot = k_rot.contiguous().view(num_tokens, -1)
+        torch_npu._npu_rotary_embedding(
+            positions,
+            q_rot,
+            k_rot,
+            self.head_size,
+            self.cos_sin_cache,
+            is_neox_style,
+        )
+        q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
+        k_rot = k_rot.view(num_tokens, -1, self.rotary_dim)
+        q = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
+        k = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
+        return q, k
     else:
-        if self.cos is not None and \
-            self.sin is not None:
-            # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
-            # This method requires head_size and rotary_dim equal 128 and neox_style is True
-            query = query.contiguous().view(1, query.shape[0], -1,
-                                            self.head_size)
-            key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
-            torch_npu.npu_apply_rotary_pos_emb(query, key, self.cos, self.sin)
-        elif self.rotary_dim < self.head_size:
-            num_tokens = query.shape[0]
-            query = query.view(num_tokens, -1, self.head_size)
-            key = key.view(num_tokens, -1, self.head_size)
-            q_rot = query[..., :self.rotary_dim]
-            q_pass = query[..., self.rotary_dim:]
-            k_rot = key[..., :self.rotary_dim]
-            k_pass = key[..., self.rotary_dim:]
-            q_rot = q_rot.contiguous().view(num_tokens, -1)
-            k_rot = k_rot.contiguous().view(num_tokens, -1)
-            torch_npu._npu_rotary_embedding(
-                positions,
-                q_rot,
-                k_rot,
-                self.head_size,
-                self.cos_sin_cache,
-                is_neox_style,
-            )
-            q_rot = q_rot.view(num_tokens, -1, self.rotary_dim)
-            k_rot = k_rot.view(num_tokens, -1, self.rotary_dim)
-            q = torch.cat((q_rot, q_pass), dim=-1).reshape(query_shape)
-            k = torch.cat((k_rot, k_pass), dim=-1).reshape(key_shape)
-            return q, k
-        else:
-            # TODO: Remove the contiguous in the future.
-            query = query.contiguous().view(query.shape[0], -1)
-            key = key.contiguous().view(key.shape[0], -1)
-            torch_npu._npu_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                self.cos_sin_cache,
-                is_neox_style,
-            )
-        return query.view(query_shape), key.view(key_shape)
+        # TODO: Remove the contiguous in the future.
+        query = query.contiguous().view(query.shape[0], -1)
+        key = key.contiguous().view(key.shape[0], -1)
+        torch_npu._npu_rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+            is_neox_style,
+        )
+    return query.view(query_shape), key.view(key_shape)
 
 
 class AscendRotaryEmbedding(RotaryEmbedding):
@@ -130,7 +121,6 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None,
         is_neox_style_override: Optional[bool] = None,
     ):
         is_neox_style = self.is_neox_style
@@ -150,8 +140,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
                 self.cos = cos.view(1, -1, 1, last_dim).contiguous()
                 self.sin = sin.view(1, -1, 1, last_dim).contiguous()
                 forward_context.is_first_layer = False
-        return _rope_forward_oot(self, positions, query, key, is_neox_style,
-                                 offsets)
+        return _rope_forward_oot(self, positions, query, key, is_neox_style)
 
 
 class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
@@ -187,11 +176,9 @@ class AscendYaRNRotaryEmbedding(YaRNScalingRotaryEmbedding):
         positions: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
-        offsets: Optional[torch.Tensor] = None,
         is_neox_style_override: Optional[bool] = None,
     ):
         return AscendRotaryEmbedding.forward_oot(self, positions, query, key,
-                                                 offsets,
                                                  is_neox_style_override)
 
 
@@ -374,11 +361,8 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         self.register_buffer("cos_cached", cos_cached, persistent=False)
         self.register_buffer("sin_cached", sin_cached, persistent=False)
 
-    def forward(self,
-                positions: torch.Tensor,
-                query: torch.Tensor,
-                key: torch.Tensor,
-                offsets: Optional[torch.Tensor] = None):
+    def forward(self, positions: torch.Tensor, query: torch.Tensor,
+                key: torch.Tensor):
         if len(key.shape) == 2:
             key = key[:, None, :]
         # Note: we implement the non neox_style method with shuffle the last dim and neox style
@@ -393,7 +377,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
             key = key.view(b, h_k, d // 2, 2).transpose(3,
                                                         2).reshape(b, h_k, d)
         q_pe, k_pe = _rope_forward_oot(self, positions, query, key,
-                                       is_neox_style, offsets)
+                                       is_neox_style)
         return q_pe, k_pe
 
 
