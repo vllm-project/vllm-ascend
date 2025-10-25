@@ -60,11 +60,10 @@ def get_vllm_config():
         max_num_batched_tokens=512,
         max_model_len=512,
     )
-    model_config = ModelConfig(
-        model="facebook/opt-125m",
-        dtype="float16",
-        seed=42,
-    )
+    model_config = ModelConfig(model="facebook/opt-125m",
+                               dtype="float16",
+                               seed=42,
+                               enforce_eager=True)
     cache_config = CacheConfig(
         block_size=BLOCK_SIZE,
         gpu_memory_utilization=0.9,
