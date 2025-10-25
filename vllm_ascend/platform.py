@@ -293,10 +293,7 @@ class NPUPlatform(Platform):
                     "When enabling VLLM_COMPILE aclgraph, please make sure compilation_config.mode == CompilationMode.VLLM_COMPILE and compilation_config.cudagraph_mode == CUDAGraphMode.VLLM_COMPILE"
                 compilation_config.set_splitting_ops_for_v1()
                 compilation_config.use_inductor = False
-                compilation_config.splitting_ops.extend([
-                    "vllm::unified_ascend_attention_with_output",
-                    "vllm::mla_forward"
-                ])
+                compilation_config.splitting_ops.extend(["vllm::mla_forward"])
                 update_aclgraph_sizes(vllm_config)
             elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
                 logger.info(
@@ -451,6 +448,10 @@ class NPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
+        return True
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
         return True
 
     @classmethod

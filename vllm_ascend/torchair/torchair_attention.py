@@ -314,7 +314,6 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: AscendTorchairMetadata,
         output: Optional[torch.Tensor] = None,
-        trace_flag: bool = False,
     ) -> torch.Tensor:
         """Forward pass with Ascend attention.
         Args:
