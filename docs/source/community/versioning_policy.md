@@ -99,7 +99,7 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vLLM Asce
 
 | Branch     | Status       | RFC link                              | Merge plan | Mentor |
 |------------|--------------|---------------------------------------|------------|--------|
-|rfc/long_seq_optimization|Maintained|https://github.com/vllm-project/vllm/issues/22693|930|wangxiyuan|
+|rfc/long_seq_optimization|Completed|https://github.com/vllm-project/vllm/issues/22693|930|wangxiyuan|
 - Branch: The feature branch should be created with a prefix `rfc/` followed by the feature name, such as `rfc/feature-name`.
 - Status: The status of the feature branch is `Maintained` until it is merged into the main branch or deleted.
 - RFC link: The feature branch should be created with a corresponding RFC issue. The creation of a feature branch requires an RFC and approval from at least two maintainers.
