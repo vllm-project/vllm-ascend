@@ -1,4 +1,5 @@
 import openai
+import pytest
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.nightly.multi_node.config.multi_node_config import (
@@ -14,6 +15,7 @@ api_keyword_args = {
 }
 
 
+@pytest.mark.asyncio
 async def test_multi_node() -> None:
     config = MultiNodeConfig.from_yaml()
     env_dict = config.envs
