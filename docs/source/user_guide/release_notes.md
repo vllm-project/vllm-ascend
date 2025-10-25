@@ -64,6 +64,7 @@ This is the 1st release candidate of v0.10.2 for vLLM Ascend. Please follow the 
 - The HBM usage of Qwen3 Next is higher than expected. It's a [known issue](https://github.com/vllm-project/vllm-ascend/issues/2884) and we're working on it. You can set `max_model_len` and `gpu_memory_utilization` to suitable value basing on your parallel config to avoid oom error.
 - We notice that lora doesn't work with this release due to the refactor of kv cache. We'll fix it soon. [2941](https://github.com/vllm-project/vllm-ascend/issues/2941)
 - Please do not enable chunked prefill with prefix cache when running with Ascend scheduler. The performance and accuracy is not good/correct. [#2943](https://github.com/vllm-project/vllm-ascend/issues/2943)
+- Please manually disable the USE_SCHED_YIELD option in the sched_yield function of the vllm/distributed/utils.py file on the vllm side to alleviate model performance issues caused by CPU host bound (e.g., in scenarios like 800I-A2 Qwen2.5-VL 72B W8A8 TP4)(TODO: Add the issue url after this method accepted).
 
 ## v0.10.1rc1 - 2025.09.04
 
