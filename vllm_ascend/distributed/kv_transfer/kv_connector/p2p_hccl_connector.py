@@ -87,8 +87,8 @@ class P2pHcclConnector(KVConnectorBase_V1):
 
         self._rank = get_world_group().rank \
             if role == KVConnectorRole.WORKER else 0
-        self._local_rank = self.config.kv_rank + (get_world_group().local_rank \
-            if role == KVConnectorRole.WORKER else 0)
+        self._local_rank = get_world_group().local_rank \
+            if role == KVConnectorRole.WORKER else 0
 
         self.p2p_hccl_engine = P2pHcclEngine(
             local_rank=self._local_rank,

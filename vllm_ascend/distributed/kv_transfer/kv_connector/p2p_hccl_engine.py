@@ -85,9 +85,11 @@ class P2pHcclEngine:
         self.send_queue_cv = threading.Condition()
         self.recv_store_cv = threading.Condition()
 
+        self.stream_ctx = self.hccl.aclrtGetCurrentContext()
         self.send_stream = torch_npu.npu.Stream()
         self.recv_stream = torch_npu.npu.Stream()
 
+        # todo 如果服务器确实压力大，要发送的kvcache连内存都装不下，应该如何处理？
         mem_pool_size_gb = float(
             self.config.get_from_extra_config("mem_pool_size_gb",
                                               DEFAULT_MEM_POOL_SIZE_GB))
@@ -157,11 +159,9 @@ class P2pHcclEngine:
                 sock.send(msgpack.dumps(data))
 
                 rank = 0
-                comm: hcclComm_t = self.hccl.hcclCommInitRank(
-                    2, unique_id, rank)
+                comm: hcclComm_t = self.hccl.hcclCommInitRank(2, unique_id, rank)
                 self.comms[remote_address] = (comm, rank)
-                self.aclCtx[remote_address] = self.hccl.aclrtGetCurrentContext(
-                )
+                self.aclCtx[remote_address] = self.hccl.aclrtGetCurrentContext()
                 logger.info("🤝hcclCommInitRank Success, %s👉%s, MyRank:%s",
                             self.zmq_address, remote_address, rank)
 
@@ -272,7 +272,7 @@ class P2pHcclEngine:
                            remote_address, tensor_id, data["ret"])
             return None
 
-        self.hccl.aclrtSetCurrentContext(ctx)
+        self.hccl.aclrtSetCurrentContext(self.stream_ctx)
         with torch_npu.npu.Stream(self.recv_stream):
             tensor = torch.empty(data["shape"],
                                  dtype=getattr(torch, data["dtype"]),
@@ -330,11 +330,12 @@ class P2pHcclEngine:
 
                     comm, rank = self.comms[remote_address.decode()]
                     ctx = self.aclCtx[remote_address.decode()]
-
+                    oldCtx = self.hccl.aclrtGetCurrentContext()
+                    
                     # logger.info("before receive tensor: ", comm, tensor, rank ^ 1, self.recv_stream)
-                    self.hccl.aclrtSetCurrentContext(ctx)
-                    with torch_npu.npu.Stream(self.recv_stream):
-                        self.recv(comm, tensor, rank ^ 1, self.recv_stream)
+                    self.hccl.aclrtSetCurrentContext(self.stream_ctx)
+                    self.recv(comm, tensor, rank ^ 1, self.recv_stream)
+                    self.hccl.aclrtSetCurrentContext(oldCtx)
                     tensor_size = tensor.element_size() * tensor.numel()
                     if (self.buffer_size + tensor_size
                             > self.buffer_size_threshold):
@@ -462,7 +463,10 @@ class P2pHcclEngine:
                 return False
 
             # logger.info("before send tensor: ", comm, tensor.to(self.device), rank ^ 1, self.send_stream)
+            oldCtx = self.hccl.aclrtGetCurrentContext()
+            self.hccl.aclrtSetCurrentContext(self.stream_ctx)
             self.send(comm, tensor.to(self.device), rank ^ 1, self.send_stream)
+            self.hccl.aclrtSetCurrentContext(oldCtx)
 
             if self.send_type == "PUT_ASYNC":
                 self.have_sent_tensor_id(item.tensor_id + "_idx_" +
