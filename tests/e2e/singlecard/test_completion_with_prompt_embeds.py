@@ -24,7 +24,7 @@ from tests.e2e.conftest import VllmRunner
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-MODELS = ["facebook/opt-125m"]
+MODELS = ["meta-llama/Llama-3.2-1B-Instruct"]
 
 
 def get_prompt_embeds(chat, tokenizer, embedding_layer):
