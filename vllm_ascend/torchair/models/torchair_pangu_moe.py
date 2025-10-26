@@ -625,7 +625,7 @@ class PanguProMoEAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         if self.torchair_graph_enabled:
-            forward_kwargs = {'trace_flag': False}
+            forward_kwargs = {}
             output_shape = q.shape
             attn_output = torch.empty(output_shape,
                                       dtype=q.dtype,

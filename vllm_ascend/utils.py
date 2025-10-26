@@ -536,9 +536,10 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
+    from vllm_ascend.models.layers.sfa import AscendSparseFlashAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
-                                                  AscendSharedFusedMoE)
+    from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
+                                                     AscendSharedFusedMoE)
     from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
                                            AscendQuantRMSNorm, AscendRMSNorm)
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
@@ -547,8 +548,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding,
-        AscendYaRNRotaryEmbedding)
+        AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
+        AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -558,6 +559,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
+        "MRotaryEmbedding": AscendMRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
         "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
@@ -572,7 +574,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
-        "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
 
     if vllm_config is not None and \
@@ -580,6 +581,13 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()) and \
             not version_check():
         REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
+    mla_to_register = "MultiHeadLatentAttention" if vllm_version_is(
+        "0.11.0") else "MultiHeadLatentAttentionWrapper"
+    if vllm_config and vllm_config.model_config and vllm_config.model_config.use_mla:
+        AscendMLAAttentionWarrper = AscendSparseFlashAttention if hasattr(
+            vllm_config.model_config.hf_config,
+            "index_topk") else AscendMultiHeadLatentAttention
+        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMLAAttentionWarrper
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -689,6 +697,13 @@ def weak_ref_tensors(
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
+
+    This function should be used in the following scenario:
+    When a tensor is created during graph capture, and it's held by a method
+    that's not part of the graph, we don't really need to store it, but we
+    **do need** its buffer pointer. If we don't handle this, it cannot
+    be garbage collected, leading to a memory leak. To avoid this,
+    we should create a weak reference to the tensor.
     """
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
@@ -750,13 +765,13 @@ def get_default_buffer_config() -> dict:
 def calculate_dp_buffer_size() -> int:
     """
     formula of dp buffer size:
-    dp_size + 2 (flags: with_prefill and enable_dbo)
+    dp_size + 1 (flags: with_prefill)
     """
     from vllm.config import get_current_vllm_config
     vllm_config = get_current_vllm_config()
     dp_size = vllm_config.parallel_config.data_parallel_size
     int32_size = torch.iinfo(torch.int32).bits // 8
-    dp_buffer_size = math.ceil((dp_size + 2) * int32_size / (1024 * 1024))
+    dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
     return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
 
 
@@ -771,7 +786,7 @@ def is_hierarchical_communication_enabled():
 @functools.cache
 def version_check():
     """check if torch_npu version >= dev20250919"""
-    import re
+    import re  # noqa
     torch_npu_version = torch_npu.version.__version__
     date_pattern = r'dev(\d{8})'
 
