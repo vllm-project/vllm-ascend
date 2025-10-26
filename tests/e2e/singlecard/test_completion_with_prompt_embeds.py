@@ -25,7 +25,7 @@ from tests.e2e.conftest import VllmRunner
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-MODELS = ["meta-llama/Llama-3.2-1B-Instruct"]
+MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 
 
 def get_prompt_embeds(chat, tokenizer, embedding_layer):
