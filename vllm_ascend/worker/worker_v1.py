@@ -182,8 +182,7 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def _init_device(self):
-        device = torch.device(
-            f"npu:{self.local_rank * self.kv_parallel_size+self.kv_rank}")
+        device = torch.device(f"npu:{self.local_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
