@@ -72,8 +72,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.utils import (cdiv,
-                        is_pin_memory_available,
+from vllm.utils import (cdiv, is_pin_memory_available,
                         length_from_prompt_token_ids_or_embeds)
 from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
