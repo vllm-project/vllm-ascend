@@ -119,7 +119,6 @@ class P2pHcclEngine:
         self.recv_request_id_to_tensor_ids: dict[str, set[str]] = {}
         self.socks: dict[str, Any] = {}  # remote_address: client socket
         self.comms: dict[str, Any] = {}  # remote_address: (hcclComm_t, rank)
-        self.aclCtx: dict[str, Any] = {}  # remote_address: aclrtContext_t
 
         self.buffer_size = 0
         self.buffer_size_threshold = float(self.config.kv_buffer_size)
@@ -150,8 +149,7 @@ class P2pHcclEngine:
             if remote_address in self.comms:
                 logger.info("👋comm exists, remote_address:%s, comms:%s",
                             remote_address, self.comms)
-                return sock, self.comms[remote_address], self.aclCtx[
-                    remote_address]
+                return sock, self.comms[remote_address]
 
             with torch_npu.npu.device(self.device):
                 unique_id = self.hccl.hcclGetUniqueId()
@@ -159,14 +157,13 @@ class P2pHcclEngine:
                 sock.send(msgpack.dumps(data))
 
                 rank = 0
-                comm: hcclComm_t = self.hccl.hcclCommInitRank(2, unique_id, rank)
+                comm: hcclComm_t = self.hccl.hcclCommInitRank(
+                    2, unique_id, rank)
                 self.comms[remote_address] = (comm, rank)
-                self.aclCtx[remote_address] = self.hccl.aclrtGetCurrentContext()
                 logger.info("🤝hcclCommInitRank Success, %s👉%s, MyRank:%s",
                             self.zmq_address, remote_address, rank)
 
-        return self.socks[remote_address], self.comms[
-            remote_address], self.aclCtx[remote_address]
+        return self.socks[remote_address], self.comms[remote_address]
 
     def send_tensor(
         self,
@@ -260,7 +257,6 @@ class P2pHcclEngine:
 
         sock = self.socks[remote_address]
         comm, rank = self.comms[remote_address]
-        ctx = self.aclCtx[remote_address]
 
         data = {"cmd": "GET", "tensor_id": tensor_id}
         sock.send(msgpack.dumps(data))
@@ -298,26 +294,28 @@ class P2pHcclEngine:
                         comm: hcclComm_t = self.hccl.hcclCommInitRank(
                             2, unique_id, rank)
                         self.comms[remote_address.decode()] = (comm, rank)
-                        self.aclCtx[remote_address.decode(
-                        )] = self.hccl.aclrtGetCurrentContext()
                         logger.info(
                             "🤝hcclCommInitRank Success, %s👈%s, MyRank:%s",
                             self.zmq_address, remote_address.decode(), rank)
             elif data["cmd"] == "PUT":
                 tensor_id = data["tensor_id"]
                 shape: torch.Tensor = torch.tensor(data["shape"])
-                recv_tensor_size = shape.prod().item() * torch.empty((1),
-                    dtype=getattr(torch, data["dtype"])).element_size()
-                while (self.buffer_size + recv_tensor_size > self.buffer_size_threshold):
+                recv_tensor_size = shape.prod().item() * torch.empty(
+                    (1), dtype=getattr(torch, data["dtype"])).element_size()
+                while (self.buffer_size + recv_tensor_size
+                       > self.buffer_size_threshold):
                     if recv_tensor_size > self.buffer_size_threshold:
                         raise RuntimeError(
-                            f"recv_tensor_size {recv_tensor_size} is larger than buffer_size_threshold {self.buffer_size_threshold}, cannot recv")
-                    
+                            f"recv_tensor_size {recv_tensor_size} is larger than buffer_size_threshold {self.buffer_size_threshold}, cannot recv"
+                        )
+
                     newest_tensor_id = list(self.recv_store.keys())[-1]
                     newest_tensor = self.recv_store.pop(newest_tensor_id)
-                    newest_tensor_size = newest_tensor.element_size() * newest_tensor.numel()
+                    newest_tensor_size = newest_tensor.element_size(
+                    ) * newest_tensor.numel()
                     addr = self.pool.store_tensor(newest_tensor)
-                    newest_tensor = (addr, newest_tensor.dtype, newest_tensor.shape)
+                    newest_tensor = (addr, newest_tensor.dtype,
+                                     newest_tensor.shape)
                     self.recv_store[newest_tensor_id] = newest_tensor
                     self.buffer_size -= newest_tensor_size
                 try:
@@ -329,9 +327,8 @@ class P2pHcclEngine:
                     self.router_socket.send_multipart([remote_address, b"0"])
 
                     comm, rank = self.comms[remote_address.decode()]
-                    ctx = self.aclCtx[remote_address.decode()]
                     oldCtx = self.hccl.aclrtGetCurrentContext()
-                    
+
                     # logger.info("before receive tensor: ", comm, tensor, rank ^ 1, self.recv_stream)
                     self.hccl.aclrtSetCurrentContext(self.stream_ctx)
                     self.recv(comm, tensor, rank ^ 1, self.recv_stream)
