@@ -3183,6 +3183,87 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return kv_caches
 
+    def _initialize_kv_cache_tensors_310p(
+            self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+        kv_cache_sizes = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            assert len(kv_cache_tensor.shared_by) == 1, (
+                "KV cache tensor shared by multiple layers is not supported in "
+                "310p NPU.")
+            kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
+
+        kv_caches: Dict[str, torch.Tensor] = {}
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            attn_backend = group.backend
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_attn_layers:
+                    continue
+                tensor_size = kv_cache_sizes[layer_name]
+                assert tensor_size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_size // kv_cache_spec.page_size_bytes
+
+                # `num_blocks` is the number of blocks the model runner can use.
+                # `kv_cache_config.num_blocks` is the number of blocks that
+                # KVCacheManager may allocate.
+                # Since different GPUs may have different number of layers and
+                # different memory capacities, `num_blocks` can be different on
+                # different GPUs, and `kv_cache_config.num_blocks` is set to
+                # the min of all `num_blocks`. Verify it here.
+                assert num_blocks >= kv_cache_config.num_blocks
+
+                # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
+                # encounter OOM issue
+                if isinstance(kv_cache_spec, FullAttentionSpec):
+                    if self.vllm_config.additional_config.get(
+                            "kv_cache_dtype", None) == 'int8':
+                        kv_cache_shape = attn_backend.get_bsh_kv_cache_shape(
+                            num_blocks, kv_cache_spec.block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size)
+                    elif hasattr(attn_backend, "get_supported_block_size"
+                                 ) and self.use_hybrid_blocks:
+                        block_size = attn_backend.get_supported_block_size()[0]
+
+                        block_size_chunk = kv_cache_spec.block_size // block_size
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                            num_blocks * block_size_chunk, block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size)
+                    else:
+                        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                            num_blocks, kv_cache_spec.block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
+
+                    if "attn" in layer_name:
+                        # for self_attn, sliding window attn
+                        if self.vllm_config.kv_transfer_config is None:
+                            k_tensor = torch.zeros(kv_cache_shape[1:],
+                                                   dtype=dtype,
+                                                   device=self.device)
+                            v_tensor = torch.zeros(kv_cache_shape[1:],
+                                                   dtype=dtype,
+                                                   device=self.device)
+                            k_cache = torch_npu.npu_format_cast(
+                                k_tensor, ACL_FORMAT)
+                            v_cache = torch_npu.npu_format_cast(
+                                v_tensor, ACL_FORMAT)
+
+                            kv_caches[layer_name] = (k_cache, v_cache)
+                        else:
+                            raise ValueError(
+                                "KV cache transfer is not supported for 310p.")
+                else:
+                    raise ValueError("Unknown KV cache spec type.")
+
+        bind_kv_cache(kv_caches,
+                      self.compilation_config.static_forward_context,
+                      self.kv_caches)
+
+        return kv_caches
+
     def initialize_kv_cache_tensors(
             self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
         """
@@ -3194,6 +3275,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
+
+        if is_310p():
+            return self._initialize_kv_cache_tensors_310p(kv_cache_config)
+
         # init kv cache tensors
         kv_cache_raw_tensors: dict[str, Union[torch.Tensor,
                                               Optional[torch.Tensor]]] = {}

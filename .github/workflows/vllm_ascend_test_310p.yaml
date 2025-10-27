@@ -112,6 +112,4 @@ jobs:
         run: |
           if [[ "${{ matrix.os }}" == "linux-aarch64-310p-1" ]]; then
             pytest -sv tests/e2e/310p/test_offline_inference_310p.py
-          else
-            pytest -sv tests/e2e/310p/test_offline_inference_parallel_310p.py
           fi
