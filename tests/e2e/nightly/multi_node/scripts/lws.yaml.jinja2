@@ -37,11 +37,11 @@ spec:
                 bash /root/.cache/tests/run.sh
             resources:
               limits:
-                huawei.com/ascend-1980: "16"
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
-                huawei.com/ascend-1980: "16"
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
             ports:
@@ -95,11 +95,11 @@ spec:
                 bash /root/.cache/tests/run.sh
             resources:
               limits:
-                huawei.com/ascend-1980: "16"
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
-                huawei.com/ascend-1980: "16"
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
             volumeMounts:
