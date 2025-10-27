@@ -167,15 +167,16 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'light' }}
         run: |
+          pytest -sv tests/e2e/multicart/test_torchair_ge_graph_mode.py
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
-
+          
       - name: Run vllm-project/vllm-ascend test (full)
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
-          pytest -sv tests/e2e/multicart/test_torchair_ge_graph_mode.py
+          # pytest -sv tests/e2e/multicart/test_torchair_ge_graph_mode.py
           pytest -sv tests/e2e/multicard/test_data_parallel.py
           pytest -sv tests/e2e/multicard/test_expert_parallel.py
           # pytest -sv tests/e2e/multicard/test_external_launcher.py
