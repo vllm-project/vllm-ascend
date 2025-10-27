@@ -147,6 +147,9 @@ def rejection_sample(
     assert bonus_token_ids.is_contiguous()
     assert target_probs.shape == (num_tokens, vocab_size)
 
+    #Switch of Block Verify: when MTP>=2, using block verify for rejection sampler.
+    using_block_verify = max_spec_len >= 2
+
     # Create output buffer.
     output_token_ids = torch.empty(
         (batch_size, max_spec_len + 1),
@@ -159,30 +162,31 @@ def rejection_sample(
         is_greedy = None
     else:
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
-    if not sampling_metadata.all_random:
-        # Rejection sampling for greedy sampling requests.
-        target_argmax = target_probs.argmax(dim=-1)
-        if min(num_draft_tokens) == 1 and max(
-                num_draft_tokens) == 1 and sampling_metadata.all_greedy:
-            rejection_greedy_sample_spec_len_1_pytorch(
-                output_token_ids,
-                draft_token_ids,
-                target_argmax,
-                bonus_token_ids,
-            )
-        else:
-            rejection_greedy_sample_pytorch(
-                output_token_ids,
-                cu_num_draft_tokens,
-                draft_token_ids,
-                target_argmax,
-                bonus_token_ids,
-                num_draft_tokens,
-                max_spec_len,
-                is_greedy,
-            )
-        if sampling_metadata.all_greedy:
-            return output_token_ids
+    if not using_block_verify:
+        if not sampling_metadata.all_random:
+              # Rejection sampling for greedy sampling requests.
+              target_argmax = target_probs.argmax(dim=-1)
+              if min(num_draft_tokens) == 1 and max(
+                      num_draft_tokens) == 1 and sampling_metadata.all_greedy:
+                  rejection_greedy_sample_spec_len_1_pytorch(
+                      output_token_ids,
+                      draft_token_ids,
+                      target_argmax,
+                      bonus_token_ids,
+                  )
+              else:
+                  rejection_greedy_sample_pytorch(
+                      output_token_ids,
+                      cu_num_draft_tokens,
+                      draft_token_ids,
+                      target_argmax,
+                      bonus_token_ids,
+                      num_draft_tokens,
+                      max_spec_len,
+                      is_greedy,
+                  )
+              if sampling_metadata.all_greedy:
+                  return output_token_ids
 
     # Generate uniform probabilities for rejection sampling.
     # [num_tokens]
@@ -219,6 +223,7 @@ def rejection_sample(
         is_greedy,
         max_spec_len,
         vocab_size,
+        using_block_verify,
         IS_NGRAM=draft_probs is None,
         # num_warps=1,
     )
@@ -405,12 +410,13 @@ def rejection_random_sample_pytorch(
     is_greedy,  # [batch_size]
     max_spec_len,
     vocab_size,
+    using_block_verify,  # bool
     IS_NGRAM=False,
 ):
     batch_size = output_token_ids.shape[0]
 
     for req_idx in range(batch_size):
-        if is_greedy[req_idx]:
+        if not using_block_verify and is_greedy is not None and is_greedy[req_idx]:
             continue
 
         if req_idx == 0:
@@ -421,29 +427,39 @@ def rejection_random_sample_pytorch(
         num_draft_tokens = end_idx - start_idx
 
         rejected = False
+        pi = 1.0
+        uniform_prob = 1.0
         for pos in range(num_draft_tokens):
-            if not rejected:
+            draft_token_id = draft_token_ids[start_idx + pos].item()
+
+            if IS_NGRAM:
+                draft_prob = 1.0
+            else:
+                draft_prob = draft_probs[start_idx + pos,
+                                         draft_token_id].item()
+
+            target_prob = target_probs[start_idx + pos,
+                                       draft_token_id].item()
+            uniform_prob = uniform_prob * uniform_probs[start_idx + pos].item()
+
+            pi = min(pi * target_prob / draft_prob, 1.0)
+
+            if draft_prob > 0 and pi >= uniform_prob:
+                last_accepted_token_pos = pos
+                rejected = False
+            else:
+                rejected = True
+        
+        if last_accepted_token_pos > -1:
+            for pos in range(last_accepted_token_pos + 1):
                 draft_token_id = draft_token_ids[start_idx + pos].item()
+                output_token_ids[req_idx, pos] = draft_token_id
 
-                if IS_NGRAM:
-                    draft_prob = 1.0
-                else:
-                    draft_prob = draft_probs[start_idx + pos,
-                                             draft_token_id].item()
-
-                target_prob = target_probs[start_idx + pos,
-                                           draft_token_id].item()
-                uniform_prob = uniform_probs[start_idx + pos].item()
-
-                if draft_prob > 0 and target_prob / draft_prob >= uniform_prob:
-                    token_id = draft_token_id
-                else:
-                    rejected = True
-                    token_id = recovered_token_ids[start_idx + pos].item()
-
-                output_token_ids[req_idx, pos] = token_id
-
-        if not rejected:
+            
+        if rejected:
+            recovered_token_id = recovered_token_ids[start_idx + last_accepted_token_pos + 1].item()
+            output_token_ids[req_idx, last_accepted_token_pos + 1] = recovered_token_id
+        else:
             bonus_token_id = bonus_token_ids[req_idx].item()
             output_token_ids[req_idx, num_draft_tokens] = bonus_token_id
 
