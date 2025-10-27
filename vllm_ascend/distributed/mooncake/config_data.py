@@ -2,6 +2,7 @@ import array
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -438,8 +439,8 @@ class MooncakeStoreConfig:
             global_segment_size=_parse_global_segment_size(
                 config.get("global_segment_size",
                            DEFAULT_GLOBAL_SEGMENT_SIZE)),
-            local_buffer_size=config.get("local_buffer_size",
-                                         DEFAULT_LOCAL_BUFFER_SIZE),
+            local_buffer_size=(config.get("local_buffer_size",
+                                          DEFAULT_LOCAL_BUFFER_SIZE)),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
@@ -478,32 +479,31 @@ def _parse_global_segment_size(value) -> int:
             raise TypeError(
                 f"Unsupported type for global_segment_size: {type(value)}"
             ) from e
-    # Clean input string
+    
     cleaned_input = value.strip().lower()
     if not cleaned_input:
         raise ValueError("global segment size cannot be empty.")
 
     UNIT_MULTIPLIERS = {
-        'gb': 1024**3,  # 1 GB = 1024^3 bytes
-        'mb': 1024**2,  # 1 MB = 1024^2 bytes
+        'gb': 1024 ** 3,  # 1 GB = 1024^3 bytes
+        'mb': 1024 ** 2,  # 1 MB = 1024^2 bytes
         'kb': 1024,  # 1 KB = 1024 bytes
-        'b': 1  # 1 B = 1 byte
+        'b': 1   # 1 B = 1 byte
     }
-    # Check for unit suffixes
-    for unit, multiplier in UNIT_MULTIPLIERS.items():
-        if cleaned_input.endswith(unit):
-            number_part = cleaned_input[:-len(unit)].strip()
-            if not number_part:
-                raise ValueError(
-                    f"Missing numeric value before unit '{unit}' in: '{value}'"
-                )
-            return _convert_to_bytes(number_part, multiplier, value)
-    # Handle unit-less input (bytes)
-    return _convert_to_bytes(cleaned_input, 1, value)
+    pattern = r'^\s*([\d.]+)\s*(gb|mb|kb|b)?\s*$'
+    match = re.match(pattern, cleaned_input)
+    
+    if not match:
+        raise ValueError(f"Invalid format: '{value}'")
+    
+    number_str = match.group(1)
+    unit = match.group(2) or 'b'
+       
+    multiplier = UNIT_MULTIPLIERS[unit]
+    return _convert_to_bytes(number_str, multiplier, value)
 
 
-def _convert_to_bytes(number_str: str, multiplier: int,
-                      original_input: str) -> int:
+def _convert_to_bytes(number_str: str, multiplier: int, original_input: str) -> int:
     """
     Convert numeric string to byte count
     
