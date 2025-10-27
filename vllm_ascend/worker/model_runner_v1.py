@@ -588,20 +588,33 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # exceeding a sequence length limit (16 tokens) in npu_fused_infer_attention_score operation
         pass
 
+    @property
+    def mc2_tokens_capacity_hardware(self):
+        soc_version = get_ascend_soc_version()
+        # TODO: merge AscendSocVersion A2 and A3 if their MC2 ops have the same max input token limit
+        if soc_version == AscendSocVersion.A2:
+            return 256
+        elif soc_version == AscendSocVersion.A3:
+            return 512
+        else:
+            # for other SOC, like 310p, MC2 is not supported
+            return 0
+
     def _init_mc2_tokens_capacity(self):
         # NOTE: To be clear, we need to make sure that during graph capture, the number of
         # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
-        # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
+        # the max number of tokens in graph is max_num_seqs * uniform_decode_query_len.
         if self.compilation_config.cudagraph_capture_sizes:
             max_num_tokens = self.compilation_config.cudagraph_capture_sizes[0]
         else:
-            # NOTE: To save memory, we cap the max number of tokens to 512.
-            max_num_tokens = min(
-                self.max_num_reqs * self.uniform_decode_query_len, 512)
+            max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
         tp_size = self.parallel_config.tensor_parallel_size
         # Use integer arithmetic for ceiling division.
         num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+        # NOTE: There is a maximum input token limit for MC2 operators,
+        # so mc2_tokens_capacity must be less than or equal to mc2_tokens_capacity_hardware.
+        self.mc2_tokens_capacity = min(num_tokens_per_tp_rank * tp_size,
+                                       self.mc2_tokens_capacity_hardware)
 
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
