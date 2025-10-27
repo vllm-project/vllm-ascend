@@ -84,22 +84,3 @@ deployment:
             }
         }'
 benchmarks:
-  perf:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs400
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 1
-    max_out_len: 2
-    batch_size: 1
-    baseline: 5
-    threshold: 0.97
-  acc:
-    case_type: accuracy
-    dataset_path: vllm-ascend/AIME2024
-    request_conf: vllm_api_general_chat
-    dataset_conf: aime2024/aime2024_gen_0_shot_chat_prompt
-    max_out_len: 10
-    batch_size: 32
-    baseline: 1
-    threshold: 1
