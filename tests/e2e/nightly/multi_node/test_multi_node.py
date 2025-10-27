@@ -1,5 +1,5 @@
 import time
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
 
 import httpx
 import pytest
@@ -25,7 +25,7 @@ def get_local_model_path_with_retry(
     revision: str = "master",
     max_retries: int = 5,
     delay: int = 5,
-) -> str:
+) -> Optional[str]:
     for attempt in range(1, max_retries + 1):
         try:
             local_model_path = snapshot_download(
