@@ -62,6 +62,12 @@ jobs:
           - name: qwen2-5-vl-7b
             os: linux-aarch64-a3-4
             tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
+          - name: qwen2-5-vl-32b
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/models/test_qwen2_5_vl_32b.py
+          - name: qwen3-32b-int8-prefix-cache
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/features/test_prefix_cache_qwen3_32b_int8.py
           - name: deepseek-r1-0528-w8a8
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8.py
