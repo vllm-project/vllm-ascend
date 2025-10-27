@@ -122,7 +122,6 @@ jobs:
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
             --ignore tests/ut/torchair/models/test_torchair_deepseek_mtp.py \
             --ignore tests/ut/torchair/models/test_torchair_deepseek_v2.py \
-            --ignore tests/ut/test_utils.py \
             --ignore tests/ut/test_platform.py
 
       - name: Upload coverage to Codecov

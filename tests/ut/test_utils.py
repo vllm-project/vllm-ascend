@@ -258,10 +258,7 @@ class TestUtils(TestBase):
         model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
         test_model_config = ModelConfig(model=model_path, enforce_eager=True)
         test_parallel_config = ParallelConfig()
-        ascend_config = mock.MagicMock()
-        ascend_config.max_num_batched_tokens = 2048
-        ascend_config.max_model_len = 1024
-        ascend_config.ascend_scheduler_config.enabled = False
+        ascend_config = {"ascend_scheduler_config": {"enabled": False}}
         test_vllm_config = VllmConfig(
             model_config=test_model_config,
             compilation_config=test_compilation_config,
