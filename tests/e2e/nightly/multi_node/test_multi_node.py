@@ -1,6 +1,7 @@
 import time
+from typing import Any, List, Union
 
-import openai
+import httpx
 import pytest
 from modelscope import snapshot_download  # type: ignore
 from requests.exceptions import ConnectionError, HTTPError, Timeout
@@ -44,6 +45,46 @@ def get_local_model_path_with_retry(
     return None
 
 
+async def get_completions(url: str, model: str, prompts: Union[str, List[str]],
+                          **api_kwargs: Any) -> List[str]:
+    """
+    Asynchronously send HTTP requests to a /v1/completions endpoint.
+
+    Args:
+        url: Full endpoint URL, e.g. "http://localhost:1025/v1/completions"
+        model: Model name or local model path
+        prompts: A single prompt string or a list of prompts
+        **api_kwargs: Additional parameters (e.g., max_tokens, temperature)
+
+    Returns:
+        List[str]: A list of generated texts corresponding to each prompt
+    """
+    headers = {"Content-Type": "application/json"}
+
+    if isinstance(prompts, str):
+        prompts = [prompts]
+
+    results = []
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        for prompt in prompts:
+            payload = {"model": model, "prompt": prompt, **api_kwargs}
+
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"Request failed with status {response.status_code}: {response.text}"
+                )
+
+            resp_json = response.json()
+            choices = resp_json.get("choices", [])
+            if not choices or not choices[0].get("text"):
+                raise ValueError("Empty response from server")
+
+            results.append(choices[0]["text"])
+
+    return results
+
+
 @pytest.mark.asyncio
 async def test_multi_node() -> None:
     config = MultiNodeConfig.from_yaml()
@@ -72,18 +113,11 @@ async def test_multi_node() -> None:
         ) as remote_server:
             if config.is_master:
                 port = proxy_port if disaggregated_prefill else server_port
-                base_url = f"http://{config.cur_ip}:{port}/v1/completions"
-                client = openai.AsyncOpenAI(base_url=base_url,
-                                            api_key="token-abc123",
-                                            max_retries=0,
-                                            **{"timeout": 600})
-                batch = await client.completions.create(
-                    model=local_model_path,
-                    prompt=prompts,
-                    **api_keyword_args,
-                )
-                choices: list[openai.types.CompletionChoice] = batch.choices
-                assert choices[0].text, "empty response"
+                base_url = f"http://localhost:{port}/v1/completions"
+                _ = await get_completions(url=base_url,
+                                          model=local_model_path,
+                                          prompts=prompts,
+                                          api_kwargs=api_keyword_args)
                 # aisbench test
                 if acc_cmd:
                     run_aisbench_cases(local_model_path, port, acc_cmd)
