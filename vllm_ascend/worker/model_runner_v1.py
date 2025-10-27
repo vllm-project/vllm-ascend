@@ -590,15 +590,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     @property
     def mc2_tokens_capacity_hardware(self):
-        soc_version = get_ascend_soc_version()
         # TODO: merge AscendSocVersion A2 and A3 if their MC2 ops have the same max input token limit
-        if soc_version == AscendSocVersion.A2:
-            return 256
-        elif soc_version == AscendSocVersion.A3:
-            return 512
-        else:
-            # for other SOC, like 310p, MC2 is not supported
-            return 0
+        mc2_capacities = {
+            AscendSocVersion.A2: 256,
+            AscendSocVersion.A3: 512,
+        }
+        soc_version = get_ascend_soc_version()
+
+        # The default value of 0 is for other SOCs, like 310p, where MC2 is not supported.
+        return mc2_capacities.get(soc_version, 0)
 
     def _init_mc2_tokens_capacity(self):
         # NOTE: To be clear, we need to make sure that during graph capture, the number of
