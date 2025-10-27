@@ -41,6 +41,9 @@ on:
         default: main
         type: string
         description: used for pr level tests
+    secrets:
+      KUBECONFIG_B64:
+        required: true
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -53,7 +56,7 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 8 cards test type
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ascend-nightly-${{ github.ref }}-${{ inputs.config_file_path }}
   cancel-in-progress: true
 
 jobs:
