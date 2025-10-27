@@ -1886,9 +1886,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # TODO: Optimize the CPU -> NPU copy.
         cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
             self.device, non_blocking=True)
-
-        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(
-            self.device, non_blocking=True)
+        if not vllm_version_is("0.11.0"):
+            cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(
+                self.device, non_blocking=True)
         logits_indices = torch.from_numpy(logits_indices).to(self.device,
                                                              non_blocking=True)
         target_logits_indices = torch.from_numpy(target_logits_indices).to(
@@ -1900,16 +1900,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
         draft_token_ids = self.input_ids[logits_indices]
         draft_token_ids = draft_token_ids[target_logits_indices + 1]
-
-        metadata = SpecDecodeMetadata(
-            draft_token_ids=draft_token_ids,
-            num_draft_tokens=num_draft_tokens.tolist(),
-            cu_num_draft_tokens=cu_num_draft_tokens,
-            cu_num_sampled_tokens=cu_num_sampled_tokens,
-            target_logits_indices=target_logits_indices,
-            bonus_logits_indices=bonus_logits_indices,
-            logits_indices=logits_indices,
-        )
+        if vllm_version_is("0.11.0"):
+            metadata = SpecDecodeMetadata(
+                draft_token_ids=draft_token_ids,
+                num_draft_tokens=num_draft_tokens.tolist(),
+                cu_num_draft_tokens=cu_num_draft_tokens,
+                target_logits_indices=target_logits_indices,
+                bonus_logits_indices=bonus_logits_indices,
+                logits_indices=logits_indices,
+            )
+        else:
+            metadata = SpecDecodeMetadata(
+                draft_token_ids=draft_token_ids,
+                num_draft_tokens=num_draft_tokens.tolist(),
+                cu_num_draft_tokens=cu_num_draft_tokens,
+                cu_num_sampled_tokens=cu_num_sampled_tokens,
+                target_logits_indices=target_logits_indices,
+                bonus_logits_indices=bonus_logits_indices,
+                logits_indices=logits_indices,
+            )
         return metadata
 
     def apply_grammar_bitmask(
