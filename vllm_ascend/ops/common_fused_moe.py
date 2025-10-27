@@ -39,6 +39,9 @@ from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe.experts_selector import select_experts
 from vllm_ascend.ops.moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, npu_stream_switch
+from vllm.distributed.parallel_state import (
+    get_dp_group, get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size)
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -184,7 +187,8 @@ class AscendAFD(FusedMoE):
         #     router_logits=router_logits,
         #     replace_allreduce=forward_context.sp_enabled,
         #     enable_shared_expert_dp=self.enable_shared_expert_dp)
-
+        
+        # topk
         topk_weights, topk_ids, row_idx = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -311,11 +315,14 @@ class AscendFusedMoE(FusedMoE):
 
 
     def afd_ffn_compute(self, 
+                layer: int,
                 hidden_states: torch.Tensor, 
+                router_logits: torch.Tensor,
                 topk_weights: torch.Tensor,
                 topk_ids: torch.Tensor,
-                row_idx):
-        moe_comm_method = get_forward_context().moe_comm_method
+                row_idx:torch.Tensor):
+        forward_context = get_forward_context()
+        moe_comm_method = forward_context.moe_comm_method
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=hidden_states,
             w1=layer.w13_weight,
@@ -526,12 +533,65 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
     # TODO 这里的weight的传入有问题，目测是没加载对
     def afd_ffn_compute(self, 
-                layer,
+                layer: int,
                 hidden_states: torch.Tensor, 
+                router_logits: torch.Tensor,
                 topk_weights: torch.Tensor,
                 topk_ids: torch.Tensor,
-                row_idx):
-        moe_comm_method = get_forward_context().moe_comm_method
+                row_idx:torch.Tensor):
+        import torch.nn as nn
+        forward_context = get_forward_context()
+        moe_comm_method = forward_context.moe_comm_method
+
+        # Load balancing for token distribution among experts in dummy_run
+        # TODO: The community only considers load balancing when DP > 1.
+        # This approach may overlook some extreme scenarios.
+        enable_force_load_balance = forward_context.in_profile_run
+        
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        # print(f'topk_ids shape before split is {topk_ids.shape}')
+        
+        shared_out = self._shared_experts(hidden_states)
+
+        # NOTE: This is exactly the opposite of `maybe_all_reduce_tensor_model_parallel`
+        moe_comm_type = forward_context.moe_comm_type
+        if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
+            shared_out = tensor_model_parallel_all_reduce(shared_out)
+            
+        num_tokens, _ = hidden_states.shape
+        target_pad_length = forward_context.padded_num_tokens
+        pad_size = target_pad_length - num_tokens
+        # print(f'pad_size is {pad_size}')
+        # Pad if necessary (unless shared expert DP is enabled)
+        if pad_size > 0:
+            topk_weights = nn.functional.pad(topk_weights,
+                                                (0, 0, 0, pad_size))
+            topk_ids = nn.functional.pad(topk_ids,
+                                                (0, 0, 0, pad_size))
+            row_idx = nn.functional.pad(row_idx,
+                                                (0, 0, 0, pad_size))
+        if tp_size > 1:
+            split_topk_weights = torch.tensor_split(topk_weights,
+                                                    tp_size,
+                                                    dim=0)
+            split_topk_ids = torch.tensor_split(topk_ids,
+                                                tp_size,
+                                                dim=0)
+            split_row_idx = torch.tensor_split(row_idx,
+                                                tp_size,
+                                                dim=0)
+            topk_weights = split_topk_weights[tp_rank]
+            topk_ids = split_topk_ids[tp_rank]
+            row_idx = split_row_idx[tp_rank]
+
+        # print(f'topk_ids shape after split is {topk_ids.shape}')    
+        hidden_states, router_logits = forward_context.moe_comm_method.prepare(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            replace_allreduce=forward_context.sp_enabled,
+            enable_shared_expert_dp=self.enable_shared_expert_dp)
+        
         final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=hidden_states,
             w1=layer.w13_weight,
@@ -555,5 +615,5 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             hidden_states=final_hidden_states,
             reduce_results=self.reduce_results)
 
-        return final_hidden_states
+        return shared_out,final_hidden_states
 

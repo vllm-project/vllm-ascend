@@ -222,6 +222,21 @@ class MC2CommImpl(MoECommMethod):
     def _get_fused_moe_prepare_finalize(self):
         return FusedMoEPrepareAndFinalizeWithMC2(self.moe_config)
 
+# class M2NCommImpl(MoECommMethod):
+#     """This implementation is for the scenarios listed below:
+#     1. `enable_expert_parallel=True`.
+#     2. `npu_moe_distribute_dispatch` and `npu_moe_distribute_combine` are available.
+#     3. `enable_expert_parallel=False` is not supported.
+    
+#     This implementation uses the MC2 communication method, which is optimized for
+#     Communication and Computation parallelism on Ascend devices.
+#     """
+
+#     # def _get_token_dispatcher(self):
+#     #     return TokenDispatcherWithMC2()
+
+#     def _get_fused_moe_prepare_finalize(self):
+#         return FusedMoEPrepareAndFinalizeWithM2N(self.moe_config)
 
 class AlltoAllCommImpl(MoECommMethod):
     """This implementation is for the scenarios listed below:

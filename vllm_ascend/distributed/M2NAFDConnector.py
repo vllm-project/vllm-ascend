@@ -109,6 +109,10 @@ class M2NAFDConnector(AFDConnectorBase):
     # ATTN发给MOE（ATTN发送）
     # TODO:metadata的获取，最好从框架侧去拿
     def send_attn_output(self, hidden_states: torch.Tensor, metadata: AFDConnectorMetadata) -> Any:
+        # 传metadata
+        dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
+        self.process_group.send_object(metadata,dst)
+        
         dynamic_scales = metadata.extra_fields.custom_fields["scale"]
         topk_idx = metadata.extra_fields.custom_fields["topk_idx"]
         topk_weights = metadata.extra_fields.custom_fields["topk_weights"]
@@ -169,6 +173,10 @@ class M2NAFDConnector(AFDConnectorBase):
     
     # ATTN发给MOE(MOE接收)
     def recv_attn_output(self, metadata: AFDConnectorMetadata) -> Any: 
+        
+        src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
+        metadata = self.process_group.recv_object(src)
+        # TODO(yxj): 对比
         x_type = torch.int8
         if metadata.quant_mode == 0 :
             x_type = metadata.expand_x_type

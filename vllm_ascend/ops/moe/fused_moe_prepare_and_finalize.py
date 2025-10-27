@@ -197,6 +197,104 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalize):
 
         return hidden_states
 
+# class FusedMoEPrepareAndFinalizeWithM2N(FusedMoEPrepareAndFinalize):
+#     """
+#     MoE communication strategy using M2N.
+#     """
+
+#     def __init__(self, moe_config: FusedMoEConfig):
+#         super().__init__(moe_config)
+#         self._restore_tp_across_dp()
+
+#     def _restore_tp_across_dp(self):
+#         """
+#         Restore original TP configuration.
+#         vLLM flattens TP and DP into a single dimension; this method recovers
+#         the true TP world size and rank for correct tensor slicing.
+#         """
+#         self.tp_size = get_tensor_model_parallel_world_size()
+#         self.tp_rank = get_tensor_model_parallel_rank()
+
+#     def prepare(self,
+#                 hidden_states: torch.Tensor,
+#                 router_logits: torch.Tensor,
+#                 enable_shared_expert_dp: bool = False,
+#                 replace_allreduce: bool = False,
+#                 gate=None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+#         """
+#         Preparation steps:
+#           1. Fetch `mc2_mask` and target padding length from forward context.
+#           2. Pad `hidden_states` and `router_logits` to target length if needed.
+#           3. If TP > 1, split tensors along token dimension and select current TP rank's slice.
+#           4. Split and return corresponding `mc2_mask`.
+
+#         Skips padding/slicing if `enable_shared_expert_dp` or `replace_allreduce` is True.
+
+#         Returns:
+#             Tuple of (hidden_states, router_logits, mc2_mask), possibly sliced/padded.
+#         """
+#         self.replace_allreduce = replace_allreduce
+#         self.enable_shared_expert_dp = enable_shared_expert_dp
+#         forward_context = get_forward_context()
+#         mc2_mask = forward_context.mc2_mask
+#         if self.tp_size > 1:
+#             # Also slice mc2_mask
+#             split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)
+#             mc2_mask = split_mc2_mask[self.tp_rank]
+
+#         if not self.replace_allreduce:
+#             self.num_tokens, _ = hidden_states.shape
+#             target_pad_length = forward_context.padded_num_tokens
+#             pad_size = target_pad_length - self.num_tokens
+
+#             # Pad if necessary (unless shared expert DP is enabled)
+#             if pad_size > 0 and not self.enable_shared_expert_dp:
+#                 hidden_states = nn.functional.pad(hidden_states,
+#                                                   (0, 0, 0, pad_size))
+#                 router_logits = nn.functional.pad(router_logits,
+#                                                   (0, 0, 0, pad_size))
+
+#             # Slice across TP ranks
+#             if self.tp_size > 1 and not self.enable_shared_expert_dp:
+#                 split_hidden_states = torch.tensor_split(hidden_states,
+#                                                          self.tp_size,
+#                                                          dim=0)
+#                 split_router_logits = torch.tensor_split(router_logits,
+#                                                          self.tp_size,
+#                                                          dim=0)
+#                 hidden_states = split_hidden_states[self.tp_rank]
+#                 router_logits = split_router_logits[self.tp_rank]
+#                 self.split_hidden_states = split_hidden_states  # Save for finalize
+
+#         return hidden_states, router_logits, mc2_mask
+
+#     def finalize(self, hidden_states: torch.Tensor,
+#                  reduce_results: bool) -> torch.Tensor:
+#         """
+#         Finalization steps:
+#           1. If TP > 1, all-gather slices from all TP ranks to reconstruct full tensor.
+#           2. Unpad to original token count if padding was applied.
+#           3. Return tensor with shape [original_num_tokens, hidden_size].
+
+#         Skips communication and unpadding if `enable_shared_expert_dp` or `replace_allreduce` is True.
+#         """
+#         if not (self.enable_shared_expert_dp or self.replace_allreduce):
+#             if self.tp_size > 1:
+#                 # All-gather across TP group
+#                 dist.all_gather(list(self.split_hidden_states), hidden_states,
+#                                 self.moe_config.tp_group.device_group)
+#                 hidden_states = torch.cat(self.split_hidden_states, dim=0)
+
+#                 # TODO: It is a quick bugfix for the memory explosion issue in eager mode.
+#                 # If the cache is not cleared after `self.split_hidden_states` is created,
+#                 # it can lead to the memory explosion in eager mode.
+#                 del self.split_hidden_states
+
+#             # Unpad if necessary
+#             if self.num_tokens < hidden_states.shape[0]:
+#                 hidden_states = hidden_states[:self.num_tokens]
+
+#         return hidden_states
 
 class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
     """

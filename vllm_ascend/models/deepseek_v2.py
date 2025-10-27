@@ -442,6 +442,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
+        # TODO(yxj) :delete self.enable_afd
         self.enable_afd = vllm_config.additional_config.get(
             "enable_afd", False)
         
@@ -497,10 +498,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp",
                 )
-                if self.mlp.gate.e_score_correction_bias is not None:
-                    self.mlp.gate.e_score_correction_bias.data = (
-                        self.mlp.gate.e_score_correction_bias.data.to(
-                            dtype=torch.get_default_dtype()))
+                # if self.mlp.gate.e_score_correction_bias is not None:
+                #     self.mlp.gate.e_score_correction_bias.data = (
+                #         self.mlp.gate.e_score_correction_bias.data.to(
+                #             dtype=torch.get_default_dtype()))
             else:
                 self.mlp = DeepseekV2MLP(
                     hidden_size=config.hidden_size,
@@ -511,8 +512,29 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 )
         
         if self.role is not None and self.role == "attention":
-            if layer_idx < config.first_k_dense_replace:
-                print('开始加载attn侧的mlp')
+            # if layer_idx < config.first_k_dense_replace:
+            #     print('开始加载attn侧的mlp')
+            #     self.mlp = DeepseekV2MLP(
+            #         hidden_size=config.hidden_size,
+            #         intermediate_size=config.intermediate_size,
+            #         hidden_act=config.hidden_act,
+            #         quant_config=quant_config,
+            #         prefix=f"{prefix}.mlp",
+            #     )
+            # 这里增加gating的初始化
+            if layer_idx >= config.first_k_dense_replace:
+                self.gate = ReplicatedLinear(config.hidden_size,
+                                        config.n_routed_experts,
+                                        bias=False,
+                                        quant_config=None,
+                                        prefix=f"{prefix}.gate")
+                if config.topk_method == "noaux_tc":
+                    self.gate.e_score_correction_bias = nn.Parameter(
+                        torch.empty(config.n_routed_experts, dtype=torch.float32))
+                else:
+                    self.gate.e_score_correction_bias = None
+            # desne layer
+            else:
                 self.mlp = DeepseekV2MLP(
                     hidden_size=config.hidden_size,
                     intermediate_size=config.intermediate_size,
@@ -520,18 +542,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                     quant_config=quant_config,
                     prefix=f"{prefix}.mlp",
                 )
-            # 这里增加gating的初始化
-            self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.n_routed_experts,
-                                     bias=False,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
-            if config.topk_method == "noaux_tc":
-                self.gate.e_score_correction_bias = nn.Parameter(
-                    torch.empty(config.n_routed_experts, dtype=torch.float32))
-            else:
-                self.gate.e_score_correction_bias = None
-
+                
             # Load balancing settings.
             eplb_config = parallel_config.eplb_config
             self.enable_eplb = parallel_config.enable_eplb
@@ -554,25 +565,25 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                                         self.n_local_physical_experts)
 
             self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
-            self.afd_gating = AscendAFD(
-                num_experts=config.n_routed_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                intermediate_size=config.moe_intermediate_size,
-                reduce_results=False,
-                renormalize=config.norm_topk_prob,
-                quant_config=quant_config,
-                use_grouped_topk=True,
-                num_expert_group=config.n_group,
-                topk_group=config.topk_group,
-                prefix=f"{prefix}.experts",
-                scoring_func=config.scoring_func,
-                # we do scaling outside, set factor to 1.0 to avoid double mul
-                routed_scaling_factor=1.0,
-                e_score_correction_bias=self.gate.e_score_correction_bias,
-                enable_eplb=self.enable_eplb,
-                num_redundant_experts=self.n_redundant_experts,
-                is_sequence_parallel=self.is_sequence_parallel,)
+            # self.afd_gating = AscendAFD(
+            #     num_experts=config.n_routed_experts,
+            #     top_k=config.num_experts_per_tok,
+            #     hidden_size=config.hidden_size,
+            #     intermediate_size=config.moe_intermediate_size,
+            #     reduce_results=False,
+            #     renormalize=config.norm_topk_prob,
+            #     quant_config=quant_config,
+            #     use_grouped_topk=True,
+            #     num_expert_group=config.n_group,
+            #     topk_group=config.topk_group,
+            #     # prefix=f"{prefix}.experts",
+            #     scoring_func=config.scoring_func,
+            #     # we do scaling outside, set factor to 1.0 to avoid double mul
+            #     routed_scaling_factor=1.0,
+            #     e_score_correction_bias=self.gate.e_score_correction_bias,
+            #     enable_eplb=self.enable_eplb,
+            #     num_redundant_experts=self.n_redundant_experts,
+            #     is_sequence_parallel=self.is_sequence_parallel,)
         
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -591,6 +602,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        # TODO(yxj):delete self.enable_afd
         self.enable_afd = vllm_config.additional_config.get(
             "enable_afd", False)
         self.afd_config = vllm_config.afd_config
@@ -719,6 +731,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                # load share expert gate\up
                 break
             else:
                 for mapping in expert_params_mapping:
@@ -742,12 +755,12 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                   shard_id=shard_id,
                                   expert_id=expert_id,
                                   return_success=False)
+                    # load expert gate up down ,without share expert
                     break
                 else:
                     if self.role == "ffn" and not self.is_moe_weight(
-                            name) and not self.is_common_weight(name):
+                            name) and not self.is_common_weight(name) and not self.is_desne_weight(name):
                         continue
-
 
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
@@ -765,13 +778,15 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+                    # load share expert down,attn q\k\v\o\layernorm,mlp.gate
             loaded_params.add(name)
 
         return loaded_params
 
     def is_moe_weight(self,name):
-        if "shared_experts" in name or "experts" in name or "gate_" in name \
-            or "up" in name or "down" in name:
+        if "shared_experts" in name or "experts" in name:
+            # or "gate_" in name \
+            # or "up" in name or "down" in name:
             return True
         return False
         # if 'mlp.gate_proj.weight' in name or 'mlp.up_proj.weight' in name or 'mlp.down_proj.weight' in name:
@@ -781,7 +796,11 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
         #     return True
         # return False
-
+    def is_desne_weight(self,name):
+        if 'mlp.gate_proj.weight' in name or 'mlp.up_proj.weight' in name or 'mlp.down_proj.weight' in name:
+            return True
+        return False
+    
     def is_common_weight(self,name):
         if "lm_head" in name or "model.norm.weight" in name or "embed_tokens" in name \
             or "input_layernorm" in name or "post_attention_layernorm" in name:
