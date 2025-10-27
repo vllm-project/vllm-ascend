@@ -53,7 +53,7 @@ def _deepseek_torchair_test_fixture(
     additional_config.update(**kwargs)
 
     with VllmRunner(
-            "vllm-ascend/DeepSeek-V3-Pruning",
+            "Qwen/Qwen3-30B-A3B",
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
