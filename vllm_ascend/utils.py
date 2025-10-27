@@ -314,6 +314,7 @@ def get_max_hidden_layers(hf_config) -> int:
 # Update cudagraph capture sizes for vllm config
 def update_cudagraph_capture_sizes(vllm_config: VllmConfig,
                                    cudagraph_capture_sizes: List[int]):
+
     valid_max_size = (cudagraph_capture_sizes[-1]
                       if cudagraph_capture_sizes else 0)
     if (vllm_config.compilation_config.max_cudagraph_capture_size is not None
@@ -330,17 +331,18 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig,
             valid_max_size,
         )
 
-        vllm_config.compilation_config.max_cudagraph_capture_size = valid_max_size
-        if vllm_config.compilation_config.cudagraph_capture_sizes is not None and len(
-                cudagraph_capture_sizes) < len(
-                    vllm_config.compilation_config.cudagraph_capture_sizes):
-            logger.warning(
-                ("cudagraph_capture_sizes specified in compilation_config"
-                 " %s is overridden by config %s"),
-                vllm_config.compilation_config.cudagraph_capture_sizes,
-                cudagraph_capture_sizes,
-            )
-        vllm_config.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
+    vllm_config.compilation_config.max_cudagraph_capture_size = valid_max_size
+
+    if vllm_config.compilation_config.cudagraph_capture_sizes is not None and len(
+            cudagraph_capture_sizes) < len(
+                vllm_config.compilation_config.cudagraph_capture_sizes):
+        logger.warning(
+            ("cudagraph_capture_sizes specified in compilation_config"
+             " %s is overridden by config %s"),
+            vllm_config.compilation_config.cudagraph_capture_sizes,
+            cudagraph_capture_sizes,
+        )
+    vllm_config.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
     vllm_config.compilation_config.post_init_cudagraph_sizes()
 
 
