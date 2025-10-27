@@ -43,6 +43,8 @@ else:
     VllmConfig = None
     FlexibleArgumentParser = None
 
+ASCEND_MAX_MODEL_LEN = 65535
+
 
 class NPUPlatform(Platform):
 
@@ -476,13 +478,14 @@ class NPUPlatform(Platform):
         """
         Check max_model_len for the current platform.
         """
-        if max_model_len > 65536:
+        if max_model_len > ASCEND_MAX_MODEL_LEN:
             logger.warning(
                 "max_model_len is not specified and the default value"
                 "derived from the model config is %d, which is too large"
                 "and will make the engine stuck in initializing distributed"
-                "communication. Set max_model_len to 65536.",
+                "communication. Set max_model_len to %d.",
                 max_model_len,
+                ASCEND_MAX_MODEL_LEN,
             )
-            max_model_len = 65535
+            max_model_len = ASCEND_MAX_MODEL_LEN
         return max_model_len
