@@ -25,7 +25,7 @@ import sys
 from sysconfig import get_paths
 from typing import Dict, List
 
-from setuptools import Extension, find_packages, setup
+from setuptools import Command, Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
@@ -101,6 +101,26 @@ class custom_build_info(build_py):
         logging.info(
             f"Generated _build_info.py with SOC version: {soc_version}")
         super().run()
+
+
+class build_and_install_aclnn(Command):
+    description = "Build and install AclNN by running build_aclnn.sh"
+    user_options = []
+
+    def initialize_options(self):
+        pass
+
+    def finalize_options(self):
+        pass
+
+    def run(self):
+        try:
+            print("Running bash build_aclnn.sh ...")
+            subprocess.check_call(["bash", "csrc/build_aclnn.sh", ROOT_DIR])
+            print("buid_aclnn.sh executed successfully!")
+        except subprocess.CalledProcessError as e:
+            print(f"Error running build_aclnn.sh: {e}")
+            raise SystemExit(e.returncode)
 
 
 class cmake_build_ext(build_ext):
@@ -290,7 +310,9 @@ class cmake_build_ext(build_ext):
                         print(f"Copy: {src_path} -> {dst_path}")
 
     def run(self):
-        # First, run the standard build_ext command to compile the extensions
+        # First, ensure ACLNN custom-ops is built and installed.
+        self.run_command("build_aclnn")
+        # Then, run the standard build_ext command to compile the extensions
         super().run()
 
 
@@ -353,6 +375,7 @@ def get_requirements() -> List[str]:
 
 cmdclass = {
     "build_py": custom_build_info,
+    "build_aclnn": build_and_install_aclnn,
     "build_ext": cmake_build_ext,
     "install": custom_install
 }
