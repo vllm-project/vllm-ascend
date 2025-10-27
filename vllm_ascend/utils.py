@@ -314,7 +314,7 @@ def get_max_hidden_layers(hf_config) -> int:
 # Update cudagraph capture sizes for vllm config
 def update_cudagraph_capture_sizes(
         vllm_config: VllmConfig,
-        cudagraph_capture_sizes: List[int]) -> List[int]:
+        cudagraph_capture_sizes: List[int]):
     valid_max_size = (cudagraph_capture_sizes[-1]
                       if cudagraph_capture_sizes else 0)
     if (vllm_config.compilation_config.max_cudagraph_capture_size is not None
@@ -439,7 +439,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         if vllm_version_is("0.11.0"):
             compilation_config.init_with_cudagraph_sizes(sampled_sizes)
         else:
-            update_cudagraph_capture_sizes(sampled_sizes)
+            update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
 
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
