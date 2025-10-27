@@ -50,8 +50,6 @@ class MultiNodeConfig:
         self.proxy_port = get_avaliable_port()
         self.perf_cmd = perf_cmd
         self.acc_cmd = acc_cmd
-        assert perf_cmd is not None, "perf_cmd must be provided"
-        assert acc_cmd is not None, "acc_cmd must be provided"
 
         self.cur_index = int(os.getenv("LWS_WORKER_INDEX", 0))
         self.cur_ip = get_cur_ip()
