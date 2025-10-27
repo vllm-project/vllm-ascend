@@ -63,8 +63,11 @@ chips_per_card = get_cmd_stdout("npu-smi info -l | grep \"Chip Count\"").split(
 chips_per_card = int(chips_per_card)
 
 if args.local_device_ids:
-    local_device_ids = args.local_device_ids.split(',')
-    local_device_ids = [int(id_str) for id_str in local_device_ids]
+    try:
+        local_device_ids = [int(id_str) for id_str in args.local_device_ids.split(',')]
+    except ValueError:
+        print(f"Error: --local-device-ids must be a comma-separated list of integers. Received: '{args.local_device_ids}'")
+        exit(1)
 else:
     local_device_ids = []
     for card_id in range(num_cards):
