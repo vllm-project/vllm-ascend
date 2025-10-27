@@ -64,7 +64,7 @@ jobs:
           ls dist
 
       - name: Archive tar.gz
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: vllm-ascend-src
           path: dist/*
