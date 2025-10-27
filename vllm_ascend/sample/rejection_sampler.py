@@ -96,11 +96,12 @@ class AscendRejectionSampler(RejectionSampler, nn.Module):
                 sampling_metadata,
             )
         else:
-            target_probs = apply_sampling_constraints(
+            target_logits = apply_sampling_constraints(
                 target_logits,
                 metadata.cu_num_draft_tokens,
                 sampling_metadata,
             )
+            target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,

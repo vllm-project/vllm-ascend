@@ -387,7 +387,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter = get_spec_decode_method(
                     self.speculative_config.method, self.vllm_config,
                     self.device, self)
-                self.rejection_sampler = AscendRejectionSampler()
+                if vllm_version_is("0.11.0"):
+                    self.rejection_sampler = AscendRejectionSampler()
+                else:
+                    self.rejection_sampler = AscendRejectionSampler(
+                        self.sampler)
             self.actual_seq_lengths_q = list(
                 range(self.decode_token_per_req, self.max_num_tokens + 1,
                       self.decode_token_per_req))
@@ -1882,6 +1886,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # TODO: Optimize the CPU -> NPU copy.
         cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
             self.device, non_blocking=True)
+
+        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(
+            self.device, non_blocking=True)
         logits_indices = torch.from_numpy(logits_indices).to(self.device,
                                                              non_blocking=True)
         target_logits_indices = torch.from_numpy(target_logits_indices).to(
@@ -1898,6 +1905,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens.tolist(),
             cu_num_draft_tokens=cu_num_draft_tokens,
+            cu_num_sampled_tokens=cu_num_sampled_tokens,
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,

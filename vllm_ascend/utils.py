@@ -312,9 +312,8 @@ def get_max_hidden_layers(hf_config) -> int:
 
 
 # Update cudagraph capture sizes for vllm config
-def update_cudagraph_capture_sizes(
-        vllm_config: VllmConfig,
-        cudagraph_capture_sizes: List[int]):
+def update_cudagraph_capture_sizes(vllm_config: VllmConfig,
+                                   cudagraph_capture_sizes: List[int]):
     valid_max_size = (cudagraph_capture_sizes[-1]
                       if cudagraph_capture_sizes else 0)
     if (vllm_config.compilation_config.max_cudagraph_capture_size is not None
