@@ -120,6 +120,17 @@ download_go() {
     print_success "Go $GOVER installed successfully"
 }
 
+install_ais_bench() {
+    local AIS_BENCH="$SRC_DIR/benchmark"
+    git clone https://gitee.com/aisbench/benchmark.git $AIS_BENCH
+    cd $AIS_BENCH
+    git checkout v3.0-20250930-master
+    pip3 install -e ./
+    pip3 install -r requirements/api.txt
+    pip3 install -r requirements/extra.txt
+    cd -
+}
+
 install_go() {
     # Check if Go is already installed
     if command -v go &> /dev/null; then
@@ -167,6 +178,7 @@ main() {
     checkout_src
     install_sys_dependencies
     install_vllm
+    install_ais_bench
     # to speed up mooncake build process, install Go here
     install_go
     cd "$WORKSPACE/source_code"
