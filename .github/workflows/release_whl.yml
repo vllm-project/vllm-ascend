@@ -107,7 +107,7 @@ jobs:
         done
 
     - name: Archive wheel
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: vllm-ascend-${{ matrix.os }}-py${{ matrix.python-version }}-wheel
         path: dist/*
