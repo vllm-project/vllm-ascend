@@ -1,5 +1,9 @@
+import time
+
 import openai
 import pytest
+from modelscope import snapshot_download  # type: ignore
+from requests.exceptions import ConnectionError, HTTPError, Timeout
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tests.e2e.nightly.multi_node.config.multi_node_config import (
@@ -13,6 +17,33 @@ prompts = [
 api_keyword_args = {
     "max_tokens": 10,
 }
+
+
+def get_local_model_path_with_retry(
+    model: str,
+    revision: str = "master",
+    max_retries: int = 5,
+    delay: int = 5,
+) -> str:
+    for attempt in range(1, max_retries + 1):
+        try:
+            local_model_path = snapshot_download(
+                model_id=model,
+                revision=revision,
+                resume_download=True,
+            )
+            return local_model_path
+
+        except HTTPError as e:
+            status = getattr(e.response, "status_code", None)
+            url = getattr(e.response, "url", None)
+
+        except (ConnectionError, Timeout):
+            continue
+
+        if attempt < max_retries:
+            time.sleep(delay)
+    return None
 
 
 @pytest.mark.asyncio
