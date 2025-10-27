@@ -5,6 +5,7 @@ from vllm_ascend.distributed.mooncake.config_data import (
 
 
 class TestParseGlobalSegmentSize(unittest.TestCase):
+
     def test_int_input(self):
         self.assertEqual(_parse_global_segment_size(1024), 1024)
         self.assertEqual(_parse_global_segment_size(0), 0)
@@ -52,6 +53,7 @@ class TestParseGlobalSegmentSize(unittest.TestCase):
 
 
 class TestConvertToBytes(unittest.TestCase):
+    
     def test_valid_conversion(self):
         self.assertEqual(_convert_to_bytes("10", 1, "10"), 10)
         self.assertEqual(_convert_to_bytes("1.5", 1024, "1.5KB"),
