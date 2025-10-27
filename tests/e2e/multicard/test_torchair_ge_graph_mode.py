@@ -107,7 +107,7 @@ def test_e2e_qwen_with_torchair_v1scheduler():
             "mode": "max-autotune",
         },
     }
-    _qwen3_qwen_test_fixture(additional_config, use_v1_schduler=True)
+    _qwen3_torchair_test_fixture(additional_config, use_v1_schduler=True)
 
 
 def _pangu_torchair_test_fixture(
