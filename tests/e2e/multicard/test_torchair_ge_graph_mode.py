@@ -62,7 +62,10 @@ def _qwen3_torchair_test_fixture(
         # use greedy sampler to make sure the generated results are fix
         vllm_output = vllm_model.generate_greedy(example_prompts, 5)
 
-
+    # NOTE: Qwen/Qwen3-30B is a random weight of
+    # Qwen3 with 2 hidden layers, thus the golden results seems
+    # inaccurate. This will only change if accuracy improves with the
+    # official weights of QWen3.
     golden_results = [
         'Hello, my name is下载早点向前很有่อง',
         'The president of the United States isSender)## physiological Albany',
@@ -104,7 +107,7 @@ def test_e2e_qwen_with_torchair_v1scheduler():
             "mode": "max-autotune",
         },
     }
-    _qwen3_torchair_test_fixture(additional_config, use_v1_schduler=True)
+    _qwen3_qwen_test_fixture(additional_config, use_v1_schduler=True)
 
 
 def _pangu_torchair_test_fixture(
