@@ -973,6 +973,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # Update out&lse
         attn_out = self._npu_attention_update(attn_out_lse_list)
         return attn_out
+
     def _forward_pcp_dcp(self, query: torch.Tensor, key: torch.Tensor,
                          value: torch.Tensor, attn_metadata: AscendMetadata,
                          output: torch.Tensor) -> torch.Tensor:
