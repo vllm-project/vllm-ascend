@@ -909,7 +909,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     query, k_nope, value, **common_kwargs)
-                graph_params.workspaces[num_tokens] = weak_ref_tensors(workspace)
+                graph_params.workspaces[num_tokens] = weak_ref_tensors(
+                    workspace)
             attn_out = torch.empty_like(query)
             attn_lse = torch.empty((num_tokens, num_heads, 1, 1),
                                    dtype=torch.float,
