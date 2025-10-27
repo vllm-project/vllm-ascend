@@ -910,18 +910,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     query, k_nope, value, **common_kwargs)
-                graph_params.workspaces[num_tokens] = workspace
+                graph_params.workspaces[num_tokens] = weak_ref_tensors(workspace)
             attn_out = torch.empty_like(query)
             attn_lse = torch.empty((num_tokens, num_heads, 1, 1),
                                    dtype=torch.float,
                                    device=query.device)
 
             graph_params.attn_params[num_tokens].append(
-                (query, k_nope, value, self.num_heads, self.num_kv_heads,
+                (weak_ref_tensors(query), weak_ref_tensors(k_nope), weak_ref_tensors(value), 
+                 self.num_heads, self.num_kv_heads,
                  self.scale, attn_metadata.block_tables,
-                 self.key_cache.shape[1], attn_metadata.decode.
+                 self.key_cache.shape[1], attn_metadata.decode_meta.
                  num_computed_tokens_of_pcp_dcp[:, self.pcp_rank, self.dcp_rank],
-                 workspace, attn_out, attn_lse, self.pcp_rank, self.dcp_rank,
+                 weak_ref_tensors(workspace), weak_ref_tensors(attn_out), 
+                 weak_ref_tensors(attn_lse), self.pcp_rank, self.dcp_rank,
                  self.dcp_size))
             torch.npu.graph_task_group_begin(stream)
             torch_npu.npu_fused_infer_attention_score.out(
