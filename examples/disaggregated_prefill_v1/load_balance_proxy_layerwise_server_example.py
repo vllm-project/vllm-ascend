@@ -556,7 +556,13 @@ async def _handle_completions(api: str, request: Request):
                                 instance_info.prefiller_idx,
                                 instance_info.prefiller_score)
                             released_kv = True
-                        chunk_str = chunk.decode("utf-8").strip()
+                        try:
+                            chunk_str = chunk.decode("utf-8").strip()
+                        except UnicodeDecodeError:
+                            logger.debug(
+                                f"Skipping chunk: {chunk}")
+                            yield chunk
+                            continue
                         if not chunk_str:
                             continue
                         if chunk_str.startswith("data: "):
