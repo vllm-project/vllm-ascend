@@ -5,6 +5,7 @@
 :maxdepth: 1
 single_npu
 single_npu_multimodal
+single_npu_internvl
 single_npu_audio
 single_npu_qwen3_embedding
 single_npu_qwen3_quantization
