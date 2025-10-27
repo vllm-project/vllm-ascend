@@ -38,7 +38,6 @@ def rope_forward_oot(
     positions: torch.Tensor,
     query: torch.Tensor,
     key: torch.Tensor,
-    offsets: Optional[torch.Tensor] = None,
     is_neox_style_override: Optional[bool] = None,
     is_qwen_torchair: Optional[bool] = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -48,7 +47,6 @@ def rope_forward_oot(
             positions,
             query,
             key,
-            offsets,
         )
 
     query_shape, key_shape = query.shape, key.shape
@@ -71,29 +69,23 @@ def rope_forward_oot(
             neox_style,
         )
         return query.view(query_shape), key.view(key_shape)
-    if offsets is not None:
-        raise NotImplementedError(
-            "Batched rotary embedding is currently not supported on NPU.")
-    else:
-        # TODO: Remove the contiguous in the future.
-        query = query.contiguous().view(query.shape[0], -1)
-        key = key.contiguous().view(key.shape[0], -1)
-        torch_npu._npu_rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            self.cos_sin_cache,
-            neox_style,
-        )
+
+    # TODO: Remove the contiguous in the future.
+    query = query.contiguous().view(query.shape[0], -1)
+    key = key.contiguous().view(key.shape[0], -1)
+    torch_npu._npu_rotary_embedding(
+        positions,
+        query,
+        key,
+        self.head_size,
+        self.cos_sin_cache,
+        neox_style,
+    )
     return query.view(query_shape), key.view(key_shape)
 
 
-def native_rope_deepseek_forward(self,
-                                 positions: torch.Tensor,
-                                 query: torch.Tensor,
-                                 key: torch.Tensor,
-                                 offsets: Optional[torch.Tensor] = None):
+def native_rope_deepseek_forward(self, positions: torch.Tensor,
+                                 query: torch.Tensor, key: torch.Tensor):
     if len(key.shape) == 2:
         key = key[:, None, :]
     # Note: we implement the non neox_style method with shuffle the last dim and neox style
@@ -106,8 +98,7 @@ def native_rope_deepseek_forward(self,
                                                         2).reshape(b, h_q, d)
         b, h_k, d = key.shape
         key = key.view(b, h_k, d // 2, 2).transpose(3, 2).reshape(b, h_k, d)
-    q_pe, k_pe = rope_forward_oot(self, positions, query, key, offsets,
-                                  neox_style)
+    q_pe, k_pe = rope_forward_oot(self, positions, query, key, neox_style)
     return q_pe, k_pe
 
 
@@ -286,7 +277,6 @@ def rope_forward(
     positions: torch.Tensor,
     query: torch.Tensor,
     key: torch.Tensor,
-    offsets: Optional[torch.Tensor] = None,
     is_neox_style_override: Optional[bool] = None,
     max_seq_len: Optional[int] = None,
     is_prefill: Optional[bool] = True,
@@ -324,7 +314,7 @@ def rope_forward(
             query, key, cos, sin)
         return q_embed.flatten(-2), k_embed.flatten(-2)
     else:
-        return rope_forward_oot(self, positions, query, key, offsets,
+        return rope_forward_oot(self, positions, query, key,
                                 is_neox_style_override,
                                 is_qwen_torchair)  # type: ignore
 

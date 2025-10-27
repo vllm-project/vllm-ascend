@@ -100,7 +100,7 @@ class TestRopeForwardOot(TestBase):
                                               self.query, self.key)
 
         self.mock_self.forward_native.assert_called_once_with(
-            self.positions, self.query, self.key, None)
+            self.positions, self.query, self.key)
         self.assertTrue(torch.equal(result_q, self.query))
         self.assertTrue(torch.equal(result_k, self.key))
 
@@ -153,19 +153,6 @@ class TestRopeForwardOot(TestBase):
         mock_npu_rotary.assert_called_once()
         self.assertEqual(result_q.shape, non_contig_query.shape)
         self.assertEqual(result_k.shape, non_contig_key.shape)
-
-    @patch(
-        'vllm_ascend.torchair.ops.torchair_rotary_embedding.get_ascend_config')
-    def test_rope_forward_oot_with_offsets(self, mock_get_ascend_config):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-        mock_get_ascend_config.return_value = mock_config
-
-        # Test that NotImplementedError is raised when offsets is provided
-        offsets = torch.tensor([1, 2, 3])
-        with self.assertRaises(NotImplementedError):
-            rope_forward_oot(self.mock_self, self.positions, self.query,
-                             self.key, offsets)
 
     @patch(
         'vllm_ascend.torchair.ops.torchair_rotary_embedding.get_ascend_config')
