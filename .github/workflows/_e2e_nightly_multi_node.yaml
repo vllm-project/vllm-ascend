@@ -7,6 +7,10 @@ on:
         required: true
         type: string
         description: use a2 or a3
+      runner:
+        required: false
+        type: string
+        default: linux-aarch64-a3-0
       image:
         required: false
         type: string
@@ -62,7 +66,7 @@ concurrency:
 jobs:
   e2e:
     # This is a runner with no NPU for k8s controller
-    runs-on: linux-aarch64-a3-0
+    runs-on: ${{ inputs.runner }}
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       env:
@@ -90,8 +94,7 @@ jobs:
             kubectl version --client=true
 
         # TODO: Add A2 tests
-        - name: Setup kubeconfig for A3
-          if: inputs.soc_version == 'a3'
+        - name: Decode kubeconfig from secrets
           run: |
             # Decode and save kubeconfig
             echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
@@ -129,6 +132,12 @@ jobs:
               fi
             done
 
+            if [ "${{ inputs.soc_version }}" = "a3" ]; then
+              npu_per_node=16
+            else
+              npu_per_node=8
+            fi
+
             jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
               -D size="$size" \
               -D replicas="$replicas" \
@@ -138,6 +147,7 @@ jobs:
               -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
               -D vllm_ascend_ref="$vllm_ascend_ref" \
               -D result_file_path="$result_file_path" \
+              -D npu_per_node="$npu_per_node" \
               --outfile lws.yaml
 
             kubectl apply -f ./lws.yaml
