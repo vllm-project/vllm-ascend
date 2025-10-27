@@ -33,7 +33,8 @@ from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
                                prefill_context_parallel_enable,
-                               update_aclgraph_sizes, vllm_version_is)
+                               update_aclgraph_sizes,
+                               update_cudagraph_capture_sizes, vllm_version_is)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -264,7 +265,8 @@ class NPUPlatform(Platform):
                     compilation_config.init_with_cudagraph_sizes(
                         sp_aclgraph_sizes)
                 else:
-                    vllm_config.compilation_config.post_init_cudagraph_sizes()
+                    update_cudagraph_capture_sizes(vllm_config,
+                                                   sp_aclgraph_sizes)
 
         # TODO: Full graph is fully supported later, and the default value will be set to full graph.
         if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
