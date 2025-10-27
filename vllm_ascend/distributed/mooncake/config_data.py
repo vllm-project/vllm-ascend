@@ -485,10 +485,10 @@ def _parse_global_segment_size(value) -> int:
         raise ValueError("global segment size cannot be empty.")
 
     UNIT_MULTIPLIERS = {
-        'gb': 1024 ** 3,  # 1 GB = 1024^3 bytes
-        'mb': 1024 ** 2,  # 1 MB = 1024^2 bytes
+        'gb': 1024**3,  # 1 GB = 1024^3 bytes
+        'mb': 1024**2,  # 1 MB = 1024^2 bytes
         'kb': 1024,  # 1 KB = 1024 bytes
-        'b': 1   # 1 B = 1 byte
+        'b': 1  # 1 B = 1 byte
     }
     pattern = r'^\s*([\d.]+)\s*(gb|mb|kb|b)?\s*$'
     match = re.match(pattern, cleaned_input)
@@ -503,7 +503,8 @@ def _parse_global_segment_size(value) -> int:
     return _convert_to_bytes(number_str, multiplier, value)
 
 
-def _convert_to_bytes(number_str: str, multiplier: int, original_input: str) -> int:
+def _convert_to_bytes(number_str: str, multiplier: int,
+                      original_input: str) -> int:
     """
     Convert numeric string to byte count
     
