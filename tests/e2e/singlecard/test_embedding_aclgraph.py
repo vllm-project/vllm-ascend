@@ -24,9 +24,9 @@ from tests.e2e.conftest import VllmRunner
 from tests.e2e.utils import check_embeddings_close
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
 MODELS = ["BAAI/bge-m3"]
+
 
 @pytest.mark.parametrize("model_name", MODELS)
 def test_aclgrpah_embed_models_correctness(model_name):
@@ -36,14 +36,12 @@ def test_aclgrpah_embed_models_correctness(model_name):
             model_name,
             task="embed",
             enforce_eager=False,
-            # load_format="dummy",
     ) as vllm_aclgraph_runner:
         vllm_aclgraph_outputs = vllm_aclgraph_runner.encode(queries)
 
     with VllmRunner(
             model_name,
             task="embed",
-            # load_format="dummy",
             enforce_eager=True,
     ) as vllm_runner:
         vllm_outputs = vllm_runner.encode(queries)
