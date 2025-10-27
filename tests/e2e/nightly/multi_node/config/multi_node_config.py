@@ -220,7 +220,7 @@ class MultiNodeConfig:
                          server_port=server_port,
                          server_cmd=server_cmd))
 
-        benchmarks = config_data.get("benchmarks", {})
+        benchmarks = config_data.get("benchmarks") or {}
         assert benchmarks is not None, "benchmarks must be provided"
         perf_cmd = benchmarks.get("perf")
         acc_cmd = benchmarks.get("acc")
@@ -290,3 +290,8 @@ class MultiNodeConfig:
         subprocess.run(cmd, env=env, check=True)
         assert os.path.exists(
             str(ranktable_path)), "failed generate ranktable.json"
+
+
+if __name__ == '__main__':
+    config = MultiNodeConfig.from_yaml()
+    print(config.perf_cmd)
