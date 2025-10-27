@@ -149,7 +149,7 @@ def _pangu_torchair_test_fixture(
     # of PanguProMoE.
     golden_results = [
         'Hello, my name is Remempondeprecatedmiot忱',
-        'The president of the United States is Remem下的一个 rever ceremoni Segnali',
+        'The president of the United States is Remem下的一个 revert ceremoni Segnali',
         'The capital of France is Rememvoud administrativ Remem投',
         'The future of AI isotope Segnali Zoeken精细化 supus',
     ]
@@ -217,7 +217,7 @@ def _qwen_torchair_test_fixture(
     # of PanguProMoE.
     golden_results = [
         'Hello, my name is Remempondeprecatedmiot忱',
-        'The president of the United States is Remem下的一个 rever ceremoni Segnali',
+        'The president of the United States is Remem下的一个 revert ceremoni Segnali',
         'The capital of France is Rememvoud administrativ Remem投',
         'The future of AI isotope Segnali Zoeken精细化 supus',
     ]
