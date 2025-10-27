@@ -68,9 +68,10 @@ class CachedRequestState:
 
     # cp/dcp param
     num_computed_tokens_of_cp_sp: Optional[list[Optional[list[int]]]] = None
-    num_computed_tokens_of_cp_sp_accum: Optional[list[Optional[list[Optional[list[int]]]]]] = None  # Records computed tokens for each chunk
+    num_computed_tokens_of_cp_sp_accum: Optional[list[Optional[list[Optional[
+        list[int]]]]]] = None  # Records computed tokens for each chunk
     next_cp_dcp_start_rank: int = 0  # Tracks next starting rank for round-robin distribution
-    token_blank_in_last_blk: int = 0    # if the last block is not full, how many future tokens can be stored
+    token_blank_in_last_blk: int = 0  # if the last block is not full, how many future tokens can be stored
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
@@ -300,8 +301,8 @@ class InputBatch:
         # cp/dcp parameters
         self.num_computed_tokens_of_cp_sp: list[Optional[list[Optional[
             list[int]]]]] = [None] * max_num_reqs
-        self.num_computed_tokens_of_cp_sp_accum: list[
-            Optional[list[Optional[list[int]]]]] = [None] * max_num_reqs
+        self.num_computed_tokens_of_cp_sp_accum: list[Optional[list[Optional[
+            list[int]]]]] = [None] * max_num_reqs
 
     @property
     def req_ids(self) -> list[str]:
@@ -368,8 +369,10 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         # Add CP/DCP tracking fields
-        self.num_computed_tokens_of_cp_sp[req_index] = request.num_computed_tokens_of_cp_sp
-        self.num_computed_tokens_of_cp_sp_accum[req_index] = request.num_computed_tokens_of_cp_sp_accum
+        self.num_computed_tokens_of_cp_sp[
+            req_index] = request.num_computed_tokens_of_cp_sp
+        self.num_computed_tokens_of_cp_sp_accum[
+            req_index] = request.num_computed_tokens_of_cp_sp_accum
 
         if sampling_params := request.sampling_params:
             if (self.is_spec_decode
