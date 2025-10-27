@@ -24,13 +24,12 @@ from typing import Dict
 
 import pytest
 
-
-
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
-def _qwen_torchair_test_fixture(
+
+def _deepseek_torchair_test_fixture(
     additional_config: Dict,
     *,
     tensor_parallel_size=2,
@@ -47,13 +46,14 @@ def _qwen_torchair_test_fixture(
         kwargs = {
             "ascend_scheduler_config": {
                 "enabled": True,
+                "mode": "max-autotune",
             },
             "refresh": True,
         }
     additional_config.update(**kwargs)
 
     with VllmRunner(
-            "Qwen/Qwen3-30B-A3B",
+            "vllm-ascend/DeepSeek-V3-Pruning",
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
@@ -62,7 +62,10 @@ def _qwen_torchair_test_fixture(
         # use greedy sampler to make sure the generated results are fix
         vllm_output = vllm_model.generate_greedy(example_prompts, 5)
 
-
+    # NOTE: vllm-ascend/DeepSeek-V3-Pruning is a random weight of
+    # DeepSeek-V3 with 2 hidden layers, thus the golden results seems
+    # inaccurate. This will only change if accuracy improves with the
+    # official weights of DeepSeek-V3.
     golden_results = [
         'Hello, my name is下载早点向前很有่อง',
         'The president of the United States isSender)## physiological Albany',
@@ -76,35 +79,35 @@ def _qwen_torchair_test_fixture(
         print(f"Generated text: {vllm_output[i][1]!r}")
 
 
-def test_e2e_qwen_with_torchair():
+def test_e2e_deepseekv3_with_torchair():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
-            "mode":"max-autotune",
+            "mode": "max-autotune",
         },
     }
-    _qwen_torchair_test_fixture(additional_config)
+    _deepseek_torchair_test_fixture(additional_config)
 
 
-def test_e2e_qwen_with_torchair_ms_mla():
+def test_e2e_deepseekv3_with_torchair_ms_mla():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
             "enable_multistream_mla": True,
-            "mode":"max-autotune",
+            "mode": "max-autotune",
         },
     }
-    _qwen_torchair_test_fixture(additional_config)
+    _deepseek_torchair_test_fixture(additional_config)
 
 
-def test_e2e_qwen_with_torchair_v1scheduler():
+def test_e2e_deepseekv3_with_torchair_v1scheduler():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
-            "mode":"max-autotune",
+            "mode": "max-autotune",
         },
     }
-    _qwen_torchair_test_fixture(additional_config, use_v1_schduler=True)
+    _deepseek_torchair_test_fixture(additional_config, use_v1_schduler=True)
 
 
 def _pangu_torchair_test_fixture(
@@ -123,6 +126,7 @@ def _pangu_torchair_test_fixture(
     kwargs = {
         "ascend_scheduler_config": {
             "enabled": True,
+            "mode": "max-autotune",
         },
         "refresh": True,
     }
@@ -161,7 +165,7 @@ def test_e2e_pangu_with_torchair():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
-            "mode":"max-autotune",
+            "mode": "max-autotune",
         },
     }
     _pangu_torchair_test_fixture(additional_config)
@@ -186,11 +190,11 @@ def _qwen_torchair_test_fixture(
     additional_config = {
         "torchair_graph_config": {
             "enabled": False,
-            "mode":"max-autotune",
+            "mode": "max-autotune",
         },
         "ascend_scheduler_config": {
             "enabled": True,
-            "mode":"max-autotune",
+            "mode": "max-autotune",
         },
         "refresh": True,
     }
