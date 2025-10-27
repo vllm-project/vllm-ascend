@@ -72,7 +72,7 @@ async def test_multi_node() -> None:
         ) as remote_server:
             if config.is_master:
                 port = proxy_port if disaggregated_prefill else server_port
-                base_url = f"http://localhost:{port}/v1/completions"
+                base_url = f"http://{config.cur_ip}:{port}/v1/completions"
                 client = openai.AsyncOpenAI(base_url=base_url,
                                             api_key="token-abc123",
                                             max_retries=0,
