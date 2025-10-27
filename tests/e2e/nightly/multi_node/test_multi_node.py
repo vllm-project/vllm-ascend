@@ -30,13 +30,11 @@ def get_local_model_path_with_retry(
             local_model_path = snapshot_download(
                 model_id=model,
                 revision=revision,
-                resume_download=True,
             )
             return local_model_path
 
-        except HTTPError as e:
-            status = getattr(e.response, "status_code", None)
-            url = getattr(e.response, "url", None)
+        except HTTPError:
+            continue
 
         except (ConnectionError, Timeout):
             continue
@@ -49,6 +47,8 @@ def get_local_model_path_with_retry(
 @pytest.mark.asyncio
 async def test_multi_node() -> None:
     config = MultiNodeConfig.from_yaml()
+    local_model_path = get_local_model_path_with_retry(config.model)
+    assert local_model_path is not None, "can not find any local weight for test"
     env_dict = config.envs
     perf_cmd = config.perf_cmd
     acc_cmd = config.acc_cmd
@@ -59,7 +59,7 @@ async def test_multi_node() -> None:
     server_host = config.cluster_ips[0]
     with config.launch_server_proxy(DISAGGREGATED_PREFILL_PROXY_SCRIPT):
         with RemoteOpenAIServer(
-                model=config.model,
+                model=local_model_path,
                 vllm_serve_args=config.server_cmd,
                 server_port=server_port,
                 server_host=server_host,
@@ -78,7 +78,7 @@ async def test_multi_node() -> None:
                                             max_retries=0,
                                             **{"timeout": 600})
                 batch = await client.completions.create(
-                    model=config.model,
+                    model=local_model_path,
                     prompt=prompts,
                     **api_keyword_args,
                 )
@@ -86,8 +86,8 @@ async def test_multi_node() -> None:
                 assert choices[0].text, "empty response"
                 # aisbench test
                 if acc_cmd:
-                    run_aisbench_cases(config.model, port, acc_cmd)
+                    run_aisbench_cases(local_model_path, port, acc_cmd)
                 if perf_cmd:
-                    run_aisbench_cases(config.model, port, perf_cmd)
+                    run_aisbench_cases(local_model_path, port, perf_cmd)
             else:
                 remote_server.hang_until_terminated()
