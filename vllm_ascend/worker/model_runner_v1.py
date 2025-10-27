@@ -473,11 +473,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                         device="cpu",
                                         pin_memory=True)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
-        self.pcp_allgather_restore_idx = torch.zeros(self.max_num_tokens,
+        self.pcp_allgather_restore_idx = torch.zeros(self.max_num_tokens + 2 * self.pcp_size * self.max_num_reqs,
                                                      dtype=torch.int32,
                                                      device=self.device)
         self.num_pcp_pads = torch.zeros(self.max_num_reqs, dtype=torch.int32)
-        self.pcp_padded_slot_mapping = torch.zeros(self.max_num_tokens,
+        self.pcp_padded_slot_mapping = torch.zeros(self.max_num_tokens + 2 * self.pcp_size * self.max_num_reqs,
                                                    dtype=torch.int32,
                                                    device=self.device)
 
