@@ -176,7 +176,7 @@ jobs:
 
       - name: Upload Report
         if: ${{ inputs.upload == true }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: "report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}"
           path: ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md
