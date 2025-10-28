@@ -116,7 +116,7 @@ class RemoteOpenAIServer:
                  model: str,
                  vllm_serve_args: Union[list[str], str],
                  *,
-                 server_host: str = "0.0.0.0",
+                 server_host: Optional[str] = None,
                  server_port: int = 8080,
                  env_dict: Optional[dict[str, str]] = None,
                  seed: Optional[int] = None,
@@ -154,7 +154,7 @@ class RemoteOpenAIServer:
                 json.dumps(override_hf_configs)
             ]
 
-        self.host = str(server_host)
+        self.host = str(server_host) if server_host else "localhost"
         self.port = int(server_port)
         # for multi-nodes test
         self.nodes_info = nodes_info

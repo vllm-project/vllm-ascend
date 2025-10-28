@@ -48,7 +48,7 @@ def get_local_model_path_with_retry(
 async def get_completions(url: str, model: str, prompts: Union[str, List[str]],
                           **api_kwargs: Any) -> List[str]:
     """
-    Asynchronously send HTTP requests to a /v1/completions endpoint.
+    Asynchronously send HTTP requests to endpoint.
 
     Args:
         url: Full endpoint URL, e.g. "http://localhost:1025/v1/completions"
