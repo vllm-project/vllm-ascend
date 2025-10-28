@@ -480,7 +480,7 @@ def _parse_global_segment_size(value) -> int:
             raise TypeError(
                 f"Unsupported type for global_segment_size: {type(value)}"
             ) from e
-    
+
     cleaned_input = value.strip().lower()
     if not cleaned_input:
         raise ValueError("global segment size cannot be empty.")
@@ -493,13 +493,13 @@ def _parse_global_segment_size(value) -> int:
     }
     pattern = r'^\s*([\d.]+)\s*(gb|mb|kb|b)?\s*$'
     match = re.match(pattern, cleaned_input)
-    
+
     if not match:
         raise ValueError(f"Invalid format: '{value}'")
-    
+
     number_str = match.group(1)
     unit = match.group(2) or 'b'
-       
+
     multiplier = UNIT_MULTIPLIERS[unit]
     return _convert_to_bytes(number_str, multiplier, value)
 
