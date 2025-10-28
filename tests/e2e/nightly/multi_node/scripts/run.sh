@@ -121,7 +121,7 @@ download_go() {
 }
 
 install_ais_bench() {
-    local AIS_BENCH="$SRC_DIR/benchmark"
+    local AIS_BENCH="$SRC_DIR/vllm-ascend/benchmark"
     git clone https://gitee.com/aisbench/benchmark.git $AIS_BENCH
     cd $AIS_BENCH
     git checkout v3.0-20250930-master
@@ -166,8 +166,8 @@ run_tests() {
     kill_npu_processes
     ret=$?
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
-        mkdir -p "$(dirname "$RESULT_PATH")"
-        echo $ret > "$RESULT_PATH"
+        mkdir -p "$(dirname "$RESULT_FILE_PATH")"
+        echo $ret > "$RESULT_FILE_PATH"
     fi
     return $ret
 }
