@@ -335,8 +335,7 @@ class AscendFusedMoE(FusedMoE):
         enable_force_load_balance = forward_context.in_profile_run
 
         forward_context = get_forward_context()
-        if forward_context.moe_comm_type == MoECommType.ALLGATHER:
-            forward_context.moe_comm_method.is_w8a8_dynamic = self.is_w8a8_dynamic
+        forward_context.moe_comm_method.prepare_finalize.is_w8a8_dynamic = self.is_w8a8_dynamic
         hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,

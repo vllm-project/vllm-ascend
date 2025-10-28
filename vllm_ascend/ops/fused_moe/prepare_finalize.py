@@ -45,6 +45,7 @@ class PrepareAndFinalize(ABC):
 
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
+        self.is_w8a8_dynamic = None
 
     @abstractmethod
     def prepare(
@@ -291,7 +292,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
     def __init__(self, moe_config: FusedMoEConfig):
         super().__init__(moe_config)
-        self.is_w8a8_dynamic = None
 
     def prepare(
         self,
@@ -321,6 +321,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
+        pertoken_scale = None
         if self.is_w8a8_dynamic:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
                 hidden_states)
