@@ -44,28 +44,28 @@ class NgramProposer(VllmNgramProposer, Proposer):
             num_sampled_ids = len(sampled_ids)
             if not num_sampled_ids:
                 continue
-            
+
             req_id = self.runner.input_batch.req_ids[i]
             if req_id in self.runner.input_batch.spec_decode_unsupported_reqs:
                 continue
-            
+
             num_tokens = self.runner.input_batch.num_tokens_no_spec[i]
             if num_tokens >= self.runner.input_batch.max_model_len:
                 # Skip requests that have already reached the max model length.
                 continue
-            
+
             start_idx = self.runner.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
             self.runner.input_batch.token_ids_cpu[
                 i, start_idx:end_idx] = sampled_ids
-            
+
             valid_ngram_requests.append(i)
-        
+
         draft_token_ids = self.batch_propose(
             len(valid_sampled_token_ids),
             valid_ngram_requests,
             self.runner.input_batch.num_tokens_no_spec,
             self.runner.input_batch.token_ids_cpu,
-            )
-        
+        )
+
         return draft_token_ids
