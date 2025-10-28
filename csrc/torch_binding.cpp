@@ -469,16 +469,16 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     const at::Tensor & x_scale,
     const at::Tensor & group_list,
     const c10::optional<at::Tensor> & bias,
-    const c10::optional<at::Tensor> & offset
-) {
+    const c10::optional<at::Tensor> & offset)
+{
     auto x_size = x.sizes();
     int n = weight[0].sizes()[2];
     int m = x_size[0];
     int k = x_size[1];
 
-    at::Tensor output = at_npu::native::OpPreparation::apply_tensor_without_format({m, n/2}, x.options().dtype(at::kChar));
-    at::Tensor output_scale = at_npu::native::OpPreparation::apply_tensor_without_format({m}, x.options().dtype(at::kFloat));
-    at::Tensor output_offset = at_npu::native::OpPreparation::apply_tensor_without_format({}, x.options().dtype(at::kFloat));
+    at::Tensor output = at_npu::native::OpPreparation::apply_tensor_without_format({m, n/2}, c10::dtype(c10::ScalarType::Char));
+    at::Tensor output_scale = at_npu::native::OpPreparation::apply_tensor_without_format({m}, c10::dtype(c10::ScalarType::Float));
+    at::Tensor output_offset = at_npu::native::OpPreparation::apply_tensor_without_format({}, c10::dtype(c10::ScalarType::Float));
 
     EXEC_NPU_CMD(
         aclnnGroupedMatmulSwigluQuantWeightNZTensorList,
@@ -492,6 +492,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
         output,
         output_scale,
         output_offset);
+
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }
 
@@ -552,7 +553,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.def(
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list(Tensor x, Tensor[] weight, Tensor[] weight_scale, Tensor x_scale,"
         "                                                  Tensor group_list, *,"
-        "                                                  Tensor? bias=None, Tensor? offset=None)  -> (Tensor, Tensor, Tensor)"
+        "                                                  Tensor? bias=None, Tensor? offset=None) ->"
+        "                                                  (Tensor output, Tensor output_scale, Tensor output_offset)"
     );
     ops.impl("grouped_matmul_swiglu_quant_weight_nz_tensor_list", torch::kPrivateUse1, &vllm_ascend::grouped_matmul_swiglu_quant_weight_nz_tensor_list);
 }

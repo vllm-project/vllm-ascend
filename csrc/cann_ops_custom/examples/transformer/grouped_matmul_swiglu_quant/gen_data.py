@@ -6,7 +6,7 @@ from tqdm import tqdm
 class DataGenerator:
     def __init__(self, data_dir="data"):
         self.data_dir = data_dir
-        
+
         # 初始化成员变量（现在用 None 或 torch.Tensor）
         self.x_data = None
         self.weight_data = None
@@ -17,7 +17,7 @@ class DataGenerator:
         self.output_data = None
         self.output_scale = None
         os.makedirs(data_dir, exist_ok=True)
-    
+
     def shape_nd_to_nz(self, shape):
         assert len(shape) >= 2
         batch = shape[:-2]
@@ -40,18 +40,17 @@ class DataGenerator:
         # 1. xHostData (M*K) - int8
         self.x_data = torch.randint(-128, 127, (M, K), dtype=torch.int8)
         self.x_data.cpu().numpy().tofile(os.path.join(self.data_dir, "xHostData.bin"))
-        
+
         # 2. weightHostData (E*N*K) - int8
         self.weight_data = torch.randint(-128, 127, size=(E, K, N), dtype=torch.int8)
         self.weight_data_nz = self.convert_nd_to_nz(self.weight_data)
-        print("weight_data_nz shape:", self.weight_data_nz.shape)
         self.weight_data_nz.cpu().numpy().tofile(os.path.join(self.data_dir, "weightHostData.bin"))
-        
+
         # 3. weightScaleHostData (E*N) - float32
         self.weight_scale = torch.rand(E, N) * 0.9 + 0.1  # uniform(0.1, 1.0)
         self.weight_scale = self.weight_scale.to(torch.float32)
         self.weight_scale.cpu().numpy().tofile(os.path.join(self.data_dir, "weightScaleHostData.bin"))
-        
+
         # 4. xScaleHostData (M) - float32
         self.x_scale = torch.rand(M) * 0.9 + 0.1  # uniform(0.1, 1.0)
         self.x_scale = self.x_scale.to(torch.float32)
@@ -60,7 +59,7 @@ class DataGenerator:
     def process_swiglu_quant(self):
         # group_list_data: int64 tensor
         self.group_list_data = torch.tensor([2048, 4096, 6144, 8192], dtype=torch.int64)
-        
+
         output0, output1 = self.process_groups(
             self.x_data, 
             self.weight_data, 
@@ -68,7 +67,7 @@ class DataGenerator:
             self.x_scale, 
             self.group_list_data
         )
-        
+
         # Save results
         output0.cpu().numpy().tofile(os.path.join(self.data_dir, "quant_output_np.bin"))
         output1.cpu().numpy().tofile(os.path.join(self.data_dir, "quant_scale_output_np.bin"))
