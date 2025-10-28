@@ -3355,23 +3355,38 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     else:
                         # k_cache: nope_cache    v_cache: rope_cache
                         mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
-                        k_shape = [
-                            mla_num_blocks, mla_block_size, num_kv_heads,
-                            self.model_config.hf_text_config.kv_lora_rank
-                        ]
-                        v_shape = [
-                            mla_num_blocks, mla_block_size, num_kv_heads,
-                            self.model_config.hf_text_config.qk_rope_head_dim
-                        ]
-
+                        if not self.use_sparse:
+                            k_shape = [
+                                mla_num_blocks, mla_block_size, num_kv_heads,
+                                self.model_config.hf_text_config.kv_lora_rank
+                            ]
+                            v_shape = [
+                                mla_num_blocks, mla_block_size, num_kv_heads,
+                                self.model_config.hf_text_config.
+                                qk_rope_head_dim
+                            ]
+                        else:
+                            k_shape = [
+                                mla_num_blocks, mla_block_size, num_kv_heads,
+                                self.model_config.hf_text_config.kv_lora_rank
+                            ]
+                            v_shape = [
+                                mla_num_blocks, mla_block_size, num_kv_heads,
+                                self.model_config.hf_text_config.
+                                qk_rope_head_dim
+                            ]
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
                     k_cache = self._convert_torch_format(k_cache)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
                     v_cache = self._convert_torch_format(v_cache)
                     if self.use_sparse and raw_dsa_k_cache is not None:
-                        dsa_k_cache_shape = (num_blocks, block_size, 1, 128)
-                        dsa_k_cache = raw_dsa_k_cache.view(dtype).view(
-                            dsa_k_cache_shape)
+                        dsa_k_cache_shape = (num_blocks,
+                                             kv_cache_spec.block_size, 1, 128)
+                        dsa_k_cache_size = (
+                            num_blocks
+                        ) * kv_cache_spec.block_size * 128 * dtype.itemsize
+                        dsa_k_cache = raw_dsa_k_cache[:dsa_k_cache_size].view(
+                            dtype).view(dsa_k_cache_shape)
                         kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
                     else:
                         kv_caches[layer_name] = (k_cache, v_cache)
