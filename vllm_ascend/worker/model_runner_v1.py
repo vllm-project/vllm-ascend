@@ -3891,23 +3891,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             if aclgraph_mode.decode_mode() == CUDAGraphMode.FULL and \
                 aclgraph_mode.separate_routine():
-                max_num_tokens = self.scheduler_config.max_num_seqs * \
-                        self.uniform_decode_query_len
-                decode_cudagraph_batch_sizes = [
-                    x for x in self.aclgraph_batch_sizes if x <= max_num_tokens
-                    and x >= self.uniform_decode_query_len
-                ]
-                if not all(x % self.uniform_decode_query_len == 0
-                           for x in decode_cudagraph_batch_sizes):
-                    raise ValueError(
-                        "In the MTP fullgraph scenario, each graph size must be an integer multiple of "
-                        f"(num_speculative_tokens + 1): {self.uniform_decode_query_len}. "
-                        f"Please modify the cudagraph_capture_sizes variable to be integer multiple of {self.uniform_decode_query_len}, "
-                        f"while ensuring the maximum cudagraph_capture_sizes does not exceed max_num_seqs * (num_speculative_tokens + 1): {max_num_tokens}. "
-                        "For example, with MTP=2 and max_num_seqs=16, we recommend setting cudagraph_capture_sizes to [48]."
-                    )
                 compilation_cases_decode = list(
-                    reversed(decode_cudagraph_batch_sizes))
+                    reversed(self.aclgraph_batch_sizes))
                 self._capture_aclgraphs(
                     compilation_cases=compilation_cases_decode,
                     aclgraph_runtime_mode=CUDAGraphMode.FULL,
