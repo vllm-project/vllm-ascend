@@ -72,8 +72,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.utils import (cdiv, is_pin_memory_available,
-                        length_from_prompt_token_ids_or_embeds)
+from vllm.utils import cdiv, length_from_prompt_token_ids_or_embeds
 from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -111,10 +110,14 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          AscendPrefillContextParallelMetadata)
+# yapf: disable
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                set_graph_params,
+                                               update_attn_dcp_pcp_params,
                                                update_attn_params,
+                                               update_mla_attn_dcp_pcp_params,
                                                update_mla_attn_params)
+# yapf: enable
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import \
     D2DExpertWeightLoader
@@ -156,13 +159,14 @@ else:
 if vllm_version_is("0.11.0"):
     from vllm.attention.layer import Attention
     from vllm.config import CompilationLevel
-    from vllm.utils import LazyLoader
+    from vllm.utils import LazyLoader, is_pin_memory_available
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
 else:
     from vllm.attention.layer import MLAAttention
     from vllm.config import CompilationMode
     from vllm.utils.import_utils import LazyLoader
+    from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -388,7 +392,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter = get_spec_decode_method(
                     self.speculative_config.method, self.vllm_config,
                     self.device, self)
-                self.rejection_sampler = AscendRejectionSampler()
+                if vllm_version_is("0.11.0"):
+                    self.rejection_sampler = AscendRejectionSampler()
+                else:
+                    self.rejection_sampler = AscendRejectionSampler(
+                        self.sampler)
             self.actual_seq_lengths_q = list(
                 range(self.decode_token_per_req, self.max_num_tokens + 1,
                       self.decode_token_per_req))
@@ -965,8 +973,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_seq_len, self.dtype, self.device)
         # Prefill with cache hit.
         elif attn_state == AscendAttentionState.PrefillCacheHit:
-            return self.attn_mask_builder.get_attn_mask(
-                128, self.dtype, self.device)
+            if torch.version.cann.startswith("8.3"):
+                return self.attn_mask_builder.get_attn_mask(
+                    2048, self.dtype, self.device)
+            else:
+                return self.attn_mask_builder.get_attn_mask(
+                    128, self.dtype, self.device)
         # Decode-only situation.
         else:
             return None
@@ -1735,6 +1747,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping = blk_table.slot_mapping[:slot_mapping_size]
                 blk_table.slot_mapping[slot_mapping_size:].fill_(0)
                 if self.pcp_size > 1:
+                    slot_mapping_for_pcp = blk_table.slot_mapping[:
+                                                                  long_seq_metadata
+                                                                  .
+                                                                  num_actual_tokens_pcp_padded]
+                    slot_mapping_for_pcp[slot_mapping_size:].fill_(-1)
                     assert pcp_unpad_mask is not None
                     pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[:
                                                                            pcp_unpad_mask
@@ -1743,10 +1760,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                                                0]]
                     pcp_padded_slot_mapping.fill_(-1)
                     pcp_padded_slot_mapping[
-                        pcp_unpad_mask] = blk_table.slot_mapping[:
-                                                                 slot_mapping_size]
-                    blk_table.slot_mapping[:long_seq_metadata.
-                                           num_actual_tokens_pcp_padded] = pcp_padded_slot_mapping
+                        pcp_unpad_mask] = slot_mapping_for_pcp[:
+                                                               slot_mapping_size]
+                    slot_mapping_for_pcp[:long_seq_metadata.
+                                         num_actual_tokens_pcp_padded] = pcp_padded_slot_mapping
+                    slot_mapping = slot_mapping_for_pcp
 
             # Make AscendCommonAttentionMetadata
             common_attn_metadata = AscendCommonAttentionMetadata(
@@ -1835,13 +1853,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
             # TODO: maybe_padded_num_tokens will be removed, use num_input_tokens instead
             if self.vllm_config.model_config.use_mla:
-                # FIXME: Try using `auto_dispatch_capture=True`
-                update_mla_attn_params(self.update_stream, forward_context,
-                                       maybe_padded_num_tokens,
-                                       self.speculative_config)
+                if self.pcp_size * self.dcp_size > 1:
+                    # FIXME: Try using `auto_dispatch_capture=True`
+                    update_mla_attn_dcp_pcp_params(self.update_stream,
+                                                   forward_context,
+                                                   maybe_padded_num_tokens,
+                                                   self.speculative_config)
+                else:
+                    # FIXME: Try using `auto_dispatch_capture=True`
+                    update_mla_attn_params(self.update_stream, forward_context,
+                                           maybe_padded_num_tokens,
+                                           self.speculative_config)
             else:
-                update_attn_params(self.update_stream, forward_context,
-                                   maybe_padded_num_tokens)
+                if self.pcp_size * self.dcp_size > 1:
+                    update_attn_dcp_pcp_params(self.update_stream,
+                                               forward_context,
+                                               maybe_padded_num_tokens)
+                else:
+                    update_attn_params(self.update_stream, forward_context,
+                                       maybe_padded_num_tokens)
 
         if get_forward_context().sp_enabled:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
@@ -1945,6 +1975,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # TODO: Optimize the CPU -> NPU copy.
         cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
             self.device, non_blocking=True)
+        if not vllm_version_is("0.11.0"):
+            cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(
+                self.device, non_blocking=True)
         logits_indices = torch.from_numpy(logits_indices).to(self.device,
                                                              non_blocking=True)
         target_logits_indices = torch.from_numpy(target_logits_indices).to(
@@ -1956,15 +1989,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
         draft_token_ids = self.input_ids[logits_indices]
         draft_token_ids = draft_token_ids[target_logits_indices + 1]
-
-        metadata = SpecDecodeMetadata(
-            draft_token_ids=draft_token_ids,
-            num_draft_tokens=num_draft_tokens.tolist(),
-            cu_num_draft_tokens=cu_num_draft_tokens,
-            target_logits_indices=target_logits_indices,
-            bonus_logits_indices=bonus_logits_indices,
-            logits_indices=logits_indices,
-        )
+        if vllm_version_is("0.11.0"):
+            metadata = SpecDecodeMetadata(
+                draft_token_ids=draft_token_ids,
+                num_draft_tokens=num_draft_tokens.tolist(),
+                cu_num_draft_tokens=cu_num_draft_tokens,
+                target_logits_indices=target_logits_indices,
+                bonus_logits_indices=bonus_logits_indices,
+                logits_indices=logits_indices,
+            )
+        else:
+            metadata = SpecDecodeMetadata(
+                draft_token_ids=draft_token_ids,
+                num_draft_tokens=num_draft_tokens.tolist(),
+                cu_num_draft_tokens=cu_num_draft_tokens,
+                cu_num_sampled_tokens=cu_num_sampled_tokens,
+                target_logits_indices=target_logits_indices,
+                bonus_logits_indices=bonus_logits_indices,
+                logits_indices=logits_indices,
+            )
         return metadata
 
     def apply_grammar_bitmask(
@@ -2576,6 +2619,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     kv_cache_group_id].get_device_tensor()
                 slot_mapping = self.input_batch.block_table[
                     kv_cache_group_id].slot_mapping
+                self.cp_kv_recover_idx = torch.zeros(self.max_num_tokens,
+                                                     dtype=torch.int32,
+                                                     device=self.device)
+                long_seq_metadata = self._generate_pcp_metadata(
+                    num_tokens, self.seq_lens_cpu)
+                if long_seq_metadata is not None:
+                    pcp_world_size = get_pcp_group(
+                    ).world_size if prefill_context_parallel_enable() else 1
+                    dcp_world_size = get_dcp_group().world_size
+                    num_computed_tokens_of_pcp_dcp = [[
+                        [0] * dcp_world_size for _ in range(pcp_world_size)
+                    ] for _ in range(num_tokens)]
+                    long_seq_metadata.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=torch.tensor(
                         [0] + self.actual_seq_lengths_q[:num_reqs],
@@ -2599,6 +2655,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     decode_token_per_req=self.decode_token_per_req,
                     cos=self.cos,
                     sin=self.sin,
+                    prefill_context_parallel_metadata=long_seq_metadata,
                 )
                 attn_state = AscendAttentionState.DecodeOnly
                 if self.speculative_config and \
@@ -2628,12 +2685,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             not forward_context.capturing:
             if self.vllm_config.model_config.use_mla:
                 # FIXME: Try using `auto_dispatch_capture=True`
-                update_mla_attn_params(self.update_stream, forward_context,
-                                       positions.shape[0],
-                                       self.speculative_config)
+                if self.pcp_size * self.dcp_size > 1:
+                    # FIXME: Try using `auto_dispatch_capture=True`
+                    update_mla_attn_dcp_pcp_params(self.update_stream,
+                                                   forward_context,
+                                                   positions.shape[0],
+                                                   self.speculative_config)
+                else:
+                    # FIXME: Try using `auto_dispatch_capture=True`
+                    update_mla_attn_params(self.update_stream, forward_context,
+                                           positions.shape[0],
+                                           self.speculative_config)
             else:
-                update_attn_params(self.update_stream, forward_context,
-                                   positions.shape[0])
+                if self.pcp_size * self.dcp_size > 1:
+                    update_attn_dcp_pcp_params(self.update_stream,
+                                               forward_context,
+                                               positions.shape[0])
+                else:
+                    update_attn_params(self.update_stream, forward_context,
+                                       positions.shape[0])
 
         if self.drafter and self.drafter.name == SpecDcodeType.EAGLE3:
             hidden_states, _ = hidden_states

@@ -50,8 +50,6 @@ class MultiNodeConfig:
         self.proxy_port = get_avaliable_port()
         self.perf_cmd = perf_cmd
         self.acc_cmd = acc_cmd
-        assert perf_cmd is not None, "perf_cmd must be provided"
-        assert acc_cmd is not None, "acc_cmd must be provided"
 
         self.cur_index = int(os.getenv("LWS_WORKER_INDEX", 0))
         self.cur_ip = get_cur_ip()
@@ -220,10 +218,10 @@ class MultiNodeConfig:
                          server_port=server_port,
                          server_cmd=server_cmd))
 
-        benchmarks = config_data.get("benchmarks", {})
+        benchmarks = config_data.get("benchmarks") or {}
         assert benchmarks is not None, "benchmarks must be provided"
-        perf_cmd = benchmarks["perf"]
-        acc_cmd = benchmarks["acc"]
+        perf_cmd = benchmarks.get("perf")
+        acc_cmd = benchmarks.get("acc")
 
         return cls(model=model,
                    test_name=test_name,
@@ -290,3 +288,8 @@ class MultiNodeConfig:
         subprocess.run(cmd, env=env, check=True)
         assert os.path.exists(
             str(ranktable_path)), "failed generate ranktable.json"
+
+
+if __name__ == '__main__':
+    config = MultiNodeConfig.from_yaml()
+    print(config.perf_cmd)

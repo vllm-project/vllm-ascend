@@ -231,6 +231,8 @@ class AisbenchRunner:
 
 
 def run_aisbench_cases(model, port, aisbench_cases):
+    if isinstance(aisbench_cases, dict):
+        aisbench_cases = [aisbench_cases]
     aisbench_results = []
     aisbench_errors = []
     for aisbench_case in aisbench_cases:

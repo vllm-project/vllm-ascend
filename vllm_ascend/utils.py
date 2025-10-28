@@ -311,6 +311,41 @@ def get_max_hidden_layers(hf_config) -> int:
     return max(layer_counts)
 
 
+# Update cudagraph capture sizes for vllm config
+def update_cudagraph_capture_sizes(vllm_config: VllmConfig,
+                                   cudagraph_capture_sizes: List[int]):
+
+    valid_max_size = (cudagraph_capture_sizes[-1]
+                      if cudagraph_capture_sizes else 0)
+    if (vllm_config.compilation_config.max_cudagraph_capture_size is not None
+            and vllm_config.compilation_config.max_cudagraph_capture_size
+            != valid_max_size):
+        if vllm_config.compilation_config.cudagraph_capture_sizes is not None:
+            raise ValueError(
+                "customized max_cudagraph_capture_size"
+                f"(={vllm_config.compilation_config.max_cudagraph_capture_size}) "
+                "should be consistent with the max value of "
+                f"cudagraph_capture_sizes(={valid_max_size})")
+        logger.warning(
+            "Truncating max_cudagraph_capture_size to %d",
+            valid_max_size,
+        )
+
+    vllm_config.compilation_config.max_cudagraph_capture_size = valid_max_size
+
+    if vllm_config.compilation_config.cudagraph_capture_sizes is not None and len(
+            cudagraph_capture_sizes) < len(
+                vllm_config.compilation_config.cudagraph_capture_sizes):
+        logger.warning(
+            ("cudagraph_capture_sizes specified in compilation_config"
+             " %s is overridden by config %s"),
+            vllm_config.compilation_config.cudagraph_capture_sizes,
+            cudagraph_capture_sizes,
+        )
+    vllm_config.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
+    vllm_config.compilation_config.post_init_cudagraph_sizes()
+
+
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
     # NOTE: Currently, we can only capture 1800 graphs at most,
@@ -402,7 +437,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         indices[0], indices[-1] = 0, len(original_sizes) - 1
 
         sampled_sizes = [original_sizes[i] for i in indices]
-        compilation_config.init_with_cudagraph_sizes(sampled_sizes)
+        if vllm_version_is("0.11.0"):
+            compilation_config.init_with_cudagraph_sizes(sampled_sizes)
+        else:
+            update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
 
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
@@ -433,7 +471,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
             enlarged_sizes = [(num_speculative_tokens + 1) * size
                               for size in original_sizes]
-            compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            if vllm_version_is("0.11.0"):
+                compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            else:
+                update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
             logger.info(
                 "Adjusted ACL graphs: %s → %s for speculative decoding",
                 original_sizes, enlarged_sizes)
