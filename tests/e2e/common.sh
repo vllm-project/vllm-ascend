@@ -1,4 +1,4 @@
-# bash fonts colors
+# bash fonts colors 
 cyan='\e[96m'
 yellow='\e[33m'
 red='\e[31m'
