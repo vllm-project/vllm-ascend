@@ -35,7 +35,6 @@ from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
@@ -49,8 +48,9 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (init_ascend_soc_version,
+                               prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
-                               try_register_lib)
+                               try_register_lib, vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -64,6 +64,12 @@ torch_non_c_binding_in_graph_functions_npu[
     "torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(
     torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
+else:
+    from vllm.utils.mem_constants import GiB_bytes
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 
 class NPUWorker(WorkerBase):
@@ -206,9 +212,12 @@ class NPUWorker(WorkerBase):
         return device
 
     def init_device(self):
-        device = self._init_device()
+        # NOTE: KEEP device the member of `NPUWorker`, as it will be checked
+        # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
+        # for more details
+        self.device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = NPUModelRunner(self.vllm_config, device)
+        self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
@@ -381,9 +390,17 @@ class NPUWorker(WorkerBase):
         init_distributed_environment(self.parallel_config.world_size,
                                      self.rank, self.distributed_init_method,
                                      self.local_rank, "hccl")
-        ensure_model_parallel_initialized(
-            self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size)
+        if prefill_context_parallel_enable():
+            ensure_model_parallel_initialized(
+                self.parallel_config.tensor_parallel_size,
+                self.parallel_config.pipeline_parallel_size,
+                self.parallel_config.prefill_context_parallel_size,
+                self.parallel_config.decode_context_parallel_size)
+        else:
+            ensure_model_parallel_initialized(
+                self.parallel_config.tensor_parallel_size,
+                self.parallel_config.pipeline_parallel_size,
+                self.parallel_config.decode_context_parallel_size)
         init_ascend_model_parallel(self.parallel_config)
         ensure_kv_transfer_initialized(self.vllm_config)
 

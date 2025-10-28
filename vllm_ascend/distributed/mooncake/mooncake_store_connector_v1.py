@@ -165,6 +165,8 @@ class MooncakeStoreConnectorV1Scheduler:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False)
+        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "load_async", False)
         # request_id -> (vllm cached tokes, mooncake cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self._block_size = vllm_config.cache_config.block_size
@@ -229,7 +231,7 @@ class MooncakeStoreConnectorV1Scheduler:
             can_load=False,
         )
 
-        return need_to_allocate, not self.use_layerwise
+        return need_to_allocate, self.load_async
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
@@ -477,7 +479,8 @@ class MooncakeLookupServer:
             while self.running:
                 frames = self.socket.recv_multipart(copy=False)
                 token_ids = self.decoder.decode(frames)
-                result = self.mooncake_engine.lookup(token_ids, use_layerwise)
+                result = self.mooncake_engine.lookup_scheduler(
+                    token_ids, use_layerwise)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 

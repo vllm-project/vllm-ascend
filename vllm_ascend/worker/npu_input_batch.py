@@ -29,7 +29,6 @@ from vllm.multimodal.inputs import (MultiModalFeatureSpec,
                                     MultiModalKwargsItems, PlaceholderRange)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
@@ -39,7 +38,13 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.block_table import MultiGroupBlockTable
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import swap_dict_values
+else:
+    from vllm.utils.collection_utils import swap_dict_values
 
 
 @dataclass
@@ -94,19 +99,21 @@ class CachedRequestState:
 class InputBatch:
 
     def __init__(
-            self,
-            max_num_reqs: int,
-            max_model_len: int,
-            max_num_batched_tokens: int,
-            device: torch.device,
-            pin_memory: bool,
-            vocab_size: int,
-            block_sizes: list[int],  # The block_size of each kv cache group
-            logitsprocs: Optional[LogitsProcessors] = None,
-            is_spec_decode: bool = False,
-            is_pooling_model: bool = False,
-            num_speculative_tokens: int = 0,
-            kernel_block_sizes: Optional[list[list[int]]] = None):
+        self,
+        max_num_reqs: int,
+        max_model_len: int,
+        max_num_batched_tokens: int,
+        device: torch.device,
+        pin_memory: bool,
+        vocab_size: int,
+        block_sizes: list[int],  # The block_size of each kv cache group
+        logitsprocs: Optional[LogitsProcessors] = None,
+        is_spec_decode: bool = False,
+        is_pooling_model: bool = False,
+        num_speculative_tokens: int = 0,
+        kernel_block_sizes: Optional[list[list[int]]] = None,
+        cp_kv_cache_interleave_size: int = 1,
+    ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
@@ -151,7 +158,9 @@ class InputBatch:
             device=device,
             block_sizes=block_sizes,
             num_speculative_tokens=num_speculative_tokens,
-            kernel_sizes=kernel_block_sizes)
+            kernel_sizes=kernel_block_sizes,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        )
 
         # Sampling-related.
         self.temperature = torch.empty((max_num_reqs, ),

@@ -82,9 +82,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
     lambda: bool(int(os.getenv("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", '0'))
                  ),
-    # Whether to enable DBO feature for deepseek model.
-    "VLLM_ASCEND_ENABLE_DBO":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DBO", '0'))),
     # Whether to enable the model execute time observe profile. Disable it when
     # running vllm ascend in production environment.
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
@@ -172,6 +169,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable transpose weight and cast format to FRACTAL_NZ.
     "VLLM_ASCEND_ENABLE_NZ":
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
+    # Decide whether we should enable CP parallelism.
+    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", '0')))
 }
 
 # end-env-vars-definition
