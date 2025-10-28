@@ -53,6 +53,7 @@ from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
+from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (dense_optim_enable, enable_sp,
                                flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
@@ -318,7 +319,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             input_parallel = nn.functional.pad(input_parallel,
                                                (0, 0, 0, num_padding_tokens))
 
-        def otp_quant_comm(x):
+        def otp_maybe_quant_comm(x):
 
             # Reorganize the tensor so that the batch id and rank id correspond to each other.
             chunk_num = len(self.reorgnized_batch_ids) * len(
@@ -354,10 +355,18 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
 
         if not hasattr(self, '_quant_comm_config'):
             self._quant_comm_config = {}
-        self._quant_comm_config['communication_fn'] = otp_quant_comm
+        self._quant_comm_config['communication_fn'] = otp_maybe_quant_comm
 
         # Matrix multiply.
         assert self.quant_method is not None
+
+        actual_quant_method = getattr(self.quant_method, 'quant_method',
+                                      self.quant_method)
+
+        if not isinstance(actual_quant_method, AscendW8A8LinearMethod):
+            # Check if w8a8 quantization is enabled. If not, communicate immediately.
+            otp_maybe_quant_comm(input_parallel)
+
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
