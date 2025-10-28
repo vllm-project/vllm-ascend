@@ -223,7 +223,7 @@ def rejection_sample(
         is_greedy,
         max_spec_len,
         vocab_size,
-        using_block_verify,
+        using_block_verify=False,
         IS_NGRAM=draft_probs is None,
         # num_warps=1,
     )
