@@ -1,22 +1,22 @@
-# Model Support
+# Supported Models
 
-Get the newest info here: https://github.com/vllm-project/vllm-ascend/issues/1608
+Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/1608
 
-## Text-only Language Models
+## Text-Only Language Models
 
 ### Generative Models
 
-| Model                         | Supported | Note                                                                 |
+| Model                         | Support   | Note                                                                 |
 |-------------------------------|-----------|----------------------------------------------------------------------|
-| DeepSeek v3/3.1               | ✅        |                                                                      |
-| DeepSeek v3.2 EXP             | ✅        |                                                                      |
+| DeepSeek V3/3.1               | ✅        |                                                                      |
+| DeepSeek V3.2 EXP             | ✅        |                                                                      |
 | DeepSeek R1                   | ✅        |                                                                      |
 | DeepSeek Distill (Qwen/LLama) | ✅        |                                                                      |
 | Qwen3                         | ✅        |                                                                      |
 | Qwen3-based                   | ✅        |                                                                      |
 | Qwen3-Coder                   | ✅        |                                                                      |
 | Qwen3-Moe                     | ✅        |                                                                      |
-| Qwen3NextMoE                  | ✅        |                                                                      |
+| Qwen3-Next                    | ✅        |                                                                      |
 | Qwen2.5                       | ✅        |                                                                      |
 | Qwen2                         | ✅        |                                                                      |
 | Qwen2-based                   | ✅        |                                                                      |
@@ -38,13 +38,13 @@ Get the newest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | GLM-4                         | ❌        | [#2255](https://github.com/vllm-project/vllm-ascend/issues/2255)     |
 | GLM-4-0414                    | ❌        | [#2258](https://github.com/vllm-project/vllm-ascend/issues/2258)     |
 | ChatGLM                       | ❌        | [#554](https://github.com/vllm-project/vllm-ascend/issues/554)       |
-| DeepSeek v2.5                 | 🟡        | Need test                                                            |
+| DeepSeek V2.5                 | 🟡        | Need test                                                            |
 | Mllama                        | 🟡        | Need test                                                            |
 | MiniMax-Text                  | 🟡        | Need test                                                            |
 
 ### Pooling Models
 
-| Model                         | Supported | Note                                                                 |
+| Model                         | Support   | Note                                                                 |
 |-------------------------------|-----------|----------------------------------------------------------------------|
 | Qwen3-Embedding               | ✅        |                                                                      |
 | Molmo                         | ✅        | [1942](https://github.com/vllm-project/vllm-ascend/issues/1942)      |
@@ -54,7 +54,7 @@ Get the newest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 
 ### Generative Models
 
-| Model                          | Supported     | Note                                                                 |
+| Model                          | Support       | Note                                                                 |
 |--------------------------------|---------------|----------------------------------------------------------------------|
 | Qwen2-VL                       | ✅            |                                                                      |
 | Qwen2.5-VL                     | ✅            |                                                                      |
