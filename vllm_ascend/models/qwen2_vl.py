@@ -40,7 +40,11 @@ from vllm.model_executor.models.qwen2_vl import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, is_enable_nz
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, is_enable_nz,
+                               vllm_version_is)
+
+if not vllm_version_is("0.11.0"):
+    from vllm.model_executor.models.vision import conv3d_to_linear_weight
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
@@ -304,6 +308,10 @@ class AscendQwen2VisionTransformer(Qwen2VisionTransformer):
         loaded_params: Set[str] = set()
 
         for name, loaded_weight in weights:
+            if not vllm_version_is("0.11.0"):
+                if name.endswith("patch_embed.proj.weight"):
+                    loaded_weight = conv3d_to_linear_weight(loaded_weight)
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
