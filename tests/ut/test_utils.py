@@ -29,6 +29,12 @@ from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 class TestUtils(TestBase):
 
+    def setUp(self):
+        import importlib
+
+        from vllm_ascend import platform
+        importlib.reload(platform)
+
     def test_is_310p(self):
         utils._IS_310P = None
         with mock.patch("vllm_ascend._build_info.__soc_version__",
@@ -252,7 +258,6 @@ class TestUtils(TestBase):
         self.assertIn("num_hidden_layers", str(context.exception))
 
     def test_update_aclgraph_sizes(self):
-        # max_num_batch_sizes < len(original_sizes)
         test_compilation_config = CompilationConfig(
             cudagraph_capture_sizes=[i for i in range(150)])
         model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
@@ -268,9 +273,18 @@ class TestUtils(TestBase):
         os.environ['HCCL_OP_EXPANSION_MODE'] = 'AIV'
         utils.update_aclgraph_sizes(test_vllm_config)
         del os.environ['HCCL_OP_EXPANSION_MODE']
-        self.assertEqual(
-            137,
-            len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
+
+        if utils.vllm_version_is("0.11.0"):
+            self.assertEqual(
+                137,
+                len(test_vllm_config.compilation_config.cudagraph_capture_sizes
+                    ))
+        else:
+            self.assertEqual(
+                0,
+                len(test_vllm_config.compilation_config.cudagraph_capture_sizes
+                    ))
+            return
 
         test_vllm_config.speculative_config = mock.MagicMock()
         test_vllm_config.speculative_config.num_speculative_tokens = 2
