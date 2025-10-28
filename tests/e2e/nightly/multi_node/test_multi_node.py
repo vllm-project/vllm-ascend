@@ -88,7 +88,10 @@ async def get_completions(url: str, model: str, prompts: Union[str, List[str]],
 @pytest.mark.asyncio
 async def test_multi_node() -> None:
     config = MultiNodeConfig.from_yaml()
+    # To avoid modelscope 400 HttpError, we should download the model with retry
     local_model_path = get_local_model_path_with_retry(config.model)
+    config.server_cmd = config.server_cmd.replace(config.model,
+                                                  local_model_path)
     assert local_model_path is not None, "can not find any local weight for test"
     env_dict = config.envs
     perf_cmd = config.perf_cmd
