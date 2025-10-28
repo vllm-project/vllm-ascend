@@ -84,16 +84,17 @@ class MultiNodeConfig:
         self.envs["LOCAL_IP"] = self.cur_ip
         self.envs["NIC_NAME"] = self.nic_name
 
+        master_ip = self.cluster_ips[0]
         if self.disaggregated_prefill:
             self.envs[
                 "DISAGGREGATED_PREFILL_RANK_TABLE_PATH"] = self.disaggregated_prefill.get(
                     "ranktable_path")
             if self.cur_index < self.decode_start_index:
-                self.envs["MASTER_IP"] = self.cluster_ips[0]
+                master_ip = self.cluster_ips[0]
             else:
-                self.envs["MASTER_IP"] = self.cluster_ips[
-                    self.decode_start_index]
+                master_ip = self.cluster_ips[self.decode_start_index]
 
+        self.envs["MASTER_IP"] = master_ip
         ascend_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages"
         self.envs[
             "LD_LIBRARY_PATH"] = f"{ascend_path}:{self.envs.get('LD_LIBRARY_PATH', os.environ.get('LD_LIBRARY_PATH', ''))}"
@@ -292,4 +293,4 @@ class MultiNodeConfig:
 
 if __name__ == '__main__':
     config = MultiNodeConfig.from_yaml()
-    print(config.perf_cmd)
+    print(config.server_cmd)
