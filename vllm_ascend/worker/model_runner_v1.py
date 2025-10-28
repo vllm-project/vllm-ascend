@@ -3757,7 +3757,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         for attn_group in self._attn_group_iterator():
             builder = attn_group.get_metadata_builder()
-            if builder.aclgraph_support.value < min_ag_support.value:
+            graph_support = None
+            if hasattr(builder, 'aclgraph_support'):
+                graph_support = builder.aclgraph_support.value
+            else:
+                graph_support = builder.cudagraph_support.value
+            if graph_support < min_ag_support.value:
                 min_ag_support = builder.aclgraph_support
                 min_ag_builder_name = builder.__class__.__name__
 
