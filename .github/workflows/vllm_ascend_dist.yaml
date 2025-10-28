@@ -134,7 +134,7 @@ jobs:
             tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC \
             tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP \
             tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_W8A8_WITH_EP \
-            tests/e2e/multicart/test_torchair_ge_graph_mode.py::test_e2e_qwen_with_torchair
+            tests/e2e/multicard/test_torchair_ge_graph_mode.py::test_e2e_qwen_with_torchair \
 
       - name: Install Ascend toolkit & triton_ascend (for Qwen3-Next-80B-A3B-Instruct)
         shell: bash -l {0}
