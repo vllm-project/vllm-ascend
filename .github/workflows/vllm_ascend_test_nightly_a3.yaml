@@ -106,6 +106,9 @@ jobs:
           - name: multi-node-qwen3-dp
             config_file_path: Qwen3-235B-A3B.yaml
             size: 2
+          - name: multi-node-deepseek3.2-exp-dp
+            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek3_2-Exp-W8A8.yaml
+            size: 2
           - name: multi-node-dpsk-4node-pd
             config_file_path: DeepSeek-R1-W8A8.yaml
             size: 4

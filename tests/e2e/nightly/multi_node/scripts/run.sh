@@ -107,6 +107,90 @@ install_ais_bench() {
     cd -
 }
 
+install_go() {
+    # Check if Go is already installed
+    if command -v go &> /dev/null; then
+        GO_VERSION=$(go version | awk '{print $3}')
+        if [[ "$GO_VERSION" == "go$GOVER" ]]; then
+            echo -e "${YELLOW}Go $GOVER is already installed. Skipping...${NC}"
+        else
+            echo -e "${YELLOW}Found Go $GO_VERSION. Will install Go $GOVER...${NC}"
+            download_go
+        fi
+    else
+        download_go
+    fi
+
+    # Add Go to PATH if not already there
+    if ! grep -q "export PATH=\$PATH:/usr/local/go/bin" ~/.bashrc; then
+        echo -e "${YELLOW}Adding Go to your PATH in ~/.bashrc${NC}"
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+        echo -e "${YELLOW}Please run 'source ~/.bashrc' or start a new terminal to use Go${NC}"
+    fi
+    export PATH=$PATH:/usr/local/go/bin
+}
+
+install_extra_components() {
+    echo "====> Installing extra components for DeepSeek-R1-W8A8"
+    
+    mkdir -p /vllm-workspace/CANN
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
+        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
+        return 1
+    fi
+    chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+    ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+    
+    export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
+        echo "Failed to download custom_ops wheel"
+        return 1
+    fi
+    pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-mlapo-linux.aarch64.run; then
+        echo "Failed to download CANN-custom_ops-mlapo-linux.aarch64.run"
+        return 1
+    fi
+    chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run 
+    ./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/torch_npu-2.7.1%2Bgitb7c90d0-cp311-cp311-linux_aarch64.whl; then
+        echo "Failed to download torch_npu wheel"
+        return 1
+    fi
+    pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/libopsproto_rt2.0.so; then
+        echo "Failed to download libopsproto_rt2.0.so"
+        return 1
+    fi
+    cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
+    
+    source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
+    export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
+    
+    cat >> ~/.bashrc << 'EOF'
+
+# Extra components for DeepSeek-R1-W8A8
+export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
+export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
+EOF
+    
+    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
+          custom_ops-1.0-cp311-cp311-linux_aarch64.whl \
+          CANN-custom_ops-mlapo-linux.aarch64.run \
+          torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl \
+          libopsproto_rt2.0.so
+    
+    echo "====> Extra components installation completed"
+}
+
 kill_npu_processes() {
   pgrep python3 | xargs -r kill -9
   pgrep VLLM | xargs -r kill -9
@@ -140,6 +224,9 @@ main() {
     checkout_src
     install_sys_dependencies
     install_vllm
+    if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-R1-W8A8.yaml" ]]; then
+        install_extra_components
+    fi
     install_ais_bench
     cd "$WORKSPACE/source_code"
     . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh
