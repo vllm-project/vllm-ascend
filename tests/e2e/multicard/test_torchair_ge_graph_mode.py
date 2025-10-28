@@ -189,7 +189,7 @@ def _qwen_torchair_test_fixture(
 
     additional_config = {
         "torchair_graph_config": {
-            "enabled": False,
+            "enabled": True,
             "mode": "max-autotune",
         },
         "ascend_scheduler_config": {
@@ -204,7 +204,7 @@ def _qwen_torchair_test_fixture(
             dtype="half",
             tensor_parallel_size=tp,
             distributed_executor_backend="mp",
-            enforce_eager=True,
+            enforce_eager=False,
             additional_config=additional_config,
             enable_expert_parallel=enable_expert_parallel,
     ) as vllm_model:
