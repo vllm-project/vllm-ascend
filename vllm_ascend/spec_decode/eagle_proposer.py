@@ -12,7 +12,6 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.utils import is_pin_memory_available
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -27,8 +26,10 @@ from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.11.0"):
     from vllm.config import CompilationLevel
+    from vllm.utils import is_pin_memory_available
 else:
     from vllm.config import CompilationMode
+    from vllm.utils.platform_utils import is_pin_memory_available
 
 PADDING_SLOT_ID = -1
 
