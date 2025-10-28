@@ -2370,6 +2370,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
             num_tokens = math.ceil(num_tokens / tp_size) * tp_size
 
+        # Force dummy run on prefill stage when this node is deemed as kv producer.
+        if self.is_kv_producer and not self.is_kv_consumer:
+            with_prefill = True
+
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self._sync_metadata_across_dp(num_tokens, with_prefill, False)
@@ -2416,10 +2420,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
-
-        # Force dummy run on prefill stage when this node is deemed as kv producer.
-        if self.is_kv_producer and not self.is_kv_consumer:
-            with_prefill = True
 
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
