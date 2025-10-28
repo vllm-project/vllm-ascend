@@ -117,9 +117,7 @@ async def test_multi_node() -> None:
             if config.is_master:
                 port = proxy_port if disaggregated_prefill else server_port
                 # aisbench test
-                if acc_cmd:
-                    run_aisbench_cases(local_model_path, port, acc_cmd)
-                if perf_cmd:
-                    run_aisbench_cases(local_model_path, port, perf_cmd)
+                aisbench_cases = [acc_cmd, perf_cmd]
+                run_aisbench_cases(local_model_path, port, aisbench_cases)
             else:
                 remote_server.hang_until_terminated()
