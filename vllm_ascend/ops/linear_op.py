@@ -381,13 +381,13 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         assert self.quant_method is not None
         try:
             forward_context = get_forward_context()
-            sp_enabled = forward_context.sp_enabled
+            is_any_flashcomm_enabled = forward_context.is_any_flashcomm_enabled
         except AssertionError:
-            sp_enabled = False
+            is_any_flashcomm_enabled = False
 
         x = input_parallel
 
-        if not sp_enabled:
+        if not is_any_flashcomm_enabled:
             output_parallel = self.layer.quant_method.apply(self.layer,
                                                             x,
                                                             bias=bias_)
