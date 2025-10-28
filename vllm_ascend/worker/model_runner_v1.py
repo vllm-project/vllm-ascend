@@ -3198,10 +3198,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         rope_cache,
                         alignment)[:rope_allocate_shape].view(rope_cache_shape)
                 kv_caches[layer_name] = (nope_cache, rope_cache)
-
+        num_attn_module = 2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
-                      self.kv_caches)
+                      self.kv_caches,
+                      num_attn_module)
 
         return kv_caches
 

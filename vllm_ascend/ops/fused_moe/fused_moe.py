@@ -129,7 +129,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               enable_force_load_balance: bool = False,
               shared_experts: Optional[Any] = None,
               **kwargs) -> torch.Tensor:
-
+        zero_expert_num = getattr(layer, "zero_expert_num", 0)
+        zero_expert_type = getattr(layer, "zero_expert_type", None)
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -142,7 +143,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts)
+            global_num_experts=global_num_experts,
+            zero_expert_num=zero_expert_num,
+            zero_expert_type=zero_expert_type)
 
         topk_weights = topk_weights.to(x.dtype)
         # this is a naive implementation for experts load balance so as
@@ -349,6 +352,7 @@ class AscendFusedMoE(FusedMoE):
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
+            routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,

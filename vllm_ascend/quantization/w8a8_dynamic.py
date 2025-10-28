@@ -210,6 +210,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = True,
@@ -220,9 +221,11 @@ class AscendW8A8DynamicFusedMoEMethod:
         dynamic_scale_for_share: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert router_logits.shape[
-            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
-
+        zero_expert_num = getattr(layer, "zero_expert_num", 0)
+        zero_expert_type = getattr(layer, "zero_expert_type", None)
+        if zero_expert_num == 0 or zero_expert_type is None:
+            assert router_logits.shape[1] == global_num_experts - global_redundant_expert_num, \
+                "Number of global experts mismatch (excluding redundancy)"
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -233,8 +236,11 @@ class AscendW8A8DynamicFusedMoEMethod:
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts)
+            global_num_experts=global_num_experts,
+            zero_expert_num=zero_expert_num,
+            zero_expert_type=zero_expert_type)
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
