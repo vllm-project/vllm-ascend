@@ -192,10 +192,10 @@ def _qwen_torchair_test_fixture(
             "enabled": True,
             "mode": "max-autotune",
         },
-        "ascend_scheduler_config": {
-            "enabled": False,
-            #"mode": "max-autotune",
-        },
+        # "ascend_scheduler_config": {
+        #     "enabled": False,
+        #     #"mode": "max-autotune",
+        # },
         "refresh": True,
     }
 
