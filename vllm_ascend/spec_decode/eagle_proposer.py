@@ -63,7 +63,8 @@ class EagleProposer(Proposer):
                 == CompilationMode.VLLM_COMPILE
                 and not self.vllm_config.model_config.enforce_eager)
 
-            self.cudagraph_batch_sizes = sorted(self.vllm_config.compilation_config.cudagraph_capture_sizes)
+            self.cudagraph_batch_sizes = sorted(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes)
 
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(

@@ -150,8 +150,7 @@ class NPUPlatform(Platform):
                 scheduler_config.policy == "fcfs":
                 ascend_scheduler_config.enabled = True
                 chunked_prefill_enabled_in_ascend_scheduler = getattr(
-                    ascend_scheduler_config, "enable_chunked_prefill",
-                    False)
+                    ascend_scheduler_config, "enable_chunked_prefill", False)
                 if chunked_prefill_enabled_in_ascend_scheduler:
                     logger.warning(
                         "Chunked prefill feature is enabled in ascend_scheduler,"
@@ -160,8 +159,8 @@ class NPUPlatform(Platform):
                 # In this situation, max_num_batched_tokens would have been rewritten.
                 # So we must make sure max_num_batched_tokens is not smaller than max_model_len.
                 if (scheduler_config.max_num_batched_tokens
-                        < scheduler_config.max_model_len and
-                        not chunked_prefill_enabled_in_ascend_scheduler):
+                        < scheduler_config.max_model_len
+                        and not chunked_prefill_enabled_in_ascend_scheduler):
                     scheduler_config.max_num_batched_tokens = scheduler_config.max_model_len
 
         kv_cache_dtype = vllm_config.additional_config.get(
