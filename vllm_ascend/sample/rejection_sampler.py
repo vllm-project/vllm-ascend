@@ -164,29 +164,29 @@ def rejection_sample(
         is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
     if not using_block_verify:
         if not sampling_metadata.all_random:
-              # Rejection sampling for greedy sampling requests.
-              target_argmax = target_probs.argmax(dim=-1)
-              if min(num_draft_tokens) == 1 and max(
-                      num_draft_tokens) == 1 and sampling_metadata.all_greedy:
-                  rejection_greedy_sample_spec_len_1_pytorch(
-                      output_token_ids,
-                      draft_token_ids,
-                      target_argmax,
-                      bonus_token_ids,
-                  )
-              else:
-                  rejection_greedy_sample_pytorch(
-                      output_token_ids,
-                      cu_num_draft_tokens,
-                      draft_token_ids,
-                      target_argmax,
-                      bonus_token_ids,
-                      num_draft_tokens,
-                      max_spec_len,
-                      is_greedy,
-                  )
-              if sampling_metadata.all_greedy:
-                  return output_token_ids
+            # Rejection sampling for greedy sampling requests.
+            target_argmax = target_probs.argmax(dim=-1)
+            if min(num_draft_tokens) == 1 and max(
+                    num_draft_tokens) == 1 and sampling_metadata.all_greedy:
+                rejection_greedy_sample_spec_len_1_pytorch(
+                    output_token_ids,
+                    draft_token_ids,
+                    target_argmax,
+                    bonus_token_ids,
+                )
+            else:
+                rejection_greedy_sample_pytorch(
+                    output_token_ids,
+                    cu_num_draft_tokens,
+                    draft_token_ids,
+                    target_argmax,
+                    bonus_token_ids,
+                    num_draft_tokens,
+                    max_spec_len,
+                    is_greedy,
+                )
+            if sampling_metadata.all_greedy:
+                return output_token_ids
 
     # Generate uniform probabilities for rejection sampling.
     # [num_tokens]
