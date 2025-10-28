@@ -10,6 +10,29 @@ To facilitate reproduction and deployment, we open-source our deployed EP load b
 Please refer to the EPLB section of the user guide for detailed information: [How to Use EPLB](../../user_guide/feature_guide/eplb_swift_balancer.md)
 
 ## How It Works?
+In `vllm_ascend/eplb`, you can see the code structure as follows:
+
+```
+vllm_ascend
+├── eplb
+│   ├── adaptor
+│   │   ├── abstrat_adaptor.py
+│   │   ├── vllm_adaptor.py
+│   ├── core
+│   │   ├── policy
+│   │   │   ├── policy_abstract.py
+│   │   │   ├── policy_dynamic_ep.py
+│   │   │   ├── policy_dynamic_ep_v2.py
+│   │   │   ├── policy_factory.py
+│   │   │   ├── policy_flashlb.py
+│   │   │   ├── policy_random.py
+│   │   ├── eplb_device_transfer_loader.py
+│   │   ├── eplb_utils.py
+│   │   ├── eplb_worker.py
+│   ├── eplb_updator.py
+│   ├── utils.py
+└───────────
+```
 
 ### Default Algorithm
 #### Hierarchical Load Balancing
