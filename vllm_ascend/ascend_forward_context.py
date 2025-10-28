@@ -112,22 +112,21 @@ def set_ascend_forward_context(
         # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
+        mmrs_fusion = True
         if is_moe_model(vllm_config):
             sp_enabled = enable_sp(vllm_config) and \
                 tp_world_size > 1 and num_tokens is not None
+            mmrs_fusion = False
         else:
             sp_enabled = enable_sp(vllm_config) and \
                 tp_world_size > 1 and \
-                num_tokens is not None and num_tokens > 1024
+                num_tokens is not None and num_tokens > 1000
+        forward_context.mmrs_fusion = mmrs_fusion
 
-        # The current MatmulReduceScatter operator experiences performance degradation in small-shape scenarios,
-        # so it determines whether to use this operator by judging the size of the shape.
-        # We use 1024 as the threshold to decide whether to use the MatmulReduceScatter operator.
         if sp_enabled:
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
-            forward_context.mmrs_fusion = num_tokens is not None and num_tokens > 1024
         forward_context.sp_enabled = sp_enabled
         forward_context.num_tokens = num_tokens
 
