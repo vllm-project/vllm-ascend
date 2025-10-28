@@ -229,7 +229,7 @@ def test_e2e_qwen3_moe_with_torchair():
 
 # test deepseek-v3-lite
 def _deepseek_v3_lite_torchair_test_fixure(
-    additional_config:Dict,
+    additional_config: Dict,
     *,
     tensor_parallel_size=2,
     use_v1_schduler=False,
@@ -244,23 +244,23 @@ def _deepseek_v3_lite_torchair_test_fixure(
     kwargs = {}
     if not use_v1_schduler:
         kwargs = {
-            "ascend_scheduler_config":{
-                "enable":True,
+            "ascend_scheduler_config": {
+                "enable": True,
             },
-            "refresh":True,
+            "refresh": True,
         }
     additional_config.update(**kwargs)
 
     with VllmRunner(
-        "deepseek-ai/DeepSeek-V3-Lite",
-        dtype="half",
-        tensor_parallel_size=tensor_parallel_size,
-        distributed_executor_backend="mp",
-        additional_config=additional_config,
+            "deepseek-ai/DeepSeek-V3-Lite",
+            dtype="half",
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend="mp",
+            additional_config=additional_config,
     )as vllm_model:
         vllm_output = vllm_model.generate_greedy(example_prompts, 5)
 
-     # NOTE: vllm-ascend/DeepSeek-V3-Pruning is a random weight of
+    # NOTE: vllm-ascend/DeepSeek-V3-Pruning is a random weight of
     # DeepSeek-V3 with 2 hidden layers, thus the golden results seems
     # inaccurate. This will only change if accuracy improves with the
     # official weights of DeepSeek-V3.
@@ -278,8 +278,8 @@ def _deepseek_v3_lite_torchair_test_fixure(
 
 def test_e2e_deepseekv3lite_with_torchair():
     additional_config = {
-        "torchair_graph_config":{
-            "enabled":True,
+        "torchair_graph_config": {
+            "enabled": True, 
         },
     }
 
@@ -288,17 +288,18 @@ def test_e2e_deepseekv3lite_with_torchair():
 
 def test_e2e_deepseekv3lite_with_torchair_ms_mla():
     additional_config = {
-        "torchair_graph_config":{
-            "enabled":True,
-            "enable_multistream_mla":True,
+        "torchair_graph_config": {
+            "enabled": True,
+            "enable_multistream_mla": True,
         },
     }
     _deepseek_v3_lite_torchair_test_fixure(additional_config)
 
 def test_e2e_deepseekv3lite_with_torchair_v1scheduler():
     additional_config = {
-        "torchair_graph_config":{
-            "enabled":True,
+        "torchair_graph_config": {
+            "enabled": True,
         },
     }
-    _deepseek_v3_lite_torchair_test_fixure(additional_config, use_v1_schduler=True)
+    _deepseek_v3_lite_torchair_test_fixure(additional_config,
+                                           use_v1_schduler=True)
