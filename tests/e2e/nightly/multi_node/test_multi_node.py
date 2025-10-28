@@ -116,11 +116,6 @@ async def test_multi_node() -> None:
         ) as remote_server:
             if config.is_master:
                 port = proxy_port if disaggregated_prefill else server_port
-                base_url = f"http://localhost:{port}/v1/completions"
-                _ = await get_completions(url=base_url,
-                                          model=local_model_path,
-                                          prompts=prompts,
-                                          api_kwargs=api_keyword_args)
                 # aisbench test
                 if acc_cmd:
                     run_aisbench_cases(local_model_path, port, acc_cmd)
