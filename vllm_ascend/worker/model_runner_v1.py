@@ -1365,13 +1365,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.input_batch.block_table.compute_slot_mapping(
             req_indices, positions_np)
+        self.input_batch.block_table.commit_slot_mapping(
+            total_num_scheduled_tokens)
         tokens, position_pcp, pcp_unpad_mask = self._update_tokens_for_pcp(
             tokens)
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         # update total_num_scheduled_tokens
         total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
-        self.input_batch.block_table.commit_slot_mapping(
-            total_num_scheduled_tokens)
 
         total_num_pcp_pads = sum(self.num_pcp_pads)
         max_num_scheduled_tokens = max(tokens)

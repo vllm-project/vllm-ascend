@@ -317,15 +317,18 @@ class AscendAttentionMetadataBuilder:
             pcp_metadata = None
             common_long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
             if common_long_seq_metadata is not None:
-                attn_mask_seqlens = torch.cumsum(
-                    common_long_seq_metadata.attn_mask_seqlens[0],
-                    dim=0).tolist()
-                head_attn_nomask_seqlens = torch.cumsum(
-                    common_long_seq_metadata.head_attn_nomask_seqlens[1],
-                    dim=0).tolist()
-                tail_attn_nomask_seqlens = torch.cumsum(
-                    common_long_seq_metadata.tail_attn_nomask_seqlens[1],
-                    dim=0).tolist()
+                attn_mask_seqlens = common_long_seq_metadata.attn_mask_seqlens
+                head_attn_nomask_seqlens = common_long_seq_metadata.head_attn_nomask_seqlens
+                tail_attn_nomask_seqlens = common_long_seq_metadata.tail_attn_nomask_seqlens
+                pcp_size = get_prefill_context_model_parallel_world_size(
+                ) if prefill_context_parallel_enable() else 1
+                if pcp_size > 1:
+                    attn_mask_seqlens = torch.cumsum(attn_mask_seqlens[0],
+                                                     dim=0).tolist()
+                    head_attn_nomask_seqlens = torch.cumsum(
+                        head_attn_nomask_seqlens[1], dim=0).tolist()
+                    tail_attn_nomask_seqlens = torch.cumsum(
+                        tail_attn_nomask_seqlens[1], dim=0).tolist()
                 pcp_metadata = AscendPCPMetadata(
                     q_head_idx=common_long_seq_metadata.q_head_idx_tensor,
                     q_tail_idx=common_long_seq_metadata.q_tail_idx_tensor,
