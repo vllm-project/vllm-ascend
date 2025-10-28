@@ -88,6 +88,7 @@ jobs:
         - name: Install kubectl
           run: |
             # Install kubectl
+            sleep 10000
             install -o root -g root -m 0755 $KUBECTL /usr/local/bin/kubectl
             
             # Verify kubectl installation
