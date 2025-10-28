@@ -274,7 +274,7 @@ def _deepseek_v3_lite_torchair_test_fixure(
     assert len(golden_results) == len(vllm_output)
     for i in range(len(vllm_output)):
         assert golden_results[i] == vllm_output[i][1]
-        print(f"Generated text:{vllm_output[i][1]!r}")
+        print(f"Generated text: {vllm_output[i][1]!r}")
 
 def test_e2e_deepseekv3lite_with_torchair():
     additional_config = {
@@ -282,7 +282,6 @@ def test_e2e_deepseekv3lite_with_torchair():
             "enabled": True,
         },
     }
-
     _deepseek_v3_lite_torchair_test_fixure(additional_config)
 
 
@@ -294,6 +293,7 @@ def test_e2e_deepseekv3lite_with_torchair_ms_mla():
         },
     }
     _deepseek_v3_lite_torchair_test_fixure(additional_config)
+
 
 def test_e2e_deepseekv3lite_with_torchair_v1scheduler():
     additional_config = {
