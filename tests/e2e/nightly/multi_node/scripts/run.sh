@@ -166,8 +166,8 @@ run_tests() {
     kill_npu_processes
     ret=$?
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
-        mkdir -p "$(dirname "$RESULT_PATH")"
-        echo $ret > "$RESULT_PATH"
+        mkdir -p "$(dirname "$RESULT_FILE_PATH")"
+        echo $ret > "$RESULT_FILE_PATH"
     fi
     return $ret
 }
