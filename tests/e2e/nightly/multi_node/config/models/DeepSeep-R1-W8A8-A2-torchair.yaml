@@ -29,7 +29,7 @@ deployment:
       --trust-remote-code
       --quantization ascend
       --gpu-memory-utilization 0.9
-      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
       --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_moe":true},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
 
   -
@@ -50,7 +50,7 @@ deployment:
       --trust-remote-code
       --quantization ascend
       --gpu-memory-utilization 0.9
-      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
+      --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
       --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_moe":true},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
 benchmarks:
   acc:

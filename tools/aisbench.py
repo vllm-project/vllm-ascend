@@ -182,8 +182,8 @@ class AisbenchRunner:
                                             line).group(1)
                 return
             if "ERROR" in line:
-                raise RuntimeError(
-                    "Some errors happen to Aisbench task.") from None
+                error_msg = f"Some errors happened to Aisbench runtime, the first error is {line}"
+                raise RuntimeError(error_msg) from None
 
     def _wait_for_task(self):
         self._wait_for_exp_folder()
@@ -195,8 +195,8 @@ class AisbenchRunner:
                 self.result_line = line
                 return
             if "ERROR" in line:
-                raise RuntimeError(
-                    "Some errors happen to Aisbench task.") from None
+                error_msg = f"Some errors happened to Aisbench runtime, the first error is {line}"
+                raise RuntimeError(error_msg) from None
 
     def _get_result_performance(self):
         result_dir = re.search(r'Performance Result files locate in (.*)',
