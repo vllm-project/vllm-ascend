@@ -225,3 +225,80 @@ def test_e2e_qwen2_with_torchair():
 
 def test_e2e_qwen3_moe_with_torchair():
     _qwen_torchair_test_fixture("Qwen/Qwen3-30B-A3B", 2, True)
+
+
+# test deepseek-v3-lite
+def _deepseek_v3_lite_torchair_test_fixure(
+    additional_config:Dict,
+    *,
+    tensor_parallel_size=2,
+    use_v1_schduler=False,
+):
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    kwargs = {}
+    if not use_v1_schduler:
+        kwargs = {
+            "ascend_scheduler_config":{
+                "enable":True,
+            },
+            "refresh":True,
+        }
+    additional_config.update(**kwargs)
+
+    with VllmRunner(
+        "deepseek-ai/DeepSeek-V3-Lite",
+        dtype="half",
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend="mp",
+        additional_config=additional_config,
+    )as vllm_model:
+        vllm_output = vllm_model.generate_greedy(example_prompts, 5)
+
+     # NOTE: vllm-ascend/DeepSeek-V3-Pruning is a random weight of
+    # DeepSeek-V3 with 2 hidden layers, thus the golden results seems
+    # inaccurate. This will only change if accuracy improves with the
+    # official weights of DeepSeek-V3.
+    golden_results = [
+        'Hello, my name is下载早点向前很有่อง',
+        'The president of the United States isSender)## physiological Albany',
+        'The capital of France is Rocky转角 hospitalizedinterval sparked',
+        'The future of AI is её asegο BIOS一扫',
+    ]   
+
+    assert len(golden_results) == len(vllm_output)
+    for i in range(len(vllm_output)):
+        assert golden_results[i] == vllm_output[i][1]
+        print(f"Generated text:{vllm_output[i][1]!r}")
+
+def test_e2e_deepseekv3lite_with_torchair():
+    additional_config = {
+        "torchair_graph_config":{
+            "enabled":True,
+        },
+    }
+
+    _deepseek_v3_lite_torchair_test_fixure(additional_config)
+
+
+def test_e2e_deepseekv3lite_with_torchair_ms_mla():
+    additional_config = {
+        "torchair_graph_config":{
+            "enabled":True,
+            "enable_multistream_mla":True,
+        },
+    }
+    _deepseek_v3_lite_torchair_test_fixure(additional_config)
+
+def test_e2e_deepseekv3lite_with_torchair_v1scheduler():
+    additional_config = {
+        "torchair_graph_config":{
+            "enabled":True,
+        },
+    }
+    _deepseek_v3_lite_torchair_test_fixure(additional_config, use_v1_schduler=True)
