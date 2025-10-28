@@ -116,7 +116,7 @@ class RemoteOpenAIServer:
                  model: str,
                  vllm_serve_args: Union[list[str], str],
                  *,
-                 server_host: str = "0.0.0.0",
+                 server_host: str = '0.0.0.0',
                  server_port: int = 8080,
                  env_dict: Optional[dict[str, str]] = None,
                  seed: Optional[int] = None,
