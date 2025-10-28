@@ -1,5 +1,8 @@
 model_name: "PaddlePaddle/ERNIE-4.5-21B-A3B-PT"
+<<<<<<< HEAD
 hardware: "Atlas A2 Series"
+=======
+>>>>>>> a6f8422 (add acc test)
 tasks:
 - name: "gsm8k"
   metrics:

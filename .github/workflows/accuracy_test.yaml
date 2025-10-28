@@ -53,20 +53,31 @@ jobs:
             model_name: Qwen2-Audio-7B-Instruct
           - runner: a2-2
             model_name: Qwen3-30B-A3B
-          - runner: a2-2
-            model_name: Qwen3-VL-30B-A3B-Instruct
+          # This model has a bug that needs to be fixed and re added
+          # - runner: a2-2
+          #   model_name: Qwen3-VL-30B-A3B-Instruct
           - runner: a2-2
             model_name: DeepSeek-V2-Lite
           - runner: a2-4
             model_name: Qwen3-Next-80B-A3B-Instruct
+<<<<<<< HEAD
           - runner: a2-1  
             model_name: Qwen3-8B-W8A8
+=======
+>>>>>>> a6f8422 (add acc test)
           - runner: a2-1
             model_name: Qwen3-VL-8B-Instruct
           - runner: a2-1
             model_name: Qwen2.5-Omni-7B
           - runner: a2-1
             model_name: Meta-Llama-3.1-8B-Instruct
+<<<<<<< HEAD
+=======
+          - runner: a2-2
+            model_name: ERNIE-4.5-21B-A3B-PT
+          - runner: a2-1
+            model_name: Mistral-7B-Instruct-v0.1
+>>>>>>> a6f8422 (add acc test)
       fail-fast: false
     # test will be triggered when tag 'accuracy-test' & 'ready-for-test'
     if:  >-

@@ -1,4 +1,9 @@
+<<<<<<< HEAD
 model_name: "mistralai/Mistral-7B-Instruct-v0.1"
+=======
+model_name: "AI-ModelScope/Mistral-7B-Instruct-v0.1"
+runner: "linux-aarch64-a2-1"
+>>>>>>> a6f8422 (add acc test)
 hardware: "Atlas A2 Series"
 tasks:
 - name: "gsm8k"
