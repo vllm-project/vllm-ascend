@@ -89,7 +89,6 @@ jobs:
           # the test separately.
 
           pytest -sv tests/e2e/singlecard/test_aclgraph.py
-          pytest -sv tests/e2e/singlecard/test_aclgraph_mem.py
           pytest -sv tests/e2e/singlecard/test_ascend_scheduler.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_chunked.py
@@ -173,6 +172,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
+          pytest -sv tests/e2e/multicard/test_aclgraph_capture_replay.py
           pytest -sv tests/e2e/multicard/test_data_parallel.py
           pytest -sv tests/e2e/multicard/test_expert_parallel.py
           # external_launcher test is not stable enough. Fix it later
