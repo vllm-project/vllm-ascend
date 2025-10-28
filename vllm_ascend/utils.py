@@ -782,9 +782,11 @@ def version_check():
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
+    if model_instance is None:
+        return False
+
     global _HAS_LAYER_IDX
     if _HAS_LAYER_IDX is None:
-        _HAS_LAYER_IDX = model_instance is not None and \
-            hasattr(model_instance, "model") and \
+        _HAS_LAYER_IDX = hasattr(model_instance, "model") and \
             hasattr(model_instance.model, "start_layer")
     return _HAS_LAYER_IDX
