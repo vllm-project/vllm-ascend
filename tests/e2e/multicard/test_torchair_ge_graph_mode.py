@@ -46,7 +46,6 @@ def _qwen3_torchair_test_fixture(
         kwargs = {
             "ascend_scheduler_config": {
                 "enabled": True,
-                "mode": "max-autotune",
             },
             "refresh": True,
         }
@@ -83,7 +82,6 @@ def test_e2e_qwen_with_torchair():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
-            "mode": "max-autotune",
         },
     }
     _qwen3_torchair_test_fixture(additional_config)
@@ -94,7 +92,6 @@ def test_e2e_qwen_with_torchair_ms_mla():
         "torchair_graph_config": {
             "enabled": True,
             "enable_multistream_mla": True,
-            "mode": "max-autotune",
         },
     }
     _qwen3_torchair_test_fixture(additional_config)
@@ -104,7 +101,6 @@ def test_e2e_qwen_with_torchair_v1scheduler():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
-            "mode": "max-autotune",
         },
     }
     _qwen3_torchair_test_fixture(additional_config, use_v1_schduler=True)
@@ -126,7 +122,6 @@ def _pangu_torchair_test_fixture(
     kwargs = {
         "ascend_scheduler_config": {
             "enabled": True,
-            "mode": "max-autotune",
         },
         "refresh": True,
     }
@@ -165,7 +160,6 @@ def test_e2e_pangu_with_torchair():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
-            "mode": "max-autotune",
         },
     }
     _pangu_torchair_test_fixture(additional_config)
@@ -190,8 +184,6 @@ def _qwen_torchair_test_fixture(
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
-            "graph_batch_sizes": [16],
-            "use_cached_graph": True
         },
         # "ascend_scheduler_config": {
         #     "enabled": False,
