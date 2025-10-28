@@ -1,0 +1,11 @@
+model_name: "LLM-Research/Meta-Llama-3.1-8B-Instruct"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.82
+  - name: "exact_match,flexible-extract"
+    value: 0.84
+
+num_fewshot: 5
