@@ -40,6 +40,7 @@ from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VLDummyInputsBuilder, Qwen2_5_VLForConditionalGeneration,
     Qwen2_5_VLMultiModalProcessor, Qwen2_5_VLProcessingInfo)
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.vision import conv3d_to_linear_weight
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, is_enable_nz
@@ -355,6 +356,8 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+            if name.endswith("patch_embed.proj.weight"):
+                loaded_weight = conv3d_to_linear_weight(loaded_weight)
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
