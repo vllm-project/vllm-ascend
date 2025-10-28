@@ -190,7 +190,8 @@ def _qwen_torchair_test_fixture(
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
-            "mode": "max-autotune",
+            "graph_batch_sizes": [16],
+            "use_cached_graph": True
         },
         # "ascend_scheduler_config": {
         #     "enabled": False,
