@@ -431,7 +431,7 @@ def rejection_random_sample_pytorch(
         pi = 1.0
         uniform_prob = 1.0
         last_accepted_token_pos = -1
-      
+
         for pos in range(num_draft_tokens):
             draft_token_id = draft_token_ids[start_idx + pos].item()
 
@@ -451,7 +451,7 @@ def rejection_random_sample_pytorch(
                 rejected = False
             else:
                 rejected = True
-        
+
         if last_accepted_token_pos > -1:
             for pos in range(last_accepted_token_pos + 1):
                 draft_token_id = draft_token_ids[start_idx + pos].item()
