@@ -257,7 +257,7 @@ def _deepseek_v3_lite_torchair_test_fixure(
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
             additional_config=additional_config,
-    )as vllm_model:
+    ) as vllm_model:
         vllm_output = vllm_model.generate_greedy(example_prompts, 5)
 
     # NOTE: vllm-ascend/DeepSeek-V3-Pruning is a random weight of
@@ -269,7 +269,7 @@ def _deepseek_v3_lite_torchair_test_fixure(
         'The president of the United States isSender)## physiological Albany',
         'The capital of France is Rocky转角 hospitalizedinterval sparked',
         'The future of AI is её asegο BIOS一扫',
-    ]   
+    ]
 
     assert len(golden_results) == len(vllm_output)
     for i in range(len(vllm_output)):
@@ -279,7 +279,7 @@ def _deepseek_v3_lite_torchair_test_fixure(
 def test_e2e_deepseekv3lite_with_torchair():
     additional_config = {
         "torchair_graph_config": {
-            "enabled": True, 
+            "enabled": True,
         },
     }
 
