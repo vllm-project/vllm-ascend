@@ -88,12 +88,17 @@ jobs:
         - name: Install kubectl
           run: |
             # Install kubectl
+            arch=$(uname -m)
+
+            if echo "$arch" | grep -qiE "arm|aarch64"; then
+              echo "Detected ARM architecture: $arch"
+              KUBECTL="$KUBECTL"_arm
+            fi
             install -o root -g root -m 0755 $KUBECTL /usr/local/bin/kubectl
-            
+
             # Verify kubectl installation
             kubectl version --client=true
 
-        # TODO: Add A2 tests
         - name: Decode kubeconfig from secrets
           run: |
             # Decode and save kubeconfig
@@ -175,7 +180,7 @@ jobs:
 
         - name: Determine is success
           run: |
-            TIMEOUT=600
+            TIMEOUT=300
             ELAPSED=0
             while [ ! -f "$RESULT_FILE" ]; do
               sleep 5
