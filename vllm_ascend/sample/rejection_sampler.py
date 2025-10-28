@@ -416,7 +416,8 @@ def rejection_random_sample_pytorch(
     batch_size = output_token_ids.shape[0]
 
     for req_idx in range(batch_size):
-        if not using_block_verify and is_greedy is not None and is_greedy[req_idx]:
+        if not using_block_verify and is_greedy is not None and is_greedy[
+                req_idx]:
             continue
 
         if req_idx == 0:
@@ -440,8 +441,7 @@ def rejection_random_sample_pytorch(
                 draft_prob = draft_probs[start_idx + pos,
                                          draft_token_id].item()
 
-            target_prob = target_probs[start_idx + pos,
-                                       draft_token_id].item()
+            target_prob = target_probs[start_idx + pos, draft_token_id].item()
             uniform_prob = uniform_prob * uniform_probs[start_idx + pos].item()
 
             pi = min(pi * target_prob / draft_prob, 1.0)
@@ -458,8 +458,11 @@ def rejection_random_sample_pytorch(
                 output_token_ids[req_idx, pos] = draft_token_id
 
         if rejected:
-            recovered_token_id = recovered_token_ids[start_idx + last_accepted_token_pos + 1].item()
-            output_token_ids[req_idx, last_accepted_token_pos + 1] = recovered_token_id
+            recovered_token_id = recovered_token_ids[start_idx +
+                                                     last_accepted_token_pos +
+                                                     1].item()
+            output_token_ids[req_idx,
+                             last_accepted_token_pos + 1] = recovered_token_id
         else:
             bonus_token_id = bonus_token_ids[req_idx].item()
             output_token_ids[req_idx, num_draft_tokens] = bonus_token_id
