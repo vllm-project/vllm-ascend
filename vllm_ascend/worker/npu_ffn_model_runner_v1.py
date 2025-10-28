@@ -97,7 +97,13 @@ class NPUFFNModelRunner(NPUModelRunner):
             # AFDConnectorMetadata
             if current_layer_idx < 1:
                 return
-            hidden_states,router_logits,topk_weights, topk_ids, row_idx, afdConnectorMetadata = self.connector.recv_attn_output()
+            self.is_m2n = True
+            if self.is_m2n:
+                # TODO metadata
+                # metadata = AFDConnectorMetadata
+                hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(metadata)
+            else:
+                hidden_states,router_logits,topk_weights, topk_ids, row_idx, afdConnectorMetadata = self.connector.recv_attn_output()
             logger.info("*"*50)
             logger.info(f"layer {current_layer_idx} moe recv hidden states type:{type(hidden_states)}, shape:{hidden_states.shape}")
             num_tokens = hidden_states.shape[0]
@@ -132,10 +138,26 @@ class NPUFFNModelRunner(NPUModelRunner):
                         prefetch_stream=self.prefetch_stream,
                         num_actual_tokens=total_num_scheduled_tokens,
                         model_instance=self.model):
-                    rank_ffn_output = self._execute_eager_mode(
-                        hidden_states,router_logits,current_layer_idx,topk_weights, topk_ids, row_idx)
-
-            self.connector.send_ffn_output(rank_ffn_output, None)
+                    if self.is_m2n:
+                        # 未combine hidden
+                        rank_ffn_output = self._execute_eager_mode(
+                            hidden_states=hidden_states,
+                            group_list=group_list,
+                            dynamic_scales=dynamic_scales,
+                            topk_weights=topk_weights,
+                            current_layer_idx=current_layer_idx)
+                    else:
+                        rank_ffn_output = self._execute_eager_mode(
+                            hidden_states,router_logits,current_layer_idx,topk_weights, topk_ids, row_idx)
+            # metadata
+            # create metadata
+            # batch_size = metadata.m2n_afdconnector_data.batch_size
+            # topk_weights = metadata.m2n_afdconnector_data.topk_weights
+            # moe_expert_num = metadata.m2n_afdconnector_data.moe_expert_num
+            # aiv_num = metadata.m2n_afdconnector_data.aiv_num
+            # k = metadata.m2n_afdconnector_data.k
+            # handle = metadata.m2n_afdconnector_data.handle
+            self.connector.send_ffn_output(rank_ffn_output, metadata)
         except Exception as e:
             raise ValueError(
                 f"Error computing FFN for layer {current_layer_idx}: {e}"
@@ -177,8 +199,10 @@ class NPUFFNModelRunner(NPUModelRunner):
 
     def _execute_eager_mode(self, 
                             hidden_states: torch.Tensor,
-                            router_logits: torch.Tensor,
                             current_layer_idx: int,
+                            router_logits: Optional[torch.Tensor] = None,
+                            group_list: Optional[torch.Tensor] = None,
+                            dynamic_scales: Optional[torch.Tensor] = None,
                             topk_weights: Optional[torch.Tensor] = None,
                             topk_ids: Optional[torch.Tensor] = None,
                             row_idx: Optional[torch.Tensor] = None,):
@@ -199,8 +223,18 @@ class NPUFFNModelRunner(NPUModelRunner):
         #     rank_ffn_output = ffn_output[start_idx:end_idx, :]
         # else:
         # Single TP case
-        rank_ffn_output = self.model.compute_ffn_output(
-            current_layer_idx, hidden_states,router_logits,topk_weights, topk_ids, row_idx)
+        if self.is_m2n:
+            rank_ffn_output = self.model.compute_ffn_output(
+                current_layer_idx=current_layer_idx, 
+                hidden_states=hidden_states,
+                group_list=group_list,
+                dynamic_scales=dynamic_scales,
+                topk_weights=topk_weights, 
+                topk_ids=topk_ids, 
+                row_idx=row_idx)
+        else:
+            rank_ffn_output = self.model.compute_ffn_output(
+                current_layer_idx, hidden_states,router_logits,topk_weights, topk_ids, row_idx)
 
         return rank_ffn_output
 

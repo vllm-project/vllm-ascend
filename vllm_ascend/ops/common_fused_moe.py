@@ -113,7 +113,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
               enable_force_load_balance: bool = False,
               shared_experts: Optional[Any] = None,
               **kwargs) -> torch.Tensor:
-        print("AscendUnquantizedFusedMoEMethod apply")
+        # print("AscendUnquantizedFusedMoEMethod apply")
         topk_weights, topk_ids, row_idx = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -135,7 +135,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if enable_force_load_balance and not self.use_aclgraph:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
-        print('w1=', layer.w13_weight)
+        # print('w1=', layer.w13_weight)
         moe_comm_method = get_forward_context().moe_comm_method
         return moe_comm_method.fused_experts(
             hidden_states=x,
@@ -314,13 +314,16 @@ class AscendFusedMoE(FusedMoE):
             self.moe_load.zero_()
 
 
-    def afd_ffn_compute(self, 
-                layer: int,
-                hidden_states: torch.Tensor, 
-                router_logits: torch.Tensor,
-                topk_weights: torch.Tensor,
-                topk_ids: torch.Tensor,
-                row_idx:torch.Tensor):
+    def afd_ffn_compute(
+            self, 
+            layer: int,
+            hidden_states: torch.Tensor, 
+            router_logits:  Optional[torch.Tensor] = None,
+            group_list:  Optional[torch.Tensor] = None,
+            topk_weights: Optional[torch.Tensor] = None,
+            topk_ids: Optional[torch.Tensor] = None,
+            row_idx: Optional[torch.Tensor] = None,
+        ):
         forward_context = get_forward_context()
         moe_comm_method = forward_context.moe_comm_method
         final_hidden_states = moe_comm_method.fused_experts(
@@ -532,13 +535,16 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
 
     # TODO 这里的weight的传入有问题，目测是没加载对
-    def afd_ffn_compute(self, 
-                layer: int,
-                hidden_states: torch.Tensor, 
-                router_logits: torch.Tensor,
-                topk_weights: torch.Tensor,
-                topk_ids: torch.Tensor,
-                row_idx:torch.Tensor):
+    def afd_ffn_compute(
+            self, 
+            layer: int,
+            hidden_states: torch.Tensor, 
+            router_logits:  Optional[torch.Tensor] = None,
+            group_list:  Optional[torch.Tensor] = None,
+            topk_weights: Optional[torch.Tensor] = None,
+            topk_ids: Optional[torch.Tensor] = None,
+            row_idx: Optional[torch.Tensor] = None,
+        ):
         import torch.nn as nn
         forward_context = get_forward_context()
         moe_comm_method = forward_context.moe_comm_method
@@ -604,6 +610,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             shared_experts=None,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb)
+    
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
 
@@ -617,3 +624,50 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
         return shared_out,final_hidden_states
 
+    def afd_m2n_ffn_compute(
+            self, 
+            layer: int,
+            hidden_states: torch.Tensor, 
+            router_logits:  Optional[torch.Tensor] = None,
+            group_list:  Optional[torch.Tensor] = None,
+            dynamic_scale:  Optional[torch.Tensor] = None,
+            topk_weights: Optional[torch.Tensor] = None,
+            topk_ids: Optional[torch.Tensor] = None,
+            row_idx: Optional[torch.Tensor] = None,
+        ):
+        # TODO(yxj): M2N算子接入需要拆分fused_experts
+        shared_out = self._shared_experts(hidden_states)
+        
+        # forward_context = get_forward_context()
+        # moe_comm_type = forward_context.moe_comm_type
+        # if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
+        #     shared_out = tensor_model_parallel_all_reduce(shared_out)
+            
+        # dispatch --> m2n
+
+        # gmm
+        from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
+        
+        # "group_list_type": group_list_type,
+        # "hidden_states": sorted_hidden_states,
+        # "group_list": group_list,
+        # "topk_scales": topk_scales,
+        # expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales
+        group_list_type = 0
+        permuted_hidden_states, expert_tokens = hidden_states, group_list
+        
+        mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
+                                    w1=layer.w13_weight,
+                                    w1_scale=None,
+                                    w2=layer.w2_weight,
+                                    w2_scale=None,
+                                    group_list=expert_tokens,
+                                    dynamic_scale=dynamic_scale,
+                                    group_list_type=group_list_type,
+                                    w1_scale_bias=None,
+                                    w2_scale_bias=None,
+                                    with_quant=False,
+                                    fusion=False,
+                                    need_trans=False)
+        
+        return shared_out,mlp_output

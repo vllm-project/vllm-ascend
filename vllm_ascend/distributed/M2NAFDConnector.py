@@ -84,6 +84,7 @@ class M2NAFDConnector(AFDConnectorBase):
 
         default_pg_switcher = DefaultProcessGroupSwitcher(
             _get_default_group(), afd_pg)
+        # TODO(yxj):m2n ae_group is different
         with default_pg_switcher:
             sub_group_ranks = []
             for i in range(len(ffn_ranks)):
@@ -94,7 +95,7 @@ class M2NAFDConnector(AFDConnectorBase):
                                                  backend="hccl",
                                                  group_name="ae")
 
-        logger.info("p2p connector initialized")
+        logger.info("m2n connector initialized")
 
         self._initialized = True
     
@@ -109,13 +110,13 @@ class M2NAFDConnector(AFDConnectorBase):
     # ATTN发给MOE（ATTN发送）
     # TODO:metadata的获取，最好从框架侧去拿
     def send_attn_output(self, hidden_states: torch.Tensor, metadata: AFDConnectorMetadata) -> Any:
-        # 传metadata
-        dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
-        self.process_group.send_object(metadata,dst)
+        
         
         dynamic_scales = metadata.m2n_afdconnector_data.scale
+        # 重复传topk_idx，topk_weights
         topk_idx = metadata.m2n_afdconnector_data.topk_idx
         topk_weights = metadata.m2n_afdconnector_data.topk_weights
+        # moe_expert_num
         moe_expert_num = metadata.m2n_afdconnector_data.moe_expert_num
         quant_mode = metadata.m2n_afdconnector_data.quant_mode
         aiv_num = metadata.m2n_afdconnector_data.aiv_num
@@ -133,10 +134,15 @@ class M2NAFDConnector(AFDConnectorBase):
                                                         quant_mode=quant_mode,
                                                         aiv_num=aiv_num,
                                                         dynamic_scales=scale)
+        
+        dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
+        self.process_group.send_object(metadata,dst)
+        
         return recv_counts
 
     # MOE发给ATTN（ATTN接收）
     def recv_ffn_output(self, hidden_states: torch.Tensor, metadata: AFDConnectorMetadata) -> torch.Tensor:
+        # handle = send_attn_output（）recv_counts
         handle = metadata.m2n_afdconnector_data.handle
         moe_expert_num = metadata.m2n_afdconnector_data.moe_expert_num
         aiv_num = metadata.m2n_afdconnector_data.aiv_num
@@ -152,12 +158,14 @@ class M2NAFDConnector(AFDConnectorBase):
     
     # MOE发给ATTN(MOE发送) 
     def send_ffn_output(self, ffn_output: torch.Tensor, metadata: AFDConnectorMetadata):
+        # 配置
         batch_size = metadata.m2n_afdconnector_data.batch_size
         topk_weights = metadata.m2n_afdconnector_data.topk_weights
         moe_expert_num = metadata.m2n_afdconnector_data.moe_expert_num
         aiv_num = metadata.m2n_afdconnector_data.aiv_num
         k = metadata.m2n_afdconnector_data.k
         handle = metadata.m2n_afdconnector_data.handle
+        
         torch_npu.npu_n2m_distribute_send(expandX=ffn_output,
                                         ep_send_counts=handle,
                                         expert_scales=topk_weights,
@@ -165,17 +173,16 @@ class M2NAFDConnector(AFDConnectorBase):
                                         world_size=self.attn_size + self.ffn_size,
                                         moe_world_size=self.ffn_size,
                                         ep_rank_id=self.rank,
-                                        moe_expert_num=moe_expert_num,
-                                        batch_size=batch_size,
-                                        k=k,
-                                        aiv_num=aiv_num)
+                                        moe_expert_num=moe_expert_num,# config
+                                        batch_size=batch_size,# config
+                                        k=k,# config
+                                        aiv_num=aiv_num)# config 未分核48 
         return
     
     # ATTN发给MOE(MOE接收)
     def recv_attn_output(self, metadata: AFDConnectorMetadata) -> Any: 
         
-        src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
-        metadata = self.process_group.recv_object(src)
+        
         # TODO(yxj): 对比
         x_type = torch.int8
         if metadata.quant_mode == 0 :
@@ -199,4 +206,8 @@ class M2NAFDConnector(AFDConnectorBase):
                                                                                 k=k,
                                                                                 expert_token_nums_type=expert_token_nums_type,
                                                                                 aiv_num=aiv_num)
-        return expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales
+        src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
+        metadata = self.process_group.recv_object(src)
+        
+        # recv_counts 返程路由
+        return expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales,metadata
