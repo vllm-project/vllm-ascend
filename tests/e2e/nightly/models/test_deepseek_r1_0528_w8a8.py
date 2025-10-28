@@ -133,4 +133,7 @@ async def test_models(model: str, mode: str) -> None:
         if mode in ["single", "no_chunkprefill"]:
             return
         # aisbench test
-        run_aisbench_cases(model, port, aisbench_cases)
+        run_aisbench_cases(model,
+                           port,
+                           aisbench_cases,
+                           server_args=server_args)

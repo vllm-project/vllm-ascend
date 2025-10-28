@@ -73,6 +73,9 @@ jobs:
           - name: multi-node-deepseek-dp
             config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8-A2.yaml
             size: 2
+          - name: multi-node-deepseek-dp-torchair
+            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8-A2-torchair.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a2
