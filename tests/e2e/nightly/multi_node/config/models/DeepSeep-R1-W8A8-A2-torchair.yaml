@@ -1,4 +1,4 @@
-test_name: "test DeepSeek-R1-W8A8 on A2"
+test_name: "test DeepSeek-R1-W8A8 torchair on A2"
 model: "vllm-ascend/DeepSeek-R1-0528-W8A8"
 num_nodes: 2
 npu_per_node: 8
@@ -29,9 +29,8 @@ deployment:
       --trust-remote-code
       --quantization ascend
       --gpu-memory-utilization 0.9
-      --enforce-eager
       --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
-      --additional-config '{"ascend_scheduler_config":{"enabled":false},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
+      --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_moe":true},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
 
   -
     server_cmd: >
@@ -51,7 +50,15 @@ deployment:
       --trust-remote-code
       --quantization ascend
       --gpu-memory-utilization 0.9
-      --enforce-eager
       --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
-      --additional-config '{"ascend_scheduler_config":{"enabled":false},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
+      --additional-config '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_moe":true},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
 benchmarks:
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gsm8k
+    request_conf: vllm_api_general_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+    max_out_len: 32768
+    batch_size: 512
+    baseline: 95
+    threshold: 5

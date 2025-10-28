@@ -16,6 +16,7 @@
 #
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -188,8 +189,8 @@ class AisbenchRunner:
                                             line).group(1)
                 return
             if "ERROR" in line:
-                raise RuntimeError(
-                    "Some errors happen to Aisbench task.") from None
+                error_msg = f"Some errors happened to Aisbench runtime, the first error is {line}"
+                raise RuntimeError(error_msg) from None
 
     def _wait_for_task(self):
         self._wait_for_exp_folder()
@@ -201,8 +202,8 @@ class AisbenchRunner:
                 self.result_line = line
                 return
             if "ERROR" in line:
-                raise RuntimeError(
-                    "Some errors happen to Aisbench task.") from None
+                error_msg = f"Some errors happened to Aisbench runtime, the first error is {line}"
+                raise RuntimeError(error_msg) from None
 
     def _get_result_performance(self):
         result_dir = re.search(r'Performance Result files locate in (.*)',
@@ -237,12 +238,12 @@ class AisbenchRunner:
         assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, f"Accuracy verification failed. The accuracy of {self.dataset_path} is {acc_value}, which is not within {self.threshold} relative to baseline {self.baseline}."
 
 
-def run_aisbench_cases(model, port, aisbench_cases):
-    if isinstance(aisbench_cases, dict):
-        aisbench_cases = [aisbench_cases]
+def run_aisbench_cases(model, port, aisbench_cases, server_args=""):
     aisbench_results = []
     aisbench_errors = []
     for aisbench_case in aisbench_cases:
+        if not aisbench_case:
+            continue
         try:
             with AisbenchRunner(model, port, aisbench_case) as aisbench:
                 aisbench_results.append(aisbench.result)
@@ -251,9 +252,10 @@ def run_aisbench_cases(model, port, aisbench_cases):
             aisbench_errors.append([aisbench_case, e])
             print(e)
     for failed_case, error_info in aisbench_errors:
-        print(
-            f"The following aisbench case failed: {failed_case}, reason is {error_info}."
-        )
+        error_msg = f"The following aisbench case failed: {failed_case}, reason is {error_info}"
+        if server_args:
+            error_msg += f"\nserver_args are {server_args}"
+        logging.error(error_msg)
     assert not aisbench_errors, "some aisbench cases failed, info were shown above."
     return aisbench_results
 
