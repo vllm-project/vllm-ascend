@@ -164,7 +164,6 @@ kill_npu_processes() {
 run_tests() {
     set +e
     kill_npu_processes
-    sleep 3
     pytest -sv tests/e2e/nightly/multi_node/test_multi_n.py
     ret=$?
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
@@ -204,6 +203,7 @@ main() {
     #. $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
     #pooling_async_memecpy_v1 9d96b2e1dd76cc601d76b1b4c5f6e04605cd81d3
     cd "$WORKSPACE/source_code/vllm-ascend"
+    sleep 10000
     run_tests
 }
 
