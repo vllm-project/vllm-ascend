@@ -1160,8 +1160,7 @@ class MooncakeConnectorWorker:
                     self.kv_send_thread.add_delayed_request(
                         req_id, delay_start_time)
                 else:
-                    if self.vllm_config.model_config.is_deepseek_mla:
-                        self.kv_send_thread.add_not_transfer_request(req_id)
+                    self.kv_send_thread.add_not_transfer_request(req_id)
 
     def _prefill_get_remote_tp_rank(self, req_id: str) -> List[int]:
         return sum(self._get_remote_tp_ranks_for_req(req_id), [])
