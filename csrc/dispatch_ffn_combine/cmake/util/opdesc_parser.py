@@ -2,7 +2,6 @@
 # -*- coding: UTF-8 -*-
 
 import os
-import sys
 
 OP_ALL = "__ALLOP__"
 SOC_ALL = "__ALLSOC__"
@@ -106,6 +105,7 @@ CONFLICT_KEYWORDS = {
 
 
 class OpDesc:
+
     def __init__(self: any, op_type: str):
         self.op_type = op_type
         self.attr_list = []
@@ -182,19 +182,22 @@ class OpDesc:
                 self.param_type_dynamic = True
         elif conf.startswith("input{}.dtype".format(int(self.input_idx))):
             self.input_dtype.append(self._parse_str(conf))
-        elif conf.startswith("input{}.for_bin_dtype".format(int(self.input_idx))):
-            self.input_dtype_for_bin.update({self.input_idx: self._parse_str(conf)})
+        elif conf.startswith("input{}.for_bin_dtype".format(int(
+                self.input_idx))):
+            self.input_dtype_for_bin.update(
+                {self.input_idx: self._parse_str(conf)})
         elif conf.startswith("input{}.format".format(int(self.input_idx))):
             self.input_fmt.append(self._parse_str(conf))
-        elif conf.startswith("input{}.for_bin_format".format(int(self.input_idx))):
-            self.input_fmt_for_bin.update({self.input_idx: self._parse_str(conf)})
+        elif conf.startswith("input{}.for_bin_format".format(
+                int(self.input_idx))):
+            self.input_fmt_for_bin.update(
+                {self.input_idx: self._parse_str(conf)})
         elif conf.startswith("input{}.virtual".format(int(self.input_idx))):
             self.input_virt[self.input_idx] = self._parse_str(conf)
         elif conf.startswith("input{}.initValue".format(int(self.input_idx))):
             raise Exception(
                 f"[ERROR]: Op: {{'{self.op_type}'}} input {self.input_ori_name[int(self.input_idx)]}\
- has InitValue, which is not support!"
-            )
+ has InitValue, which is not support!")
         else:
             return
 
@@ -204,24 +207,30 @@ class OpDesc:
             self.output_ori_name.append(self._parse_str(conf))
             self.output_name.append(self.output_ori_name[-1] + "_out_")
             self.output_init_value.append(None)
-        elif conf.startswith("output{}.paramType".format(int(self.output_idx))):
+        elif conf.startswith("output{}.paramType".format(int(
+                self.output_idx))):
             param_type = self._parse_str(conf)
             self.output_type.append(param_type)
             if param_type == "dynamic":
                 self.param_type_dynamic = True
         elif conf.startswith("output{}.dtype".format(int(self.output_idx))):
             self.output_dtype.append(self._parse_str(conf))
-        elif conf.startswith("output{}.for_bin_dtype".format(int(self.output_idx))):
-            self.output_dtype_for_bin.update({self.output_idx: self._parse_str(conf)})
+        elif conf.startswith("output{}.for_bin_dtype".format(
+                int(self.output_idx))):
+            self.output_dtype_for_bin.update(
+                {self.output_idx: self._parse_str(conf)})
         elif conf.startswith("output{}.format".format(int(self.output_idx))):
             self.output_fmt.append(self._parse_str(conf))
-        elif conf.startswith("output{}.for_bin_format".format(int(self.output_idx))):
-            self.output_fmt_for_bin.update({self.output_idx: self._parse_str(conf)})
-        elif conf.startswith("output{}.initValue".format(int(self.output_idx))):
-            self.output_init_value[int(self.output_idx)] = self._parse_str(conf)
-        elif conf.startswith(
-            "output{}.outputShapeDependOnCompute=true".format(int(self.output_idx))
-        ):
+        elif conf.startswith("output{}.for_bin_format".format(
+                int(self.output_idx))):
+            self.output_fmt_for_bin.update(
+                {self.output_idx: self._parse_str(conf)})
+        elif conf.startswith("output{}.initValue".format(int(
+                self.output_idx))):
+            self.output_init_value[int(
+                self.output_idx)] = self._parse_str(conf)
+        elif conf.startswith("output{}.outputShapeDependOnCompute=true".format(
+                int(self.output_idx))):
             self.output_shape_depend_on_compute.append(int(self.output_idx))
         else:
             return
@@ -277,8 +286,7 @@ conflicts with the built-in variable name. Use a complex name or prefix the oper
                 self.attr_val[attr] = {}
             if conf.startswith("attr_{}.type".format(attr)):
                 self.attr_val.get(attr)["type"] = self._camel_to_snake(
-                    self._parse_str(conf)
-                )
+                    self._parse_str(conf))
             elif conf.startswith("attr_{}.paramType".format(attr)):
                 self.attr_val.get(attr)["paramType"] = self._parse_str(conf)
             elif conf.startswith("attr_{}.defaultValue".format(attr)):
@@ -317,8 +325,7 @@ def _trans_soc_ver_to_short(soc_ver: str):
     if low_soc_ver not in SOC_TO_SHORT_SOC_MAP:
         print(
             f"WARNING: caution: {soc_ver} will trans into ascend910, if not your intention,"
-            f"use ascend910b1~4 instead"
-        )
+            f"use ascend910b1~4 instead")
     return SOC_TO_SHORT_SOC_MAP[low_soc_ver]
 
 
@@ -327,7 +334,8 @@ def _get_op_custom_options(op_descs: list, auto_gen_dir: str):
         return {}
     file = os.path.join(auto_gen_dir, "custom_compile_options.ini")
     if not os.path.exists(file):
-        print(f"WARNING: cannot find {auto_gen_dir}/custom_compile_options.ini")
+        print(
+            f"WARNING: cannot find {auto_gen_dir}/custom_compile_options.ini")
         return {}
     with open(file, "r") as fd:
         lines = fd.readlines()
@@ -335,12 +343,12 @@ def _get_op_custom_options(op_descs: list, auto_gen_dir: str):
             param_list = str.split(line.rstrip("\n"), ",")
             if len(param_list) != 3:
                 raise Exception(
-                    f"ERROR: custom compile option {param_list} len is not 3"
-                )
+                    f"ERROR: custom compile option {param_list} len is not 3")
             op_type = param_list[0]
             if op_type.upper() == "ALL":
                 op_type = OP_ALL
-            if op_type != OP_ALL and _is_op_type_in_opdesc(op_descs, op_type) == False:
+            if op_type != OP_ALL and not _is_op_type_in_opdesc(
+                    op_descs, op_type):
                 continue
             soc_ver_compile_options = {}
             soc_ver = param_list[1]
@@ -356,7 +364,8 @@ def _get_op_custom_options(op_descs: list, auto_gen_dir: str):
             if op_type == OP_ALL:
                 _set_all_options_to_opdescs(op_descs, soc_ver_compile_options)
             else:
-                _set_options_to_opdesc(op_descs, op_type, soc_ver_compile_options)
+                _set_options_to_opdesc(op_descs, op_type,
+                                       soc_ver_compile_options)
 
 
 def get_op_desc(

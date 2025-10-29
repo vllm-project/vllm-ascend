@@ -5,9 +5,6 @@ import argparse
 import glob
 import os
 import shutil
-import subprocess
-import sys
-import time
 
 import ascendc_bin_param_build
 import ascendc_impl_build
@@ -16,6 +13,7 @@ import const_var
 
 
 class CompileKernel:
+
     def __init__(self: any, args: any):
         self.op_type = args.op_name
         self.op_cpp_file = os.path.realpath(args.src_file)
@@ -54,27 +52,26 @@ class CompileKernel:
         rep_cfg[const_var.REPLAY_ITERATE] = ""
         cfg_dir = {}
         cfg_dir[const_var.CFG_IMPL_DIR] = os.path.dirname(self.op_cpp_file)
-        cfg_dir[const_var.CFG_OUT_DIR] = os.path.join(self.working_dir, "dynamic")
+        cfg_dir[const_var.CFG_OUT_DIR] = os.path.join(self.working_dir,
+                                                      "dynamic")
         os.makedirs(os.path.join(self.working_dir, "dynamic"), exist_ok=True)
         cfg_dir[const_var.AUTO_GEN_DIR] = os.path.dirname(self.op_cfg_ini)
-        ascendc_impl_build.write_scripts(
-            self.op_cfg_ini, rep_cfg, cfg_dir, [self.op_type], self.compile_options
-        )
+        ascendc_impl_build.write_scripts(self.op_cfg_ini, rep_cfg, cfg_dir,
+                                         [self.op_type], self.compile_options)
         py_files = glob.glob(os.path.join(self.working_dir, "dynamic", "*.py"))
         if py_files is None or len(py_files) != 1:
             self.clean()
-            raise RuntimeError("compile py file {} generated error!".format(py_files))
-        self.op_impl_py = os.path.join(
-            self.working_dir, "dynamic", self.op_type + ".py"
-        )
+            raise RuntimeError(
+                "compile py file {} generated error!".format(py_files))
+        self.op_impl_py = os.path.join(self.working_dir, "dynamic",
+                                       self.op_type + ".py")
         if self.dynamic_dir is not None:
             shutil.copy(py_files[0], self.dynamic_dir)
         os.rename(py_files[0], self.op_impl_py)
         if not os.path.exists(self.op_impl_py):
             self.clean()
-            raise RuntimeError(
-                "compile py file {} not generated!".format(self.op_impl_py)
-            )
+            raise RuntimeError("compile py file {} not generated!".format(
+                self.op_impl_py))
 
     def ascendc_gen_param(self: any):
         bin_param_path = os.path.join(self.working_dir, "bin_param")
@@ -89,8 +86,7 @@ class CompileKernel:
             [self.op_type],
         )
         tiling_key_info, op_debug_config = ascendc_bin_param_build.parse_op_debug_confg(
-            opc_config_file, self.op_type
-        )
+            opc_config_file, self.op_type)
         if self.op_type in op_debug_config:
             self.op_debug_config = op_debug_config[self.op_type]
         if "ALL" in op_debug_config:
@@ -100,20 +96,21 @@ class CompileKernel:
             self.clean()
             raise RuntimeError("compile binary param json file not generated!")
         self.compile_sh = glob.glob(os.path.join(bin_param_path, "*.sh"))
-        if self.compile_sh is None or len(self.compile_sh) != len(bin_param_files):
+        if self.compile_sh is None or len(
+                self.compile_sh) != len(bin_param_files):
             self.clean()
             raise RuntimeError("compile binary shell file not generated!")
 
     def ascendc_put_tiling(self: any):
-        tiling_path = os.path.join(
-            self.build_opp_path, "op_impl", "ai_core", "tbe", "op_tiling"
-        )
+        tiling_path = os.path.join(self.build_opp_path, "op_impl", "ai_core",
+                                   "tbe", "op_tiling")
         os.makedirs(tiling_path)
         tiling_so = os.path.join(tiling_path, "liboptiling.so")
         os.symlink(self.op_tiling, tiling_so)
         if not os.path.exists(tiling_so):
             self.clean()
-            raise RuntimeError("prepare tiling lib {} link failed!".format(tiling_so))
+            raise RuntimeError(
+                "prepare tiling lib {} link failed!".format(tiling_so))
 
     def ascendc_put_json(self: any):
         if self.json_file is not None:
@@ -128,15 +125,12 @@ class CompileKernel:
             os.makedirs(json_file_dir)
             shutil.copy(self.json_file, json_file_dir)
             build_json_file = os.path.join(
-                json_file_dir, "aic-{}-ops-info.json".format(self.op_soc_ver)
-            )
+                json_file_dir, "aic-{}-ops-info.json".format(self.op_soc_ver))
             if not os.path.exists(build_json_file):
                 self.clean()
                 raise RuntimeError(
                     "prepare json file aic-{}-ops-info.json failed!".format(
-                        self.op_soc_ver
-                    )
-                )
+                        self.op_soc_ver))
 
     def ascendc_build(self: any):
         op_info = ascendc_op_info.OpInfo(self.op_type, self.op_cfg_ini)
@@ -153,68 +147,73 @@ class CompileKernel:
             all_tar.append(tar)
             sub_cmd.append(tar + ":")
             sub_cmd.append(
-                "\tcd {} && bash {} --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)".format(
-                    build_path, sh
-                )
-            )
+                "\tcd {} && bash {} --kernel-src=$(CPP) $(PY) $(OUT) $(MAKE)".
+                format(build_path, sh))
             index += 1
         mkfile = os.path.join(self.working_dir, op_file + ".make")
-        with os.fdopen(os.open(mkfile, const_var.WFLAGS, const_var.WMODES), "w") as fd:
+        with os.fdopen(os.open(mkfile, const_var.WFLAGS, const_var.WMODES),
+                       "w") as fd:
             sub_cmd.insert(0, "all: " + " ".join(all_tar))
             fd.write("\n".join(sub_cmd))
 
         if os.getenv("TILINGKEY_PAR_COMPILE") is None:
             cmd_str = (
                 "export HI_PYTHON=python3 && export ASCEND_CUSTOM_OPP_PATH={} && export TILINGKEY_PAR_COMPILE=1"
-                "&& make -f {} PY={} OUT={} CPP={}"
-            )
+                "&& make -f {} PY={} OUT={} CPP={}")
         else:
             cmd_str = "export HI_PYTHON=python3 && export ASCEND_CUSTOM_OPP_PATH={} && make -f {} PY={} OUT={} CPP={}"
 
-        if (
-            os.system(
+        if (os.system(
                 cmd_str.format(
                     self.build_opp_path,
                     mkfile,
                     self.op_impl_py,
                     op_bin_dir,
                     self.op_cpp_file,
-                )
-            )
-            != 0
-        ):
+                )) != 0):
             raise RuntimeError(
                 "Kernel Compilation Error: OpType {} Kernel File {}!".format(
-                    self.op_type, self.op_cpp_file
-                )
-            )
+                    self.op_type, self.op_cpp_file))
 
 
 def args_parse():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-n", "--op-name", nargs="?", help="Op name(Camel string) to compile."
-    )
-    parser.add_argument("-s", "--src-file", nargs="?", help="Op kernel source file.")
+    parser.add_argument("-n",
+                        "--op-name",
+                        nargs="?",
+                        help="Op name(Camel string) to compile.")
+    parser.add_argument("-s",
+                        "--src-file",
+                        nargs="?",
+                        help="Op kernel source file.")
 
-    parser.add_argument("-u", "--compute-unit", nargs="?", help="Compute unit.")
-    parser.add_argument(
-        "-c", "--compile-options", nargs="?", help="Compile options of compiler."
-    )
+    parser.add_argument("-u",
+                        "--compute-unit",
+                        nargs="?",
+                        help="Compute unit.")
+    parser.add_argument("-c",
+                        "--compile-options",
+                        nargs="?",
+                        help="Compile options of compiler.")
     parser.add_argument(
         "-d",
         "--debug-config",
         nargs="?",
         help="Debug config of op, ref opc op-debug-config.",
     )
-    parser.add_argument("-i", "--config-ini", nargs="?", help="Op config ini file.")
-    parser.add_argument(
-        "-t", "--tiling-lib", nargs="?", help="Tiling shared library file."
-    )
+    parser.add_argument("-i",
+                        "--config-ini",
+                        nargs="?",
+                        help="Op config ini file.")
+    parser.add_argument("-t",
+                        "--tiling-lib",
+                        nargs="?",
+                        help="Tiling shared library file.")
 
-    parser.add_argument(
-        "-o", "--output-path", nargs="?", help="Output path of compile result."
-    )
+    parser.add_argument("-o",
+                        "--output-path",
+                        nargs="?",
+                        help="Output path of compile result.")
     parser.add_argument(
         "-dy",
         "--dynamic-dir",
@@ -237,9 +236,11 @@ def args_parse():
         help="aic-<compute-unit>-ops-info.json file path.",
     )
     # $(MAKE) is necessary for parallel compiling
-    parser.add_argument(
-        "-b", "--build-tool", nargs="?", default=None, help="build tool must be make."
-    )
+    parser.add_argument("-b",
+                        "--build-tool",
+                        nargs="?",
+                        default=None,
+                        help="build tool must be make.")
     return parser.parse_args()
 
 

@@ -7,13 +7,13 @@ import math
 import os
 import shutil
 import subprocess
-import sys
 
 import const_var
 from tbe.tikcpp.log_utils import AscendCLogLevel, LogUtil
 
 
 class PackKernel:
+
     def __init__(self: any, args: any):
         self.in_path = os.path.realpath(args.input_path)
         self.copy_path = os.path.realpath(args.copy_path)
@@ -27,7 +27,7 @@ class PackKernel:
         if os.path.exists(self.copy_path):
             try:
                 shutil.rmtree(self.copy_path)
-            except OSError as e:
+            except OSError:
                 LogUtil.print_compile_log(
                     "",
                     f"remove {self.copy_path} error!",
@@ -37,7 +37,7 @@ class PackKernel:
         if os.path.exists(self.out_path):
             try:
                 shutil.rmtree(self.out_path)
-            except OSError as e:
+            except OSError:
                 LogUtil.print_compile_log(
                     "",
                     f"remove {self.out_path} error!",
@@ -74,20 +74,18 @@ class PackKernel:
         # ascend610lite only support aarch64
         if path.find("ascend610lite") != -1:
             try:
-                subprocess.run(
-                    [
-                        "llvm-objcopy",
-                        "--input-target",
-                        "binary",
-                        "--output-target",
-                        "elf64-littleaarch64",
-                        "--binary-architecture",
-                        "aarch64",
-                        in_file,
-                        out_file,
-                    ]
-                )
-            except Exception as e:
+                subprocess.run([
+                    "llvm-objcopy",
+                    "--input-target",
+                    "binary",
+                    "--output-target",
+                    "elf64-littleaarch64",
+                    "--binary-architecture",
+                    "aarch64",
+                    in_file,
+                    out_file,
+                ])
+            except Exception:
                 LogUtil.print_compile_log(
                     "",
                     " ascend610lite execute objcopy fail!",
@@ -104,33 +102,29 @@ class PackKernel:
             target_platform = uname
         try:
             if target_platform == "x86_64":
-                subprocess.run(
-                    [
-                        "llvm-objcopy",
-                        "--input-target",
-                        "binary",
-                        "--output-target",
-                        "elf64-x86-64",
-                        "--binary-architecture",
-                        "i386",
-                        in_file,
-                        out_file,
-                    ]
-                )
+                subprocess.run([
+                    "llvm-objcopy",
+                    "--input-target",
+                    "binary",
+                    "--output-target",
+                    "elf64-x86-64",
+                    "--binary-architecture",
+                    "i386",
+                    in_file,
+                    out_file,
+                ])
             elif target_platform == "aarch64":
-                subprocess.run(
-                    [
-                        "llvm-objcopy",
-                        "--input-target",
-                        "binary",
-                        "--output-target",
-                        "elf64-littleaarch64",
-                        "--binary-architecture",
-                        "aarch64",
-                        in_file,
-                        out_file,
-                    ]
-                )
+                subprocess.run([
+                    "llvm-objcopy",
+                    "--input-target",
+                    "binary",
+                    "--output-target",
+                    "elf64-littleaarch64",
+                    "--binary-architecture",
+                    "aarch64",
+                    in_file,
+                    out_file,
+                ])
             else:
                 subprocess.run(["echo", "unsupported environment!"])
         except Exception as e:
@@ -152,13 +146,10 @@ class PackKernel:
                 files_dict = {}
                 for root, _, files in os.walk(catalog):
                     for file in files:
-                        if (
-                            file.endswith(".json")
-                            or file.endswith(".so")
-                            or file.endswith(".cpp")
-                            or file.endswith(".py")
-                            or file.endswith(".o")
-                        ):
+                        if (file.endswith(".json") or file.endswith(".so")
+                                or file.endswith(".cpp")
+                                or file.endswith(".py")
+                                or file.endswith(".o")):
                             file_path = os.path.join(root, file)
                             file_name = os.path.basename(file_path)
                             files_dict[file_name] = file_path
@@ -174,8 +165,7 @@ class PackKernel:
                 path, filename = os.path.split(op_cfgs[file_name])
                 op_info[file_name].append(os.path.join(self.vendor_name, path))
                 op_info[file_name].append(
-                    self.ascendc_gen_object(op_cfgs[file_name], path)
-                )
+                    self.ascendc_gen_object(op_cfgs[file_name], path))
         self.op_info = op_info
 
     def ascendc_gen_header(self: any):
@@ -183,8 +173,7 @@ class PackKernel:
         var_str = ""
         macro_op = (
             "std::vector<std::tuple<ge::AscendString, ge::AscendString, "
-            "const uint8_t *, const uint8_t *>> __ascendc_op_info = \n"
-        )
+            "const uint8_t *, const uint8_t *>> __ascendc_op_info = \n")
         for file_name in self.op_info.keys():
             file_addr = self.op_info.get(file_name)
             soc_pairs = []
@@ -200,14 +189,13 @@ class PackKernel:
             socs_res.append(soc_res)
             if len(op_syms) > 0:
                 var_str += "".join(
-                    ["extern uint8_t {};\n".format(sym) for sym in op_syms]
-                )
+                    ["extern uint8_t {};\n".format(sym) for sym in op_syms])
         macro_op += "{{\n{}}}; \n".format("".join(socs_res))
         head_file = os.path.join(self.out_path, "ge_table_op_resource.h")
         try:
             with os.fdopen(
-                os.open(head_file, const_var.WFLAGS, const_var.WMODES), "w"
-            ) as fd:
+                    os.open(head_file, const_var.WFLAGS, const_var.WMODES),
+                    "w") as fd:
                 fd.write("#include <stdint.h>\n")
                 fd.write("#include <map>\n")
                 fd.write("#include <tuple>\n")
@@ -235,7 +223,7 @@ class PackKernel:
         start = 0
         batch_size = 100
         for _ in range(math.ceil(len(objs) / batch_size)):
-            sub_objs = objs[start : start + batch_size]
+            sub_objs = objs[start:start + batch_size]
             start += batch_size
             try:
                 subprocess.run(["ar", "qc", out_lib] + sub_objs)
@@ -292,59 +280,63 @@ class PackKernel:
         os.chdir(self.in_path)
         framework_catalog = os.listdir("framework")
         for catalog_file in framework_catalog:
-            if (
-                catalog_file == "tf_plugin"
-                or catalog_file == "caffe_plugin"
-                or catalog_file == "onnx_plugin"
-            ):
+            if (catalog_file == "tf_plugin" or catalog_file == "caffe_plugin"
+                    or catalog_file == "onnx_plugin"):
                 source_dir = "op_kernel/tbe/op_info_cfg/ai_core"
-                dst_dir = os.path.join(self.copy_path, "framework", self.framework_type)
+                dst_dir = os.path.join(self.copy_path, "framework",
+                                       self.framework_type)
                 self.ascendc_copy_file(source_dir, dst_dir)
                 source_dir = os.path.join("framework", catalog_file)
-                dst_dir = os.path.join(self.copy_path, "framework", self.framework_type)
+                dst_dir = os.path.join(self.copy_path, "framework",
+                                       self.framework_type)
                 self.ascendc_copy_file(source_dir, dst_dir)
         source_dir = "op_kernel/tbe/op_info_cfg/ai_core"
         dst_dir = os.path.join(self.copy_path, "op_impl/ai_core/tbe/config")
         self.ascendc_copy_dir(source_dir, dst_dir)
         source_dir = "op_kernel/binary/dynamic"
-        dst_dir = os.path.join(
-            self.copy_path, "op_impl/ai_core/tbe", self.vendor_name + "_impl", "dynamic"
-        )
+        dst_dir = os.path.join(self.copy_path, "op_impl/ai_core/tbe",
+                               self.vendor_name + "_impl", "dynamic")
         self.ascendc_copy_file(source_dir, dst_dir)
         for compute_unit in self.op_soc_ver:
             source_dir = os.path.join("op_kernel/binary", compute_unit)
-            dst_dir = os.path.join(
-                self.copy_path, "op_impl/ai_core/tbe/kernel", compute_unit
-            )
+            dst_dir = os.path.join(self.copy_path,
+                                   "op_impl/ai_core/tbe/kernel", compute_unit)
             self.ascendc_copy_dir(source_dir, dst_dir)
         source_dir = "op_kernel/binary/config"
-        dst_dir = os.path.join(self.copy_path, "op_impl/ai_core/tbe/kernel/config")
+        dst_dir = os.path.join(self.copy_path,
+                               "op_impl/ai_core/tbe/kernel/config")
         self.ascendc_copy_dir(source_dir, dst_dir)
         so_file = "op_impl/ai_core/tbe/op_master_device/lib/libcust_opmaster.so"
         if os.path.exists(so_file):
-            dst_dir = os.path.join(
-                self.copy_path, "op_impl/ai_core/tbe/op_master_device/lib"
-            )
+            dst_dir = os.path.join(self.copy_path,
+                                   "op_impl/ai_core/tbe/op_master_device/lib")
             os.makedirs(dst_dir, exist_ok=True)
             shutil.copy(so_file, dst_dir)
 
 
 def args_parse():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-i", "--input-path", nargs="?", help="Input path of compile result."
-    )
-    parser.add_argument(
-        "-c", "--copy-path", nargs="?", help="Copy path of compile result."
-    )
-    parser.add_argument(
-        "-o", "--output-path", nargs="?", help="Output path of compile result."
-    )
+    parser.add_argument("-i",
+                        "--input-path",
+                        nargs="?",
+                        help="Input path of compile result.")
+    parser.add_argument("-c",
+                        "--copy-path",
+                        nargs="?",
+                        help="Copy path of compile result.")
+    parser.add_argument("-o",
+                        "--output-path",
+                        nargs="?",
+                        help="Output path of compile result.")
     parser.add_argument("-n", "--vendor-name", nargs="?", help="Vendor name.")
-    parser.add_argument("-u", "--compute-unit", nargs="?", help="Compute unit.")
-    parser.add_argument(
-        "-t", "--framework-type", nargs="?", help="Framework type, eg:tensorflow."
-    )
+    parser.add_argument("-u",
+                        "--compute-unit",
+                        nargs="?",
+                        help="Compute unit.")
+    parser.add_argument("-t",
+                        "--framework-type",
+                        nargs="?",
+                        help="Framework type, eg:tensorflow.")
     parser.add_argument(
         "-p",
         "--platform",

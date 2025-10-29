@@ -26,6 +26,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.moe.moe_comm_method import FusedAlltoAllCommImpl
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, is_enable_nz,
                                vllm_version_is)
 
@@ -33,9 +34,6 @@ if vllm_version_is("0.11.0"):
     from vllm.config import CompilationLevel
 else:
     from vllm.config import CompilationMode
-from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.ops.moe.moe_comm_method import FusedAlltoAllCommImpl
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 
 class AscendW8A8DynamicLinearMethod:

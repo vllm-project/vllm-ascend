@@ -7,7 +7,6 @@ import json
 import math
 import os
 import subprocess
-import sys
 
 import ascendc_ops_config
 import const_var
@@ -15,6 +14,7 @@ from tbe.tikcpp.log_utils import AscendCLogLevel, LogUtil
 
 
 class PackKernel:
+
     def __init__(self: any, args: any):
         self.in_path = os.path.realpath(args.input_path)
         self.out_path = os.path.realpath(args.output_path)
@@ -47,20 +47,18 @@ class PackKernel:
         # ascend610lite only support aarch64
         if soc == "ascend610lite":
             try:
-                subprocess.run(
-                    [
-                        "llvm-objcopy",
-                        "--input-target",
-                        "binary",
-                        "--output-target",
-                        "elf64-littleaarch64",
-                        "--binary-architecture",
-                        "aarch64",
-                        in_file,
-                        out_file,
-                    ]
-                )
-            except Exception as e:
+                subprocess.run([
+                    "llvm-objcopy",
+                    "--input-target",
+                    "binary",
+                    "--output-target",
+                    "elf64-littleaarch64",
+                    "--binary-architecture",
+                    "aarch64",
+                    in_file,
+                    out_file,
+                ])
+            except Exception:
                 LogUtil.print_compile_log(
                     "",
                     " ascend610lite execute objcopy fail!",
@@ -76,33 +74,29 @@ class PackKernel:
             target_platform = uname
         try:
             if target_platform == "x86_64":
-                subprocess.run(
-                    [
-                        "llvm-objcopy",
-                        "--input-target",
-                        "binary",
-                        "--output-target",
-                        "elf64-x86-64",
-                        "--binary-architecture",
-                        "i386",
-                        in_file,
-                        out_file,
-                    ]
-                )
+                subprocess.run([
+                    "llvm-objcopy",
+                    "--input-target",
+                    "binary",
+                    "--output-target",
+                    "elf64-x86-64",
+                    "--binary-architecture",
+                    "i386",
+                    in_file,
+                    out_file,
+                ])
             elif target_platform == "aarch64":
-                subprocess.run(
-                    [
-                        "llvm-objcopy",
-                        "--input-target",
-                        "binary",
-                        "--output-target",
-                        "elf64-littleaarch64",
-                        "--binary-architecture",
-                        "aarch64",
-                        in_file,
-                        out_file,
-                    ]
-                )
+                subprocess.run([
+                    "llvm-objcopy",
+                    "--input-target",
+                    "binary",
+                    "--output-target",
+                    "elf64-littleaarch64",
+                    "--binary-architecture",
+                    "aarch64",
+                    in_file,
+                    out_file,
+                ])
             else:
                 subprocess.run(["echo", "unsported environment!"])
         except Exception as e:
@@ -153,7 +147,8 @@ class PackKernel:
                 op_bin = op_info.get("op_bin")
                 if op_bin.get(soc) is None:
                     op_bin[soc] = []
-                    op_bin[soc].append(self.ascendc_gen_object(op_obj["cfg"], soc))
+                    op_bin[soc].append(
+                        self.ascendc_gen_object(op_obj["cfg"], soc))
                 op_soc = op_bin.get(soc)
                 for objs in op_obj["obj"]:
                     op_soc.append(self.ascendc_gen_object(objs + ".json", soc))
@@ -165,10 +160,8 @@ class PackKernel:
             macro_op = (
                 "#define {}_OP_RESOURCES std::make_tuple<std::vector<void *>, \\\n"
                 "    std::map<ge::AscendString, std::vector<std::tuple<const uint8_t *, const uint8_t *>>>, \\\n"
-                "    std::vector<std::tuple<const uint8_t *, const uint8_t *>>>({{{}}}, \\\n".format(
-                    op_type, ", ".join(op_obj.get("op_fun"))
-                )
-            )
+                "    std::vector<std::tuple<const uint8_t *, const uint8_t *>>>({{{}}}, \\\n"
+                .format(op_type, ", ".join(op_obj.get("op_fun"))))
             op_bin = op_obj.get("op_bin")
             socs_res = []
             op_syms = []
@@ -179,31 +172,29 @@ class PackKernel:
                 for pair_addr in soc_syms:
                     pair_addr1 = ["&" + s for s in pair_addr]
                     op_syms += pair_addr
-                    soc_pairs.append(
-                        "    {{ {} }} ".format(", \\\n      ".join(pair_addr1))
-                    )
+                    soc_pairs.append("    {{ {} }} ".format(
+                        ", \\\n      ".join(pair_addr1)))
                 soc_res += ", \\\n        ".join(soc_pairs)
                 soc_res += " } }"
                 socs_res.append(soc_res)
-            macro_op += "    {{ {} }}, \\\n".format(", \\\n      ".join(socs_res))
-            macro_op += "    {{ {} }})\n\n".format(", ".join(op_obj.get("op_rkb")))
+            macro_op += "    {{ {} }}, \\\n".format(
+                ", \\\n      ".join(socs_res))
+            macro_op += "    {{ {} }})\n\n".format(", ".join(
+                op_obj.get("op_rkb")))
             macro_str = '#define {}_RESOURCES {{{{"{}", {}}}}}'.format(
-                op_type, op_type, "{}_OP_RESOURCES".format(op_type)
-            )
+                op_type, op_type, "{}_OP_RESOURCES".format(op_type))
             var_str = (
-                "extern gert::OpImplRegisterV2 op_impl_register_optiling_{};\n".format(
-                    op_type
-                )
-            )
+                "extern gert::OpImplRegisterV2 op_impl_register_optiling_{};\n"
+                .format(op_type))
             if len(op_syms) > 0:
-                var_str += (
-                    "extern uint8_t " + ";\nextern uint8_t ".join(op_syms) + ";\n"
-                )
-            head_file = os.path.join(self.out_path, "{}_op_resource.h".format(op_type))
+                var_str += ("extern uint8_t " +
+                            ";\nextern uint8_t ".join(op_syms) + ";\n")
+            head_file = os.path.join(self.out_path,
+                                     "{}_op_resource.h".format(op_type))
             try:
                 with os.fdopen(
-                    os.open(head_file, const_var.WFLAGS, const_var.WMODES), "w"
-                ) as fd:
+                        os.open(head_file, const_var.WFLAGS, const_var.WMODES),
+                        "w") as fd:
                     fd.write("#include <stdint.h>\n")
                     fd.write("#include <map>\n")
                     fd.write("#include <tuple>\n")
@@ -230,7 +221,7 @@ class PackKernel:
         start = 0
         batch_size = 100
         for _ in range(math.ceil(len(objs) / batch_size)):
-            sub_objs = objs[start : start + batch_size]
+            sub_objs = objs[start:start + batch_size]
             start += batch_size
             try:
                 subprocess.run(["ar", "qc", out_lib] + sub_objs)
@@ -249,12 +240,14 @@ class PackKernel:
 
 def args_parse():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-i", "--input-path", nargs="?", help="Input path of compile result."
-    )
-    parser.add_argument(
-        "-o", "--output-path", nargs="?", help="Output path of compile result."
-    )
+    parser.add_argument("-i",
+                        "--input-path",
+                        nargs="?",
+                        help="Input path of compile result.")
+    parser.add_argument("-o",
+                        "--output-path",
+                        nargs="?",
+                        help="Output path of compile result.")
     parser.add_argument(
         "-l",
         "--enable-library",

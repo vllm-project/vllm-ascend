@@ -3,7 +3,6 @@
 
 import collections
 import os
-import stat
 
 import code_channel_infer
 import const_var
@@ -29,6 +28,7 @@ ReplayCodeGenParams = collections.namedtuple(
 
 
 class ReplayCodeGen:
+
     def __init__(self, replayCodeGenParams):
         self.op_type = replayCodeGenParams.op_type
         self.impl = replayCodeGenParams.impl
@@ -66,16 +66,16 @@ class ReplayCodeGen:
         self._gen_replay_code(replayimpl, reptmp, ops_product)
 
     def _gen_tiling_data_header(self):
-        self.tiling_data_file = os.path.join(
-            self.outdir, self.kernel + "_tiling_data.h"
-        )
+        self.tiling_data_file = os.path.join(self.outdir,
+                                             self.kernel + "_tiling_data.h")
         gen_tiling(self.tiling_file, self.tiling_data_file)
 
     def _gen_kimpl_code(self, src, tmpfile):
         with open(tmpfile, "r") as fd:
             temp = fd.read()
             temp = temp.replace("__CCE_FILE__", self.impl)
-        with os.fdopen(os.open(src, const_var.WFLAGS, const_var.WMODES), "w") as ofd:
+        with os.fdopen(os.open(src, const_var.WFLAGS, const_var.WMODES),
+                       "w") as ofd:
             ofd.write(temp)
 
     def _gen_replay_code(self, src, tmpfile, ops_product: str):
@@ -99,8 +99,7 @@ class ReplayCodeGen:
                     self.outdir,
                     ops_product,
                     None,
-                )
-            )
+                ))
             if code_channel == code_channel_infer.CODE_VEC:
                 core_type_infer = "0"
             elif code_channel == code_channel_infer.CODE_CUBE:
@@ -109,7 +108,8 @@ class ReplayCodeGen:
             # register function
             temp = temp.replace("__OPS_PRODUCT__", ops_product)
             temp = temp.replace("__OPTYPE__", self.op_type)
-        with os.fdopen(os.open(src, const_var.WFLAGS, const_var.WMODES), "w") as ofd:
+        with os.fdopen(os.open(src, const_var.WFLAGS, const_var.WMODES),
+                       "w") as ofd:
             ofd.write(temp)
 
     def _gen_kentry(self, src):
@@ -128,5 +128,6 @@ class ReplayCodeGen:
                 self.data_type,
                 self.blknum,
             )
-        with os.fdopen(os.open(src, const_var.WFLAGS, const_var.WMODES), "w") as ofd:
+        with os.fdopen(os.open(src, const_var.WFLAGS, const_var.WMODES),
+                       "w") as ofd:
             ofd.write(kf)

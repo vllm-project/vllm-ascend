@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # -*- coding: UTF-8 -*-
-
 """
 parser ini to json
 """
@@ -138,8 +137,7 @@ def check_file_size(input_file):
     if file_size > 10 * 1024 * 1024:
         print(
             "[WARN] The size of %s exceeds 10MB, it may take more time to run, please wait."
-            % input_file
-        )
+            % input_file)
 
 
 def parse_ini_to_obj(ini_file, tbe_ops_info):
@@ -167,15 +165,14 @@ def parse_ini_to_obj(ini_file, tbe_ops_info):
                     tbe_ops_info[op_name] = op_dict
                     find_op_type = True
             elif "=" in line:
-                key1 = line[: line.index("=")]
-                key2 = line[line.index("=") + 1 :]
+                key1 = line[:line.index("=")]
+                key2 = line[line.index("=") + 1:]
                 key1_0, key1_1 = key1.split(".")
                 if key1_0 not in op_dict:
                     op_dict[key1_0] = {}
                 if key1_1 in op_dict.get(key1_0):
-                    raise RuntimeError(
-                        "Op:" + op_name + " " + key1_0 + " " + key1_1 + " is repeated!"
-                    )
+                    raise RuntimeError("Op:" + op_name + " " + key1_0 + " " +
+                                       key1_1 + " is repeated!")
                 dic_key = op_dict.get(key1_0)
                 dic_key[key1_1] = key2
             else:
@@ -215,10 +212,13 @@ def check_attr_dict(attr_dict, is_valid, attr):
     param_type = attr_dict.get("paramType")
     if attr_type is None or value is None:
         is_valid = False
-        print("If attr.list is exist, {0}.type and {0}.value is required".format(attr))
+        print(
+            "If attr.list is exist, {0}.type and {0}.value is required".format(
+                attr))
     if param_type and param_type not in ATTR_PARAMTYPE_LIST:
         is_valid = False
-        print("{0}.paramType only support {1}.".format(attr, ATTR_PARAMTYPE_LIST))
+        print("{0}.paramType only support {1}.".format(attr,
+                                                       ATTR_PARAMTYPE_LIST))
     if attr_type and attr_type not in ATTR_TYPE_LIST:
         is_valid = False
         print("{0}.type only support {1}.".format(attr, ATTR_TYPE_LIST))
@@ -248,9 +248,8 @@ def check_attr(op_dict, is_valid):
                 else:
                     is_valid = False
                     print(
-                        "%s is required in .ini file, when attr.list is %s!"
-                        % (attr, attr_list_str)
-                    )
+                        "%s is required in .ini file, when attr.list is %s!" %
+                        (attr, attr_list_str))
     return is_valid
 
 
@@ -295,15 +294,14 @@ def check_type_format(op_info, is_valid, op_info_key):
         for op_format in op_info_format:
             if op_format.strip() not in FORMAT_LIST:
                 is_valid = False
-                print("{0}.format not support {1}.".format(op_info_key, op_format))
+                print("{0}.format not support {1}.".format(
+                    op_info_key, op_format))
     if op_info_dtype_num > 0 and op_info_format_num > 0:
         if op_info_dtype_num != op_info_format_num:
             is_valid = False
             print(
-                "The number of {0}.dtype not match the number of {0}.format.".format(
-                    op_info_key
-                )
-            )
+                "The number of {0}.dtype not match the number of {0}.format.".
+                format(op_info_key))
     return is_valid
 
 
@@ -329,27 +327,18 @@ def check_op_info(tbe_ops):
                     if required_op_input_info_key not in op_input_info:
                         missing_keys.append(required_op_input_info_key)
                 if len(missing_keys) > 0:
-                    print(
-                        "op: "
-                        + op_key
-                        + " "
-                        + op_info_key
-                        + " missing: "
-                        + ",".join(missing_keys)
-                    )
+                    print("op: " + op_key + " " + op_info_key + " missing: " +
+                          ",".join(missing_keys))
                     is_valid = False
                 else:
-                    if not op_input_info["paramType"] in param_type_valid_value:
-                        print(
-                            "op: "
-                            + op_key
-                            + " "
-                            + op_info_key
-                            + " paramType not valid, valid key:[dynamic, "
-                            "optional, required]"
-                        )
+                    if op_input_info[
+                            "paramType"] not in param_type_valid_value:
+                        print("op: " + op_key + " " + op_info_key +
+                              " paramType not valid, valid key:[dynamic, "
+                              "optional, required]")
                         is_valid = False
-                is_valid = check_type_format(op_input_info, is_valid, op_info_key)
+                is_valid = check_type_format(op_input_info, is_valid,
+                                             op_info_key)
             if op_info_key.startswith("output"):
                 op_input_info = op_dict[op_info_key]
                 missing_keys = []
@@ -357,27 +346,18 @@ def check_op_info(tbe_ops):
                     if required_op_input_info_key not in op_input_info:
                         missing_keys.append(required_op_input_info_key)
                 if len(missing_keys) > 0:
-                    print(
-                        "op: "
-                        + op_key
-                        + " "
-                        + op_info_key
-                        + " missing: "
-                        + ",".join(missing_keys)
-                    )
+                    print("op: " + op_key + " " + op_info_key + " missing: " +
+                          ",".join(missing_keys))
                     is_valid = False
                 else:
-                    if not op_input_info["paramType"] in param_type_valid_value:
-                        print(
-                            "op: "
-                            + op_key
-                            + " "
-                            + op_info_key
-                            + " paramType not valid, valid key:[dynamic, "
-                            "optional, required]"
-                        )
+                    if op_input_info[
+                            "paramType"] not in param_type_valid_value:
+                        print("op: " + op_key + " " + op_info_key +
+                              " paramType not valid, valid key:[dynamic, "
+                              "optional, required]")
                         is_valid = False
-                is_valid = check_type_format(op_input_info, is_valid, op_info_key)
+                is_valid = check_type_format(op_input_info, is_valid,
+                                             op_info_key)
         is_valid = check_attr(op_dict, is_valid)
         is_valid = check_bool_flag(op_dict, is_valid)
     print("==============check valid for ops info end================\n\n")
@@ -396,12 +376,16 @@ def write_json_file(tbe_ops_info, json_file_path):
     json_file_real_path = os.path.realpath(json_file_path)
     wr_flag = os.O_WRONLY | os.O_CREAT
     wr_mode = stat.S_IWUSR | stat.S_IRUSR
-    with os.fdopen(os.open(json_file_real_path, wr_flag, wr_mode), "w") as file_path:
+    with os.fdopen(os.open(json_file_real_path, wr_flag, wr_mode),
+                   "w") as file_path:
         # The owner have all rights£¬group only have read rights
-        os.chmod(json_file_real_path, stat.S_IWUSR + stat.S_IRGRP + stat.S_IRUSR)
-        json.dump(
-            tbe_ops_info, file_path, sort_keys=True, indent=4, separators=(",", ":")
-        )
+        os.chmod(json_file_real_path,
+                 stat.S_IWUSR + stat.S_IRGRP + stat.S_IRUSR)
+        json.dump(tbe_ops_info,
+                  file_path,
+                  sort_keys=True,
+                  indent=4,
+                  separators=(",", ":"))
     print("Compile op info cfg successfully.")
 
 

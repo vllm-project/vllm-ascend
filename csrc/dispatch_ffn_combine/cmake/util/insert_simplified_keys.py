@@ -6,9 +6,6 @@ import glob
 import json
 import os
 import re
-import sys
-
-import const_var
 
 DATA_TPYE_DICT = {
     "float32": 0,
@@ -23,9 +20,6 @@ DATA_TPYE_DICT = {
     "uint64": 10,
     "bool": 12,
     "double": 11,
-    "string": 13,
-    "dual": 14,
-    "dual": 15,
     "complex64": 16,
     "complex128": 17,
     "qint8": 18,
@@ -207,9 +201,8 @@ def insert_simplified_keys(json_file):
     precision = str(get_precision_value(support_info))
     overflow = str(get_overflow_value(support_info))
     input_parameters = get_all_input_parameters(support_info)
-    key = "{}/d={},p={},o={}/{}/".format(
-        op_type, deterministic, precision, overflow, input_parameters
-    )
+    key = "{}/d={},p={},o={}/{}/".format(op_type, deterministic, precision,
+                                         overflow, input_parameters)
     result = '"simplifiedKey": "' + key + '",\n'
     insert_content_into_file(json_file, result)
 
