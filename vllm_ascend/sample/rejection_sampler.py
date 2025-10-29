@@ -147,8 +147,8 @@ def rejection_sample(
     assert bonus_token_ids.is_contiguous()
     assert target_probs.shape == (num_tokens, vocab_size)
 
-    #Switch of Block Verify: when MTP>=2, using block verify for rejection sampler.
-    using_block_verify = max_spec_len >= 2
+    #Switch of Block Verify: when MTP>=3, using block verify for rejection sampler.
+    using_block_verify = max_spec_len >= 3
 
     # Create output buffer.
     output_token_ids = torch.empty(
