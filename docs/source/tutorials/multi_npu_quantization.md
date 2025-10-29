@@ -1,8 +1,8 @@
 # Multi-NPU (QwQ 32B W8A8)
 
-## Run docker container
+## Run Docker Container
 :::{note}
-w8a8 quantization feature is supported by v0.8.4rc2 or higher
+w8a8 quantization feature is supported by v0.8.4rc2 and later.
 :::
 
 ```{code-block} bash
@@ -28,7 +28,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-## Install modelslim and convert model
+## Install modelslim and Convert Model
 :::{note}
 You can choose to convert the model yourself or use the quantized model we uploaded,
 see https://www.modelscope.cn/models/vllm-ascend/QwQ-32B-W8A8
@@ -53,8 +53,8 @@ SAVE_PATH=/home/models/QwQ-32B-w8a8
 python3 quant_qwen.py --model_path $MODEL_PATH --save_directory $SAVE_PATH --calib_file ../common/boolq.jsonl --w_bit 8 --a_bit 8 --device_type npu --anti_method m1 --trust_remote_code True
 ```
 
-## Verify the quantized model
-The converted model files looks like:
+## Verify the Quantized Model
+The converted model files look like:
 
 ```bash
 .
@@ -68,10 +68,10 @@ The converted model files looks like:
 `-- tokenizer_config.json
 ```
 
-Run the following script to start the vLLM server with quantized model:
+Run the following script to start the vLLM server with the quantized model:
 
 :::{note}
-The value "ascend" for "--quantization" argument will be supported after [a specific PR](https://github.com/vllm-project/vllm-ascend/pull/877) is merged and released, you can cherry-pick this commit for now.
+The value "ascend" for "--quantization" argument will be supported after [a specific PR](https://github.com/vllm-project/vllm-ascend/pull/877) is merged and released. You can cherry-pick this commit for now.
 :::
 
 ```bash
@@ -93,10 +93,10 @@ curl http://localhost:8000/v1/completions \
     }'
 ```
 
-Run the following script to execute offline inference on multi-NPU with quantized model:
+Run the following script to execute offline inference on multi-NPU with the quantized model:
 
 :::{note}
-To enable quantization for ascend, quantization method must be "ascend"
+To enable quantization for ascend, quantization method must be "ascend".
 :::
 
 ```python

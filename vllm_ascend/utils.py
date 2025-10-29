@@ -52,11 +52,13 @@ _IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
+_SHARED_EXPERTS_COMPUTE_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
 _ENABLE_SP = None
+_HAS_LAYER_IDX = None
 
 
 def is_310p():
@@ -257,6 +259,15 @@ def prefetch_stream() -> torch.npu.Stream:
         # we return the default stream.
         _PREFETCH_STREAM = torch_npu.npu.Stream()
     return _PREFETCH_STREAM
+
+
+def shared_experts_compute_stream() -> torch.npu.Stream:
+    global _SHARED_EXPERTS_COMPUTE_STREAM
+    if _SHARED_EXPERTS_COMPUTE_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _SHARED_EXPERTS_COMPUTE_STREAM = torch_npu.npu.Stream()
+    return _SHARED_EXPERTS_COMPUTE_STREAM
 
 
 def adapt_patch(is_global_patch: bool = False):
@@ -537,8 +548,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
                                         AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding,
-        AscendYaRNRotaryEmbedding)
+        AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
+        AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -548,6 +559,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
+        "MRotaryEmbedding": AscendMRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
         "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
@@ -675,6 +687,13 @@ def weak_ref_tensors(
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
+
+    This function should be used in the following scenario:
+    When a tensor is created during graph capture, and it's held by a method
+    that's not part of the graph, we don't really need to store it, but we
+    **do need** its buffer pointer. If we don't handle this, it cannot
+    be garbage collected, leading to a memory leak. To avoid this,
+    we should create a weak reference to the tensor.
     """
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
@@ -767,3 +786,14 @@ def version_check():
         if full_date >= "20250919":
             return True
     return False
+
+
+def has_layer_idx(model_instance: torch.nn.Module) -> bool:
+    if model_instance is None:
+        return False
+
+    global _HAS_LAYER_IDX
+    if _HAS_LAYER_IDX is None:
+        _HAS_LAYER_IDX = hasattr(model_instance, "model") and \
+            hasattr(model_instance.model, "start_layer")
+    return _HAS_LAYER_IDX

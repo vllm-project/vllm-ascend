@@ -2,7 +2,7 @@
 
 ## Getting Start
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide take one-by-one steps to verify these features with constrained resources.
+vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide takes one-by-one steps to verify these features with constrained resources.
 
 Take the Qwen3-235B model as an example, use 4 Atlas 800T A3 servers to deploy the "2P1D" architecture. Assume the ip of the prefiller server is 192.0.0.1 (prefill 1) and 192.0.0.2 (prefill 2), and the decoder servers are 192.0.0.3 (decoder 1) and 192.0.0.4 (decoder 2). On each server, use 8 NPUs 16 chips to deploy one service instance.
 
@@ -60,7 +60,7 @@ Mooncake is the serving platform for Kimi, a leading LLM service provided by Moo
 git clone -b pooling_async_memecpy_v1 https://github.com/AscendTransport/Mooncake
 ```
 
-Update and install Python
+Update and install Python.
 
 ```shell
 apt-get update
@@ -97,11 +97,11 @@ cp mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend
 cp mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
 ```
 
-## Prefiller / Decoder Deployment
+## Prefiller/Decoder Deployment
 
-We can run the following scripts to launch a server on the prefiller/decoder node respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
+We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
-### layerwise
+### Layerwise
 
 :::::{tab-set}
 
@@ -223,7 +223,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 ::::
 
-::::{tab-item} Decoder node 1 (master Node)
+::::{tab-item} Decoder node 1 (master node)
 
 ```shell
 unset ftp_proxy
@@ -284,7 +284,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 ::::
 
-::::{tab-item} Decoder node 2 (primary Node)
+::::{tab-item} Decoder node 2 (primary node)
 
 ```shell
 unset ftp_proxy
@@ -348,7 +348,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 :::::
 
-### non-layerwise
+### Non-layerwise
 
 :::::{tab-set}
 
@@ -595,13 +595,13 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 :::::
 
-## Example proxy for Deployment
+## Example Proxy for Deployment
 
-Run a proxy server on the same node with prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py) or [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py) or [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 :::::{tab-set}
 
-::::{tab-item} layerwise
+::::{tab-item} Layerwise
 
 ```shell
 python load_balance_proxy_layerwise_server_example.py \
@@ -615,7 +615,7 @@ python load_balance_proxy_layerwise_server_example.py \
 
 ::::
 
-::::{tab-item} non-layerwise
+::::{tab-item} Non-layerwise
 
 ```shell
 python load_balance_proxy_server_example.py \

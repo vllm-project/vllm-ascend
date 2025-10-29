@@ -3,11 +3,11 @@
 ## Prerequisites
 
 ### Supported Devices
-- Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
-- Atlas 800I A2 Inference series (Atlas 800I A2)
-- Atlas A3 Training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
-- Atlas 800I A3 Inference series (Atlas 800I A3)
-- [Experimental] Atlas 300I Inference series (Atlas 300I Duo)
+- Atlas A2 training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
+- Atlas 800I A2 inference series (Atlas 800I A2)
+- Atlas A3 training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
+- Atlas 800I A3 inference series (Atlas 800I A3)
+- [Experimental] Atlas 300I inference series (Atlas 300I Duo)
 
 ## Setup environment using container
 
@@ -71,11 +71,11 @@ yum update -y && yum install -y curl
 ::::
 :::::
 
-The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)(`pip install -e`) to help developer immediately take place changes without requiring a new installation.
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developers immediately make changes effective without requiring a new installation.
 
 ## Usage
 
-You can use Modelscope mirror to speed up download:
+You can use ModelScope mirror to speed up download:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
@@ -128,7 +128,7 @@ the following command to start the vLLM server with the
 vllm serve Qwen/Qwen2.5-0.5B-Instruct &
 ```
 
-If you see log as below:
+If you see a log as below:
 
 ```
 INFO:     Started server process [3594]
@@ -139,7 +139,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
 Congratulations, you have successfully started the vLLM server!
 
-You can query the list the models:
+You can query the list of models:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
@@ -162,8 +162,7 @@ curl http://localhost:8000/v1/completions \
     }' | python3 -m json.tool
 ```
 
-vLLM is serving as background process, you can use `kill -2 $VLLM_PID` to stop the background process gracefully,
-it's equal to `Ctrl-C` to stop foreground vLLM process:
+vLLM is serving as a background process, you can use `kill -2 $VLLM_PID` to stop the background process gracefully, which is similar to `Ctrl-C` for stopping the foreground vLLM process:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 
@@ -172,7 +171,7 @@ it's equal to `Ctrl-C` to stop foreground vLLM process:
   kill -2 "$VLLM_PID"
 ```
 
-You will see output as below:
+The output is as below:
 
 ```
 INFO:     Shutting down FastAPI HTTP server.
@@ -181,6 +180,6 @@ INFO:     Waiting for application shutdown.
 INFO:     Application shutdown complete.
 ```
 
-Finally, you can exit container by using `ctrl-D`.
+Finally, you can exit the container by using `ctrl-D`.
 ::::
 :::::

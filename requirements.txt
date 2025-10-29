@@ -13,6 +13,7 @@ setuptools-scm>=8
 torch>=2.7.1
 torchvision
 wheel
+opencv-python-headless<=4.11.0.86 # Required to avoid numpy version conflict with vllm
 
 # requirements for disaggregated prefill
 msgpack
