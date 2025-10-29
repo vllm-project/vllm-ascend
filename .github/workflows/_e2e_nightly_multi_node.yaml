@@ -71,7 +71,8 @@ jobs:
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       env:
-        KUBECONFIG: /tmp/kubeconfig
+        #KUBECONFIG: /tmp/kubeconfig
+        KUBECONFIG: /root/.cache/.kube/kubeconfig.yaml
         KUBECTL: /root/.cache/.kube/kubectl
         NAMESPACE: vllm-project
         LEADER_POD: vllm-0
@@ -100,10 +101,10 @@ jobs:
             # Verify kubectl installation
             kubectl version --client=true
 
-        - name: Decode kubeconfig from secrets
-          run: |
-            # Decode and save kubeconfig
-            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
+        # - name: Decode kubeconfig from secrets
+        #   run: |
+        #     # Decode and save kubeconfig
+        #     #echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
 
         - name: Checkout code
           uses: actions/checkout@v4
@@ -112,10 +113,6 @@ jobs:
           run: |
             # prepare for lws entrypoint scripts
             install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
-
-        - name: Clear result ret
-          run: |
-            rm -f $RESULT_FILE
 
         - name: Clear resources
           run: |
