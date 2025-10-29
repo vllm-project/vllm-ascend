@@ -1,0 +1,88 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# This workflow related to the resources atlas 800 A2
+# We will not limit the concurrency of jobs on A2
+name: 'ascend test / nightly-a2'
+
+on:
+  schedule:
+      # Run test at 24:00 Beijing time (UTC+8)
+      - cron: "0 16 * * *"
+  workflow_dispatch:
+  pull_request: 
+    branches:
+      - 'main'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+concurrency:
+  group: ascend-nightly-${{ github.ref }}-a2
+  cancel-in-progress: true
+
+jobs:
+  single-node-tests:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          - name: qwen3-32b
+            os: linux-aarch64-a2-4
+            tests: tests/e2e/nightly/models/test_qwen3_32b.py
+          - name: qwen3-32b-in8-a2
+            os: linux-aarch64-a2-4
+            tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
+          - name: test_custom_op
+            os: linux-aarch64-a2-1
+            tests: tests/e2e/nightly/ops
+    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+    with:
+      vllm: v0.11.0
+      runner: ${{ matrix.test_config.os }}
+      tests: ${{ matrix.test_config.tests }}
+
+  multi-node-tests:
+    needs: single-node-tests
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config:
+          - name: multi-node-deepseek-dp
+            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8-A2.yaml
+            size: 2
+          - name: multi-node-deepseek-dp-torchair
+            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8-A2-torchair.yaml
+            size: 2
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: a2
+      runner: linux-aarch64-a2-0
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      replicas: 1
+      size: ${{ matrix.test_config.size }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A2_B64 }}

@@ -4,13 +4,12 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.ops.moe.fused_moe_prepare_and_finalize import (
-    FusedMoEPrepareAndFinalizeWithAll2All,
-    FusedMoEPrepareAndFinalizeWithAllGather, FusedMoEPrepareAndFinalizeWithMC2,
-    FusedMoEPrepareAndFinalizeWithNaiveMulticast)
+from vllm_ascend.ops.fused_moe.prepare_finalize import (
+    PrepareAndFinalizeWithAll2All, PrepareAndFinalizeWithAllGather,
+    PrepareAndFinalizeWithMC2, PrepareAndFinalizeWithNaiveMulticast)
 
 
-class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
+class TestPrepareAndFinalize(unittest.TestCase):
 
     def setUp(self):
         # Mock FusedMoEConfig
@@ -24,14 +23,12 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         self.moe_config.original_num_experts = 8
 
     @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_tensor_model_parallel_world_size",
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size",
         return_value=1)
     @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_tensor_model_parallel_rank",
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
         return_value=0)
-    @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_forward_context"
-    )
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
     def test_mc2_prepare_finalize(self, mock_get_forward_context, mock_tp_rank,
                                   mock_tp_size):
         mock_context = MagicMock()
@@ -39,7 +36,7 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         mock_context.padded_num_tokens = 4
         mock_get_forward_context.return_value = mock_context
 
-        layer = FusedMoEPrepareAndFinalizeWithMC2(self.moe_config)
+        layer = PrepareAndFinalizeWithMC2(self.moe_config)
 
         hidden_states = torch.randn(3, 8)
         router_logits = torch.randn(3, 2)
@@ -59,14 +56,12 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(result.shape[0], 3)
 
     @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_tensor_model_parallel_world_size",
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size",
         return_value=2)
     @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_tensor_model_parallel_rank",
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
         return_value=0)
-    @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_forward_context"
-    )
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
     @patch("torch.distributed.all_gather")
     def test_mc2_tp_split_allgather(self, mock_all_gather,
                                     mock_get_forward_context, mock_tp_rank,
@@ -76,7 +71,7 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         mock_context.padded_num_tokens = 4
         mock_get_forward_context.return_value = mock_context
 
-        layer = FusedMoEPrepareAndFinalizeWithMC2(self.moe_config)
+        layer = PrepareAndFinalizeWithMC2(self.moe_config)
         hidden_states = torch.randn(4, 8)
         router_logits = torch.randn(4, 2)
 
@@ -108,13 +103,13 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(final_result.shape[0], 4)
 
     @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_tensor_model_parallel_world_size",
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size",
         return_value=1)
     @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_tensor_model_parallel_rank",
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
         return_value=0)
     def test_all2all_prepare_finalize(self, mock_tp_rank, mock_tp_size):
-        layer = FusedMoEPrepareAndFinalizeWithAll2All(self.moe_config)
+        layer = PrepareAndFinalizeWithAll2All(self.moe_config)
         hidden_states = torch.randn(3, 8)
         router_logits = torch.randn(3, 2)
 
@@ -130,15 +125,15 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         self.assertEqual(result.shape[0], 3)
 
     @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_tensor_model_parallel_world_size",
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_world_size",
         return_value=2)
     @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_tensor_model_parallel_rank",
+        "vllm_ascend.ops.fused_moe.prepare_finalize.get_tensor_model_parallel_rank",
         return_value=0)
     @patch("torch.distributed.all_gather")
     def test_all2all_tp_split_allgather(self, mock_all_gather, mock_tp_rank,
                                         mock_tp_size):
-        layer = FusedMoEPrepareAndFinalizeWithAll2All(self.moe_config)
+        layer = PrepareAndFinalizeWithAll2All(self.moe_config)
         hidden_states = torch.randn(2, 8)
         router_logits = torch.randn(2, 2)
 
@@ -169,14 +164,15 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         # Should concat back
         self.assertEqual(final_result.shape[0], 2)
 
-    @patch("vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_dp_group")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
     @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.tensor_model_parallel_all_reduce"
+        "vllm_ascend.ops.fused_moe.prepare_finalize.tensor_model_parallel_all_reduce"
     )
-    @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_forward_context"
-    )
-    def test_allgather_prepare_finalize(self, mock_get_forward_context,
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.enable_sp",
+           return_value=False)
+    def test_allgather_prepare_finalize(self, mock_enable_sp,
+                                        mock_get_forward_context,
                                         mock_tp_all_reduce, mock_get_dp_group):
         # Mock forward context
         mock_context = MagicMock()
@@ -198,18 +194,13 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         self.moe_config.ep_size = 1
         self.moe_config.dp_group = mock_dp_group
 
-        layer = FusedMoEPrepareAndFinalizeWithAllGather(self.moe_config)
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
 
         hidden_states = torch.randn(3, 8)
         router_logits = torch.randn(3, 2)
 
-        # Mock the gate function for rm_router_logits=False case
-        mock_gate = MagicMock()
-        mock_gate.return_value = (router_logits.repeat(2, 1), None)
-
-        h_out, r_out, _, context_metadata = layer.prepare(hidden_states,
-                                                          router_logits,
-                                                          gate=mock_gate)
+        h_out, r_out, _, context_metadata = layer.prepare(
+            hidden_states, router_logits)
 
         # After all-gather with DP=2, should double the batch size
         self.assertEqual(h_out.shape[0], 12)
@@ -232,13 +223,11 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         result_with_tp = layer.finalize(h_out, reduce_results=True)
         self.assertEqual(result_with_tp.shape[0], 3)
 
-    @patch("vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_dp_group")
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_dp_group")
     @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.tensor_model_parallel_all_reduce"
+        "vllm_ascend.ops.fused_moe.prepare_finalize.tensor_model_parallel_all_reduce"
     )
-    @patch(
-        "vllm_ascend.ops.moe.fused_moe_prepare_and_finalize.get_forward_context"
-    )
+    @patch("vllm_ascend.ops.fused_moe.prepare_finalize.get_forward_context")
     def test_naive_multicast_prepare_finalize(self, mock_get_forward_context,
                                               mock_tp_all_reduce,
                                               mock_get_dp_group):
@@ -266,20 +255,14 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         self.moe_config.tp_size = 1
         self.moe_config.ep_size = 1
 
-        layer = FusedMoEPrepareAndFinalizeWithNaiveMulticast(self.moe_config)
+        layer = PrepareAndFinalizeWithNaiveMulticast(self.moe_config)
 
         # Local inputs
         hidden_states = torch.randn(3, 8)
         router_logits = torch.randn(3, 2)
 
-        # Mock gate for router logits recomputation
-        mock_gate = MagicMock()
-        mock_gate.return_value = (torch.randn(7, 2), None)
-
         # Run prepare
-        h_out, r_out, _, _ = layer.prepare(hidden_states,
-                                           router_logits,
-                                           gate=mock_gate)
+        h_out, r_out, _, _ = layer.prepare(hidden_states, router_logits)
 
         # Should be global tensor: [7, 8] and [7, 2]
         self.assertEqual(h_out.shape, (7, 8))

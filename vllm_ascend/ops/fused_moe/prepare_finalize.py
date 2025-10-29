@@ -27,10 +27,10 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.utils import enable_sp, get_rm_router_logits_state
+from vllm_ascend.utils import enable_sp
 
 
-class FusedMoEPrepareAndFinalize(ABC):
+class PrepareAndFinalize(ABC):
     """
     Abstract base class for MoE (Mixture-of-Experts) tensor preparation and finalization
     in distributed environments. Subclasses implement specific communication strategies
@@ -44,10 +44,6 @@ class FusedMoEPrepareAndFinalize(ABC):
 
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
-        is_deepseek_v3_r1 = self.moe_config.original_num_experts == 256
-        self.rm_router_logits = get_rm_router_logits_state(
-            self.moe_config.ep_size, self.moe_config.dp_size,
-            is_deepseek_v3_r1)
 
     @abstractmethod
     def prepare(
@@ -55,8 +51,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False,
-        gate=None
+        replace_allreduce: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -64,14 +59,12 @@ class FusedMoEPrepareAndFinalize(ABC):
           - Padding to align communication boundaries
           - Slicing across tensor-parallel ranks
           - Broadcasting across data-parallel ranks
-          - Recomputing router logits if needed
 
         Args:
             hidden_states (torch.Tensor): Input features, shape [num_tokens, hidden_size]
             router_logits (torch.Tensor): Router outputs, shape [num_tokens, num_experts]
             enable_shared_expert_dp (bool): Skip DP communication for shared experts
             replace_allreduce (bool): Bypass default all-reduce behavior
-            gate (nn.Module, optional): Gate network to recompute router_logits if needed
 
         Returns:
             Tuple of:
@@ -103,7 +96,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         raise NotImplementedError("Finalize function not implemented.")
 
 
-class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
+class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
     """
     MoE communication strategy using All-to-All style slicing.
     Similar to MC2 but does not use mc2_mask; instead pads to TP size for uniform slicing.
@@ -124,8 +117,7 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False,
-        gate=None
+        replace_allreduce: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -195,7 +187,7 @@ class FusedMoEPrepareAndFinalizeWithAll2All(FusedMoEPrepareAndFinalize):
         return hidden_states
 
 
-class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalizeWithAll2All):
+class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     """
     MoE communication strategy using MC2, which is based on All2All. Hence, it inherits
     All2All and share the same finalize method.
@@ -221,8 +213,7 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalizeWithAll2All):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False,
-        gate=None
+        replace_allreduce: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -275,7 +266,7 @@ class FusedMoEPrepareAndFinalizeWithMC2(FusedMoEPrepareAndFinalizeWithAll2All):
         return hidden_states, router_logits, mc2_mask, context_metadata
 
 
-class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
+class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     """
     MoE communication strategy using All-Gather + Reduce-Scatter on EP group.
     There are two sets of prepare and finalize:
@@ -303,7 +294,6 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
-        gate=None
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -318,7 +308,7 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
 
         return self._prepare_with_dp_group(hidden_states, router_logits,
                                            enable_shared_expert_dp,
-                                           replace_allreduce, gate)
+                                           replace_allreduce)
 
     def _prepare_with_ep_group(
         self,
@@ -339,7 +329,6 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
-        gate=None
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -361,18 +350,14 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
             if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states,
                                                   (0, 0, 0, pad_size))
-                if not self.rm_router_logits:
-                    router_logits = nn.functional.pad(router_logits,
-                                                      (0, 0, 0, pad_size))
+                router_logits = nn.functional.pad(router_logits,
+                                                  (0, 0, 0, pad_size))
 
             # All-gather across DP group
             hidden_states = self.moe_config.dp_group.all_gather(
                 hidden_states, 0)
-            if self.rm_router_logits:
-                router_logits, _ = gate(hidden_states)  # Recompute globally
-            else:
-                router_logits = self.moe_config.dp_group.all_gather(
-                    router_logits, 0)
+            router_logits = self.moe_config.dp_group.all_gather(
+                router_logits, 0)
         return hidden_states, router_logits, None, None
 
     def finalize(self,
@@ -429,7 +414,7 @@ class FusedMoEPrepareAndFinalizeWithAllGather(FusedMoEPrepareAndFinalize):
         return hidden_states
 
 
-class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
+class PrepareAndFinalizeWithNaiveMulticast(PrepareAndFinalize):
     """
     MoE communication strategy using Naive Multicast (point-to-point broadcast).
     Will be used in prefill when using allgather in decode. Each DP rank broadcasts its slice to all others.
@@ -474,8 +459,7 @@ class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False,
-        gate=None
+        replace_allreduce: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -493,11 +477,8 @@ class FusedMoEPrepareAndFinalizeWithNaiveMulticast(FusedMoEPrepareAndFinalize):
             ).dp_metadata.cu_tokens_across_sp(1)
             hidden_states = self._naive_multicast(hidden_states,
                                                   self.cu_tokens_across_dp_cpu)
-            if self.rm_router_logits:
-                router_logits, _ = gate(hidden_states)
-            else:
-                router_logits = self._naive_multicast(
-                    router_logits, self.cu_tokens_across_dp_cpu)
+            router_logits = self._naive_multicast(router_logits,
+                                                  self.cu_tokens_across_dp_cpu)
 
         return hidden_states, router_logits, None, None
 

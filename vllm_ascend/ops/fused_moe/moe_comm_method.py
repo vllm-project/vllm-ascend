@@ -24,15 +24,13 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.moe.fused_moe_prepare_and_finalize import (
-    FusedMoEPrepareAndFinalizeWithAll2All,
-    FusedMoEPrepareAndFinalizeWithAllGather, FusedMoEPrepareAndFinalizeWithMC2,
-    FusedMoEPrepareAndFinalizeWithNaiveMulticast)
-from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
-from vllm_ascend.ops.moe.token_dispatcher import (TokenDispatcherWithAll2AllV,
-                                                  TokenDispatcherWithAllGather,
-                                                  TokenDispatcherWithMC2,
-                                                  TokenDispatcherWithMoge)
+from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
+from vllm_ascend.ops.fused_moe.prepare_finalize import (
+    PrepareAndFinalizeWithAll2All, PrepareAndFinalizeWithAllGather,
+    PrepareAndFinalizeWithMC2, PrepareAndFinalizeWithNaiveMulticast)
+from vllm_ascend.ops.fused_moe.token_dispatcher import (
+    TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
+    TokenDispatcherWithMC2, TokenDispatcherWithMoge)
 
 _MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
 
@@ -59,29 +57,28 @@ class MoECommMethod(ABC):
         self.moe_config = moe_config
 
         self.token_dispatcher = self._get_token_dispatcher()
-        self.fused_moe_prepare_finalize = self._get_fused_moe_prepare_finalize(
-        )
+        self.prepare_finalize = self._get_prepare_finalize()
 
     def prepare(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False,
-        gate=None
+        replace_allreduce: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
-        hidden_states, router_logits, mc2_mask, context_metadata = self.fused_moe_prepare_finalize.prepare(
+        hidden_states, router_logits, mc2_mask, context_metadata = self.prepare_finalize.prepare(
             hidden_states, router_logits, enable_shared_expert_dp,
-            replace_allreduce, gate)
+            replace_allreduce)
         return hidden_states, router_logits, mc2_mask, context_metadata
 
     def finalize(self,
                  hidden_states: torch.Tensor,
                  reduce_results: bool,
                  context_metadata: Optional[dict] = None) -> torch.Tensor:
-        hidden_states = self.fused_moe_prepare_finalize.finalize(
-            hidden_states, reduce_results, context_metadata)
+        hidden_states = self.prepare_finalize.finalize(hidden_states,
+                                                       reduce_results,
+                                                       context_metadata)
         return hidden_states
 
     def fused_experts(
@@ -169,9 +166,9 @@ class MoECommMethod(ABC):
             "_get_token_dispatcher function not implemented.")
 
     @abstractmethod
-    def _get_fused_moe_prepare_finalize(self):
+    def _get_prepare_finalize(self):
         raise NotImplementedError(
-            "_get_fused_moe_prepare_finalize function not implemented.")
+            "_get_prepare_finalize function not implemented.")
 
 
 class AllGatherCommImpl(MoECommMethod):
@@ -205,8 +202,8 @@ class AllGatherCommImpl(MoECommMethod):
                 num_experts=self.moe_config.num_experts,
                 num_local_experts=self.moe_config.num_local_experts)
 
-    def _get_fused_moe_prepare_finalize(self):
-        return FusedMoEPrepareAndFinalizeWithAllGather(self.moe_config)
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithAllGather(self.moe_config)
 
 
 class MC2CommImpl(MoECommMethod):
@@ -222,8 +219,8 @@ class MC2CommImpl(MoECommMethod):
     def _get_token_dispatcher(self):
         return TokenDispatcherWithMC2()
 
-    def _get_fused_moe_prepare_finalize(self):
-        return FusedMoEPrepareAndFinalizeWithMC2(self.moe_config)
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithMC2(self.moe_config)
 
 
 class AlltoAllCommImpl(MoECommMethod):
@@ -242,8 +239,8 @@ class AlltoAllCommImpl(MoECommMethod):
             num_experts=self.moe_config.num_experts,
             num_local_experts=self.moe_config.num_local_experts)
 
-    def _get_fused_moe_prepare_finalize(self):
-        return FusedMoEPrepareAndFinalizeWithAll2All(self.moe_config)
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithAll2All(self.moe_config)
 
 
 class NaiveMulticastCommImpl(MoECommMethod):
@@ -271,5 +268,5 @@ class NaiveMulticastCommImpl(MoECommMethod):
             num_experts=self.moe_config.num_experts,
             num_local_experts=self.moe_config.num_local_experts)
 
-    def _get_fused_moe_prepare_finalize(self):
-        return FusedMoEPrepareAndFinalizeWithNaiveMulticast(self.moe_config)
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithNaiveMulticast(self.moe_config)

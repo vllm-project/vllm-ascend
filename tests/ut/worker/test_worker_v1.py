@@ -5,6 +5,7 @@ import torch
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 
 from tests.ut.base import TestBase
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestNPUWorker(TestBase):
@@ -41,6 +42,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker_v1._register_atb_extensions")
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
+    @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
@@ -53,6 +55,7 @@ class TestNPUWorker(TestBase):
         mock_try_register_lib,
         mock_init_ascend_soc_version,
         mock_init_ascend_config,
+        mock_get_ascend_config,
         mock_register_ascend_customop,
         mock_register_atb_extensions,
         mock_ops,
@@ -61,6 +64,9 @@ class TestNPUWorker(TestBase):
         """Test NPUWorker normal initialization"""
         # Setup mock behavior
         mock_ops.register_dummy_fusion_op.return_value = None
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_cpu_binding = False
+        mock_get_ascend_config.return_value = mock_ascend_config
 
         # Import and create NPUWorker instance
         from vllm_ascend.worker.worker_v1 import NPUWorker
@@ -98,6 +104,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker_v1._register_atb_extensions")
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
+    @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
@@ -110,6 +117,7 @@ class TestNPUWorker(TestBase):
         mock_try_register_lib,
         mock_init_ascend_soc_version,
         mock_init_ascend_config,
+        mock_get_ascend_config,
         mock_register_ascend_customop,
         mock_register_atb_extensions,
         mock_ops,
@@ -119,6 +127,9 @@ class TestNPUWorker(TestBase):
         # Set trust_remote_code=True
         self.model_config_mock.trust_remote_code = True
         mock_ops.register_dummy_fusion_op.return_value = None
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_cpu_binding = False
+        mock_get_ascend_config.return_value = mock_ascend_config
 
         # Create NPUWorker instance
         from vllm_ascend.worker.worker_v1 import NPUWorker
@@ -138,6 +149,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.ops")
     @patch("vllm_ascend.worker.worker_v1._register_atb_extensions")
     @patch("vllm_ascend.worker.worker_v1.register_ascend_customop")
+    @patch("vllm_ascend.worker.worker_v1.get_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
@@ -150,6 +162,7 @@ class TestNPUWorker(TestBase):
         mock_try_register_lib,
         mock_init_ascend_soc_version,
         mock_init_ascend_config,
+        mock_get_ascend_config,
         mock_register_ascend_customop,
         mock_register_atb_extensions,
         mock_ops,
@@ -159,19 +172,33 @@ class TestNPUWorker(TestBase):
         # Set custom cache_dtype
         self.cache_config_mock.cache_dtype = "float32"
         mock_ops.register_dummy_fusion_op.return_value = None
+        mock_ascend_config = MagicMock()
+        mock_ascend_config.enable_cpu_binding = False
+        mock_get_ascend_config.return_value = mock_ascend_config
 
         # Create NPUWorker instance
         from vllm_ascend.worker.worker_v1 import NPUWorker
 
-        with patch("vllm.utils.STR_DTYPE_TO_TORCH_DTYPE",
-                   {"float32": torch.float32}):
-            worker = NPUWorker(
-                vllm_config=self.vllm_config_mock,
-                local_rank=self.local_rank,
-                rank=self.rank,
-                distributed_init_method=self.distributed_init_method,
-                is_driver_worker=self.is_driver_worker,
-            )
+        if vllm_version_is("0.11.0"):
+            with patch("vllm.utils.STR_DTYPE_TO_TORCH_DTYPE",
+                       {"float32": torch.float32}):
+                worker = NPUWorker(
+                    vllm_config=self.vllm_config_mock,
+                    local_rank=self.local_rank,
+                    rank=self.rank,
+                    distributed_init_method=self.distributed_init_method,
+                    is_driver_worker=self.is_driver_worker,
+                )
+        else:
+            with patch("vllm.utils.torch_utils.STR_DTYPE_TO_TORCH_DTYPE",
+                       {"float32": torch.float32}):
+                worker = NPUWorker(
+                    vllm_config=self.vllm_config_mock,
+                    local_rank=self.local_rank,
+                    rank=self.rank,
+                    distributed_init_method=self.distributed_init_method,
+                    is_driver_worker=self.is_driver_worker,
+                )
 
         # Verify cache_dtype is set to custom value
         self.assertEqual(worker.cache_dtype, torch.float32)

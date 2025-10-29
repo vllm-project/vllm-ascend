@@ -112,6 +112,7 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.oproj_tensor_parallel_size = 2
+        ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
         linear = AscendRowParallelLinear(
             input_size=16,
