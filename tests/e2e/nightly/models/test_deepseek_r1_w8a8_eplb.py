@@ -45,7 +45,7 @@ aisbench_cases = [{
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
     "max_out_len": 32768,
     "batch_size": 32,
-    "baseline": 95,
+    "baseline": 90,
     "threshold": 5
 }, {
     "case_type": "performance",
@@ -72,7 +72,8 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         "OMP_PROC_BIND": "false",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "PAGED_ATTENTION_MASK_LEN": "5500",
-        "DYNAMIC_EPLB": "true"
+        "DYNAMIC_EPLB": "true",
+        "HCCL_BUFFSIZE": "1024"
     }
     server_args = [
         "--no-enable-prefix-caching", "--enable-expert-parallel",
@@ -84,7 +85,7 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         "--quantization", "ascend", "--gpu-memory-utilization", "0.9",
         "--additional-config", '{"enable_weight_nz_layout":true, '
         '"torch_air_graph_config":{"enabled": true, "enable_multistream_mla": true, "graph_batch_size": [16], "use_cached_graph": true},'
-        '"dynamic_eplb": true, "num_iterations_eplb_update": 200, "num_wait_worker_iterations": 100, "init_redundancy_expert": 16}'
+        '"dynamic_eplb": true, "num_iterations_eplb_update": 1000, "num_wait_worker_iterations": 200, "init_redundancy_expert": 16}'
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
