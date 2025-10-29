@@ -1,6 +1,6 @@
-# Features and models
+# Features and Models
 
-This section provides a detailed supported matrix by vLLM Ascend.
+This section provides a detailed matrix supported by vLLM Ascend.
 
 :::{toctree}
 :caption: Support Matrix
