@@ -284,12 +284,12 @@ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
 
 def maybe_download_from_modelscope(
     model: str,
-    repo_type: str | None = None,
+    repo_type: str = "model",
     revision: str | None = None,
     download_dir: str | None = None,
     ignore_patterns: str | list[str] | None = None,
     allow_patterns: list[str] | str | None = None,
-) -> str | None:
+) -> str:
     """
     Download model/dataset from ModelScope hub.
     Returns the path to the downloaded model, or None if the model is not
@@ -310,5 +310,4 @@ def maybe_download_from_modelscope(
             )
         else:
             model_path = model
-        return model_path
-    return None
+    return model_path
