@@ -103,8 +103,7 @@ jobs:
         - name: Decode kubeconfig from secrets
           run: |
             # Decode and save kubeconfig
-            #echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
-            cp /root/.cache/.kube/kubeconfig.yaml $KUBECONFIG
+            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
 
         - name: Checkout code
           uses: actions/checkout@v4
