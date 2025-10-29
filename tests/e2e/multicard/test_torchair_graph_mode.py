@@ -276,6 +276,7 @@ def _deepseek_v3_lite_torchair_test_fixure(
         assert golden_results[i] == vllm_output[i][1]
         print(f"Generated text: {vllm_output[i][1]!r}")
 
+
 def test_e2e_deepseekv3lite_with_torchair():
     additional_config = {
         "torchair_graph_config": {
