@@ -7,7 +7,7 @@
 
 from tests.ut.base import TestBase
 from vllm_ascend.torchair.torchair_sfa import (
-    AscendSFATorchairBackend, AscendSFATorchairImpl, AscendSFATorchairMetadata, 
+    AscendSFATorchairBackend, AscendSFATorchairImpl, AscendSFATorchairMetadata,
     AscendSFATorchairMetadataBuilder)
 
 
