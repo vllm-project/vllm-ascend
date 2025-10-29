@@ -252,7 +252,7 @@ def _deepseek_v3_lite_torchair_test_fixure(
     additional_config.update(**kwargs)
 
     with VllmRunner(
-            "vllm-ascend/DeepSeek-V3-Pruning",
+            "deepseek-ai/DeepSeek-V2-Lite",
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
@@ -260,10 +260,10 @@ def _deepseek_v3_lite_torchair_test_fixure(
     ) as vllm_model:
         vllm_output = vllm_model.generate_greedy(example_prompts, 5)
 
-    # NOTE: vllm-ascend/DeepSeek-V3-Pruning is a random weight of
-    # DeepSeek-V3 with 2 hidden layers, thus the golden results seems
+    # NOTE: deepseek-ai/DeepSeek-V2-Lite is a random weight of
+    # DeepSeek-V2 with 2 hidden layers, thus the golden results seems
     # inaccurate. This will only change if accuracy improves with the
-    # official weights of DeepSeek-V3.
+    # official weights of DeepSeek-V2.
     golden_results = [
         'Hello, my name is下载早点向前很有่อง',
         'The president of the United States isSender)## physiological Albany',
