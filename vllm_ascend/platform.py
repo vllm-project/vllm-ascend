@@ -452,7 +452,7 @@ class NPUPlatform(Platform):
             (False, False, False):
             "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             (True, True, False):
-            "vllm_ascend.attention.mla_v1.AscendMLABackend",
+            "vllm_ascend.attention.sfa_v1.AscendSFABackend",
             (True, True, True):
             "vllm_ascend.torchair.torchair_sfa.AscendSFATorchairBackend",
         }

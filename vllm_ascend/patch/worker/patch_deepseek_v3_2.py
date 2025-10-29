@@ -14,20 +14,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Optional, Union
 from itertools import islice
-import torch
-from torch import nn
+from typing import Optional, Union
 
+import torch
+import vllm.model_executor.models.deepseek_v2
+from torch import nn
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.utils import PPMissingLayer, make_layers, make_empty_intermediate_tensors_factory
+from vllm.model_executor.layers.vocab_parallel_embedding import \
+    VocabParallelEmbedding
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2DecoderLayer
-import vllm.model_executor.models.deepseek_v2
+from vllm.model_executor.models.utils import (
+    PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers)
 from vllm.sequence import IntermediateTensors
-from vllm.compilation.decorators import support_torch_compile
 
 
 @support_torch_compile
@@ -101,5 +103,6 @@ class DeepseekV2Model(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
+
 
 vllm.model_executor.models.deepseek_v2.DeepseekV2Model = DeepseekV2Model
