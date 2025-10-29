@@ -5,22 +5,22 @@ This guide demonstrates how to integrate a novel or customized model into vllm-a
 
 ## Step 1: Implementing Models with `torch` and `torch_npu`
 
-This section provides instructions for implementing new models compatible with vllm and vllm-ascend.
+This section provides instructions for implementing new models compatible with vLLM and vllm-ascend.
 
 **Before starting:**
 
-- Verify whether your model already exists in vllm's [models](https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models) directory.
+- Verify whether your model already exists in vLLM's [models](https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models) directory.
 - Use existing models' implementation as templates to accelerate your development.
 
 ### Method 1: Implementing New Models from Scratch
 
-Follow vllm's [OPT model adaptation](https://docs.vllm.ai/en/stable/contributing/model/basic.html) example for guidance.
+Follow vLLM's [OPT model adaptation](https://docs.vllm.ai/en/stable/contributing/model/basic.html) example for guidance.
 
 **Key implementation requirements:**
 
 1. Place model files in `vllm_ascend/models/` directory.
 
-2. Standard module structure for decoder-only LLMs (please checkout vllm's implementations for other kinds of model):
+2. Standard module structure for decoder-only LLMs (please checkout vLLM's implementations for other kinds of models):
 
 - `*ModelForCausalLM` (top-level wrapper)
 - `*Model` (main architecture)
@@ -31,7 +31,7 @@ Follow vllm's [OPT model adaptation](https://docs.vllm.ai/en/stable/contributing
 `*` denotes your model's unique identifier.
 :::
 
-3. Critical Implementation Details:
+3. Critical implementation details:
 
 All modules must include a `prefix` argument in `__init__()`.
 
@@ -42,13 +42,13 @@ All modules must include a `prefix` argument in `__init__()`.
 | `*ModelForCausalLM`  | `get_input_embeddings`, `compute_logits`, `load_weights` |
 | `*Model`             | `get_input_embeddings`, `load_weights`    |
 
-4. Attention Backend Integration:
+4. Attention backend integration:
 
 Importing attention via `from vllm.attention import Attention` can automatically leverage the attention backend routing of vllm-ascend (see: `get_attn_backend_cls()` in `vllm_ascend/platform.py`).
 
-5. Tensor Parallelism:
+5. Tensor parallelism:
 
-Use vllm's parallel layers (`ColumnParallelLinear`, `VocabParallelEmbedding`, etc.) to implement models supporting tensor parallelism. Note that Ascend-specific customizations are implemented in `vllm_ascend/ops/` directory (RMSNorm, VocabParallelEmbedding, etc.).
+Use vLLM's parallel layers (`ColumnParallelLinear`, `VocabParallelEmbedding`, etc.) to implement models supporting tensor parallelism. Note that Ascend-specific customizations are implemented in `vllm_ascend/ops/` directory (RMSNorm, VocabParallelEmbedding, etc.).
 
 **Reference Implementation Template** (assumed path: `vllm_ascend/models/custom_model.py`):
 
@@ -133,7 +133,7 @@ class CustomModelForCausalLM(nn.Module):
 
 ### Method 2: Customizing Existing vLLM Models
 
-For most use cases, extending existing implementations is preferable. We demonstrate an example to inherit from base classes and implement a custom deepseek model below (assumed path: `vllm_ascend/models/deepseek_v2.py`).
+For most use cases, extending existing implementations is preferable. We demonstrate an example to inherit from base classes and implement a custom DeepSeek model below (assumed path: `vllm_ascend/models/deepseek_v2.py`).
 
 ```python
 from typing import List, Optional
@@ -171,12 +171,12 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 ```
 
 :::{note}
-For a complete implementation reference, see: `vllm_ascend/models/deepseek_v2.py`.
+For a complete implementation reference, see `vllm_ascend/models/deepseek_v2.py`.
 :::
 
 ## Step 2: Registering Custom Models using ModelRegistry Plugins in vLLM
 
-vllm provides a plugin mechanism for registering externally implemented models without modifying its codebase.
+vLLM provides a plugin mechanism for registering externally implemented models without modifying the codebase.
 
 To integrate your implemented model from `vllm_ascend/models/` directory:
 
@@ -220,33 +220,33 @@ The first argument of `vllm.ModelRegistry.register_model()` indicates the unique
 
 ## Step 3: Verification
 
-### Case 1: Overriding Existing vLLM Model Architecture
+### Case 1: Overriding Existing vLLM Model Architectures
 
-If you're registering a customized model architecture based on vllm's existing implementation (overriding vllm's original class), when executing vllm offline/online inference (using any model), you'll observe warning logs similar to the following output from `vllm/models_executor/models/registry.py`.
+If you're registering a customized model architecture based on vLLM's existing implementation (overriding vLLM's original class), when executing vLLM offline/online inference (using any model), you'll observe warning logs similar to the following output from `vllm/models_executor/models/registry.py`.
 
 ```bash
 Model architecture DeepseekV2ForCausalLM is already registered, and will be overwritten by the new model class vllm_ascend/models/deepseek_v2:CustomDeepseekV2ForCausalLM.
 ```
 
-### Case 2: Registering New Model Architecture
+### Case 2: Registering New Model Architectures
 
-If you're registering a novel model architecture not present in vllm (creating a completely new class), current logs won't provide explicit confirmation by default. It's recommended to add the following logging statement at the end of the `register_model` method in `vllm/models_executor/models/registry.py`.
+If you're registering a novel model architecture not present in vLLM (creating a completely new class), current logs won't provide explicit confirmation by default. It's recommended to add the following logging statement at the end of the `register_model` method in `vllm/models_executor/models/registry.py`.
 
 ```python
 logger.info(f"model_arch: {model_arch} has been registered here!")
 ```
 
-After adding this line, you will see confirmation logs shown below when running vllm offline/online inference (using any model).
+After adding this line, you will see confirmation logs shown below when running vLLM offline/online inference (using any model).
 
 ```bash
 model_arch: CustomModelForCausalLM has been registered here!
 ```
 
-This log output confirms your novel model architecture has been successfully registered in vllm.
+This log output confirms your novel model architecture has been successfully registered in vLLM.
 
 ## Step 4: Testing
 
-After adding a new model, we should do basic functional test (offline/online inference), accuracy test and performance benchmark for the model.
+After adding a new model, we should do basic functional test (offline/online inference), accuracy test, and performance benchmark for the model.
 
 Find more details at:
 
