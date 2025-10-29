@@ -164,6 +164,7 @@ kill_npu_processes() {
 run_tests() {
     set +e
     kill_npu_processes
+    sleep 3
     pytest -sv tests/e2e/nightly/multi_node/test_multi_n.py
     ret=$?
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
