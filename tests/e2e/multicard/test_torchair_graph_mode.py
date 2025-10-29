@@ -262,9 +262,9 @@ def _deepseek_v3_lite_torchair_test_fixure(
         vllm_output = vllm_model.generate_greedy(example_prompts, 5)
 
     # NOTE: deepseek-ai/DeepSeek-V2-Lite is a random weight of
-    # DeepSeek-V2 with 2 hidden layers, thus the golden results seems
+    # DeepSeek-V2-Lite with 2 hidden layers, thus the golden results seems
     # inaccurate. This will only change if accuracy improves with the
-    # official weights of DeepSeek-V2.
+    # official weights of DeepSeek-V2-Lite.
 
     for i in range(len(vllm_output)):
         generated_text = vllm_output[i][1]
