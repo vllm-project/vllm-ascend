@@ -44,7 +44,7 @@ aisbench_cases = [{
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
     "max_out_len": 32768,
     "batch_size": 32,
-    "baseline": 90,
+    "baseline": 93,
     "threshold": 5
 }, {
     "case_type": "performance",
@@ -70,7 +70,8 @@ async def test_models(model: str, tp_size: int) -> None:
         "OMP_PROC_BIND": "false",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "PAGED_ATTENTION_MASK_LEN": "5500",
-        "DYNAMIC_EPLB": "true"
+        "DYNAMIC_EPLB": "true",
+        "HCCL_BUFFSIZE": "1024"
     }
     server_args = [
         "--no-enable-prefix-caching", "--enable-expert-parallel",
