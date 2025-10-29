@@ -116,21 +116,24 @@ class RandomLoadBalance(EplbPolicy):
 
 1. **Adapter File Modification**  
    - Inherit or modify `vllm_ascend/eplb/adaptor/vllm_adaptor.py`
-   - Add processing logic for key parameters:  
-    - `num_dense_layers`  
-    - `global_expert_num`  
-    - `num_roe_layers`  
-   - Ensure parameter synchronization in the `model_register` function. 
+   - Add processing logic for key parameters:
+    - `num_dense_layers`
+    - `global_expert_num`
+    - `num_roe_layers`
+   - Ensure parameter synchronization in the `model_register` function.
    
    For example:
-    
+
     Modify `__init__` of `vllm_adaptor.py` to add a new moe model eplb params:
+
     ```python
        if self.model.config.model_type == "qwen3_moe":
         self.num_dense_layers = 0
         self.global_expert_num = self.model.config.num_experts
     ```
+
    Modify `model_register` of `vllm_adaptor.py` to register eplb params for new moe model:
+   
     ```python
         if config.model_type == "qwen3_moe":
             model.num_moe_layers = config.num_hidden_layers
@@ -157,6 +160,7 @@ class RandomLoadBalance(EplbPolicy):
 ### Parameter Validation
 #### Integer Parameters
 All integer input parameters must explicitly specify their maximum and minimum values and be subject to valid value validation. For example, `num_iterations_eplb_update` must be greater than 0:
+
 ```python
     @staticmethod
     def check_iterations(iterations):
@@ -172,6 +176,7 @@ All integer input parameters must explicitly specify their maximum and minimum v
 
 #### File Path
 The file path for EPLB must be checked for legality, such as whether the file path is valid and whether it has appropriate read and write permissions. For example:
+
 ```python
     @staticmethod
     def check_expert_map_path(expert_map):
