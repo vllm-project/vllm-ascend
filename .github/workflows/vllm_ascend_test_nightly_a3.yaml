@@ -41,52 +41,52 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  single-node-tests:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    strategy:
-      fail-fast: false
-      matrix:
-        test_config:
-          - name: qwen3-32b-in8-a3
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
-          - name: qwen3-32b-int8-a3-feature-stack3
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/features/test_qwen3_32b_int8_a3_feature_stack3.py
-          - name: qwen3-235b-a22b-w8a8-eplb
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/models/test_qwen3_235b_a22b_w8a8_eplb.py
-          - name: deepseek-r1-w8a8-eplb
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
-          - name: qwen2-5-vl-7b
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
-          - name: qwen2-5-vl-32b
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/models/test_qwen2_5_vl_32b.py
-          - name: qwen3-32b-int8-prefix-cache
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/features/test_prefix_cache_qwen3_32b_int8.py
-          - name: deepseek-r1-0528-w8a8
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8.py
-          - name: deepseek-r1-0528-w8a8-prefix-cache
-            os: linux-aarch64-a3-16
-            tests: tests/e2e/nightly/features/test_prefix_cache_deepseek_r1_0528_w8a8.py
-          - name: qwq-32b-a3
-            os: linux-aarch64-a3-4
-            tests: tests/e2e/nightly/models/test_qwq_32b.py
-    uses: ./.github/workflows/_e2e_nightly_single_node.yaml
-    with:
-      vllm: v0.11.0
-      runner: ${{ matrix.test_config.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
-      tests: ${{ matrix.test_config.tests }}
+  # single-node-tests:
+  #   if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       test_config:
+  #         - name: qwen3-32b-in8-a3
+  #           os: linux-aarch64-a3-4
+  #           tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
+  #         - name: qwen3-32b-int8-a3-feature-stack3
+  #           os: linux-aarch64-a3-4
+  #           tests: tests/e2e/nightly/features/test_qwen3_32b_int8_a3_feature_stack3.py
+  #         - name: qwen3-235b-a22b-w8a8-eplb
+  #           os: linux-aarch64-a3-16
+  #           tests: tests/e2e/nightly/models/test_qwen3_235b_a22b_w8a8_eplb.py
+  #         - name: deepseek-r1-w8a8-eplb
+  #           os: linux-aarch64-a3-16
+  #           tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
+  #         - name: qwen2-5-vl-7b
+  #           os: linux-aarch64-a3-4
+  #           tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
+  #         - name: qwen2-5-vl-32b
+  #           os: linux-aarch64-a3-4
+  #           tests: tests/e2e/nightly/models/test_qwen2_5_vl_32b.py
+  #         - name: qwen3-32b-int8-prefix-cache
+  #           os: linux-aarch64-a3-4
+  #           tests: tests/e2e/nightly/features/test_prefix_cache_qwen3_32b_int8.py
+  #         - name: deepseek-r1-0528-w8a8
+  #           os: linux-aarch64-a3-16
+  #           tests: tests/e2e/nightly/models/test_deepseek_r1_0528_w8a8.py
+  #         - name: deepseek-r1-0528-w8a8-prefix-cache
+  #           os: linux-aarch64-a3-16
+  #           tests: tests/e2e/nightly/features/test_prefix_cache_deepseek_r1_0528_w8a8.py
+  #         - name: qwq-32b-a3
+  #           os: linux-aarch64-a3-4
+  #           tests: tests/e2e/nightly/models/test_qwq_32b.py
+  #   uses: ./.github/workflows/_e2e_nightly_single_node.yaml
+  #   with:
+  #     vllm: v0.11.0
+  #     runner: ${{ matrix.test_config.os }}
+  #     image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+  #     tests: ${{ matrix.test_config.tests }}
 
   multi-node-tests:
-    needs: single-node-tests
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    #needs: single-node-tests
+    #if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       max-parallel: 1

@@ -159,6 +159,8 @@ jobs:
               -D vllm_ascend_ref="$vllm_ascend_ref" \
               -D result_file_path="$result_file_path" \
               -D npu_per_node="$npu_per_node" \
+              -D controller_name="$HOSTNAME" \
+              -D kb_secret=${{ secrets.KUBECONFIG_B64 }} \
               --outfile lws.yaml
 
             kubectl apply -f ./lws.yaml

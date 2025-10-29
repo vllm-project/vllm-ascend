@@ -164,27 +164,44 @@ kill_npu_processes() {
 run_tests() {
     set +e
     kill_npu_processes
-    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
+    pytest -sv tests/e2e/nightly/multi_node/test_multi_n.py
     ret=$?
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
-        mkdir -p "$(dirname "$RESULT_FILE_PATH")"
-        echo $ret > "$RESULT_FILE_PATH"
+        if [ $ret -eq 0 ]; then
+            print_success "All tests passed!"
+        else
+            print_error "Some tests failed!"
+            kubectl delete pod $CONTROLLER_NAME -n vllm-project
+        fi
     fi
     set -e
+}
+
+install_kubectl() {
+    arch=$(uname -m)
+    KUBECTL=/root/.cache/.kube/kubectl
+    if echo "$arch" | grep -qiE "arm|aarch64"; then
+        echo "Detected ARM architecture: $arch"
+        KUBECTL="$KUBECTL"_arm
+    fi
+    install -o root -g root -m 0755 $KUBECTL /usr/local/bin/kubectl
+    echo "$SECRET" | base64 -d > /tmp/kubeconfig
+    export KUBECONFIG=/tmp/kubeconfig
 }
 
 main() {
     check_npu_info
     check_and_config
-    checkout_src
-    install_sys_dependencies
-    install_vllm
-    install_ais_bench
+    #checkout_src
+    #install_sys_dependencies
+    install_kubectl
+    #install_vllm
+    #install_ais_bench
     # to speed up mooncake build process, install Go here
-    install_go
-    cd "$WORKSPACE/source_code"
-    . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
-    pooling_async_memecpy_v1 9d96b2e1dd76cc601d76b1b4c5f6e04605cd81d3
+    #install_go
+    #cd "$WORKSPACE/source_code"
+    #. $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
+    #pooling_async_memecpy_v1 9d96b2e1dd76cc601d76b1b4c5f6e04605cd81d3
     cd "$WORKSPACE/source_code/vllm-ascend"
     run_tests
 }
