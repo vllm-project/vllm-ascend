@@ -264,7 +264,7 @@ def _native_select_experts(
         n_routed_experts = router_logits.shape[-1]
         scores_for_choice = topk_weights.view(
             -1, n_routed_experts) + e_score_correction_bias.unsqueeze(
-            0) if e_score_correction_bias is not None else 0
+                0) if e_score_correction_bias is not None else 0
         topk_ids = torch.topk(scores_for_choice, k=top_k, dim=-1,
                               sorted=False)[1]
         topk_weights = topk_weights.gather(1, topk_ids)
