@@ -850,41 +850,6 @@ class MooncakeConnectorScheduler:
             last_token_id=request.output_token_ids[-1],
         )
 
-    def get_finished_count(self) -> Optional[int]:
-        prefill_parallel_config: dict[
-            str,
-            Any] = self.vllm_config.kv_transfer_config.get_from_extra_config(
-                "prefill", {})
-
-        assert "tp_size" in prefill_parallel_config.keys()
-        self._prefill_tp_size = prefill_parallel_config["tp_size"]
-        decode_parallel_config: dict[
-            str,
-            Any] = self.vllm_config.kv_transfer_config.get_from_extra_config(
-                "decode", {})
-        assert "tp_size" in decode_parallel_config.keys()
-        self._decode_tp_size = decode_parallel_config["tp_size"]
-        num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
-        if self.vllm_config.model_config.use_mla or hasattr(
-                self.vllm_config.model_config.hf_config, "index_topk"):
-            num_need_pulls = 1
-        else:
-            num_p_block_heads = max(
-                1, num_key_value_heads // self._prefill_tp_size)
-            num_d_block_heads = max(
-                1, num_key_value_heads // self._decode_tp_size)
-            num_need_pulls = num_d_block_heads // num_p_block_heads
-        kv_role = self.vllm_config.kv_transfer_config.kv_role
-        logger.debug(
-            "get_finished_count, kv_role=%s, num_need_pulls=%d, decode_tp_size=%d",
-            kv_role, num_need_pulls, self._decode_tp_size)
-        if kv_role == 'kv_producer':
-            if self.vllm_config.model_config.is_deepseek_mla:
-                return self._prefill_tp_size
-            return num_need_pulls * self._prefill_tp_size
-        else:
-            return self._decode_tp_size
-
 
 class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
