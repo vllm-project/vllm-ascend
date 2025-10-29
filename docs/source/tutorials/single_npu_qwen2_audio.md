@@ -27,7 +27,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Load model from ModelScope to speed up download
