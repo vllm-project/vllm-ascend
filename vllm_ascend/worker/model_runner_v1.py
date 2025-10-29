@@ -3201,8 +3201,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_attn_module = 2 if self.model_config.hf_config.model_type == "longcat_flash" else 1
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
-                      self.kv_caches,
-                      num_attn_module)
+                      self.kv_caches, num_attn_module)
 
         return kv_caches
 
