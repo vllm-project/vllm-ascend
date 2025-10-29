@@ -67,7 +67,7 @@ class TestMoECommMethod(TestBase):
 
         # Verify prepare was called with correct arguments
         mock_pf_instance.prepare.assert_called_once_with(
-            hidden_states, router_logits, False, False, None)
+            hidden_states, router_logits, False, False)
 
         # Test finalize method
         comm_impl.finalize(h_out,
@@ -115,7 +115,7 @@ class TestMoECommMethod(TestBase):
 
         # Verify prepare was called with correct arguments
         mock_pf_instance.prepare.assert_called_once_with(
-            hidden_states, router_logits, False, False, None)
+            hidden_states, router_logits, False, False)
 
         # Test finalize method
         comm_impl.finalize(h_out,
@@ -165,7 +165,7 @@ class TestMoECommMethod(TestBase):
 
         # Verify prepare was called with correct arguments
         mock_pf_instance.prepare.assert_called_once_with(
-            hidden_states, router_logits, False, False, None)
+            hidden_states, router_logits, False, False)
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
