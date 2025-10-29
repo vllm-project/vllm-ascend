@@ -222,7 +222,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         }
 
         return {
-            "group_list_type": 0,
+            "group_list_type": 1,
             "hidden_states": expand_x,
             "group_list": expert_token_nums,
             "dynamic_scale": dynamic_scale,
