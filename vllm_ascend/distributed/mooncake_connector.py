@@ -665,9 +665,6 @@ class MooncakeConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
-    def get_finished_count(self) -> Optional[int]:
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.get_finished_count()
 
     ############################################################
     # Worker Side Methods
