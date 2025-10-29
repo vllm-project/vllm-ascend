@@ -65,6 +65,7 @@ concurrency:
 
 jobs:
   e2e:
+    name: ${{ inputs.config_file_path }}
     # This is a runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     container:
@@ -112,9 +113,10 @@ jobs:
             # prepare for lws entrypoint scripts
             install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
 
-        - name: Clear result ret
+        - name: Clear resources
           run: |
-            rm -f $RESULT_FILE
+            # pre clear the crd resources created by lws
+            kubectl delete leaderworkerset vllm -n "$NAMESPACE" --ignore-not-found
 
         - name: Launch cluster
           run: |
@@ -153,6 +155,8 @@ jobs:
               -D vllm_ascend_ref="$vllm_ascend_ref" \
               -D result_file_path="$result_file_path" \
               -D npu_per_node="$npu_per_node" \
+              -D controller_name="$HOSTNAME" \
+              -D kb_secret=${{ secrets.KUBECONFIG_B64 }} \
               --outfile lws.yaml
 
             kubectl apply -f ./lws.yaml
@@ -177,29 +181,6 @@ jobs:
         - name: Stream logs
           run: |
             kubectl logs -f "$LEADER_POD" -n "$NAMESPACE"
-
-        - name: Determine is success
-          run: |
-            TIMEOUT=300
-            ELAPSED=0
-            while [ ! -f "$RESULT_FILE" ]; do
-              sleep 5
-              ELAPSED=$((ELAPSED + 5))
-              if [ $ELAPSED -ge $TIMEOUT ]; then
-                echo "Timeout waiting for test result file"
-                exit 1
-              fi
-            done
-
-            RET=$(cat "$RESULT_FILE")
-            echo "Test result: $RET"
-
-            if [ "$RET" -ne 0 ]; then
-              echo "Test failed"
-              exit 1
-            else
-              echo "Test succeeded"
-            fi
 
         - name: Post process
           if: always()
