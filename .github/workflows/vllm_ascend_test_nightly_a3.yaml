@@ -120,7 +120,7 @@ jobs:
 
   clear_resources:
     needs: multi-node-tests
-    if: always()
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/_kill_lws_resources.yaml
     with:
       runner: linux-aarch64-a3-0
