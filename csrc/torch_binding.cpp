@@ -245,7 +245,7 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     return std::forward_as_tuple(q_out0, kv_cache_out0, q_out1, kv_cache_out1);
 }
 
-at::Tensor& dispatch_gmm_combine(
+at::Tensor& dispatch_ffn_combine(
     const at::Tensor& x,
     const at::Tensor& weight1,
     const at::Tensor& weight2,
@@ -258,7 +258,7 @@ at::Tensor& dispatch_gmm_combine(
     at::Tensor& out
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
-    EXEC_NPU_CMD(aclnnDispatchGmmCombine,
+    EXEC_NPU_CMD(aclnnDispatchFfnCombine,
                  x,
                  weight1,
                  weight2,
@@ -606,9 +606,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 
     ops.def(
-        "dispatch_gmm_combine(Tensor x, Tensor weight1, Tensor weight2, Tensor expert_idx,"
+        "dispatch_ffn_combine(Tensor x, Tensor weight1, Tensor weight2, Tensor expert_idx,"
         "                     Tensor scale1, Tensor scale2, Tensor probs, str group,"
         "                     int max_output_size, Tensor! out) -> Tensor"
     );
-    ops.impl("dispatch_gmm_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_gmm_combine);
+    ops.impl("dispatch_ffn_combine", torch::kPrivateUse1, &vllm_ascend::dispatch_ffn_combine);
 }

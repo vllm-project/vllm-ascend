@@ -2,7 +2,7 @@ ROOT_DIR=$1
 
 source $(dirname $ASCEND_HOME_PATH)/set_env.sh
 
-cd csrc/dispatch_gmm_combine
+cd csrc/dispatch_ffn_combine
 
 # Clean
 rm -rf build_out

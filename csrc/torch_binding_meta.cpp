@@ -114,7 +114,7 @@ std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preproces
     return {q_out0, kv_cache_out0, q_out1, kv_cache_out1};
 }
 
-at::Tensor& dispatch_gmm_combine_meta(
+at::Tensor& dispatch_ffn_combine_meta(
     const at::Tensor& x,
     const at::Tensor& weight1,
     const at::Tensor& weight2,
@@ -148,6 +148,6 @@ namespace {
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
     // MoE dispatch-gmm-combine
-    ops.impl("dispatch_gmm_combine", &vllm_ascend::meta::dispatch_gmm_combine_meta);
+    ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
 }
 }

@@ -260,7 +260,7 @@ class FusedAlltoAllCommImpl(MoECommMethod):
             num_local_experts=self.moe_config.num_local_experts)
 
     def _get_fused_moe_prepare_finalize(self):
-        return FusedMoEPrepareAndFinalizeWithAll2All(self.moe_config)
+        return PrepareAndFinalizeWithAll2All(self.moe_config)
 
     def fused_experts(self,
                       hidden_states,
