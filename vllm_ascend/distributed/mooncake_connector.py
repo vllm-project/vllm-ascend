@@ -1127,9 +1127,6 @@ class MooncakeConnectorWorker:
     def _prefill_get_remote_tp_rank(self, req_id: str) -> List[int]:
         return sum(self._get_remote_tp_ranks_for_req(req_id), [])
 
-    def _prefill_get_remote_tp_rank(self, req_id: str) -> List[int]:
-        return sum(self._get_remote_tp_ranks_for_req(req_id), [])
-
     def _get_remote_tp_rank(self, req_id: str) -> List[int]:
         return self._get_remote_tp_ranks_for_req(req_id)[self.tp_rank]
 
