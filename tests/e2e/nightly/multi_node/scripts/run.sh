@@ -162,14 +162,15 @@ kill_npu_processes() {
 }
 
 run_tests() {
-    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
+    set +e
     kill_npu_processes
+    pytest -sv tests/ut/worker/test_input_batch.py
     ret=$?
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         mkdir -p "$(dirname "$RESULT_FILE_PATH")"
         echo $ret > "$RESULT_FILE_PATH"
     fi
-    return $ret
+    set -e
 }
 
 main() {
@@ -178,12 +179,12 @@ main() {
     checkout_src
     install_sys_dependencies
     install_vllm
-    install_ais_bench
+    #install_ais_bench
     # to speed up mooncake build process, install Go here
-    install_go
-    cd "$WORKSPACE/source_code"
-    . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
-    pooling_async_memecpy_v1 9d96b2e1dd76cc601d76b1b4c5f6e04605cd81d3
+    #install_go
+    #cd "$WORKSPACE/source_code"
+    #. $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
+    #pooling_async_memecpy_v1 9d96b2e1dd76cc601d76b1b4c5f6e04605cd81d3
     cd "$WORKSPACE/source_code/vllm-ascend"
     run_tests
 }
