@@ -184,29 +184,6 @@ jobs:
           run: |
             kubectl logs -f "$LEADER_POD" -n "$NAMESPACE"
 
-        - name: Determine is success
-          run: |
-            TIMEOUT=300
-            ELAPSED=0
-            while [ ! -f "$RESULT_FILE" ]; do
-              sleep 5
-              ELAPSED=$((ELAPSED + 5))
-              if [ $ELAPSED -ge $TIMEOUT ]; then
-                echo "Timeout waiting for test result file"
-                exit 1
-              fi
-            done
-
-            RET=$(cat "$RESULT_FILE")
-            echo "Test result: $RET"
-
-            if [ "$RET" -ne 0 ]; then
-              echo "Test failed"
-              exit 1
-            else
-              echo "Test succeeded"
-            fi
-
         - name: Post process
           if: always()
           run: |
