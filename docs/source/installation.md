@@ -287,3 +287,181 @@ Prompt: 'The president of the United States is', Generated text: ' a very import
 Prompt: 'The capital of France is', Generated text: ' Paris. The oldest part of the city is Saint-Germain-des-Pr'
 Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt that the evolution of AI will have a huge'
 ```
+
+## Multi-node Deployment
+### Verify Multi-Node Communication Environment
+
+#### Physical Layer Requirements:
+
+- The physical machines must be located on the same WLAN, with network connectivity.
+- All NPUs are connected with optical modules, and the connection status must be normal.
+
+#### Verification Process:
+
+Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
+
+:::::{tab-set}
+::::{tab-item} A2 series
+
+```bash
+ # Check the remote switch ports
+ for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+ # Get the link status of the Ethernet ports (UP or DOWN)
+ for i in {0..7}; do hccn_tool -i $i -link -g ; done
+ # Check the network health status
+ for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
+ # View the network detected IP configuration
+ for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
+ # View gateway configuration
+ for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
+ # View NPU network configuration
+ cat /etc/hccn.conf
+```
+
+::::
+::::{tab-item} A3 series
+
+```bash
+ # Check the remote switch ports
+ for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+ # Get the link status of the Ethernet ports (UP or DOWN)
+ for i in {0..15}; do hccn_tool -i $i -link -g ; done
+ # Check the network health status
+ for i in {0..15}; do hccn_tool -i $i -net_health -g ; done
+ # View the network detected IP configuration
+ for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
+ # View gateway configuration
+ for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
+ # View NPU network configuration
+ cat /etc/hccn.conf
+```
+
+::::
+:::::
+
+#### NPU Interconnect Verification:
+##### 1. Get NPU IP Addresses
+:::::{tab-set}
+::::{tab-item} A2 series
+
+```bash
+for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+```
+
+::::
+::::{tab-item} A3 series
+
+```bash
+for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+```
+
+::::
+:::::
+
+##### 2. Cross-Node PING Test
+
+```bash
+# Execute on the target node (replace with actual IP)
+hccn_tool -i 0 -ping -g address x.x.x.x
+```
+
+### Run Container In Each Node
+
+Using vLLM-ascend official container is more efficient to run multi-node environment.
+
+Run the following command to start the container in each node (You should download the weight to /root/.cache in advance):
+
+:::::{tab-set}
+::::{tab-item} A2 series
+
+```{code-block} bash
+   :substitutions:
+# Update the vllm-ascend image
+# openEuler:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
+# Ubuntu:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+
+# Run the container using the defined variables
+# Note if you are running bridge network with docker, Please expose available ports
+# for multiple nodes communication in advance
+docker run --rm \
+--name vllm-ascend \
+--net=host \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci4 \
+--device /dev/davinci5 \
+--device /dev/davinci6 \
+--device /dev/davinci7 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-it $IMAGE bash
+```
+
+::::
+::::{tab-item} A3 series
+
+```{code-block} bash
+   :substitutions:
+# Update the vllm-ascend image
+# openEuler:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3-openeuler
+# Ubuntu:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+
+# Run the container using the defined variables
+# Note if you are running bridge network with docker, Please expose available ports
+# for multiple nodes communication in advance
+docker run --rm \
+--name vllm-ascend \
+--net=host \
+--shm-size=1g \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci2 \
+--device /dev/davinci3 \
+--device /dev/davinci4 \
+--device /dev/davinci5 \
+--device /dev/davinci6 \
+--device /dev/davinci7 \
+--device /dev/davinci8 \
+--device /dev/davinci9 \
+--device /dev/davinci10 \
+--device /dev/davinci11 \
+--device /dev/davinci12 \
+--device /dev/davinci13 \
+--device /dev/davinci14 \
+--device /dev/davinci15 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-it $IMAGE bash
+```
+
+::::
+:::::
+
+### Verify installation
+
+TODO
