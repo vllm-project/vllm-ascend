@@ -87,6 +87,5 @@ def test_internvl_basic(model: str):
         outputs_0_lst=eager_outputs,
         outputs_1_lst=graph_outputs,
         name_0="eager mode",
-        name_1="graph mode",
-        similarity_threshold=0.50,
+        name_1="graph mode"
     )
