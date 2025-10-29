@@ -83,9 +83,7 @@ def test_internvl_basic(model: str):
     eager_outputs = outputs["eager"]
     graph_outputs = outputs["graph"]
 
-    check_outputs_equal(
-        outputs_0_lst=eager_outputs,
-        outputs_1_lst=graph_outputs,
-        name_0="eager mode",
-        name_1="graph mode"
-    )
+    check_outputs_equal(outputs_0_lst=eager_outputs,
+                        outputs_1_lst=graph_outputs,
+                        name_0="eager mode",
+                        name_1="graph mode")
