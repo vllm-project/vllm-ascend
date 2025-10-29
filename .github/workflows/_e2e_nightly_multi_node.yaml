@@ -65,6 +65,7 @@ concurrency:
 
 jobs:
   e2e:
+    name: ${{ inputs.config_file_path }}
     # This is a runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     container:
@@ -102,7 +103,8 @@ jobs:
         - name: Decode kubeconfig from secrets
           run: |
             # Decode and save kubeconfig
-            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
+            #echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
+            cp /root/.cache/.kube/kubeconfig.yaml $KUBECONFIG
 
         - name: Checkout code
           uses: actions/checkout@v4
@@ -115,6 +117,11 @@ jobs:
         - name: Clear result ret
           run: |
             rm -f $RESULT_FILE
+
+        - name: Clear resources
+          run: |
+            # pre clear the crd resources created by lws
+            kubectl delete leaderworkerset vllm -n "$NAMESPACE" --ignore-not-found
 
         - name: Launch cluster
           run: |

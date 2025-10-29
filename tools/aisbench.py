@@ -297,6 +297,8 @@ def maybe_download_from_modelscope(
     """
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
+    if not repo_type:
+        repo_type = "model"
     with get_lock(model, download_dir):
         if not os.path.exists(model):
             model_path = snapshot_download(
