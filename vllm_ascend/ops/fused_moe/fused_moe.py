@@ -37,8 +37,6 @@ from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
-from vllm_ascend.quantization.w8a8_dynamic import \
-    AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
                                shared_expert_dp_enabled,
@@ -291,10 +289,7 @@ class AscendFusedMoE(FusedMoE):
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
-        setup_moe_comm_method(self.moe_config)
-
-        self.is_w8a8_dynamic = hasattr(self.quant_method, "quant_method") and \
-                isinstance(self.quant_method.quant_method, AscendW8A8DynamicFusedMoEMethod)
+        setup_moe_comm_method(self.moe_config, self.quant_method)
 
     def update_expert_map(self, new_expert_map):
         self.expert_map = new_expert_map
@@ -335,7 +330,6 @@ class AscendFusedMoE(FusedMoE):
         enable_force_load_balance = forward_context.in_profile_run
 
         forward_context = get_forward_context()
-        forward_context.moe_comm_method.prepare_finalize.is_w8a8_dynamic = self.is_w8a8_dynamic
         hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,

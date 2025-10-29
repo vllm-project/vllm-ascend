@@ -43,9 +43,9 @@ class PrepareAndFinalize(ABC):
                                      sizes, ranks, and communication settings.
     """
 
-    def __init__(self, moe_config: FusedMoEConfig):
+    def __init__(self, moe_config: FusedMoEConfig, is_w8a8_dynamic):
         self.moe_config = moe_config
-        self.is_w8a8_dynamic = None
+        self.is_w8a8_dynamic = is_w8a8_dynamic
 
     @abstractmethod
     def prepare(
@@ -105,8 +105,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
     Will be used when num_tokens exceed mc2's limitation (512 tokens/rank).
     """
 
-    def __init__(self, moe_config: FusedMoEConfig):
-        super().__init__(moe_config)
+    def __init__(self, moe_config: FusedMoEConfig, is_w8a8_dynamic):
+        super().__init__(moe_config, is_w8a8_dynamic)
         self._restore_tp_across_dp()
 
     def _restore_tp_across_dp(self):
@@ -197,8 +197,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     Relies on `mc2_mask` and `padded_num_tokens` from forward_context for alignment.
     """
 
-    def __init__(self, moe_config: FusedMoEConfig):
-        super().__init__(moe_config)
+    def __init__(self, moe_config: FusedMoEConfig, is_w8a8_dynamic):
+        super().__init__(moe_config, is_w8a8_dynamic)
         self._restore_tp_across_dp()
 
     def _restore_tp_across_dp(self):
@@ -289,9 +289,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
 
     TP AG → Attn → TP RS → EP AG → MoE → EP RS
     """
-
-    def __init__(self, moe_config: FusedMoEConfig):
-        super().__init__(moe_config)
 
     def prepare(
         self,
