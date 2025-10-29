@@ -252,7 +252,7 @@ def _deepseek_v3_lite_torchair_test_fixure(
     additional_config.update(**kwargs)
 
     with VllmRunner(
-            "deepseek-ai/DeepSeek-V3-Lite",
+            "tclf90/DeepSeek-V3.2-Exp-AWQ-Lite",
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
