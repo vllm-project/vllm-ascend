@@ -1,3 +1,3 @@
-# Adding a New Multi-Modal Model
+# Adding a New Multimodal Model
 
-**_Comming soon ..._**
+**_Coming soon ..._**
