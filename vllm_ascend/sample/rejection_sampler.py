@@ -223,7 +223,7 @@ def rejection_sample(
         is_greedy,
         max_spec_len,
         vocab_size,
-        using_block_verify=False,
+        using_block_verify,
         IS_NGRAM=draft_probs is None,
         # num_warps=1,
     )
@@ -410,7 +410,7 @@ def rejection_random_sample_pytorch(
     is_greedy,  # [batch_size]
     max_spec_len,
     vocab_size,
-    using_block_verify,  # bool
+    using_block_verify=False,  # bool
     IS_NGRAM=False,
 ):
     batch_size = output_token_ids.shape[0]
