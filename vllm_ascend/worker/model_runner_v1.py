@@ -3110,7 +3110,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter.dummy_run(
                     num_tokens=num_tokens,
                     with_prefill=with_prefill,
-                    skip_attn=True,
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
