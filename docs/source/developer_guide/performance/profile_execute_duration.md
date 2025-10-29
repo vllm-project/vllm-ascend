@@ -9,7 +9,7 @@ The execution duration of each stage (including pre/post-processing, model forwa
 * Use the non-blocking API `ProfileExecuteDuration().capture_async` to set observation points asynchronously when you need to observe the execution duration.
 * Use the blocking API `ProfileExecuteDuration().pop_captured_sync` at an appropriate time to get and print the execution durations of all observed stages.
 
-**We have instrumented the key inference stages (including pre-processing, model forward pass, etc.) for execute duration profiling. Execute the script as follows:**
+**We have instrumented the key inference stages (including pre-processing, model forward pass, etc.) for execution duration profiling. Execute the script as follows:**
 
 ```
 VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE=1 python3 vllm-ascend/examples/offline_inference_npu.py

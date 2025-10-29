@@ -2,9 +2,9 @@
 
 ## Getting Start
 
-vLLM-Ascend now supports prefill-decode (PD) disaggregation with EP (Expert Parallel) options. This guide take one-by-one steps to verify these features with constrained resources.
+vLLM-Ascend now supports prefill-decode (PD) disaggregation with Expert Parallel (EP) options. This guide takes one-by-one steps to verify these features with constrained resources.
 
-Take the Qwen3-30B-A3B model as an example, use vllm-ascend v0.10.1rc1 (with vLLM v0.10.1.1) on 3 Atlas 800T A2 servers to deploy the "1P2D" architecture. Assume the ip of the prefiller server is 192.0.0.1, and the decoder servers are 192.0.0.2 (decoder 1) and 192.0.0.3 (decoder 2). On each server, use 2 NPUs to deploy one service instance.
+Using the Qwen3-30B-A3B model as an example, use vllm-ascend v0.10.1rc1 (with vLLM v0.10.1.1) on 3 Atlas 800T A2 servers to deploy the "1P2D" architecture. Assume the IP address of the prefiller server is 192.0.0.1, and the decoder servers are 192.0.0.2 (decoder 1) and 192.0.0.3 (decoder 2). On each server, use 2 NPUs to deploy one service instance.
 
 ## Verify Multi-Node Communication Environment
 
@@ -49,7 +49,7 @@ for i in {0..7}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 
 ## Generate Ranktable
 
-The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to nodes. For more details please refer to the [vllm-ascend examples](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/README.md). Execute the following commands for reference.
+The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to nodes. For more details, please refer to the [vllm-ascend examples](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/README.md). Execute the following commands for reference.
 
 ```shell
 cd vllm-ascend/examples/disaggregate_prefill_v1/
@@ -58,7 +58,7 @@ bash gen_ranktable.sh --ips <prefiller_node1_local_ip> <prefiller_node2_local_ip
   [--local-device-ids <id_1>,<id_2>,<id_3>...]
 ```
 
-Assume that we use device 0,1 on the prefiller server node and device 6,7 on both of the decoder server nodes. Take the following commands as an example. (`--local-device-ids` is necessary if you specify certain NPU devices on the local server.)
+Assume that we use devices 0 and 1 on the prefiller server node and devices 6 and 7 on both of the decoder server nodes. The following commands are for reference.  (`--local-device-ids` is necessary if you specify certain NPU devices on the local server.)
 
 ```shell
 # On the prefiller node
@@ -77,20 +77,20 @@ bash gen_ranktable.sh --ips 192.0.0.1 192.0.0.2 192.0.0.3 \
   --npus-per-node  2 --network-card-name eth0 --prefill-device-cnt 2 --decode-device-cnt 4 --local-device-ids 6,7
 ```
 
-Rank table will generated at /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
+The rank table will be generated at /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
 
-|Parameter  | meaning |
+|Parameter  | Meaning |
 | --- | --- |
-| --ips | Each node's local ip (prefiller nodes should be front of decoder nodes) |
-| --npus-per-node | Each node's npu clips  |
+| --ips | Each node's local IP address (prefiller nodes should be in front of decoder nodes) |
+| --npus-per-node | Each node's NPU clips |
 | --network-card-name | The physical machines' NIC |
-|--prefill-device-cnt  | Npu clips used for prefill |
-|--decode-device-cnt |Npu clips used for decode |
+|--prefill-device-cnt  | NPU clips used for prefill |
+|--decode-device-cnt |NPU clips used for decode |
 |--local-device-ids |Optional. No need if using all devices on the local node. |
 
-## Prefiller / Decoder Deployment
+## Prefiller/Decoder Deployment
 
-We can run the following scripts to launch a server on the prefiller/decoder node respectively.
+We can run the following scripts to launch a server on the prefiller/decoder node, respectively.
 
 :::::{tab-set}
 
@@ -214,9 +214,9 @@ vllm serve /model/Qwen3-30B-A3B  \
 
 :::::
 
-## Example proxy for Deployment
+## Example Proxy for Deployment
 
-Run a proxy server on the same node with prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 ```shell
 python load_balance_proxy_server_example.py \
