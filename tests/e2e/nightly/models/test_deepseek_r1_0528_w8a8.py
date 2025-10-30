@@ -32,6 +32,7 @@ MODES = [
     "torchair",
     "single",
     "aclgraph",
+    "aclgraph_mlapo",
     "no_chunkprefill",
 ]
 
@@ -107,6 +108,9 @@ async def test_models(model: str, mode: str) -> None:
         server_args.append("--enforce-eager")
         additional_config["torchair_graph_config"] = {"enabled": False}
     if mode == "aclgraph":
+        additional_config["torchair_graph_config"] = {"enabled": False}
+    if mode == "aclgraph_mlapo":
+        env_dict["VLLM_ASCEND_ENABLE_MLAPO"] = "1"
         additional_config["torchair_graph_config"] = {"enabled": False}
     if mode == "no_chunkprefill":
         additional_config["ascend_scheduler_config"] = {"enabled": True}
