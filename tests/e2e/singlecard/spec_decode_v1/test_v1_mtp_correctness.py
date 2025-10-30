@@ -130,6 +130,7 @@ def test_mtp2_correctness_full_graph(
 ):
     mtp_correctness(sampling_config, model_name, 2, CUDAGraphMode.FULL)
 
+
 def test_mtp1_correctness_eager_with_pad(
     sampling_config: SamplingParams,
     model_name: str,
