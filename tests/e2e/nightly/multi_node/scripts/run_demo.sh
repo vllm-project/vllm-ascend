@@ -165,8 +165,10 @@ run_tests_with_log() {
     set +e
     kill_npu_processes
     BASENAME=$(basename "$CONFIG_YAML_PATH" .yaml)
+    # each worker should have log file
     LOG_FILE="${RESULT_FILE_PATH}/${BASENAME}_worker_${LWS_WORKER_INDEX}.log"
     mkdir -p ${RESULT_FILE_PATH}
+    pip install pytest
     pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee $LOG_FILE
     ret=${PIPESTATUS[0]}
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
@@ -174,23 +176,17 @@ run_tests_with_log() {
             print_success "All tests passed!"
         else
             print_error "Some tests failed!"
+            mv LOG_FILE error_${LOG_FILE}
         fi
     fi
     set -e
+    return $ret
 }
 
 main() {
     check_npu_info
     check_and_config
     checkout_src
-    install_sys_dependencies
-    install_vllm
-    install_ais_bench
-    # to speed up mooncake build process, install Go here
-    install_go
-    cd "$WORKSPACE/source_code"
-    . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
-    pooling_async_memecpy_v1 9d96b2e1dd76cc601d76b1b4c5f6e04605cd81d3
     cd "$WORKSPACE/source_code/vllm-ascend"
     run_tests_with_log
 }

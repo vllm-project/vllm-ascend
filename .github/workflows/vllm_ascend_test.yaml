@@ -18,13 +18,14 @@
 name: 'ascend test'
 
 on:
-  push:
-    branches:
-      - 'main'
-  pull_request:
-    branches:
-      - 'main'
-      - '*-dev'
+  # push:
+  #   branches:
+  #     - 'main'
+  # pull_request:
+  #   branches:
+  #     - 'main'
+  #     - '*-dev'
+  workflow_call: 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.

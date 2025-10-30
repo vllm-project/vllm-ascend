@@ -84,7 +84,7 @@ jobs:
            pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
            pip install jinja2-cli
 
-           apt-get update -y && apt-get install -y git curl
+           #apt-get update -y && apt-get install -y git curl
 
         - name: Install kubectl
           run: |
@@ -103,7 +103,8 @@ jobs:
         - name: Decode kubeconfig from secrets
           run: |
             # Decode and save kubeconfig
-            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
+            #echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
+            cp /root/.cache/.kube/kubeconfig.yaml $KUBECONFIG
 
         - name: Checkout code
           uses: actions/checkout@v4
@@ -111,13 +112,13 @@ jobs:
         - name: Prepare scripts
           run: |
             # prepare for lws entrypoint scripts
-            install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
+            install -D tests/e2e/nightly/multi_node/scripts/run_demo.sh /root/.cache/tests/run.sh
 
         - name: Clear resources
           run: |
             # pre clear the crd resources created by lws
             kubectl delete leaderworkerset vllm -n "$NAMESPACE" --ignore-not-found
-
+            rm -fr $RESULT_FILE/*
         - name: Launch cluster
           run: |
             set -e
@@ -155,8 +156,6 @@ jobs:
               -D vllm_ascend_ref="$vllm_ascend_ref" \
               -D result_file_path="$result_file_path" \
               -D npu_per_node="$npu_per_node" \
-              -D controller_name="$HOSTNAME" \
-              -D kb_secret=${{ secrets.KUBECONFIG_B64 }} \
               --outfile lws.yaml
 
             kubectl apply -f ./lws.yaml

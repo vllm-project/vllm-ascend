@@ -88,7 +88,7 @@ jobs:
   multi-node-tests:
     name: multi-node
     #needs: single-node-tests
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    #if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -112,8 +112,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
-      #runner: linux-aarch64-a3-0
-      runner: nv-linux-aarch64-a3-0
+      runner: linux-aarch64-a3-0
       image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
       replicas: 1
       size: ${{ matrix.test_config.size }}
