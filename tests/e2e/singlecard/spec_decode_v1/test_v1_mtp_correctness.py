@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import os
-from unittest.mock import patch
-
 import pytest
 from vllm import SamplingParams
 from vllm.config import CompilationConfig, CUDAGraphMode
