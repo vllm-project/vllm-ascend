@@ -60,8 +60,6 @@ _IS_MOE_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 
-_MULTI_MODAL_MODEL_ARCH_KEY_WORDS = ["VL", "Omni"]
-
 
 def is_310p():
     global _IS_310P
@@ -718,13 +716,18 @@ def is_moe_model(vllm_config: VllmConfig):
     if _IS_MOE_MODEL is None:
         model_configs = vllm_config.model_config.hf_config.to_dict()
 
-        global _MULTI_MODAL_MODEL_ARCH_KEY_WORDS
-        if (any(mm_arch in model_configs["architectures"][0]
-                for mm_arch in _MULTI_MODAL_MODEL_ARCH_KEY_WORDS)
+        if ("VL" in model_configs["architectures"][0]
                 and "text_config" in model_configs):
-            # Check multi-modal models
+            # Check VL multi-modal models
             _IS_MOE_MODEL = any("experts" in key.lower()
                                 for key in model_configs["text_config"])
+        elif ("Omni" in model_configs["architectures"][0]
+              and "talker_config" in model_configs
+              and "text_config" in model_configs["talker_config"]):
+            # Check Omni multi-modal models
+            _IS_MOE_MODEL = any(
+                "experts" in key.lower()
+                for key in model_configs["talker_config"]["text_config"])
         else:
             # Check text-only models
             _IS_MOE_MODEL = any("experts" in key.lower()
