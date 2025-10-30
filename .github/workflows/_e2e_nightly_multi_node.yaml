@@ -75,7 +75,7 @@ jobs:
         KUBECTL: /root/.cache/.kube/kubectl
         NAMESPACE: vllm-project
         LEADER_POD: vllm-0
-        RESULT_FILE: /root/.cache/tests/ret/test_result.txt
+        RESULT_FILE: /root/.cache/tests/ret_${{ inputs.soc_version }}
     steps:
         - name: Install system denpendencies
           run: |
