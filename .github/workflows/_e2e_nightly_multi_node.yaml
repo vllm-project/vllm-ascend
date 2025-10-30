@@ -120,6 +120,7 @@ jobs:
             kubectl delete leaderworkerset vllm -n "$NAMESPACE" --ignore-not-found
             rm -fr $RESULT_FILE/*
         - name: Launch cluster
+          id: launcher
           run: |
             set -e
 
@@ -131,6 +132,8 @@ jobs:
             vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
             vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
             result_file_path="$RESULT_FILE"
+            fail_tag=FAIL_TAG_"${{ inputs.config_file_path }}"
+            echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
             required_params=("size" "replicas" "image" "config_file_path")
             for param in "${required_params[@]}"; do
@@ -156,6 +159,7 @@ jobs:
               -D vllm_ascend_ref="$vllm_ascend_ref" \
               -D result_file_path="$result_file_path" \
               -D npu_per_node="$npu_per_node" \
+              -D fail_tag="$fail_tag" \
               --outfile lws.yaml
 
             kubectl apply -f ./lws.yaml
@@ -179,6 +183,7 @@ jobs:
 
         - name: Stream logs
           run: |
+            echo $FAIL_TAG
             kubectl logs -f "$LEADER_POD" -n "$NAMESPACE"
 
         - name: Determine is success

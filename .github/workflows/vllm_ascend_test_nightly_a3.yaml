@@ -95,19 +95,19 @@ jobs:
       matrix:
         test_config:
           - name: multi-node-deepseek-pd
-            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml
+            config_file_path: DeepSeek-V3.yaml
             size: 2
           # - name: multi-node-qwen3-dp
-          #   config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A3B.yaml
+          #   config_file_path: Qwen3-235B-A3B.yaml
           #   size: 2
           # - name: multi-node-dpsk-4node-pd
-          #   config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
+          #   config_file_path: DeepSeek-R1-W8A8.yaml
           #   size: 4
           # - name: multi-node-qwenw8a8-2node
-          #   config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-W8A8.yaml
+          #   config_file_path: Qwen3-235B-W8A8.yaml
           #   size: 2
           # - name: multi-node-glm-2node
-          #   config_file_path: tests/e2e/nightly/multi_node/config/models/GLM-4_5.yaml
+          #   config_file_path: GLM-4_5.yaml
           #   size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:

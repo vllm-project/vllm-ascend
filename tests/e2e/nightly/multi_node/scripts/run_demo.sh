@@ -31,6 +31,11 @@ print_error() {
     exit 1
 }
 
+print_failure() {
+    echo -e "${RED}${FAIL_TAG} ✗ ERROR: $1${NC}"
+    exit 1
+}
+
 # Function to check command success
 check_success() {
     if [ $? -ne 0 ]; then
@@ -171,16 +176,15 @@ run_tests_with_log() {
     pip install pytest
     pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee $LOG_FILE
     ret=${PIPESTATUS[0]}
+    set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            print_error "Some tests failed!"
+            print_failure "Some tests failed!"
             mv LOG_FILE error_${LOG_FILE}
         fi
     fi
-    set -e
-    exit $ret
 }
 
 main() {

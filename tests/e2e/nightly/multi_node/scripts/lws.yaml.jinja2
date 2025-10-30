@@ -30,10 +30,8 @@ spec:
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
               - name: RESULT_FILE_PATH
                 value: {{ result_file_path | default("/root/.cache/tests/ret") }}
-              - name: CONTROLLER_NAME
-                value: {{ controller_name | default("placeholder") }}
-              - name: SECRET
-                value: {{ kb_secret | default("placeholder") }}
+              - name: FAIL_TAG
+                value: {{ fail_tag | default("FAIL_TAG") }}
             command:
               - sh
               - -c
@@ -93,6 +91,8 @@ spec:
                 value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
               - name: RESULT_FILE_PATH
                 value: {{ result_file_path | default("/root/.cache/tests/ret/test_result.txt") }}
+              - name: FAIL_TAG
+                value: {{ fail_tag | default("FAIL_TAG") }}
             command:
               - sh
               - -c

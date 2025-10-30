@@ -17,6 +17,7 @@ setup_logger()
 logger = logging.getLogger(__name__)
 DISAGGREGATED_PREFILL_PROXY_SCRIPT = "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py"
 DISAGGEGATED_PREFILL_PORT = 5333
+CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/config/models/"
 
 
 @dataclass
@@ -187,9 +188,8 @@ class MultiNodeConfig:
     @classmethod
     def from_yaml(cls, yaml_path: Optional[str] = None):
         if not yaml_path:
-            yaml_path = os.getenv(
-                "CONFIG_YAML_PATH",
-                "tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml")
+            yaml_path = os.getenv("CONFIG_YAML_PATH", "DeepSeek-V3.yaml")
+        yaml_path = os.path.join(CONFIG_BASE_PATH, yaml_path)
         with open(yaml_path, 'r') as file:
             config_data = yaml.safe_load(file)
         test_name = config_data.get("test_name", "default_test")
