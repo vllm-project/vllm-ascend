@@ -130,7 +130,8 @@ class MoECommMethod(ABC):
             dynamic_scale_for_share=dynamic_scale_for_share,
             mc2_mask=mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            with_quant=use_int8_w8a8 or use_int4_w4a8)
+            with_quant=use_int8_w8a8 or use_int4_w4a8,
+            dynamic_eplb=dynamic_eplb)
 
         permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, context_metadata = \
             results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("context_metadata")
