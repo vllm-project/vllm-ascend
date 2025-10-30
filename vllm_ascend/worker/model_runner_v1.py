@@ -3355,26 +3355,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     else:
                         # k_cache: nope_cache    v_cache: rope_cache
                         mla_num_blocks, mla_block_size, num_kv_heads, _ = kv_cache_shape
-                        if not self.use_sparse:
-                            k_shape = [
-                                mla_num_blocks, mla_block_size, num_kv_heads,
-                                self.model_config.hf_text_config.kv_lora_rank
-                            ]
-                            v_shape = [
-                                mla_num_blocks, mla_block_size, num_kv_heads,
-                                self.model_config.hf_text_config.
-                                qk_rope_head_dim
-                            ]
-                        else:
-                            k_shape = [
-                                mla_num_blocks, mla_block_size, num_kv_heads,
-                                self.model_config.hf_text_config.kv_lora_rank
-                            ]
-                            v_shape = [
-                                mla_num_blocks, mla_block_size, num_kv_heads,
-                                self.model_config.hf_text_config.
-                                qk_rope_head_dim
-                            ]
+                        k_shape = [
+                            mla_num_blocks, mla_block_size, num_kv_heads,
+                            self.model_config.hf_text_config.kv_lora_rank
+                        ]
+                        v_shape = [
+                            mla_num_blocks, mla_block_size, num_kv_heads,
+                            self.model_config.hf_text_config.qk_rope_head_dim
+                        ]
                     k_cache = raw_k_tensor.view(dtype).view(k_shape)
                     k_cache = self._convert_torch_format(k_cache)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
