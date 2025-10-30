@@ -257,7 +257,6 @@ def _deepseek_v3_lite_torchair_test_fixure(
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
             additional_config=additional_config,
-            trust_remote_code=True,
     ) as vllm_model:
         vllm_output = vllm_model.generate_greedy(example_prompts, 5)
 
