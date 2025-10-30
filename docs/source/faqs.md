@@ -244,6 +244,6 @@ This is often due to system compatibility issues. You can resolve this by using 
 **3. On the target (Kylin) machine**, load the image from the archive:
 
    ```bash
-   docker load -i vllm_ascend_image.tar
+   docker load -i vllm_ascend_<tag>.tar
    ```
 After this, the image will be available locally, and you can proceed with the standard `docker run` command
