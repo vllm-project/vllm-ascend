@@ -28,8 +28,8 @@ from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from multiprocessing import Manager
-from typing import (TYPE_CHECKING, Any, Dict, List, Tuple, NamedTuple,
-                    Optional, Union, cast)
+from typing import (TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional,
+                    Tuple, Union, cast)
 
 import numpy as np
 import numpy.typing as npt
@@ -4316,7 +4316,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         dcp_idx] += consumed_tokens
                     request_start_rank_dict[req_id] = (start_rank,
                                                        tokens_blank)
-                    return cast(list[list[list[int] | None] | None],
+                    return cast(List[Optional[List[Optional[List[int]]]]],
                                 num_computed_tokens_of_pcp_dcp_for_chunk)
 
             virtual_size = total_ranks * cp_kv_cache_interleave_size
@@ -4353,7 +4353,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if request_start_rank_dict is not None:
                 request_start_rank_dict[req_id] = (start_rank, tokens_blank)
 
-        return cast(list[list[list[int] | None] | None],
+        return cast(List[Optional[List[Optional[List[int]]]]],
                     num_computed_tokens_of_pcp_dcp_for_chunk)
 
     def _get_chunked_req_mask_and_max_chunk(
