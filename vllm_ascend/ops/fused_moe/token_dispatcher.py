@@ -157,21 +157,20 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
 
-    def token_dispatch(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        expert_map: Optional[torch.Tensor] = None,
-        log2phy: Optional[torch.Tensor] = None,
-        global_redundant_expert_num: int = 0,
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
-        mc2_mask: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        with_quant: bool = False,
-        dynamic_eplb: bool = False):
+    def token_dispatch(self,
+                       hidden_states: torch.Tensor,
+                       topk_weights: torch.Tensor,
+                       topk_ids: torch.Tensor,
+                       expert_map: Optional[torch.Tensor] = None,
+                       log2phy: Optional[torch.Tensor] = None,
+                       global_redundant_expert_num: int = 0,
+                       shared_experts: Optional[Any] = None,
+                       quantized_x_for_share: Optional[Any] = None,
+                       dynamic_scale_for_share: Optional[Any] = None,
+                       mc2_mask: Optional[torch.Tensor] = None,
+                       apply_router_weight_on_input: bool = False,
+                       with_quant: bool = False,
+                       dynamic_eplb: bool = False):
         self.with_quant = with_quant
 
         # Apply log2phy if needed
@@ -506,21 +505,20 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher):
                     self.local_expert_indices[i + 1] -
                     1), "local_expert_indices must be continuous"
 
-    def token_dispatch(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        expert_map: Optional[torch.Tensor] = None,
-        log2phy: Optional[torch.Tensor] = None,
-        global_redundant_expert_num: int = 0,
-        shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
-        dynamic_scale_for_share: Optional[Any] = None,
-        mc2_mask: Optional[torch.Tensor] = None,
-        apply_router_weight_on_input: bool = False,
-        with_quant: bool = False,
-        dynamic_eplb: bool = False):
+    def token_dispatch(self,
+                       hidden_states: torch.Tensor,
+                       topk_weights: torch.Tensor,
+                       topk_ids: torch.Tensor,
+                       expert_map: Optional[torch.Tensor] = None,
+                       log2phy: Optional[torch.Tensor] = None,
+                       global_redundant_expert_num: int = 0,
+                       shared_experts: Optional[Any] = None,
+                       quantized_x_for_share: Optional[Any] = None,
+                       dynamic_scale_for_share: Optional[Any] = None,
+                       mc2_mask: Optional[torch.Tensor] = None,
+                       apply_router_weight_on_input: bool = False,
+                       with_quant: bool = False,
+                       dynamic_eplb: bool = False):
         self.with_quant = with_quant
         self.hidden_shape = hidden_states.shape
 
