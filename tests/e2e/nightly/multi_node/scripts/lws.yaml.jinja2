@@ -39,6 +39,7 @@ spec:
               - -c
               - |
                 bash /root/.cache/tests/run.sh
+                tail -f /dev/null
             resources:
               limits:
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
@@ -97,6 +98,7 @@ spec:
               - -c
               - |
                 bash /root/.cache/tests/run.sh
+                tail -f /dev/null
             resources:
               limits:
                 huawei.com/ascend-1980: {{ npu_per_node | default("16") }}

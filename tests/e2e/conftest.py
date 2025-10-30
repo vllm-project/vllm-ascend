@@ -163,10 +163,10 @@ class RemoteOpenAIServer:
         self.proxy_port = proxy_port
 
         self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 7200
+        max_wait_seconds = max_wait_seconds or 1800
         if self.disaggregated_prefill:
             assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
-            self._wait_for_server_pd(proxy_port=proxy_port)
+            self._wait_for_server_pd(proxy_port=proxy_port, max_wait_seconds)
         else:
             self._wait_for_server(url=self.url_for("health"),
                                   timeout=max_wait_seconds)
@@ -186,7 +186,7 @@ class RemoteOpenAIServer:
         """Subclasses override this method to customize process polling"""
         return self.proc.poll()
 
-    def hang_until_terminated(self) -> None:
+    def hang_until_terminated(self, url) -> None:
         """
         Wait until the server process terminates.
         This is for headless mode, where the api server
@@ -196,7 +196,7 @@ class RemoteOpenAIServer:
         try:
             while True:
                 try:
-                    resp = client.get(self.url_for("health"), timeout=5)
+                    resp = client.get(url, timeout=5)
                     if resp.status_code != 200:
                         break
                     time.sleep(5)
@@ -209,7 +209,6 @@ class RemoteOpenAIServer:
     def _wait_for_server_pd(self, proxy_port: int, timeout: float):
         # Wait for all api_server nodes ready
         assert self.nodes_info is not None, "cluster info must be provided"
-        timeout = timeout or 1800
         for node_info in self.nodes_info:
             if node_info.headless:
                 continue
