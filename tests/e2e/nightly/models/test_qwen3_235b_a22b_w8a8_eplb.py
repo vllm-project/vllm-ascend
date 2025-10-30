@@ -82,8 +82,7 @@ async def test_models(model: str, tp_size: int) -> None:
         "--quantization", "ascend", "--gpu-memory-utilization", "0.9",
         "--additional-config",
         '{"enable_weight_nz_layout":true, "dynamic_eplb": true, '
-        '"num_iterations_eplb_update": 1000, "num_wait_worker_iterations": 200, '
-        '"init_redundancy_expert": 16}'
+        '"num_iterations_eplb_update": 1000, "num_wait_worker_iterations": 200}'
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
