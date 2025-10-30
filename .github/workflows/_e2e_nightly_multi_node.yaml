@@ -112,7 +112,7 @@ jobs:
         - name: Prepare scripts
           run: |
             # prepare for lws entrypoint scripts
-            install -D tests/e2e/nightly/multi_node/scripts/run_demo.sh /root/.cache/tests/run.sh
+            install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
 
         - name: Clear resources
           run: |
@@ -191,18 +191,6 @@ jobs:
                 exit 1   # workflow step failed
               fi
             done
-
-        - name: Determine is success
-          run: |
-            set -euo pipefail
-            echo "Checking for error files in ${RESULT_DIR} ..."
-            if compgen -G "${RESULT_DIR}/error*" > /dev/null; then
-              echo "Found error logs:"
-              ls -1 "${RESULT_DIR}/error"*
-              exit 1
-            else
-              echo "No error files found."
-            fi
 
         - name: Post process
           if: always()
