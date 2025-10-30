@@ -10,9 +10,9 @@ Only machines with AArch64 are supported currently. x86 will be supported soon. 
 
 ## Supported Features
 
-Refer to [](../user_guide/support_matrix/supported_models.md) to get the model's detail.
+Refer to [supported models](../user_guide/support_matrix/supported_models.md) to get the model's detail.
 
-Refer to [](../user_guide/support_matrix/supported_features.md) to get the supported features.
+Refer to [supported features](../user_guide/support_matrix/supported_features.md) to get the supported features.
 
 ## Environment
 
@@ -21,63 +21,23 @@ Refer to [](../user_guide/support_matrix/supported_features.md) to get the suppo
 - `DeepSeek-V3.2-Exp`: require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8). [Model weight link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
 - `DeepSeek-V3.2-Exp-w8a8`: require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8). [Model weight link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
 
+### Verify Multi-node Communication(Optional)
+
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../installation.md#verify-multi-node-communication).
+
 ### Installation
 
-Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp`(for Atlas 800 A3). These images include CANN 8.2RC1 + [SparseFlashAttention/LightningIndexer](https://gitcode.com/cann/cann-recipes-infer/tree/master/ops/ascendc) + [MLAPO](https://github.com/vllm-project/vllm-ascend/pull/3226). You can also build your own image by referring to [link](https://github.com/vllm-project/vllm-ascend/issues/3278) and [](../installation.md).
+Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp`(for Atlas 800 A3). These images include CANN 8.2RC1 + [SparseFlashAttention/LightningIndexer](https://gitcode.com/cann/cann-recipes-infer/tree/master/ops/ascendc) + [MLAPO](https://github.com/vllm-project/vllm-ascend/pull/3226). You can also build your own image by referring to [link](https://github.com/vllm-project/vllm-ascend/issues/3278).
+
+Refer to [installation](../installation.md#set-up-using-docker) to set up environment using Docker.
+
+If you want to deploy multi-node environment, you need to set up envrionment on each node.
 
 ## Deployment
 
 ### Single-node Deployment
 
 Only the quantized model `DeepSeek-V3.2-Exp-w8a8` can be deployed on 1 Atlas 800 A3.
-
-Run the following command to start the container in each node (You should download the weight to /root/.cache in advance):
-
-```{code-block} bash
-   :substitutions:
-# Update the vllm-ascend image
-# openEuler:
-# export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-openeuler-deepseek-v3.2-exp
-# Ubuntu:
-# export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
-export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
-export NAME=vllm-ascend
-
-# Run the container using the defined variables
-# Note if you are running bridge network with docker, Please expose available ports
-# for multiple nodes communication in advance
-docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
-```
 
 Run the following script to execute online inference.
 
@@ -106,100 +66,6 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 
 - `DeepSeek-V3.2-Exp`: require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8).
 - `DeepSeek-V3.2-Exp-w8a8`: require 2 Atlas 800 A2 (64G × 8).
-
-Firstly, verify multi-node communication environment. [verify multi-node communication environment](https://vllm-ascend.readthedocs.io/en/latest/installation.html#verify-multi-node-communication-environment)
-
-Then run the following command to start the container in each node (You should download the weight to /root/.cache in advance):
-
-:::::{tab-set}
-::::{tab-item} A2 series
-
-```{code-block} bash
-   :substitutions:
-# Update the vllm-ascend image
-# export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp
-export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp
-export NAME=vllm-ascend
-
-# Run the container using the defined variables
-# Note if you are running bridge network with docker, Please expose available ports
-# for multiple nodes communication in advance
-docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
-```
-
-::::
-::::{tab-item} A3 series
-
-```{code-block} bash
-   :substitutions:
-# Update the vllm-ascend image
-# openEuler:
-# export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-openeuler-deepseek-v3.2-exp
-# Ubuntu:
-# export IMAGE=quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
-export IMAGE=quay.nju.edu.cn/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp
-export NAME=vllm-ascend
-
-# Run the container using the defined variables
-# Note if you are running bridge network with docker, Please expose available ports
-# for multiple nodes communication in advance
-docker run --rm \
---name $NAME \
---net=host \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci1 \
---device /dev/davinci2 \
---device /dev/davinci3 \
---device /dev/davinci4 \
---device /dev/davinci5 \
---device /dev/davinci6 \
---device /dev/davinci7 \
---device /dev/davinci8 \
---device /dev/davinci9 \
---device /dev/davinci10 \
---device /dev/davinci11 \
---device /dev/davinci12 \
---device /dev/davinci13 \
---device /dev/davinci14 \
---device /dev/davinci15 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--it $IMAGE bash
-```
-
-::::
-:::::
 
 :::::{tab-set}
 ::::{tab-item} DeepSeek-V3.2-Exp A3 series

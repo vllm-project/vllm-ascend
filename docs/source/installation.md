@@ -20,7 +20,7 @@ There are two installation methods:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
 - **Using docker**: use the `vllm-ascend` pre-built docker image directly.
 
-## Configure a new environment
+## Configure Ascend CANN environment
 
 Before installation, you need to make sure firmware/driver and CANN are installed correctly, refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
 
@@ -109,14 +109,7 @@ No more extra step if you are using `vllm-ascend` prebuilt Docker image.
 
 Once it is done, you can start to set up `vllm` and `vllm-ascend`.
 
-## Setup vllm and vllm-ascend
-
-:::::{tab-set}
-:sync-group: install
-
-::::{tab-item} Using pip
-:selected:
-:sync: pip
+## Set up using Python
 
 First install system dependencies and configure pip mirror:
 
@@ -181,12 +174,19 @@ To build custom operators, gcc/g++ higher than 8 and c++ 17 or higher is require
 If you encounter other problems during compiling, it is probably because unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in environment to specify your g++ and gcc locations before compiling.
 ```
 
-::::
+## Set up using Docker
 
-::::{tab-item} Using docker
-:sync: docker
+`vllm-ascend` offers Docker images for deployment. You can just pull the **prebuilt image** from the image repository [ascend/vllm-ascend](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and run it with bash.
 
-You can just pull the **prebuilt image** and run it with bash.
+Supported images as following.
+| image name | Hardware | OS |
+|-|-|-|
+| image-tag | Atlas A2 | Ubuntu |
+| image-tag-openeuler | Atlas A2 | openEuler |
+| image-tag-a3 | Atlas A3 | Ubuntu |
+| image-tag-a3-openeuler | Atlas A3 | openEuler |
+| image-tag-310p | Atlas 300I | Ubuntu |
+| image-tag-310p-openeuler | Atlas 300I | openEuler |
 
 :::{dropdown} Click here to see "Build from Dockerfile"
 or build IMAGE from **source code**:
@@ -202,18 +202,27 @@ docker build -t vllm-ascend-dev-image:latest -f ./Dockerfile .
 ```{code-block} bash
    :substitutions:
 
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci7
-# Update the vllm-ascend image
+# Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
+# Update the vllm-ascend image according to your environment.
+# Note you should download the weight to /root/.cache in advance.
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend-env \
     --shm-size=1g \
-    --device $DEVICE \
+    --net=host \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \
     -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
@@ -223,9 +232,6 @@ docker run --rm \
 ```
 
 The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developer immediately take place changes without requiring a new installation.
-::::
-
-:::::
 
 ## Extra information
 
@@ -289,7 +295,7 @@ Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt
 ```
 
 ## Multi-node Deployment
-### Verify Multi-Node Communication Environment
+### Verify Multi-Node Communication
 
 #### Physical Layer Requirements:
 
