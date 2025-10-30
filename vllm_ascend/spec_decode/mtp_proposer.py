@@ -13,7 +13,6 @@ from vllm.model_executor.model_loader.utils import \
     process_weights_after_loading
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
-from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -30,8 +29,10 @@ from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
 
 if vllm_version_is("0.11.0"):
     from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+    from vllm.utils import is_pin_memory_available
 else:
     from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
