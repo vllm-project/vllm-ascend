@@ -166,7 +166,8 @@ class RemoteOpenAIServer:
         max_wait_seconds = max_wait_seconds or 1800
         if self.disaggregated_prefill:
             assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
-            self._wait_for_server_pd(proxy_port=proxy_port, max_wait_seconds)
+            self._wait_for_server_pd(proxy_port=proxy_port,
+                                     timeout=max_wait_seconds)
         else:
             self._wait_for_server(url=self.url_for("health"),
                                   timeout=max_wait_seconds)
