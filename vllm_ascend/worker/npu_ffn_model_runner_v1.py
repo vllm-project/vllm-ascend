@@ -21,6 +21,8 @@ from vllm.utils import DeviceMemoryProfiler, GiB_bytes
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm.distributed.afd_transfer.afd_connector.metadata import (
+    AFDConnectorMetadata,FFNNeedForwardData,M2NAFDConnectorMetadata)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -100,8 +102,20 @@ class NPUFFNModelRunner(NPUModelRunner):
             self.is_m2n = True
             if self.is_m2n:
                 # TODO metadata
-                # metadata = AFDConnectorMetadata
-                hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(metadata)
+                m2n_afdconnector_data = M2NAFDConnectorMetadata()
+                m2n_afdconnector_data.quant_mode = 0
+                m2n_afdconnector_data.expand_x_type = torch.bfloat16
+                m2n_afdconnector_data.moe_expert_num = 64
+                m2n_afdconnector_data.batch_size = 3200
+                m2n_afdconnector_data.h = 2048
+                m2n_afdconnector_data.k = 6
+                m2n_afdconnector_data.expert_token_nums_type = 0
+                m2n_afdconnector_data.aiv_num = 48
+                
+                hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
+                
+                m2n_afdconnector_data.handle = handle
+                m2n_afdconnector_data.topk_weights = topk_weights
             else:
                 hidden_states,router_logits,topk_weights, topk_ids, row_idx, afdConnectorMetadata = self.connector.recv_attn_output()
             logger.info("*"*50)
@@ -125,7 +139,7 @@ class NPUFFNModelRunner(NPUModelRunner):
                 num_input_tokens = ffn_need_forward_data.num_input_tokens
                 total_num_scheduled_tokens = ffn_need_forward_data.total_num_scheduled_tokens
                 # topk_weights = afdConnectorMetadata.topk_weights
-                # topk_ids = afdConnectorMetadata.topk_ids
+                topk_ids = afdConnectorMetadata.topk_ids
                 # row_idx = afdConnectorMetadata.row_idx
                 print('execute_model')
                 with set_ascend_forward_context(
@@ -149,15 +163,9 @@ class NPUFFNModelRunner(NPUModelRunner):
                     else:
                         rank_ffn_output = self._execute_eager_mode(
                             hidden_states,router_logits,current_layer_idx,topk_weights, topk_ids, row_idx)
-            # metadata
-            # create metadata
-            # batch_size = metadata.m2n_afdconnector_data.batch_size
-            # topk_weights = metadata.m2n_afdconnector_data.topk_weights
-            # moe_expert_num = metadata.m2n_afdconnector_data.moe_expert_num
-            # aiv_num = metadata.m2n_afdconnector_data.aiv_num
-            # k = metadata.m2n_afdconnector_data.k
-            # handle = metadata.m2n_afdconnector_data.handle
-            self.connector.send_ffn_output(rank_ffn_output, metadata)
+
+            
+            self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)
         except Exception as e:
             raise ValueError(
                 f"Error computing FFN for layer {current_layer_idx}: {e}"

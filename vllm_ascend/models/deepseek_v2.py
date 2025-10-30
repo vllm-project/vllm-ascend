@@ -66,7 +66,7 @@ from vllm_ascend.models.layers.sfa import (AscendSFAModules,
                                            AscendSparseFlashAttention, Indexer)
 from typing import Any, Optional, Union
 from vllm_ascend.ops.common_fused_moe import AscendFusedMoE, AscendAFD
-
+from vllm.distributed.afd_transfer.afd_connector.metadata import M2NAFDConnectorMetadata
 
 class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
 
@@ -668,6 +668,9 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.num_routed_experts = example_moe.n_routed_experts
         self.num_shared_experts = example_moe.n_shared_experts
         self.num_redundant_experts = example_moe.n_redundant_experts
+        
+        global afd_connector_metadata
+        afd_connector_metadata = M2NAFDConnectorMetadata()
         
 
     # NOTE: This `load_weights` is mainly copied from
