@@ -18,8 +18,8 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         split_decodes_and_prefills,
-                                         vllm_version_is)
+                                         split_decodes_and_prefills)
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if vllm_version_is("0.11.0"):
