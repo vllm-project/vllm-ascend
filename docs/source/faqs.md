@@ -215,7 +215,7 @@ torch-npu will be overridden  when installing vllm-ascend. If you need to instal
 
 ### 20. On certain systems (e.g., Kylin OS), `docker pull` may fail with an `invalid tar header` error
 
-On certain operating systems, such as Kylin OS (麒麟操作系统), you may encounter an `invalid tar header` error during the `docker pull` process:
+On certain operating systems, such as Kylin OS , you may encounter an `invalid tar header` error during the `docker pull` process:
 
 ```text
 failed to register layer: ApplyLayer exit status 1 stdout: stderr: archive/tar: invalid tar header
@@ -223,7 +223,7 @@ failed to register layer: ApplyLayer exit status 1 stdout: stderr: archive/tar: 
 
 This is often due to system compatibility issues. You can resolve this by using an offline loading method with a second machine.
 
-**1. On a separate host machine** (e.g., a standard Ubuntu server), pull the image for the target ARM64 architecture and package it into a `.tar` file.
+1. On a separate host machine (e.g., a standard Ubuntu server), pull the image for the target ARM64 architecture and package it into a `.tar` file.
 
    ```bash
    export IMAGE_TAG=v0.10.0rc1-310p
@@ -234,16 +234,8 @@ This is often due to system compatibility issues. You can resolve this by using 
    # Pull the image for the ARM64 platform and save it
    docker pull --platform linux/arm64 "${IMAGE_NAME}"
    docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
-   
    ```
 
-**2. Transfer the image archive**
+2. Transfer the image archive
 
-   Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine (e.g., using `scp`, `rsync`, or a USB drive).
-
-**3. On the target (Kylin) machine**, load the image from the archive:
-
-   ```bash
-   docker load -i vllm_ascend_<tag>.tar
-   ```
-After this, the image will be available locally, and you can proceed with the standard `docker run` command
+Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine
