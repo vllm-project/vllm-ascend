@@ -20,6 +20,7 @@ import vllm_ascend.patch.platform.patch_config  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_mamba_config  # noqa
 import vllm_ascend.patch.platform.patch_sched_yield  # noqa
+import vllm_ascend.patch.platform.patch_mtp_predictor  # noqa
 
 if os.getenv("DYNAMIC_EPLB", "false") == "true" or os.getenv(
         "EXPERT_MAP_RECORD", "false") == "true":
