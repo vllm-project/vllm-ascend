@@ -7,8 +7,8 @@
 
 from tests.ut.base import TestBase
 from vllm_ascend.torchair.torchair_mla import (
-    AscendSFATorchairBackend, AscendSFATorchairMetadata,
-    AscendSFATorchairImpl, AscendSFATorchairMetadataBuilder)
+    AscendSFATorchairBackend, AscendSFATorchairImpl, AscendSFATorchairMetadata,
+    AscendSFATorchairMetadataBuilder)
 
 
 class TestAscendSFATorchairBackend(TestBase):
