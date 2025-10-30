@@ -71,6 +71,13 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    # pcp/dcp param
+    num_computed_tokens_of_pcp_dcp_for_chunk: Optional[list[Optional[list[
+        Optional[
+            list[int]]]]]] = None  # Records computed tokens for each chunk
+    next_cp_dcp_start_rank: int = 0  # Tracks next starting rank for round-robin distribution
+    token_blank_in_last_blk: int = 0  # if the last block is not full, how many future tokens can be stored
+
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
 
@@ -296,6 +303,10 @@ class InputBatch:
         self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
 
+        # pcp/dcp parameters
+        self.num_computed_tokens_of_pcp_dcp_for_chunk: list[Optional[list[
+            Optional[list[Optional[list[int]]]]]]] = [None] * max_num_reqs
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -359,6 +370,10 @@ class InputBatch:
 
         self.num_computed_tokens_cpu[req_index] = request.num_computed_tokens
         self.block_table.add_row(request.block_ids, req_index)
+
+        # Add PCP/DCP tracking fields
+        self.num_computed_tokens_of_pcp_dcp_for_chunk[
+            req_index] = request.num_computed_tokens_of_pcp_dcp_for_chunk
 
         if sampling_params := request.sampling_params:
             if (self.is_spec_decode
