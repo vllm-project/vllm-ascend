@@ -180,7 +180,7 @@ run_tests_with_log() {
         fi
     fi
     set -e
-    return $ret
+    exit $ret
 }
 
 main() {

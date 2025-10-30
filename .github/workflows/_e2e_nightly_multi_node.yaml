@@ -181,6 +181,18 @@ jobs:
           run: |
             kubectl logs -f "$LEADER_POD" -n "$NAMESPACE"
 
+        - name: Determine is success
+          run: |
+            set -euo pipefail
+            echo "Checking for error files in ${RESULT_DIR} ..."
+            if compgen -G "${RESULT_DIR}/error*" > /dev/null; then
+              echo "Found error logs:"
+              ls -1 "${RESULT_DIR}/error"*
+              exit 1
+            else
+              echo "No error files found."
+            fi
+
         - name: Post process
           if: always()
           run: |
