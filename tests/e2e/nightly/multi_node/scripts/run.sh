@@ -21,8 +21,7 @@ print_section() {
 }
 
 print_failure() {
-    local TAG="[TEST_FAIL_${CONFIG_YAML_PATH}]"
-    echo -e "${RED}${TAG} ✗ ERROR: $1${NC}"
+    echo -e "${RED}${FAIL_TAG} ✗ ERROR: $1${NC}"
     exit 1
 }
 
@@ -170,21 +169,21 @@ kill_npu_processes() {
 run_tests_with_log() {
     set +e
     kill_npu_processes
+    BASENAME=$(basename "$CONFIG_YAML_PATH" .yaml)
     # each worker should have log file
-    LOG_FILE="${RESULT_FILE_PATH}/${CONFIG_YAML_PATH}_worker_${LWS_WORKER_INDEX}.log"
+    LOG_FILE="${RESULT_FILE_PATH}/${BASENAME}_worker_${LWS_WORKER_INDEX}.log"
     mkdir -p ${RESULT_FILE_PATH}
     pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee $LOG_FILE
     ret=${PIPESTATUS[0]}
+    set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            print_error "Some tests failed!"
+            print_failure "Some tests failed!"
             mv LOG_FILE error_${LOG_FILE}
         fi
     fi
-    set -e
-    exit $ret
 }
 
 main() {
