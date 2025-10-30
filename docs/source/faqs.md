@@ -226,15 +226,15 @@ This is often due to system compatibility issues. You can resolve this by using 
 **1. On a separate host machine** (e.g., a standard Ubuntu server), pull the image for the target ARM64 architecture and package it into a `.tar` file.
 
    ```bash
-   export IMAGE_NAME=quay.io/ascend/vllm-ascend:v0.10.0rc1-310p
-   # If in China region,adjust the image name
-   # export IMAGE_NAME=m.daocloud.io/quay.io/ascend/vllm-ascend:v0.10.0rc1-310p
+   export IMAGE_TAG=v0.10.0rc1-310p
+   export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
+   # If in China region, uncomment to use a mirror:
+   # export IMAGE_NAME="m.daocloud.io/quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
    
-   # Pull the image for the ARM64 platform
-   docker pull --platform linux/arm64 ${IMAGE_NAME}
+   # Pull the image for the ARM64 platform and save it
+   docker pull --platform linux/arm64 "${IMAGE_NAME}"
+   docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
    
-   # Save the pulled image to a tar archive
-   docker save -o vllm_ascend_image.tar ${IMAGE_NAME}
    ```
 
 **2. Transfer the image archive**
