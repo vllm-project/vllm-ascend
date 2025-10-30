@@ -723,10 +723,12 @@ def is_moe_model(vllm_config: VllmConfig):
                 for mm_arch in _MULTI_MODAL_MODEL_ARCH_KEY_WORDS)
                 and "text_config" in model_configs):
             # Check multi-modal models
-            _IS_MOE_MODEL = "num_experts" in model_configs["text_config"]
+            _IS_MOE_MODEL = any("experts" in key.lower()
+                                for key in model_configs["text_config"])
         else:
             # Check text models
-            _IS_MOE_MODEL = "num_experts" in model_configs
+            _IS_MOE_MODEL = any("experts" in key.lower()
+                                for key in model_configs)
     return _IS_MOE_MODEL
 
 
