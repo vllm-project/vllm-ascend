@@ -88,6 +88,7 @@ jobs:
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
 
+          pytest -sv tests/e2e/singlecard/test_completion_with_prompt_embeds.py
           pytest -sv tests/e2e/singlecard/test_aclgraph.py
           pytest -sv tests/e2e/singlecard/test_ascend_scheduler.py
           pytest -sv tests/e2e/singlecard/test_bge_model.py
