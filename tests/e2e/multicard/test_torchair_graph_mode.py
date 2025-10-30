@@ -227,8 +227,8 @@ def test_e2e_qwen3_moe_with_torchair():
     _qwen_torchair_test_fixture("Qwen/Qwen3-30B-A3B", 2, True)
 
 
-# test deepseek-v3-lite
-def _deepseek_v3_lite_torchair_test_fixure(
+# test deepseek-v2-lite
+def _deepseek_v2_lite_torchair_test_fixure(
     additional_config: Dict,
     *,
     tensor_parallel_size=2,
@@ -270,30 +270,30 @@ def _deepseek_v3_lite_torchair_test_fixure(
         assert len(generated_text.strip()) > 0, f"第{i}条生成结果为空"
 
 
-def test_e2e_deepseekv3lite_with_torchair():
+def test_e2e_deepseekv2lite_with_torchair():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
         },
     }
-    _deepseek_v3_lite_torchair_test_fixure(additional_config)
+    _deepseek_v2_lite_torchair_test_fixure(additional_config)
 
 
-def test_e2e_deepseekv3lite_with_torchair_ms_mla():
+def test_e2e_deepseekv2lite_with_torchair_ms_mla():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
             "enable_multistream_mla": True,
         },
     }
-    _deepseek_v3_lite_torchair_test_fixure(additional_config)
+    _deepseek_v2_lite_torchair_test_fixure(additional_config)
 
 
-def test_e2e_deepseekv3lite_with_torchair_v1scheduler():
+def test_e2e_deepseekv2lite_with_torchair_v1scheduler():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
         },
     }
-    _deepseek_v3_lite_torchair_test_fixure(additional_config,
+    _deepseek_v2_lite_torchair_test_fixure(additional_config,
                                            use_v1_schduler=True)
