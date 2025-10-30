@@ -255,6 +255,7 @@ class MultiNodeConfig:
         ranktable_path = self.disaggregated_prefill.get("ranktable_path")
         assert ranktable_gen_path is not None and ranktable_path is not None
         if os.path.exists(str(ranktable_path)):
+            logger.info("ranktable has already generated")
             return
 
         local_host = self.cur_ip
@@ -286,6 +287,8 @@ class MultiNodeConfig:
         assert self.nic_name is not None
         env["GLOO_SOCKET_IFNAME"] = self.nic_name
 
+        logger.info(
+            f"Generating ranktable from command: {' '.join(map(str, cmd))}")
         subprocess.run(cmd, env=env, check=True)
         assert os.path.exists(
             str(ranktable_path)), "failed generate ranktable.json"

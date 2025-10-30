@@ -133,7 +133,7 @@ class AisbenchRunner:
             content = f.read()
         content = re.sub(r'model=.*', f'model="{self.model}",', content)
         content = re.sub(r'host_port.*', f'host_port = {self.port},', content)
-        content = re.sub(r'host_ip.*', f'host_ip = {self.host_ip},', content)
+        content = re.sub(r'host_ip.*', f'host_ip = "{self.host_ip}",', content)
         content = re.sub(r'max_out_len.*',
                          f'max_out_len = {self.max_out_len},', content)
         content = re.sub(r'batch_size.*', f'batch_size = {self.batch_size},',
