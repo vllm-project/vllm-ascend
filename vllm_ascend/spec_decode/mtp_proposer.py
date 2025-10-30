@@ -38,6 +38,7 @@ logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
 
+
 class MtpProposer(Proposer):
 
     def __init__(
