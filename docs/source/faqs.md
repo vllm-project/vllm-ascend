@@ -239,7 +239,7 @@ This is often due to system compatibility issues. You can resolve this by using 
 
 **2. Transfer the image archive**
 
-   Copy the `vllm_ascend_image.tar` file to your target machine (e.g., using `scp`, `rsync`, or a USB drive).
+   Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine (e.g., using `scp`, `rsync`, or a USB drive).
 
 **3. On the target (Kylin) machine**, load the image from the archive:
 
