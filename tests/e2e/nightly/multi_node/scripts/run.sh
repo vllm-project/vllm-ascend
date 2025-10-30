@@ -20,6 +20,11 @@ print_section() {
     echo -e "\n${BLUE}=== $1 ===${NC}"
 }
 
+print_failure() {
+    echo -e "${RED}${FAIL_TAG} ✗ ERROR: $1${NC}"
+    exit 1
+}
+
 # Function to print success messages
 print_success() {
     echo -e "${GREEN}✓ $1${NC}"
@@ -161,32 +166,24 @@ kill_npu_processes() {
   sleep 4
 }
 
-run_tests() {
+run_tests_with_log() {
     set +e
     kill_npu_processes
-    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
-    ret=$?
+    BASENAME=$(basename "$CONFIG_YAML_PATH" .yaml)
+    # each worker should have log file
+    LOG_FILE="${RESULT_FILE_PATH}/${BASENAME}_worker_${LWS_WORKER_INDEX}.log"
+    mkdir -p ${RESULT_FILE_PATH}
+    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee $LOG_FILE
+    ret=${PIPESTATUS[0]}
+    set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
         if [ $ret -eq 0 ]; then
             print_success "All tests passed!"
         else
-            print_error "Some tests failed!"
-            kubectl delete pod $CONTROLLER_NAME -n vllm-project
+            print_failure "Some tests failed!"
+            mv LOG_FILE error_${LOG_FILE}
         fi
     fi
-    set -e
-}
-
-install_kubectl() {
-    arch=$(uname -m)
-    KUBECTL=/root/.cache/.kube/kubectl
-    if echo "$arch" | grep -qiE "arm|aarch64"; then
-        echo "Detected ARM architecture: $arch"
-        KUBECTL="$KUBECTL"_arm
-    fi
-    install -o root -g root -m 0755 $KUBECTL /usr/local/bin/kubectl
-    echo "$SECRET" | base64 -d > /tmp/kubeconfig
-    export KUBECONFIG=/tmp/kubeconfig
 }
 
 main() {
@@ -194,7 +191,6 @@ main() {
     check_and_config
     checkout_src
     install_sys_dependencies
-    install_kubectl
     install_vllm
     install_ais_bench
     # to speed up mooncake build process, install Go here
@@ -203,7 +199,7 @@ main() {
     . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
     pooling_async_memecpy_v1 9d96b2e1dd76cc601d76b1b4c5f6e04605cd81d3
     cd "$WORKSPACE/source_code/vllm-ascend"
-    run_tests
+    run_tests_with_log
 }
 
 main "$@"
