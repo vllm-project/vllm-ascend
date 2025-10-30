@@ -44,7 +44,7 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-${{ inputs.tests }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.tests }}
   cancel-in-progress: true
 
 jobs:

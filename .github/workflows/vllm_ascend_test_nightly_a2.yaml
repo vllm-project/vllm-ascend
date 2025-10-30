@@ -42,6 +42,7 @@ concurrency:
 
 jobs:
   single-node-tests:
+    name: single-node
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
@@ -63,6 +64,7 @@ jobs:
       tests: ${{ matrix.test_config.tests }}
 
   multi-node-tests:
+    name: multi-node
     needs: single-node-tests
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
@@ -71,10 +73,10 @@ jobs:
       matrix:
         test_config:
           - name: multi-node-deepseek-dp
-            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8-A2.yaml
+            config_file_path: DeepSeek-R1-W8A8-A2.yaml
             size: 2
           - name: multi-node-deepseek-dp-torchair
-            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8-A2-torchair.yaml
+            config_file_path: DeepSeek-R1-W8A8-A2-torchair.yaml
             size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
