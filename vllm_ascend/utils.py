@@ -726,7 +726,7 @@ def is_moe_model(vllm_config: VllmConfig):
             _IS_MOE_MODEL = any("experts" in key.lower()
                                 for key in model_configs["text_config"])
         else:
-            # Check text models
+            # Check text-only models
             _IS_MOE_MODEL = any("experts" in key.lower()
                                 for key in model_configs)
     return _IS_MOE_MODEL
