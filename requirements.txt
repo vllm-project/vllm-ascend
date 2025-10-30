@@ -11,7 +11,7 @@ scipy
 pandas
 setuptools>=64
 setuptools-scm>=8
-torch>=2.7.1
+torch==2.7.1
 torchvision
 wheel
 pandas-stubs
