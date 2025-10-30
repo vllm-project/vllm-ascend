@@ -21,6 +21,7 @@ from transformers import PretrainedConfig
 from vllm.config import CacheConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 
+import vllm_ascend.ascend_config as ascend_conf
 from vllm_ascend.torchair.models.torchair_deepseek_v2 import (
     TorchairDeepseekV2DecoderLayer, TorchairDeepseekV2ForCausalLM,
     TorchairDeepseekV2MergedReplicatedLinear, TorchairDeepseekV2MLAAttention,
@@ -168,6 +169,19 @@ def patch_attention_init():
         yield
 
 
+@pytest.fixture()
+def mock_ascend_config():
+    mock_cfg = Mock()
+    mock_cfg.tp_size = 1
+    mock_cfg.oproj_tensor_parallel_size = None
+    mock_cfg.init_redundancy_expert = 0
+    mock_cfg.torchair_graph_config = Mock()
+    mock_cfg.torchair_graph_config.enabled = False  # 或 True，取决于您的需求
+    ascend_conf._ASCEND_CONFIG = mock_cfg
+    yield mock_cfg
+    ascend_conf._ASCEND_CONFIG = None
+
+
 def test_torchair_deepseek_v2_silu_and_mul():
     torch.set_default_device("cpu")
 
@@ -255,7 +269,8 @@ def test_torchair_deepseek_v2_mlp(mock_distributed, base_config):
 
 
 def test_torchair_deepseek_v2_moe(mock_distributed, base_config,
-                                  mock_forward_context):
+                                  mock_forward_context, mock_ascend_config):
+    mock_ascend_config.expert_map_path = ""
     base_config.n_shared_experts = 1
     moe = TorchairDeepseekV2MoE(config=base_config,
                                 quant_config=None,
@@ -273,7 +288,7 @@ def test_torchair_deepseek_v2_moe(mock_distributed, base_config,
 
 @patch("torch_npu.npu_rms_norm")
 def test_torchair_deepseek_v2_mla_attention(mock_rms_norm, mock_distributed,
-                                            base_config):
+                                            base_config, mock_ascend_config):
     mock_rms_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128))
 
     attn = TorchairDeepseekV2MLAAttention(config=base_config,
@@ -316,7 +331,9 @@ def test_torchair_deepseek_v2_decoder_layer(mock_maybe_wait_prefetch_done,
                                             mock_rms_norm, mock_add_norm,
                                             mock_distributed, base_config,
                                             vllm_config, mock_forward_context,
-                                            patch_attention_init):
+                                            patch_attention_init,
+                                            mock_ascend_config):
+    mock_ascend_config.expert_map_path = ""
     mock_rms_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128))
     mock_add_norm.return_value = (torch.randn(2, 128), torch.randn(2, 128),
                                   torch.randn(2, 128))
@@ -347,7 +364,9 @@ def test_torchair_deepseek_v2_decoder_layer(mock_maybe_wait_prefetch_done,
 
 
 def test_torchair_deepseek_v2_for_causal_lm(mock_distributed, vllm_config,
-                                            patch_attention_init):
+                                            patch_attention_init,
+                                            mock_ascend_config):
+    mock_ascend_config.expert_map_path = ""
     model = TorchairDeepseekV2ForCausalLM(vllm_config=vllm_config)
 
     input_ids = torch.randint(0, 10000, (2, 4))
