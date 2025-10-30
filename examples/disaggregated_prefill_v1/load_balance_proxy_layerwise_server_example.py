@@ -98,7 +98,6 @@ from typing import List
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from transformers import AutoTokenizer
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -153,8 +152,6 @@ class ProxyState:
         heapq.heapify(self.decoder_heap)
         self.req_id_future = {}
         self.req_data_dict = {}
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            global_args.tokenizer_dir)
 
     def _update_prefiller_priority(self, server_idx: int):
         """Update the priority of a prefiller server in the heap."""
@@ -281,10 +278,6 @@ def parse_args():
                         nargs="+",
                         default=["localhost"])
     parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8002])
-    parser.add_argument("--tokenizer-dir",
-                        type=str,
-                        default="/mnt/weight/Qwen3-235B-A22B-W8A8",
-                        help="Maximum number of retries for HTTP requests")
     parser.add_argument("--max-retries",
                         type=int,
                         default=3,
