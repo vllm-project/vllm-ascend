@@ -26,6 +26,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
+                                               get_mtp_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
@@ -1028,8 +1029,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths,
             "actual_seq_lengths_kv": decode_meta.seq_lens_list,
         }
-        graph_params = get_graph_params()
         forward_context: ForwardContext = get_forward_context()
+        if forward_context.is_mtp_model:
+            graph_params = get_mtp_graph_params()
+        else:
+            graph_params = get_graph_params()
         if forward_context.capturing:
             stream = torch_npu.npu.current_stream()
 

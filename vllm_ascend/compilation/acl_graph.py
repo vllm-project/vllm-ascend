@@ -249,7 +249,10 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
 
 def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                            speculative_config):
-    graph_params = get_graph_params()
+    if forward_context.is_mtp_model:
+        graph_params = get_mtp_graph_params()
+    else:
+        graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
     # for each layer's attention op in the graph.
     with torch.npu.stream(update_stream):
@@ -265,7 +268,8 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
              softmax_lse) = param
             seq_lens_list = forward_context.attn_metadata[
                 key].decode.seq_lens_list
-            if speculative_config and speculative_config.method == "deepseek_mtp":
+            if speculative_config and speculative_config.method == "deepseek_mtp" \
+                and not forward_context.is_mtp_model:
                 actual_seq_lengths = forward_context.attn_metadata[
                     key].decode.actual_seq_lengths_q
                 spec_multiple = speculative_config.num_speculative_tokens + 1
@@ -341,3 +345,40 @@ def update_graph_params_workspaces(num_tokens: int, workspace: Any):
 
 def get_graph_params():
     return _graph_params
+
+
+@dataclass
+class MTPGraphParams:
+    events: dict[int, list[torch.npu.ExternalEvent]]
+    workspaces: dict[int, torch.Tensor]
+    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
+    attn_params: dict[int, list[tuple]]
+
+
+_mtp_graph_params: Optional[MTPGraphParams] = None
+
+
+def set_mtp_graph_params(aclgraph_capture_sizes: set[int]):
+    global _mtp_graph_params
+    if _mtp_graph_params is not None:
+        raise ValueError("MTPGraph parameters have already been set!")
+    _mtp_graph_params = MTPGraphParams(
+        {size: []
+         for size in aclgraph_capture_sizes},
+        {size: None
+         for size in aclgraph_capture_sizes},
+        {size: []
+         for size in aclgraph_capture_sizes},
+        {size: []
+         for size in aclgraph_capture_sizes},
+    )
+
+
+def update_mtp_graph_params_workspaces(num_tokens: int, workspace: Any):
+    global _mtp_graph_params
+    if _mtp_graph_params is not None:
+        _mtp_graph_params.workspaces[num_tokens] = workspace
+
+
+def get_mtp_graph_params():
+    return _mtp_graph_params
