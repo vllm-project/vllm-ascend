@@ -206,20 +206,21 @@ class RemoteOpenAIServer:
             if isinstance(client, httpx.Client):
                 client.close()
 
-    def _wait_for_server_pd(self, proxy_port: int):
+    def _wait_for_server_pd(self, proxy_port: int, timeout: float):
         # Wait for all api_server nodes ready
         assert self.nodes_info is not None, "cluster info must be provided"
+        timeout = timeout or 1800
         for node_info in self.nodes_info:
             if node_info.headless:
                 continue
 
             url_health = f"http://{node_info.ip}:{node_info.server_port}/health"
-            self._wait_for_server(url=url_health, timeout=7200)
+            self._wait_for_server(url=url_health, timeout=timeout)
 
         # Wait for proxy ready
         master_node = self.nodes_info[0]
         url_proxy = f"http://{master_node.ip}:{proxy_port}/healthcheck"
-        self._wait_for_server(url=url_proxy, timeout=7200)
+        self._wait_for_server(url=url_proxy, timeout=timeout)
 
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
