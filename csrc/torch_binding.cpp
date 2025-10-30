@@ -258,7 +258,7 @@ at::Tensor& dispatch_ffn_combine(
     at::Tensor& out
 ) {
     char *group_ep_ptr = const_cast<char *>(group.data());
-    EXEC_NPU_CMD(aclnnDispatchFfnCombine,
+    EXEC_NPU_CMD(aclnnDispatchFFNCombine,
                  x,
                  weight1,
                  weight2,

@@ -14,5 +14,5 @@ bash build.sh
 rm -rf $ROOT_DIR/CANN
 mkdir $ROOT_DIR/CANN
 
-bash ./build_out/custom_opp_ubuntu_aarch64.run  --install-path=$ROOT_DIR/CANN
+bash ./build_out/custom_opp_dispatch_ffn_combine.run  --install-path=$ROOT_DIR/CANN
 source $ROOT_DIR/CANN/vendors/hwcomputing/bin/set_env.bash

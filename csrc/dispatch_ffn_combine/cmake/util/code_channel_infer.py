@@ -1,13 +1,8 @@
 import collections
 
-"""CODE_* is used to cube/vector api is called in operator code
-CODE_MIX means both cube and vector api is called
-CODE_CUBE means only cube api is called
-CODE_VEC means only vector api is called
-"""
-CODE_MIX = 0
-CODE_CUBE = 1
-CODE_VEC = 2
+CODE_MIX = 0  # CODE_MIX means both cube and vector api is called
+CODE_CUBE = 1  # CODE_CUBE means only cube api is called
+CODE_VEC = 2  # CODE_VEC means only vector api is called
 
 
 def _is_v220(op_product: str):

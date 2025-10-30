@@ -43,7 +43,7 @@ def get_moe_comm_method(
 def setup_moe_comm_method(moe_config):
     _MoECommMethods[MoECommType.ALLTOALL] = FusedAlltoAllCommImpl(moe_config)
     _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-    _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
+    _MoECommMethods[MoECommType.MC2] = FusedMC2CommImpl(moe_config)
     _MoECommMethods[MoECommType.NAIVE_MULTICAST] = NaiveMulticastCommImpl(
         moe_config)
 
@@ -223,6 +223,64 @@ class MC2CommImpl(MoECommMethod):
         return PrepareAndFinalizeWithMC2(self.moe_config)
 
 
+class FusedMC2CommImpl(MoECommMethod):
+    """This implementation is for the scenarios listed below:
+    1. `enable_expert_parallel=True`.
+    2. `npu_moe_distribute_dispatch` and `npu_moe_distribute_combine` are available.
+    3. `enable_expert_parallel=False` is not supported.
+    
+    This implementation uses the MC2 communication method, which is optimized for
+    Communication and Computation parallelism on Ascend devices.
+    """
+
+    def _get_token_dispatcher(self):
+        return TokenDispatcherWithMC2()
+
+    def _get_prepare_finalize(self):
+        return PrepareAndFinalizeWithMC2(self.moe_config)
+
+    def fused_experts(self,
+                      hidden_states: torch.Tensor,
+                      w1: torch.Tensor,
+                      w2: torch.Tensor,
+                      topk_weights: torch.Tensor,
+                      topk_ids: torch.Tensor,
+                      activation: str = "silu",
+                      apply_router_weight_on_input: bool = False,
+                      use_int8_w8a8: bool = False,
+                      use_int4_w4a8: bool = False,
+                      global_num_experts: Optional[int] = None,
+                      expert_map: Optional[torch.Tensor] = None,
+                      w1_scale: Optional[torch.Tensor] = None,
+                      w2_scale: Optional[torch.Tensor] = None,
+                      w1_scale_bias: torch.Tensor = None,
+                      w2_scale_bias: torch.Tensor = None,
+                      is_torchair: bool = False,
+                      shared_experts: Optional[Any] = None,
+                      quantized_x_for_share: Optional[Any] = None,
+                      dynamic_scale_for_share: Optional[Any] = None,
+                      log2phy: torch.Tensor = None,
+                      global_redundant_expert_num: int = 0,
+                      need_trans: bool = False,
+                      dynamic_eplb: bool = False,
+                      mc2_mask: torch.Tensor = None):
+        out = torch.empty_like(hidden_states)
+
+        torch.ops._C_ascend.dispatch_ffn_combine(
+            x=hidden_states,
+            weight1=w1,
+            weight2=w2,
+            expert_idx=topk_ids,
+            scale1=w1_scale,
+            scale2=w2_scale,
+            probs=topk_weights.to(torch.float32),
+            group=self.token_dispatcher.moe_all_to_all_group_name,
+            max_output_size=512,
+            out=out,
+        )
+        return out
+
+
 class AlltoAllCommImpl(MoECommMethod):
     """This implementation is for the scenarios listed below:
     1. `enable_expert_parallel=True`.
@@ -259,36 +317,37 @@ class FusedAlltoAllCommImpl(MoECommMethod):
             num_experts=self.moe_config.num_experts,
             num_local_experts=self.moe_config.num_local_experts)
 
-    def _get_fused_moe_prepare_finalize(self):
+    def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
 
     def fused_experts(self,
-                      hidden_states,
-                      w1,
-                      w2,
-                      topk_weights,
-                      topk_ids,
-                      activation="silu",
-                      apply_router_weight_on_input=False,
-                      use_int8_w8a8=False,
-                      use_int4_w4a8=False,
-                      global_num_experts=None,
-                      expert_map=None,
-                      w1_scale=None,
-                      w2_scale=None,
-                      w1_scale_bias=None,
-                      w2_scale_bias=None,
-                      is_torchair=False,
-                      shared_experts=None,
-                      quantized_x_for_share=None,
-                      dynamic_scale_for_share=None,
-                      log2phy=None,
-                      global_redundant_expert_num=0,
-                      need_trans=False,
-                      dynamic_eplb=False):
+                      hidden_states: torch.Tensor,
+                      w1: torch.Tensor,
+                      w2: torch.Tensor,
+                      topk_weights: torch.Tensor,
+                      topk_ids: torch.Tensor,
+                      activation: str = "silu",
+                      apply_router_weight_on_input: bool = False,
+                      use_int8_w8a8: bool = False,
+                      use_int4_w4a8: bool = False,
+                      global_num_experts: Optional[int] = None,
+                      expert_map: Optional[torch.Tensor] = None,
+                      w1_scale: Optional[torch.Tensor] = None,
+                      w2_scale: Optional[torch.Tensor] = None,
+                      w1_scale_bias: torch.Tensor = None,
+                      w2_scale_bias: torch.Tensor = None,
+                      is_torchair: bool = False,
+                      shared_experts: Optional[Any] = None,
+                      quantized_x_for_share: Optional[Any] = None,
+                      dynamic_scale_for_share: Optional[Any] = None,
+                      log2phy: torch.Tensor = None,
+                      global_redundant_expert_num: int = 0,
+                      need_trans: bool = False,
+                      dynamic_eplb: bool = False,
+                      mc2_mask: torch.Tensor = None):
         out = torch.empty_like(hidden_states)
 
-        torch.ops._C_ascend.dispatch_gmm_combine(
+        torch.ops._C_ascend.dispatch_ffn_combine(
             x=hidden_states,
             weight1=w1,
             weight2=w2,
