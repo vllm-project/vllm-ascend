@@ -34,6 +34,7 @@ from vllm.logger import logger
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.torchair.utils import (
     TORCHAIR_CACHE_DIR, TorchairCommonAttentionMetadata,
     check_torchair_cache_exist, converting_weight_acl_format,
@@ -82,6 +83,20 @@ class NPUTorchairModelRunner(NPUModelRunner):
             recompiles=envs_ascend.VLLM_ASCEND_TRACE_RECOMPILES)
 
         self._check_batch_sizes_consistency()
+
+    def _set_up_drafter(self):
+        super()._set_up_drafter()
+        if self.speculative_config:
+            # Torchair do not support disable_padded_drafter_batch
+            # Enforce to disable this feature
+            self.speculative_config.disable_padded_drafter_batch = True
+
+    def _get_drafter(self):
+        return get_spec_decode_method(self.speculative_config.method,
+                                      self.vllm_config,
+                                      self.device,
+                                      self,
+                                      is_torchair_graph=True)
 
     def _may_pad_kv_consumer_num_seq(self):
         # pd disaggregation scenario need redundant_batch_sizes to avoid each batch's seq_len exceed 16 tokens
