@@ -6,9 +6,9 @@
 # from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
-from vllm_ascend.torchair.torchair_sfa import (
-    AscendSFATorchairBackend, AscendSFATorchairImpl, AscendSFATorchairMetadata,
-    AscendSFATorchairMetadataBuilder)
+from vllm_ascend.torchair.torchair_mla import (
+    AscendSFATorchairBackend, AscendSFATorchairMetadata,
+    AscendSFATorchairImpl, AscendSFATorchairMetadataBuilder)
 
 
 class TestAscendSFATorchairBackend(TestBase):
