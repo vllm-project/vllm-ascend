@@ -22,7 +22,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.utils import cdiv, round_down
+from vllm.utils import round_down
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend import envs
@@ -39,8 +39,13 @@ from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_enable_nz, prefill_context_parallel_enable,
-                               weak_ref_tensors)
+                               vllm_version_is, weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import InputBatch
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import cdiv
+else:
+    from vllm.utils.math_utils import cdiv
 
 # isort: off
 if prefill_context_parallel_enable():

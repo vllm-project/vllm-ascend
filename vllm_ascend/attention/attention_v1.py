@@ -31,7 +31,6 @@ from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
                               get_decode_context_model_parallel_world_size)
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.utils import cdiv
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -44,7 +43,12 @@ from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d, nd_to_nz_spec,
                                prefill_context_parallel_enable, version_check,
-                               weak_ref_tensors)
+                               vllm_version_is, weak_ref_tensors)
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import cdiv
+else:
+    from vllm.utils.math_utils import cdiv
 
 # isort: off
 if prefill_context_parallel_enable():

@@ -12,14 +12,20 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.utils import cdiv, round_down
+from vllm.utils import round_down
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         split_decodes_and_prefills)
+                                         split_decodes_and_prefills,
+                                         vllm_version_is)
 from vllm_ascend.worker.npu_input_batch import InputBatch
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import cdiv
+else:
+    from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput

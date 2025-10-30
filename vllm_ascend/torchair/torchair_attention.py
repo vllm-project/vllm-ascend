@@ -26,7 +26,6 @@ from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
                                               AttentionType)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
-from vllm.utils import cdiv
 
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendAttentionMetadataBuilder,
@@ -35,7 +34,12 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d)
+                               nd_to_nz_2d, vllm_version_is)
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import cdiv
+else:
+    from vllm.utils.math_utils import cdiv
 
 
 class AscendAttentionTorchairBackend(AscendAttentionBackend):
