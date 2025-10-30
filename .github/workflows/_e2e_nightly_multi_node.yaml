@@ -183,8 +183,15 @@ jobs:
 
         - name: Stream logs
           run: |
-            echo $FAIL_TAG
-            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE"
+            set -euo pipefail
+            echo "Looking for logs containing: $FAIL_TAG"
+            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | while read -r line; do
+              echo "$line"
+              if echo "$line" | grep -q "$FAIL_TAG"; then
+                echo "Found $FAIL_TAG, failing step!"
+                exit 1   # workflow step failed
+              fi
+            done
 
         - name: Determine is success
           run: |
