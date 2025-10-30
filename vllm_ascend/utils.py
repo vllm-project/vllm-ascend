@@ -577,7 +577,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
-    from vllm_ascend.models.layers.sfa import AscendSparseFlashAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
                                                      AscendSharedFusedMoE)
@@ -625,10 +624,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     mla_to_register = "MultiHeadLatentAttention" if vllm_version_is(
         "0.11.0") else "MultiHeadLatentAttentionWrapper"
     if vllm_config and vllm_config.model_config and vllm_config.model_config.use_mla:
-        AscendMLAAttentionWarrper = AscendSparseFlashAttention if hasattr(
-            vllm_config.model_config.hf_config,
-            "index_topk") else AscendMultiHeadLatentAttention
-        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMLAAttentionWarrper
+        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMultiHeadLatentAttention
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
