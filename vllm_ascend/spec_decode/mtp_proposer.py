@@ -31,13 +31,12 @@ if vllm_version_is("0.11.0"):
     from vllm.model_executor.model_loader.utils import set_default_torch_dtype
     from vllm.utils import is_pin_memory_available
 else:
-    from vllm.utils.torch_utils import set_default_torch_dtype
     from vllm.utils.platform_utils import is_pin_memory_available
+    from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
-
 
 class MtpProposer(Proposer):
 
