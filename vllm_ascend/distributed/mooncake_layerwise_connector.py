@@ -1145,7 +1145,8 @@ class MooncakeLayerwiseConnectorWorker:
                       connector_metadata: MooncakeLayerwiseConnectorMetadata,
                       **kwargs) -> None:
         """MooncakeLayerwiseConnector does not save explicitly."""
-        if self.kv_role == 'kv_producer':
+        if self.kv_role == 'kv_producer' and connector_metadata.requests.keys(
+        ):
             if self.pd_head_ratio != 1:
                 if self.current_layer != 0:
                     self.completion_event.wait()

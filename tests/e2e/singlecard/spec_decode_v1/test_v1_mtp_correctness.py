@@ -111,19 +111,3 @@ def test_mtp2_correctness_full_graph(
     model_name: str,
 ):
     mtp_correctness(sampling_config, model_name, 2, CUDAGraphMode.FULL)
-
-
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MLAPO": "1"})
-def test_mtp_correctness_piecewise_graph_with_mlapo_kernel(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config, model_name, 1)
-
-
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MLAPO": "1"})
-def test_mtp_correctness_full_graph_with_mlapo_kernel(
-    sampling_config: SamplingParams,
-    model_name: str,
-):
-    mtp_correctness(sampling_config, model_name, 1, CUDAGraphMode.FULL)

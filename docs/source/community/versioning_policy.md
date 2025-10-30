@@ -74,7 +74,7 @@ vLLM Ascend includes two branches: main and dev.
 Commits should typically be merged into the main branch first, and only then backported to the dev branch, to reduce maintenance costs as much as possible.
 
 ### Maintenance branch and EOL
-The table below lists branch states. 
+The table below lists branch states.
 
 | Branch            | Time Frame                       | Summary                                                   |
 | ----------------- | -------------------------------- | --------------------------------------------------------- |

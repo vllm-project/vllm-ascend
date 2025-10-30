@@ -2364,6 +2364,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             tp_size = self.vllm_config.parallel_config.tensor_parallel_size
             num_tokens = math.ceil(num_tokens / tp_size) * tp_size
 
+        # Force dummy run on prefill stage when this node is deemed as kv producer.
+        if self.is_kv_producer and not self.is_kv_consumer:
+            with_prefill = True
+
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
          _) = self._sync_metadata_across_dp(num_tokens, with_prefill, False)
@@ -2410,10 +2414,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
-
-        # Force dummy run on prefill stage when this node is deemed as kv producer.
-        if self.is_kv_producer and not self.is_kv_consumer:
-            with_prefill = True
 
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
@@ -3529,14 +3529,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             if aclgraph_mode.decode_mode() == CUDAGraphMode.FULL and \
                 aclgraph_mode.separate_routine():
-                max_num_tokens = self.scheduler_config.max_num_seqs * \
-                        self.uniform_decode_query_len
-                decode_cudagraph_batch_sizes = [
-                    x for x in self.aclgraph_batch_sizes if x <= max_num_tokens
-                    and x >= self.uniform_decode_query_len
-                ]
                 compilation_cases_decode = list(
-                    reversed(decode_cudagraph_batch_sizes))
+                    reversed(self.aclgraph_batch_sizes))
                 self._capture_aclgraphs(
                     compilation_cases=compilation_cases_decode,
                     aclgraph_runtime_mode=CUDAGraphMode.FULL,
