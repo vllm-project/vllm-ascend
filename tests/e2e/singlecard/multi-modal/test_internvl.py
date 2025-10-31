@@ -25,6 +25,7 @@ from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
+from vllm_ascend.utils import vllm_version_is
 
 MODELS = [
     "OpenGVLab/InternVL2-8B",
@@ -32,6 +33,13 @@ MODELS = [
     "OpenGVLab/InternVL3-8B",
     "OpenGVLab/InternVL3_5-8B",
 ]
+
+# skip testing InternVL3-8B and InternVL3_5-8B on 0.11.0 due to https://github.com/vllm-project/vllm-ascend/issues/3925.
+if vllm_version_is("0.11.0"):
+    MODELS = [
+        "OpenGVLab/InternVL2-8B",
+        "OpenGVLab/InternVL2_5-8B",
+    ]
 
 
 @pytest.mark.parametrize("model", MODELS)
