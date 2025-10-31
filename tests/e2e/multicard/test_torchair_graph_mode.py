@@ -267,7 +267,7 @@ def _deepseek_v2_lite_torchair_test_fixure(
 
     for i in range(len(vllm_output)):
         generated_text = vllm_output[i][1]
-        assert len(generated_text.strip()) > 0, f"第{i}条生成结果为空"
+        assert len(generated_text.strip()) > 0, f"The {i}-th output is null"
 
 
 def test_e2e_deepseekv2lite_with_torchair():

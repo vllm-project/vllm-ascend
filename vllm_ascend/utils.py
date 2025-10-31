@@ -58,6 +58,7 @@ _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
 _ENABLE_SP = None
+_HAS_LAYER_IDX = None
 
 
 def is_310p():
@@ -311,6 +312,41 @@ def get_max_hidden_layers(hf_config) -> int:
     return max(layer_counts)
 
 
+# Update cudagraph capture sizes for vllm config
+def update_cudagraph_capture_sizes(vllm_config: VllmConfig,
+                                   cudagraph_capture_sizes: List[int]):
+
+    valid_max_size = (cudagraph_capture_sizes[-1]
+                      if cudagraph_capture_sizes else 0)
+    if (vllm_config.compilation_config.max_cudagraph_capture_size is not None
+            and vllm_config.compilation_config.max_cudagraph_capture_size
+            != valid_max_size):
+        if vllm_config.compilation_config.cudagraph_capture_sizes is not None:
+            raise ValueError(
+                "customized max_cudagraph_capture_size"
+                f"(={vllm_config.compilation_config.max_cudagraph_capture_size}) "
+                "should be consistent with the max value of "
+                f"cudagraph_capture_sizes(={valid_max_size})")
+        logger.warning(
+            "Truncating max_cudagraph_capture_size to %d",
+            valid_max_size,
+        )
+
+    vllm_config.compilation_config.max_cudagraph_capture_size = valid_max_size
+
+    if vllm_config.compilation_config.cudagraph_capture_sizes is not None and len(
+            cudagraph_capture_sizes) < len(
+                vllm_config.compilation_config.cudagraph_capture_sizes):
+        logger.warning(
+            ("cudagraph_capture_sizes specified in compilation_config"
+             " %s is overridden by config %s"),
+            vllm_config.compilation_config.cudagraph_capture_sizes,
+            cudagraph_capture_sizes,
+        )
+    vllm_config.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
+    vllm_config.compilation_config.post_init_cudagraph_sizes()
+
+
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
     # NOTE: Currently, we can only capture 1800 graphs at most,
@@ -402,7 +438,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         indices[0], indices[-1] = 0, len(original_sizes) - 1
 
         sampled_sizes = [original_sizes[i] for i in indices]
-        compilation_config.init_with_cudagraph_sizes(sampled_sizes)
+        if vllm_version_is("0.11.0"):
+            compilation_config.init_with_cudagraph_sizes(sampled_sizes)
+        else:
+            update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
 
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
@@ -433,7 +472,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
             enlarged_sizes = [(num_speculative_tokens + 1) * size
                               for size in original_sizes]
-            compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            if vllm_version_is("0.11.0"):
+                compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            else:
+                update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
             logger.info(
                 "Adjusted ACL graphs: %s → %s for speculative decoding",
                 original_sizes, enlarged_sizes)
@@ -494,36 +536,6 @@ class ProfileExecuteDuration:
         return durations
 
 
-# TODO(ttanzhiqiang): rm_router_logits
-# dp>1 will trigger
-# In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
-def get_rm_router_logits_state(ep_size: int, dp_size: int,
-                               is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if dp_size > 1:
-        if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-                and is_deepseek_v3_r1):
-            return True
-        elif ep_size == 1 and is_deepseek_v3_r1:
-            return True
-    return False
-
-
-# TODO(ttanzhiqiang): all_reduce merge
-# When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-# Currently, all_reduce_merge is enabled by default in the AllGather, AllGatherEP and NaiveMulticast scenarios of the deepseek model.
-def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-            and is_deepseek_v3_r1):
-        return True
-    elif ep_size == 1 and is_deepseek_v3_r1:
-        return True
-    return False
-
-
 def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
@@ -536,7 +548,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
-    from vllm_ascend.models.layers.sfa import AscendSparseFlashAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
                                                      AscendSharedFusedMoE)
@@ -584,10 +595,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     mla_to_register = "MultiHeadLatentAttention" if vllm_version_is(
         "0.11.0") else "MultiHeadLatentAttentionWrapper"
     if vllm_config and vllm_config.model_config and vllm_config.model_config.use_mla:
-        AscendMLAAttentionWarrper = AscendSparseFlashAttention if hasattr(
-            vllm_config.model_config.hf_config,
-            "index_topk") else AscendMultiHeadLatentAttention
-        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMLAAttentionWarrper
+        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMultiHeadLatentAttention
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -796,3 +804,14 @@ def version_check():
         if full_date >= "20250919":
             return True
     return False
+
+
+def has_layer_idx(model_instance: torch.nn.Module) -> bool:
+    if model_instance is None:
+        return False
+
+    global _HAS_LAYER_IDX
+    if _HAS_LAYER_IDX is None:
+        _HAS_LAYER_IDX = hasattr(model_instance, "model") and \
+            hasattr(model_instance.model, "start_layer")
+    return _HAS_LAYER_IDX

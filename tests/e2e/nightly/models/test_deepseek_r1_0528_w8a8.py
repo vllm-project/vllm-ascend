@@ -32,6 +32,7 @@ MODES = [
     "torchair",
     "single",
     "aclgraph",
+    "aclgraph_mlapo",
     "no_chunkprefill",
 ]
 
@@ -108,6 +109,9 @@ async def test_models(model: str, mode: str) -> None:
         additional_config["torchair_graph_config"] = {"enabled": False}
     if mode == "aclgraph":
         additional_config["torchair_graph_config"] = {"enabled": False}
+    if mode == "aclgraph_mlapo":
+        env_dict["VLLM_ASCEND_ENABLE_MLAPO"] = "1"
+        additional_config["torchair_graph_config"] = {"enabled": False}
     if mode == "no_chunkprefill":
         additional_config["ascend_scheduler_config"] = {"enabled": True}
         i = server_args.index("--max-num-batched-tokens") + 1
@@ -133,4 +137,7 @@ async def test_models(model: str, mode: str) -> None:
         if mode in ["single", "no_chunkprefill"]:
             return
         # aisbench test
-        run_aisbench_cases(model, port, aisbench_cases)
+        run_aisbench_cases(model,
+                           port,
+                           aisbench_cases,
+                           server_args=server_args)

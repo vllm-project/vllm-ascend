@@ -44,17 +44,15 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.tests }}
   cancel-in-progress: true
 
 jobs:
   e2e-nightly:
-    name: e2e-nightly
+    name: ${{ inputs.tests }}
     runs-on: ${{ inputs.runner }}
     container:
       image: ${{ inputs.image }}
-      env:
-        VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
         run: |
@@ -111,5 +109,4 @@ jobs:
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
         run: |
-          # TODO: enable more tests
           pytest -sv ${{ inputs.tests }}
