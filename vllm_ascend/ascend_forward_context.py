@@ -11,8 +11,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import (enable_sp, has_layer_idx, is_moe_model,
-                               version_check)
+from vllm_ascend.utils import enable_sp, has_layer_idx, is_moe_model
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
@@ -162,9 +161,7 @@ def set_ascend_forward_context(
         # this optim now just support dense models due to the specific operators used.
         # Once the necessary conditions are met, support for MOE models will also be added.
         from vllm_ascend.quantization.quant_config import AscendQuantConfig
-        model_type_scope = ["llama", "qwen2", "qwen3"]
-        if version_check():
-            model_type_scope.append("qwen3_moe")
+        model_type_scope = ["llama", "qwen2", "qwen3", "qwen3_moe"]
         addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
             vllm_config.model_config.hf_config.model_type in model_type_scope and \
             forward_context.layer_idx is not None
