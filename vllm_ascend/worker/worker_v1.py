@@ -18,6 +18,7 @@
 #
 
 import copy
+
 from typing import Optional, Union
 
 import torch
