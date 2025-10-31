@@ -96,7 +96,8 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                 parallel_config.data_parallel_size, num_head_replica, -1,
                 alltoall_group_size
             )  # [DP_size, num_head_replica, num_alltoall_group, alltoall_group_size]
-            group_ranks = group_ranks.view(-1, alltoall_group_size).unbind(0)
+            group_ranks = group_ranks.reshape(-1,
+                                              alltoall_group_size).unbind(0)
         group_ranks = [x.tolist() for x in group_ranks]
         local_rank = get_world_group().local_rank
         num = next(

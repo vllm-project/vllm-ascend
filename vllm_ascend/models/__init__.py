@@ -29,10 +29,6 @@ def register_model():
             "vllm_ascend.models.qwen2_5_vl_without_padding:AscendQwen2_5_VLForConditionalGeneration_Without_Padding"
         )
 
-    ModelRegistry.register_model(
-        "DeepseekV32ForCausalLM",
-        "vllm_ascend.models.deepseek_v3_2:CustomDeepseekV3ForCausalLM")
-
     # There is no PanguProMoEForCausalLM in vLLM, so we should register it before vLLM config initialization
     # to make sure the model can be loaded correctly. This register step can be removed once vLLM support PanguProMoEForCausalLM.
     ModelRegistry.register_model(
