@@ -22,7 +22,9 @@ import torch
 import torch.fx as fx
 from vllm.compilation.compiler_interface import CompilerInterface
 from vllm.compilation.counter import compilation_counter
-
+from torch._dynamo.backends.common import aot_autograd
+from torch._inductor.decomposition import select_decomp_table
+from torch._inductor.fx_passes.post_grad import decompose_auto_functionalized
 
 def get_dtype_from_args(args: list[Any]) -> list[torch.dtype]:
     """
@@ -57,15 +59,22 @@ class AscendAdaptor(CompilerInterface):
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
+        def compile_inner(graph, example_inputs):
+            current_pass_manager = compiler_config["graph_fusion_manager"]
+            arg_dtypes = get_dtype_from_args(example_inputs)
+            arg_shapes = get_shapes_from_args(example_inputs)
+            kwargs = {
+                "runtime_shape": runtime_shape,
+                "arg_shapes": arg_shapes,
+                "arg_dtypes": arg_dtypes
+            }
+            graph = current_pass_manager(graph, **kwargs)
+            graph = decompose_auto_functionalized(graph)
+            compilation_counter.num_eager_compiles += 1
+            return graph, None
 
-        current_pass_manager = compiler_config["graph_rewriter_manager"]
-        arg_dtypes = get_dtype_from_args(example_inputs)
-        arg_shapes = get_shapes_from_args(example_inputs)
-        kwargs = {
-            "runtime_shape": runtime_shape,
-            "arg_shapes": arg_shapes,
-            "arg_dtypes": arg_dtypes
-        }
-        graph = current_pass_manager(graph, **kwargs)
-        compilation_counter.num_eager_compiles += 1
-        return graph, None
+        # Use the default decomposition table to decompose operators.
+        decompositions = select_decomp_table()
+        
+        # Use AOT Autograd to handle the forward compilation.
+        return aot_autograd(fw_compiler=compile_inner, decompositions=decompositions)(graph, example_inputs), None

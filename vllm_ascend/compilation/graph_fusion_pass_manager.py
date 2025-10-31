@@ -21,7 +21,7 @@ from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 
 
-class GraphRewritePassManager:
+class AscendFusionPassManager:
     """
     A pass manager for graph rewriting passes.
     It handles the configuration and execution of passes.

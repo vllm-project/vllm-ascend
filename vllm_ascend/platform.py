@@ -288,7 +288,7 @@ class NPUPlatform(Platform):
 
     @property
     def pass_key(self) -> str:
-        return "graph_rewriter_manager"
+        return "graph_fusion_manager"
 
     @classmethod
     def get_attn_backend_cls(cls,
@@ -333,7 +333,7 @@ class NPUPlatform(Platform):
     @classmethod
     def get_pass_manager_cls(cls) -> str:
         """Get the pass manager class of a device."""
-        return "vllm_ascend.compilation.graph_rewrite_pass_manager.GraphRewritePassManager"
+        return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
