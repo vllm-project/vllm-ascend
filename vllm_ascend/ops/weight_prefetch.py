@@ -82,6 +82,7 @@ class WeightPrefetchMethod:
         if not self.moe.is_active_this_forward:
             return
         forward_context = get_forward_context()
+        # layer_idx is subtracted by 1 because layer_idx was incremented by 1 at layernorm.
         weight = forward_context.model_instance.model.layers[
             forward_context.layer_idx - 1].mlp.experts.w13_weight
         weight_size = weight.data.element_size() * weight.data.numel(

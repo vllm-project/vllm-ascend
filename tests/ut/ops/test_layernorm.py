@@ -13,13 +13,8 @@ def mock_rms_norm(x, weight, eps):
     return x + 1, None
 
 
-def mock_add_rms_norm_quant(x, residual, weight, quant_scale, quant_offset,
-                            epsilon):
-    x_out = 2 * x
-    residual_out = 2 * residual
-    x_out_quant = x_out.to(torch.int8)
-    residual_out_quant = residual_out.to(torch.int8)
-    return x_out_quant, None, residual_out_quant
+def mock_add_rms_norm(x, residual, weight, eps):
+    return 2 * x, None, 2 * residual
 
 
 def mock_add_rms_norm_quant_with_bias(x, residual, weight, quant_scale,
@@ -36,9 +31,10 @@ class TestAscendRMSNorm(PytestBase):
     @pytest.fixture(autouse=True)
     def context(self, mocker: MockerFixture):
         mocker.patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
-        arnq_side_effect = mock_add_rms_norm_quant_with_bias
+        mocker.patch("torch_npu.npu_add_rms_norm",
+                     side_effect=mock_add_rms_norm)
         mocker.patch("torch_npu.npu_add_rms_norm_quant",
-                     side_effect=arnq_side_effect)
+                     side_effect=mock_add_rms_norm_quant_with_bias)
         mocker.patch("torch.ops.vllm.maybe_wait_prefetch_done",
                      side_effect=lambda x: None)
 
@@ -130,14 +126,14 @@ class TestAscendRMSNorm(PytestBase):
         mock_forward_context.fusion_linear = "gate_moe"
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 6
+        assert mock_get_forward_context.call_count == 5
         fusion_linear_expected = "qkv_moe"
         assert mock_forward_context.fusion_linear == fusion_linear_expected
         assert mock_forward_context.layer_idx == 2
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 7
+        assert mock_get_forward_context.call_count == 6
         fusion_linear_expected = "gate_moe"
         assert mock_forward_context.fusion_linear == fusion_linear_expected
         assert mock_forward_context.layer_idx == 2
@@ -145,13 +141,13 @@ class TestAscendRMSNorm(PytestBase):
         # last layer returned directly
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 8
+        assert mock_get_forward_context.call_count == 7
         assert mock_forward_context.fusion_linear == "qkv_moe"
         assert mock_forward_context.layer_idx == 3
 
         x_out, residual_out = layer.forward_oot(x, residual)
 
-        assert mock_get_forward_context.call_count == 9
+        assert mock_get_forward_context.call_count == 8
         assert mock_forward_context.fusion_linear == "qkv_moe"
         assert mock_forward_context.layer_idx == 3
 
