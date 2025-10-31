@@ -12,13 +12,13 @@ vLLM Ascend currently supports [MooncakeStore](https://github.com/kvcache-ai/Moo
 
 While one can utilize mooncake store in vLLM V1 engine by setting it as a remote backend of LMCache with GPU (see [Tutorial](https://github.com/LMCache/LMCache/blob/dev/examples/kv_cache_reuse/remote_backends/mooncakestore/README.md)), we find it would be better to integrate a connector that directly supports mooncake store and can utilize the data transfer strategy to one that is best fit to Huawei NPU hardware.
 
-Hence, we propose to integrate Mooncake Store with a brand new **MooncakeStoreConnectorV1**, which is indeed largly inspired by **LMCacheConnectorV1** (see [MooncakeStoreConnectorV1 Integration](#how-is-mooncakestoreconnectorv1-implemented)).
+Hence, we propose to integrate Mooncake Store with a brand new **MooncakeStoreConnectorV1**, which is indeed largly inspired by **LMCacheConnectorV1** (see the `How is MooncakestoreConnectorV1 Implemented?` section).
 
 ## Usage
 
 vLLM Ascend Currently supports Mooncake Store for KV Cache Pool. To enable Mooncake Store, one needs to config `kv-transfer-config` and choose `MooncakeStoreConnector` as KV Connector.
 
-For step-by-step deployment and configuration, please refer to the [KV Pool User Guide](vllm-ascend/docs/source/user_guide/feature_guide/kv_pool_mooncake.md).
+For step-by-step deployment and configuration, please refer to the KV Pool User Guide at `vllm-ascend/docs/source/user_guide/feature_guide/kv_pool_mooncake.md`
 
 ## How it works?
 The KV Cache Pool integrates multiple memory tiers (HBM, DRAM, SSD, etc.) through a connector-based architecture.
@@ -52,6 +52,7 @@ Currently, we only perform put and get operation of KV Pool for **Prefiil Nodes*
 To Enable this feature, we need to setup both Mooncake Connector and Mooncake Store connector with a Multi Connector, which is a KV Connector class provided by vLLM that can call multiple KV Connectors in specific order;
 
 For details, please also refer to the Mooncake Connector Store Deployment Guide.
+
 ## How is MooncakestoreConnectorV1 Implemented?
 **MooncakestoreConnectorV1** inhereits the KV Connector V1 class in vLLM V1: through implementing the required methods defined in the KV connector V1 base class, one can integrate a thrid-party KV cache transfer/storage backend into the vLLM framework.
 
@@ -79,4 +80,4 @@ The KV Connector methods that need to be implemented can be categorized into sch
 
 1. Currently, Mooncake Store for vLLM-Ascend only supports DRAM as the storage for KV Cache pool.
 
-2. For now, if we successfully looked up a key and found it exists, but failed to get it when calling KV Pool's get function, we just output a log indicating the get operation failed and keep going; hence, the accuracy of that specific request may be affected. We will handle this situation by falling back the request and re-compute everything assuming there's no prefix cache hit (or even better, revert only one block and keep using the Prefix Caches before that).
+2. For now, if we successfully looked up a key and found it exists, but failed to get it when calling KV Pool's get function, we just output a log indicating the get operation failed and keep going; hence, the accuracy of that specific request may be affected. gWe will handle this situation by falling back the request and re-compute everything assuming there's no prefix cache hit (or even better, revert only one block and keep using the Prefix Caches before that).
