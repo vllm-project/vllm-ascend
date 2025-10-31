@@ -76,7 +76,7 @@ jobs:
         run: |
           # pytest -sv tests/e2e/singlecard/test_aclgraph.py
           # pytest -sv tests/e2e/singlecard/test_quantization.py
-          # pytest -sv tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
+          pytest -sv tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
           pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair
 
       - name: Run e2e test
