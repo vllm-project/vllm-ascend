@@ -681,9 +681,24 @@ def prefill_context_parallel_enable() -> bool:
 def is_moe_model(vllm_config: VllmConfig):
     global _IS_MOE_MODEL
     if _IS_MOE_MODEL is None:
-        config = vllm_config.model_config.hf_config
-        _IS_MOE_MODEL = any('experts' in key.lower()
-                            for key in config.to_dict())
+        model_configs = vllm_config.model_config.hf_config.to_dict()
+
+        if ("VL" in model_configs["architectures"][0]
+                and "text_config" in model_configs):
+            # Check VL multi-modal models
+            _IS_MOE_MODEL = any("experts" in key.lower()
+                                for key in model_configs["text_config"])
+        elif ("Omni" in model_configs["architectures"][0]
+              and "talker_config" in model_configs
+              and "text_config" in model_configs["talker_config"]):
+            # Check Omni multi-modal models
+            _IS_MOE_MODEL = any(
+                "experts" in key.lower()
+                for key in model_configs["talker_config"]["text_config"])
+        else:
+            # Check text-only models
+            _IS_MOE_MODEL = any("experts" in key.lower()
+                                for key in model_configs)
     return _IS_MOE_MODEL
 
 
