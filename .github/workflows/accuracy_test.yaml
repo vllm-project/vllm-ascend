@@ -53,7 +53,7 @@ jobs:
             model_name: Qwen2-Audio-7B-Instruct
           - runner: a2-2
             model_name: Qwen3-30B-A3B
-          # This model has a bug that needs to be fixed and re added
+          # To do: This model has a bug that needs to be fixed and readded
           # - runner: a2-2
           #   model_name: Qwen3-VL-30B-A3B-Instruct
           - runner: a2-2
