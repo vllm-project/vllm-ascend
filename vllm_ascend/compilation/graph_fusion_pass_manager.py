@@ -21,7 +21,7 @@ from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 
 
-class AscendFusionPassManager:
+class GraphFusionPassManager:
     """
     A pass manager for graph rewriting passes.
     It handles the configuration and execution of passes.
@@ -37,7 +37,7 @@ class AscendFusionPassManager:
         for pass_ in self.passes:
             if pass_.is_applicable(**kwargs):
                 pass_(graph)
-        graph.recompile()
+        # graph.recompile() # 这句话是必写吗
         return graph
 
     def add(self, pass_: VllmInductorPass):
