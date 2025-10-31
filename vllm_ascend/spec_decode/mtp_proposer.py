@@ -11,7 +11,6 @@ from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
-from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -19,6 +18,8 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.patch.worker.patch_deepseek_mtp import \
+    AscendDeepSeekMTP as DeepSeekMTP
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
