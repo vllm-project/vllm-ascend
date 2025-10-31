@@ -32,6 +32,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+
 from vllm_ascend.utils import vllm_version_is
 
 
