@@ -349,12 +349,6 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig,
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
-    from vllm.config.compilation import CUDAGraphMode
-    if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-        if vllm_config.speculative_config is not None and \
-            vllm_config.speculative_config.num_speculative_tokens > 1:
-            _update_spec_aclgraph_sizes(vllm_config)
-        return
     # NOTE: Currently, we can only capture 1800 graphs at most,
     # due to the limitation of ACL graph. This number is bounded by
     # the number of streams, which is 2048, we save 248 streams
@@ -465,51 +459,28 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             vllm_config.model_config.architectures[0], num_hidden_layers,
             len(original_sizes))
 
-    if vllm_config.speculative_config is not None and \
-        vllm_config.speculative_config.num_speculative_tokens > 1:
-        _update_spec_aclgraph_sizes(vllm_config)
-
-
-def _update_spec_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # default or defined cudagraph_capture_sizes may not consider num_speculative_tokens>1 scenario
     # the maximum size cudagraph_capture_sizes[0] should be greater or equal than
     # (num_speculative_tokens+1)*max_num_seqs, otherwise draft model will run in eager mode
-    from vllm.config.compilation import CUDAGraphMode
-    compilation_config = vllm_config.compilation_config
-    num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
-    uniform_decode_query_len = num_speculative_tokens + 1
-    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-    max_num_tokens = max_num_seqs * uniform_decode_query_len
-    original_sizes, compilation_config.cudagraph_capture_sizes = \
-        compilation_config.cudagraph_capture_sizes, None
-
-    assert len(original_sizes) > 0
-
-    if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY and \
-        not all(size % uniform_decode_query_len == 0 for size in original_sizes):
-        enlarged_sizes = [
-            size * uniform_decode_query_len for size in original_sizes
-            if size >= uniform_decode_query_len and size *
-            uniform_decode_query_len <= max_num_tokens
-        ]
-        if vllm_version_is("0.11.0"):
-            compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+    if vllm_config.speculative_config is not None and \
+        vllm_config.speculative_config.num_speculative_tokens > 1:
+        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        original_sizes, compilation_config.cudagraph_capture_sizes = \
+            compilation_config.cudagraph_capture_sizes, None
+        assert len(original_sizes) > 0
+        if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
+            enlarged_sizes = [(num_speculative_tokens + 1) * size
+                              for size in original_sizes]
+            if vllm_version_is("0.11.0"):
+                compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            else:
+                update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
+            logger.info(
+                "Adjusted ACL graphs: %s → %s for speculative decoding",
+                original_sizes, enlarged_sizes)
         else:
-            update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
-        logger.info("Adjusted ACL graphs: %s → %s for speculative decoding",
-                    original_sizes, enlarged_sizes)
-    elif original_sizes[0] < max_num_tokens:
-        enlarged_sizes = [
-            size * uniform_decode_query_len for size in original_sizes
-        ]
-        if vllm_version_is("0.11.0"):
-            compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
-        else:
-            update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
-        logger.info("Adjusted ACL graphs: %s → %s for speculative decoding",
-                    original_sizes, enlarged_sizes)
-    else:
-        compilation_config.cudagraph_capture_sizes = original_sizes
+            compilation_config.cudagraph_capture_sizes = original_sizes
 
 
 # TODO(wxy): Move to ops module
@@ -577,12 +548,10 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
-    from vllm_ascend.models.layers.sfa import AscendSparseFlashAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
                                                      AscendSharedFusedMoE)
-    from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
-                                           AscendQuantRMSNorm, AscendRMSNorm)
+    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
@@ -616,19 +585,10 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
     }
-
-    if vllm_config is not None and \
-        vllm_config.quant_config is not None and \
-        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()) and \
-            not version_check():
-        REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
     mla_to_register = "MultiHeadLatentAttention" if vllm_version_is(
         "0.11.0") else "MultiHeadLatentAttentionWrapper"
     if vllm_config and vllm_config.model_config and vllm_config.model_config.use_mla:
-        AscendMLAAttentionWarrper = AscendSparseFlashAttention if hasattr(
-            vllm_config.model_config.hf_config,
-            "index_topk") else AscendMultiHeadLatentAttention
-        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMLAAttentionWarrper
+        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMultiHeadLatentAttention
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -822,21 +782,6 @@ def calculate_dp_buffer_size() -> int:
 def is_hierarchical_communication_enabled():
     return (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
             and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
-
-
-@functools.cache
-def version_check():
-    """check if torch_npu version >= dev20250919"""
-    import re  # noqa
-    torch_npu_version = torch_npu.version.__version__
-    date_pattern = r'dev(\d{8})'
-
-    match = re.search(date_pattern, torch_npu_version)
-    if match:
-        full_date = match.group(1)
-        if full_date >= "20250919":
-            return True
-    return False
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:

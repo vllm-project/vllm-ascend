@@ -163,10 +163,11 @@ class RemoteOpenAIServer:
         self.proxy_port = proxy_port
 
         self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 7200
+        max_wait_seconds = max_wait_seconds or 1800
         if self.disaggregated_prefill:
             assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
-            self._wait_for_server_pd(proxy_port=proxy_port)
+            self._wait_for_server_pd(proxy_port=proxy_port,
+                                     timeout=max_wait_seconds)
         else:
             self._wait_for_server(url=self.url_for("health"),
                                   timeout=max_wait_seconds)
@@ -186,7 +187,7 @@ class RemoteOpenAIServer:
         """Subclasses override this method to customize process polling"""
         return self.proc.poll()
 
-    def hang_until_terminated(self) -> None:
+    def hang_until_terminated(self, url) -> None:
         """
         Wait until the server process terminates.
         This is for headless mode, where the api server
@@ -196,7 +197,7 @@ class RemoteOpenAIServer:
         try:
             while True:
                 try:
-                    resp = client.get(self.url_for("health"), timeout=5)
+                    resp = client.get(url, timeout=5)
                     if resp.status_code != 200:
                         break
                     time.sleep(5)
@@ -206,7 +207,7 @@ class RemoteOpenAIServer:
             if isinstance(client, httpx.Client):
                 client.close()
 
-    def _wait_for_server_pd(self, proxy_port: int):
+    def _wait_for_server_pd(self, proxy_port: int, timeout: float):
         # Wait for all api_server nodes ready
         assert self.nodes_info is not None, "cluster info must be provided"
         for node_info in self.nodes_info:
@@ -214,12 +215,12 @@ class RemoteOpenAIServer:
                 continue
 
             url_health = f"http://{node_info.ip}:{node_info.server_port}/health"
-            self._wait_for_server(url=url_health, timeout=7200)
+            self._wait_for_server(url=url_health, timeout=timeout)
 
         # Wait for proxy ready
         master_node = self.nodes_info[0]
         url_proxy = f"http://{master_node.ip}:{proxy_port}/healthcheck"
-        self._wait_for_server(url=url_proxy, timeout=7200)
+        self._wait_for_server(url=url_proxy, timeout=timeout)
 
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
