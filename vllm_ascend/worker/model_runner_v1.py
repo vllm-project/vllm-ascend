@@ -2516,7 +2516,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor)
                 if need_dummy_logits:
-                    dummy_compute_logits(hidden_states)
+                    self.drafter.model.compute_logits(
+                        hidden_states[dummy_indices])
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if not self.in_profile_run and self.dynamic_eplb:
