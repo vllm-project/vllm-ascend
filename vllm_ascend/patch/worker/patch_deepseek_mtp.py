@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import vllm
@@ -18,7 +20,7 @@ def forward(
     input_ids: torch.Tensor,
     positions: torch.Tensor,
     previous_hidden_states: torch.Tensor,
-    inputs_embeds: torch.Tensor | None = None,
+    inputs_embeds: Optional[torch.Tensor] = None,
     spec_step_index: int = 0,
 ) -> torch.Tensor:
     assert inputs_embeds is not None
