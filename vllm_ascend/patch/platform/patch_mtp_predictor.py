@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-
 import vllm
-
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
-from vllm.compilation.decorators import support_torch_compile
 
 
 def forward(
@@ -27,14 +25,14 @@ def forward(
     previous_hidden_states = self.hnorm(previous_hidden_states)
 
     hidden_states = self.eh_proj(
-        torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
-    )
+        torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
-    hidden_states, residual = self.mtp_block(
-        positions=positions, hidden_states=hidden_states, residual=None
-    )
+    hidden_states, residual = self.mtp_block(positions=positions,
+                                             hidden_states=hidden_states,
+                                             residual=None)
     hidden_states = residual + hidden_states
     return hidden_states
+
 
 # Patch this only for aclgraph support, as this is not support in vLLM 0.11.0
 @support_torch_compile
@@ -45,4 +43,3 @@ class AscendDeepSeekMTP(DeepSeekMTP):
 
 
 vllm.model_executor.models.deepseek_mtp.DeepSeekMultiTokenPredictorLayer.forward = forward
-vllm.model_executor.models.deepseek_mtp.DeepSeekMTP = AscendDeepSeekMTP
