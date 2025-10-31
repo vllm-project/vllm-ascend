@@ -54,14 +54,14 @@ class AscendScheduler(Scheduler):
                                                decode_max_num_seqs)
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-        structured_output_manager: StructuredOutputManager,
-        block_size: Optional[int] = None,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        include_finished_set: bool = False,
-        log_stats: bool = False,
+            self,
+            vllm_config: VllmConfig,
+            kv_cache_config: KVCacheConfig,
+            structured_output_manager: StructuredOutputManager,
+            block_size: Optional[int] = None,
+            mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+            include_finished_set: bool = False,
+            log_stats: bool = False,
     ) -> None:
         # Call the parent class's __init__ method
         if vllm_version_is("0.11.0"):
@@ -135,14 +135,16 @@ class AscendScheduler(Scheduler):
                 break
 
             request = self.waiting[0]
+            logger.info(f"request is {request}")
 
             def skip_cur_request():
                 self.waiting.popleft()
                 skipped_waiting_requests.appendleft(request)
-
+            logger.info(f"request.status is {request.status}")
             # P/D: skip request if still waiting for remote kvs.
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 is_ready = self._update_waiting_for_remote_kv(request)
+                logger.info(f"is_ready is {is_ready}")
                 if is_ready:
                     request.status = RequestStatus.WAITING
                 else:
@@ -152,8 +154,8 @@ class AscendScheduler(Scheduler):
             # Check that adding the request still respects the max_loras
             # constraint.
             if (self.lora_config and request.lora_request and
-                (len(scheduled_loras) == self.lora_config.max_loras
-                 and request.lora_request.lora_int_id not in scheduled_loras)):
+                    (len(scheduled_loras) == self.lora_config.max_loras
+                     and request.lora_request.lora_int_id not in scheduled_loras)):
                 # Scheduling would exceed max_loras, skip.
                 skip_cur_request()
                 continue
@@ -227,8 +229,8 @@ class AscendScheduler(Scheduler):
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
                      new_encoder_budget) = self._try_schedule_encoder_inputs(
-                         request, num_computed_tokens, num_new_tokens,
-                         encoder_budget)
+                        request, num_computed_tokens, num_new_tokens,
+                        encoder_budget)
                     if num_new_tokens == 0 or len(
                             encoder_inputs_to_schedule) == 0:
                         # The request cannot be scheduled.
@@ -241,8 +243,8 @@ class AscendScheduler(Scheduler):
                 skip_cur_request()
                 continue
 
-            if  num_new_tokens > long_prefill_token_threshold \
-                and long_prefill_budget <= 0:
+            if num_new_tokens > long_prefill_token_threshold \
+                    and long_prefill_budget <= 0:
                 skip_cur_request()
                 continue
 
@@ -268,6 +270,7 @@ class AscendScheduler(Scheduler):
                 )
 
             self.waiting.popleft()
+            self.logger.info(f"load_kv_async is {load_kv_async}")
             if load_kv_async:
                 # If loading async, allocate memory and put request
                 # into the WAITING_FOR_REMOTE_KV state.
@@ -293,7 +296,7 @@ class AscendScheduler(Scheduler):
 
             req_to_new_blocks[
                 request.request_id] = self.kv_cache_manager.get_blocks(
-                    request.request_id)
+                request.request_id)
             # Update request info.
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
@@ -352,8 +355,8 @@ class AscendScheduler(Scheduler):
                 if request.has_encoder_inputs:
                     (encoder_inputs_to_schedule, num_new_tokens,
                      new_encoder_budget) = self._try_schedule_encoder_inputs(
-                         request, request.num_computed_tokens, num_new_tokens,
-                         encoder_budget)
+                        request, request.num_computed_tokens, num_new_tokens,
+                        encoder_budget)
 
                 # Check that adding the request still respects the max_loras
                 # constraint.
@@ -382,6 +385,7 @@ class AscendScheduler(Scheduler):
                         request,
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens)
+                    logger.info(f"try allocate slot for request {request.request_id},new_blocks is {new_blocks}")
                     if new_blocks is None:
                         # The request cannot be scheduled.
                         # Preempt the lowest-priority request.
@@ -543,8 +547,8 @@ class AscendScheduler(Scheduler):
                                             if blk.ref_cnt == 0)
         # If number of free blocks is less than water mark after allocating, don't allocate.
         if (self.kv_cache_manager.block_pool.get_num_free_blocks() -
-                num_evictable_computed_blocks -
-                num_new_blocks) < watermark_blocks:
+            num_evictable_computed_blocks -
+            num_new_blocks) < watermark_blocks:
             return False
         return True
 
@@ -566,9 +570,9 @@ class AscendScheduler(Scheduler):
             return prompt_limit
 
     def finish_requests(
-        self,
-        request_ids: Union[str, Iterable[str]],
-        finished_status: RequestStatus,
+            self,
+            request_ids: Union[str, Iterable[str]],
+            finished_status: RequestStatus,
     ) -> None:
         """Handles the finish signal from outside the scheduler.
 
@@ -585,9 +589,9 @@ class AscendScheduler(Scheduler):
         super().finish_requests(request_ids, finished_status)
 
     def update_from_output(
-        self,
-        scheduler_output: SchedulerOutput,
-        model_runner_output: ModelRunnerOutput,
+            self,
+            scheduler_output: SchedulerOutput,
+            model_runner_output: ModelRunnerOutput,
     ) -> EngineCoreOutputs:
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
