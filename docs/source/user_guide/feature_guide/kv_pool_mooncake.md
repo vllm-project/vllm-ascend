@@ -88,33 +88,33 @@ python3 -m vllm.entrypoints.openai.api_server \
     --max-num-batched-tokens 4096 \
     --kv-transfer-config \
     '{
-	"kv_connector": "MultiConnector",
-	"kv_role": "kv_producer",
-	"kv_connector_extra_config": {
-		"use_layerwise": false,
-		"connectors": [
-			{
-				"kv_connector": "MooncakeConnectorV1",
-				"kv_role": "kv_producer",
-				"kv_port": "20001",
-				"kv_connector_extra_config": {
-					"prefill": {
-						"dp_size": 1,
-						"tp_size": 1
-					},
-					"decode": {
-						"dp_size": 1,
-						"tp_size": 1
-					}
-				}
-			},
-            		{
-				"kv_connector": "MooncakeConnectorStoreV1",
-				"kv_role": "kv_producer",
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+        "use_layerwise": false,
+        "connectors": [
+            {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_producer",
+                "kv_port": "20001",
+                "kv_connector_extra_config": {
+                    "prefill": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                    },
+                    "decode": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                    }
+                }
+            },
+                    {
+                "kv_connector": "MooncakeConnectorStoreV1",
+                "kv_role": "kv_producer",
                 "mooncake_rpc_port":"0"
-			}  
-		]
-	}
+            }  
+        ]
+    }
 }' > p.log 2>&1
 ```
 
@@ -151,33 +151,33 @@ python3 -m vllm.entrypoints.openai.api_server \
     --max-num-batched-tokens 4096 \
     --kv-transfer-config \
     '{
-	"kv_connector": "MultiConnector",
-	"kv_role": "kv_consumer",
-	"kv_connector_extra_config": {
-		"use_layerwise": false,
-		"connectors": [
-		{
-				"kv_connector": "MooncakeConnectorV1",
-				"kv_role": "kv_consumer",
-				"kv_port": "20002",
-				"kv_connector_extra_config": {
-					"prefill": {
-						"dp_size": 1,
-						"tp_size": 1
-					},
-					"decode": {
-						"dp_size": 1,
-						"tp_size": 1
-					}
-				}
-			}, 
-			{
-				"kv_connector": "MooncakeConnectorStoreV1",
-				"kv_role": "kv_consumer",
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_consumer",
+    "kv_connector_extra_config": {
+        "use_layerwise": false,
+        "connectors": [
+        {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_consumer",
+                "kv_port": "20002",
+                "kv_connector_extra_config": {
+                    "prefill": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                    },
+                    "decode": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                    }
+                }
+            }, 
+            {
+                "kv_connector": "MooncakeConnectorStoreV1",
+                "kv_role": "kv_consumer",
                 "mooncake_rpc_port":"1"
-			}
-		]
-	}
+            }
+        ]
+    }
     }' > d.log 2>&1
 ```
 
@@ -252,12 +252,12 @@ python3 -m vllm.entrypoints.openai.api_server \
     --max-num-batched-tokens 4096 \
     --kv-transfer-config \
     '{
-	"kv_connector": "MooncakeConnectorStoreV1",
-	"kv_role": "kv_both",
-	"kv_connector_extra_config": {
-		"use_layerwise": false,
+    "kv_connector": "MooncakeConnectorStoreV1",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "use_layerwise": false,
         "mooncake_rpc_port":"0"
-	}
+    }
 }' > mix.log 2>&1
 ```
 
