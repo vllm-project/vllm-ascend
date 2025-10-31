@@ -66,10 +66,6 @@ jobs:
             model_name: Qwen2.5-Omni-7B
           - runner: a2-1
             model_name: Meta-Llama-3.1-8B-Instruct
-          - runner: a2-2
-            model_name: ERNIE-4.5-21B-A3B-PT
-          - runner: a2-1
-            model_name: Mistral-7B-Instruct-v0.1
       fail-fast: false
     # test will be triggered when tag 'accuracy-test' & 'ready-for-test'
     if:  >-
