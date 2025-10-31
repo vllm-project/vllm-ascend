@@ -126,13 +126,13 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> grouped_matmul_swiglu_quant_weigh
     const c10::optional<at::Tensor> & offset)
 {
     auto x_size = x.sizes();
-    int n = weight[0].sizes()[2];
+    int n = weight[0].sizes()[0] * weight[0].sizes()[3];
     int m = x_size[0];
     int k = x_size[1];
 
-    at::Tensor output = at::empty({m, n/2}, c10::dtype(c10::ScalarType::Char));
-    at::Tensor output_scale = at::empty({m}, c10::dtype(c10::ScalarType::Float));
-    at::Tensor output_offset = at::empty({}, c10::dtype(c10::ScalarType::Float));
+    at::Tensor output = at::zeros({m, n/2}, c10::dtype(c10::ScalarType::Char));
+    at::Tensor output_scale = at::zeros({m}, c10::dtype(c10::ScalarType::Float));
+    at::Tensor output_offset = at::zeros({m}, c10::dtype(c10::ScalarType::Float));
 
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, output_scale, output_offset);
 }

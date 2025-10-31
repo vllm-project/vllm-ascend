@@ -111,18 +111,21 @@ def test_gmm_swiglu_quant_weight_nz_tensor_list():
 
     # x (M, K) - int8
     x = torch.randint(-128, 127, (M, K), dtype=torch.int8)
-    
+
     # weight (E, N, K) - int8
     weight = torch.randint(-128, 127, size=(E, K, N), dtype=torch.int8)
-    weight_nz_npu = []
-    for i in range(E):
-        weight_nz = convert_nd_to_nz(weight[i].clone()).npu()
-        weight_nz_npu.append(torch_npu.npu_format_cast(weight_nz, 29))
-    
+
     # weight_scale (E, N) - float32
     weight_scale = torch.rand(E, N) * 0.9 + 0.1  # uniform(0.1, 1.0)
     weight_scale = weight_scale.to(torch.float32)
-    
+
+    weight_nz_npu = []
+    weight_scale_npu = []
+    for i in range(E):
+        weight_nz = convert_nd_to_nz(weight[i].clone()).npu()
+        weight_nz_npu.append(weight_nz)
+        weight_scale_npu.append(weight_scale[i].clone().npu())
+
     # x_scale (M,) - float32
     x_scale = torch.rand(M) * 0.9 + 0.1  # uniform(0.1, 1.0)
     x_scale = x_scale.to(torch.float32)
@@ -133,7 +136,7 @@ def test_gmm_swiglu_quant_weight_nz_tensor_list():
     output_npu, output_scale_npu, _ = \
         torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(x.npu(),
                                                                               weight_nz_npu,
-                                                                              weight_scale.npu(),
+                                                                              weight_scale_npu,
                                                                               x_scale.npu(),
                                                                               group_list.npu())
     output_npu_valid = output_npu[:group_list[-1], :]

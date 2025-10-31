@@ -14,13 +14,6 @@
 #include <type_traits>
 #include <vector>
 
-#include "torch_npu/csrc/aten/NPUNativeFunctions.h"
-#include "torch_npu/csrc/core/npu/NPUStream.h"
-#include "torch_npu/csrc/framework/OpCommand.h"
-#include "torch_npu/csrc/framework/interface/EnvVariables.h"
-#include "torch_npu/csrc/framework/utils/CalcuOpUtil.h"
-#include "torch_npu/csrc/framework/utils/OpPreparation.h"
-
 #define NPU_NAME_SPACE at_npu::native
 
 #define __FILENAME__ (strrchr("/" __FILE__, '/') + 1)
@@ -215,49 +208,27 @@ inline aclTensor *ConvertType(const at::Tensor &at_tensor)
     aclDataType acl_data_type = kATenScalarTypeToAclDataTypeTable[static_cast<int64_t>(scalar_data_type)];
     TORCH_CHECK(acl_data_type != ACL_DT_UNDEFINED,
                 std::string(c10::toString(scalar_data_type)) + " has not been supported")
-    c10::SmallVector<int64_t, 5> storageDims;
-    // if acl_data_type is ACL_STRING, storageDims is empty.
     auto itemsize = at_tensor.itemsize();
     if (itemsize == 0) {
         AT_ERROR("When ConvertType, tensor item size of cannot be zero.");
         return nullptr;
     }
-    if (acl_data_type != ACL_STRING) {
-        storageDims.push_back(at_tensor.storage().nbytes() / itemsize);
-    }
-
     const auto dimNum = at_tensor.sizes().size();
-    aclFormat format = ACL_FORMAT_ND;
-    switch (dimNum) {
-        case 3:
-            format = ACL_FORMAT_NCL;
-            break;
-        case 4:
-            format = ACL_FORMAT_NCHW;
-            break;
-        case 5:
-            format = ACL_FORMAT_NC1HWC0;
-            break;
-        default:
-            format = ACL_FORMAT_ND;
+    std::vector<int64_t> strides(dimNum, 1);
+    for (int64_t i = dimNum - 2; i >= 0; i--) {
+        strides[i] = at_tensor.sizes().data()[i + 1] * strides[i + 1];
     }
+    aclFormat format = ACL_FORMAT_ND;
 
-    if (acl_data_type == ACL_INT8 && dimNum == 3) {
+    if (acl_data_type == ACL_INT8 && dimNum == 4) {
         format = ACL_FORMAT_FRACTAL_NZ;
     }
 
-    if (at_tensor.unsafeGetTensorImpl()->is_wrapped_number()) {
-        c10::Scalar expScalar = ConvertTensorToScalar(at_tensor);
-        at::Tensor aclInput = CopyScalarToDevice(expScalar, scalar_data_type);
-        return aclCreateTensor(aclInput.sizes().data(), aclInput.sizes().size(), acl_data_type,
-                               aclInput.strides().data(), aclInput.storage_offset(), format, storageDims.data(),
-                               storageDims.size(), const_cast<void *>(aclInput.storage().data()));
-    }
-
     auto acl_tensor =
-        aclCreateTensor(at_tensor.sizes().data(), at_tensor.sizes().size(), acl_data_type, at_tensor.strides().data(),
-                        at_tensor.storage_offset(), format, storageDims.data(), storageDims.size(),
+        aclCreateTensor(at_tensor.sizes().data(), at_tensor.sizes().size(), acl_data_type, strides.data(),
+                        0, format, at_tensor.sizes().data(), at_tensor.sizes().size(),
                         const_cast<void *>(at_tensor.storage().data()));
+    
     return acl_tensor;
 }
 
