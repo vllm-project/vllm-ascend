@@ -117,12 +117,23 @@ class NPUTorchairModelRunner(NPUModelRunner):
         # NOTE: To be clear, we need to make sure that during graph capture, the number of
         # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
         # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
-        max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
+        max_num_tokens = self.parallel_config.tensor_parallel_size
         tp_size = self.parallel_config.tensor_parallel_size
         # Use integer arithmetic for ceiling division.
-        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        # maintain the same calculation logic as the function _align_graph_size_divisible_by_tp_size()
-        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+        max_graph_batch_size = self.calculate_new_torchair_graph_batch_size(
+            max_num_tokens, tp_size)
+        self.mc2_tokens_capacity = max_graph_batch_size
+
+        if get_ascend_soc_version(
+        ) == AscendSocVersion.A3 and self.mc2_tokens_capacity > 512:
+            logger.error(
+                f"A3: the max number of tokens must smaller then 512, but now is {self.mc2_tokens_capacity}"
+            )
+        if get_ascend_soc_version(
+        ) == AscendSocVersion.A2 and self.mc2_tokens_capacity > 256:
+            logger.error(
+                f"A2: the max number of tokens must smaller then 256, but now is {self.mc2_tokens_capacity}"
+            )
 
     def _sync_metadata_across_dp(
             self, num_tokens: int,
@@ -464,6 +475,17 @@ class NPUTorchairModelRunner(NPUModelRunner):
             self.torchair_graph_batch_sizes.append(start_graph_batch_size)
             start_graph_batch_size *= 2
 
+    def calculate_new_torchair_graph_batch_size(self, old_graph_batch_size,
+                                                tp_size):
+        cur_graph_batch_size = (old_graph_batch_size + tp_size -
+                                1) // tp_size * tp_size
+        # MTP > 1: Cal LCMLeast Common Multiple with graph_batch_size and tp_size,
+        # Both adapter multi-dp and FIA operator
+        if self.speculative_config is not None and self.speculative_config.num_speculative_tokens > 1:
+            cur_graph_batch_size = (tp_size * old_graph_batch_size) \
+                                    // math.gcd(tp_size, old_graph_batch_size)
+        return cur_graph_batch_size
+
     def select_torchair_padded_batch_size(self, batch_size: int):
         for padded_batch_size in self.torchair_graph_batch_sizes:
             if batch_size <= padded_batch_size:
@@ -515,13 +537,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
         tp_size = self.parallel_config.tensor_parallel_size
         new_graph_batch_sizes = []
         for graph_batch_size in self.torchair_graph_batch_sizes:
-            cur_graph_batch_size = (graph_batch_size + tp_size -
-                                    1) // tp_size * tp_size
-            # MTP > 1: Cal LCMLeast Common Multiple with graph_batch_size and tp_size,
-            # Both adapter multi-dp and FIA operator
-            if self.speculative_config is not None and self.speculative_config.num_speculative_tokens > 1:
-                cur_graph_batch_size = (tp_size * graph_batch_size) \
-                                       // math.gcd(tp_size, graph_batch_size)
+            cur_graph_batch_size = self.calculate_new_torchair_graph_batch_size(
+                graph_batch_size, tp_size)
             if cur_graph_batch_size not in new_graph_batch_sizes and \
                 cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
                 new_graph_batch_sizes.append(cur_graph_batch_size)
