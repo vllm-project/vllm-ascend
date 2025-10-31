@@ -69,12 +69,7 @@ class AscendAdaptor(CompilerInterface):
                 "arg_dtypes": arg_dtypes
             }
             graph = current_pass_manager(graph, **kwargs)
-            graph = decompose_auto_functionalized(graph)
-            compilation_counter.num_eager_compiles += 1
-            return graph, None
+            return graph
 
-        # Use the default decomposition table to decompose operators.
-        decompositions = select_decomp_table()
-        
         # Use AOT Autograd to handle the forward compilation.
-        return aot_autograd(fw_compiler=compile_inner, decompositions=decompositions)(graph, example_inputs), None
+        return aot_autograd(fw_compiler=compile_inner)(graph, example_inputs), None

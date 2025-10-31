@@ -341,9 +341,9 @@ def check_ascend_config(vllm_config, enforce_eager):
         # aclgraph case
         else:
             # This graph fusion can actually works on eager mode.
-            if ascend_config.ascend_compilation_config.enable_graph_rewriter:
+            if ascend_config.ascend_compilation_config.enable_graph_fusion:
                 logger.info(
-                    "Graph rewriter enabled! Automatic kernel fusion is expected."
+                    "graph fusion enabled! Automatic kernel fusion is expected."
                 )
 
                 if ascend_config.ascend_compilation_config.enable_quantization_fusion:
