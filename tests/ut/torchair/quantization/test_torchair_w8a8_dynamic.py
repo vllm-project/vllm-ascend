@@ -23,9 +23,9 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
     @patch("torch_npu.npu_swiglu")
     @patch("torch_npu.npu_dynamic_quant")
     @patch("torch_npu.npu_moe_finalize_routing")
-    @patch("torch_npu.npu_moe_init_routing")
+    @patch("torch_npu.npu_moe_init_routing_quant")
     def test_torchair_fused_experts_with_all2all(
-            self, mock_moe_init_routing, mock_moe_finalize_routing,
+            self, mock_npu_moe_init_routing_quant, mock_moe_finalize_routing,
             mock_dynamic_quant, mock_swiglu, mock_grouped_matmul,
             mock_moe_re_routing, mock_all_to_all_single):
 
@@ -38,11 +38,10 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         placeholder_ones = torch.ones(self.num_tokens, dtype=torch.int32)
         mock_all_to_all_single.side_effect = lambda output, input, *args, **kwargs: output.copy_(
             input)
-        mock_moe_init_routing.return_value = (
-            placeholder_int8,
-            placeholder_ones,
-            placeholder_ones,
-        )
+        mock_npu_moe_init_routing_quant.return_value = (
+            placeholder_int8, placeholder_ones, placeholder_ones,
+            torch.bincount(placeholder_ones, minlength=len(expert_map)),
+            torch.randn(self.num_tokens))
         mock_moe_re_routing.return_value = (placeholder_int8, self.placeholder,
                                             torch.randint(0,
                                                           100,
