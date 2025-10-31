@@ -33,3 +33,4 @@ from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.11.0"):
     import vllm_ascend.patch.worker.patch_deepseek_mtp  # noqa
+    import vllm_ascend.patch.worker.patch_deepseek_v3_2  # noqa

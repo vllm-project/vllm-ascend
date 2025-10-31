@@ -306,7 +306,6 @@ class NPUPlatform(Platform):
                 **********************************************************************************\033[0m
                 """
                 logger.warning(warning_message)
-                update_aclgraph_sizes(vllm_config)
             else:
                 logger.info(
                     "%s cudagraph_mode is not support on NPU. falling back to NONE",
@@ -344,7 +343,6 @@ class NPUPlatform(Platform):
                 **********************************************************************************\033[0m
                 """
                 logger.warning(warning_message)
-                update_aclgraph_sizes(vllm_config)
             else:
                 logger.info(
                     "%s cudagraph_mode is not support on NPU. falling back to NONE",
