@@ -108,12 +108,12 @@ class NPUFFNModelRunner(NPUModelRunner):
                 m2n_afdconnector_data.moe_expert_num = 64
                 m2n_afdconnector_data.batch_size = 3200
                 m2n_afdconnector_data.h = 2048
-                m2n_afdconnector_data.k = 6
+                m2n_afdconnector_data.k = 8
                 m2n_afdconnector_data.expert_token_nums_type = 0
                 m2n_afdconnector_data.aiv_num = 48
                 
                 hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
-                
+                print(f'recv_attn_output success ,layer id is {current_layer_idx}')
                 m2n_afdconnector_data.handle = handle
                 m2n_afdconnector_data.topk_weights = topk_weights
             else:
@@ -139,7 +139,7 @@ class NPUFFNModelRunner(NPUModelRunner):
                 num_input_tokens = ffn_need_forward_data.num_input_tokens
                 total_num_scheduled_tokens = ffn_need_forward_data.total_num_scheduled_tokens
                 # topk_weights = afdConnectorMetadata.topk_weights
-                topk_ids = afdConnectorMetadata.topk_ids
+                # topk_ids = afdConnectorMetadata.m2n_afdconnector_data.topk_ids
                 # row_idx = afdConnectorMetadata.row_idx
                 print('execute_model')
                 with set_ascend_forward_context(
@@ -162,7 +162,7 @@ class NPUFFNModelRunner(NPUModelRunner):
                             current_layer_idx=current_layer_idx)
                     else:
                         rank_ffn_output = self._execute_eager_mode(
-                            hidden_states,router_logits,current_layer_idx,topk_weights, topk_ids, row_idx)
+                            hidden_states,router_logits,current_layer_idx,topk_weights, topk_ids)
 
             
             self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)
@@ -233,13 +233,12 @@ class NPUFFNModelRunner(NPUModelRunner):
         # Single TP case
         if self.is_m2n:
             rank_ffn_output = self.model.compute_ffn_output(
-                current_layer_idx=current_layer_idx, 
+                layer_idx=current_layer_idx, 
                 hidden_states=hidden_states,
                 group_list=group_list,
                 dynamic_scales=dynamic_scales,
                 topk_weights=topk_weights, 
-                topk_ids=topk_ids, 
-                row_idx=row_idx)
+                topk_ids=topk_ids)
         else:
             rank_ffn_output = self.model.compute_ffn_output(
                 current_layer_idx, hidden_states,router_logits,topk_weights, topk_ids, row_idx)

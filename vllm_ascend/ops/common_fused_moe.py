@@ -68,7 +68,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod,
               self).process_weights_after_loading(layer)
-        print("AscendUnquantizedFusedMoEMethod process_weights_after_loading")
+        # print("AscendUnquantizedFusedMoEMethod process_weights_after_loading")
         if self.transpose:
             w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(
                 1, 2).contiguous()
@@ -316,7 +316,7 @@ class AscendFusedMoE(FusedMoE):
 
     def afd_ffn_compute(
             self, 
-            layer: int,
+            layer: torch.nn.Module,
             hidden_states: torch.Tensor, 
             router_logits:  Optional[torch.Tensor] = None,
             group_list:  Optional[torch.Tensor] = None,
@@ -537,7 +537,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     # TODO 这里的weight的传入有问题，目测是没加载对
     def afd_ffn_compute(
             self, 
-            layer: int,
+            layer: torch.nn.Module,
             hidden_states: torch.Tensor, 
             router_logits:  Optional[torch.Tensor] = None,
             group_list:  Optional[torch.Tensor] = None,
@@ -626,7 +626,7 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
     def afd_m2n_ffn_compute(
             self, 
-            layer: int,
+            layer: torch.nn.Module,
             hidden_states: torch.Tensor, 
             router_logits:  Optional[torch.Tensor] = None,
             group_list:  Optional[torch.Tensor] = None,

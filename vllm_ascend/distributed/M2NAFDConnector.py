@@ -113,14 +113,16 @@ class M2NAFDConnector(AFDConnectorBase):
     # ATTN发给MOE（ATTN发送）
     # TODO:metadata的获取，最好从框架侧去拿
     def send_attn_output(self, 
-                         hidden_states: torch.Tensor, 
+                         hidden_states: torch.Tensor,  
+                         topk_weights: torch.Tensor, 
+                         topk_ids:torch.Tensor, 
                          metadata: AFDConnectorMetadata) -> Any:
-        
-
+        # TODO():move to support aclgraph
+        dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
+        print(f'send_attn_output dst is {dst}')
+        self.process_group.send_object(metadata,dst)
+        print(f'send_attn_output metadata success')
         dynamic_scales = metadata.m2n_afdconnector_data.scale
-        # 重复传topk_idx，topk_weights
-        topk_idx = metadata.m2n_afdconnector_data.topk_idx
-        topk_weights = metadata.m2n_afdconnector_data.topk_weights
         # moe_expert_num
         moe_expert_num = metadata.m2n_afdconnector_data.moe_expert_num
         quant_mode = metadata.m2n_afdconnector_data.quant_mode
@@ -129,7 +131,7 @@ class M2NAFDConnector(AFDConnectorBase):
         if dynamic_scales is None:
             dynamic_scales = torch.tensor([], dtype=torch.float32, device='npu')
         recv_counts = torch_npu.npu_m2n_distribute_send(x=hidden_states,
-                                                        expert_ids=topk_idx,
+                                                        expert_ids=topk_ids,
                                                         expert_scales=topk_weights,
                                                         group_ep=self.afd_pg._get_backend(torch.device("npu")).get_hccl_comm_name(self.rank),
                                                         world_size=self.attn_size + self.ffn_size,
@@ -141,8 +143,7 @@ class M2NAFDConnector(AFDConnectorBase):
                                                         server_rank_size = 2,
                                                         dynamic_scales=dynamic_scales)
         
-        dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
-        self.process_group.send_object(metadata,dst)
+        
         
         return recv_counts
 
@@ -167,7 +168,7 @@ class M2NAFDConnector(AFDConnectorBase):
     # MOE发给ATTN(MOE发送) 
     def send_ffn_output(self, ffn_output: torch.Tensor, metadata: M2NAFDConnectorMetadata):
         # 配置
-        batch_size = metadatabatch_size
+        batch_size = metadata.batch_size
         topk_weights = metadata.topk_weights
         moe_expert_num = metadata.moe_expert_num
         aiv_num = metadata.aiv_num
@@ -186,12 +187,17 @@ class M2NAFDConnector(AFDConnectorBase):
                                         k=k,# config
                                         server_rank_size = 2,
                                         aiv_num=aiv_num)# config 未分核48 
+        print(f'send_ffn_output success')
         return
     
     # ATTN发给MOE(MOE接收)
     def recv_attn_output(self, metadata: M2NAFDConnectorMetadata) -> Any: 
         
-        
+        print(f'before recv_attn_output metadata is {metadata}') 
+        src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
+        afdConnectorMetadata = self.process_group.recv_object(src)
+        print(f'recv_attn_output metadata success')
+        print(f'after recv_attn_output metadata is {metadata}') 
         # TODO(yxj): 对比
         x_type = torch.int8
         if metadata.quant_mode == 0 :
@@ -217,8 +223,6 @@ class M2NAFDConnector(AFDConnectorBase):
                                                                                 expert_token_nums_type=expert_token_nums_type,
                                                                                 server_rank_size = 2,
                                                                                 aiv_num=aiv_num)
-        src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
-        metadata = self.process_group.recv_object(src)
         
         # recv_counts 返程路由
-        return expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales,metadata
+        return expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales,afdConnectorMetadata
