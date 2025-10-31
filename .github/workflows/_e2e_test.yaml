@@ -132,6 +132,7 @@ jobs:
         with:
           name: plogs
           path: plogs.tar.gz
+          retention-days: 3
 
 
   e2e-2-cards:
@@ -242,3 +243,4 @@ jobs:
         with:
           name: plogs
           path: plogs.tar.gz
+          retention-days: 3
