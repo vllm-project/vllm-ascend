@@ -150,6 +150,8 @@ class MtpProposer(Proposer):
                                                      DeepseekV32IndexerCache)
         draft_indexer_layer_names = indexer_layers.keys(
         ) - target_indexer_layer_names
+        # NOTE: Currently we don't have specific attention backend and attention metadata
+        # for deepseek v3.2 indexer, so we just exclude the indexer layers here.
         draft_attn_layer_names = draft_attn_layer_names - draft_indexer_layer_names
 
         assert len(draft_attn_layer_names) == 1
