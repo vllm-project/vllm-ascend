@@ -18,7 +18,7 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.patch.platform.patch_mtp_predictor import \
+from vllm_ascend.patch.worker.patch_deepseek_mtp import \
     AscendDeepSeekMTP as DeepSeekMTP
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
