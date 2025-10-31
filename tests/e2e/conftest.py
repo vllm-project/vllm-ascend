@@ -65,7 +65,8 @@ adapt_patch(True)
 adapt_patch(False)
 
 from vllm.distributed.parallel_state import (  # noqa E402
-    destroy_distributed_environment, destroy_model_parallel)
+    destroy_distributed_environment, destroy_model_parallel,
+    init_distributed_environment, initialize_model_parallel)
 
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 _M = TypeVar("_M")
