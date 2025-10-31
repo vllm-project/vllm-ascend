@@ -66,6 +66,10 @@ class NPUPlatform(Platform):
 
     def is_sleep_mode_available(self) -> bool:
         return True
+    
+    @property
+    def pass_key(self) -> str:
+        return "graph_fusion_manager"
 
     @classmethod
     def pre_register_and_update(cls,

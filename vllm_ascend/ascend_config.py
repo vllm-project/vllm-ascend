@@ -148,11 +148,11 @@ class AscendCompilationConfig:
     """
 
     def __init__(self,
-                 enable_graph_rewriter: bool = True,
+                 enable_graph_fusion: bool = True,
                  fx_graph_eager: bool = False,
                  enable_quantization_fusion: bool = True,
                  **kwargs):
-        self.enable_graph_rewriter = enable_graph_rewriter
+        self.enable_graph_fusion = enable_graph_fusion
         self.fx_graph_eager = fx_graph_eager
         self.enable_quantization_fusion = enable_quantization_fusion
         # Add more compilation related configs here as needed
