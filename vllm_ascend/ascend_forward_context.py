@@ -120,14 +120,11 @@ def set_ascend_forward_context(
         forward_context.num_tokens = num_tokens
         flashcomm_checker = FlashcommEnable(vllm_config, tp_world_size,
                                             num_tokens)
-        forward_context.sp_enabled = flashcomm_checker.is_flashcomm_v1_enabled(
-        )
-        forward_context.flashcomm_v2_enabled = flashcomm_checker.is_flashcomm_v2_enabled(
-        )
-        forward_context.is_any_flashcomm_enabled = flashcomm_checker.is_any_flashcomm_enabled(
-        )
+        forward_context.sp_enabled = flashcomm_checker.is_flashcomm_v1_enabled()
+        forward_context.flashcomm_v2_enabled = flashcomm_checker.is_flashcomm_v2_enabled()
+        forward_context.is_any_flashcomm_enabled = flashcomm_checker.is_any_flashcomm_enabled()
 
-        if forward_context.is_any_flashcomm_enabled:
+        if (forward_context.sp_enabled or forward_context.flashcomm_v2_enabled):
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
@@ -182,7 +179,7 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             max_tokens_across_dp = \
                 forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
-            if forward_context.is_any_flashcomm_enabled:
+            if (forward_context.sp_enabled or forward_context.flashcomm_v2_enabled):
                 padded_length = (max_tokens_across_dp + tp_world_size -
                                  1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
