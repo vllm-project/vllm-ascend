@@ -159,6 +159,64 @@ install_go() {
     export PATH=$PATH:/usr/local/go/bin
 }
 
+install_extra_components() {
+    mkdir -p /vllm-workspace/CANN
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
+        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
+        return 1
+    fi
+    chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+    ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+    
+    export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
+        echo "Failed to download custom_ops wheel"
+        return 1
+    fi
+    pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-mlapo-linux.aarch64.run; then
+        echo "Failed to download CANN-custom_ops-mlapo-linux.aarch64.run"
+        return 1
+    fi
+    chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run 
+    ./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/torch_npu-2.7.1%2Bgitb7c90d0-cp311-cp311-linux_aarch64.whl; then
+        echo "Failed to download torch_npu wheel"
+        return 1
+    fi
+    pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/libopsproto_rt2.0.so; then
+        echo "Failed to download libopsproto_rt2.0.so"
+        return 1
+    fi
+    cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
+    
+    source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
+    export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
+    
+    cat >> ~/.bashrc << 'EOF'
+
+export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
+export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
+EOF
+    
+    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
+          custom_ops-1.0-cp311-cp311-linux_aarch64.whl \
+          CANN-custom_ops-mlapo-linux.aarch64.run \
+          torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl \
+          libopsproto_rt2.0.so
+    
+    echo "====> Extra components installation completed"
+}
+
 kill_npu_processes() {
   pgrep python3 | xargs -r kill -9
   pgrep VLLM | xargs -r kill -9
@@ -192,6 +250,9 @@ main() {
     checkout_src
     install_sys_dependencies
     install_vllm
+    if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-W8A8.yaml" ]]; then
+        install_extra_components
+    fi
     install_ais_bench
     # to speed up mooncake build process, install Go here
     install_go

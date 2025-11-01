@@ -33,6 +33,9 @@ on:
       tests:
         required: true
         type: string
+      name:
+        required: false
+        type: string
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -93,6 +96,28 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+
+      - name: Install custom-ops & MLAPO (for DeepSeek-V3.2-Exp)
+        if: ${{ inputs.name == 'deepseek3_2-exp-w8a8' }}
+        shell: bash -l {0}
+        run: |
+          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
+          chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+          ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+          export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+          export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+          pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+
+          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-mlapo-linux.aarch64.run
+          chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run 
+          ./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
+          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/torch_npu-2.7.1%2Bgitb7c90d0-cp311-cp311-linux_aarch64.whl
+          pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
+          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/libopsproto_rt2.0.so
+          cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
+          . /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
+          export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
 
       - name: Checkout aisbench repo and Install aisbench
         run: |
