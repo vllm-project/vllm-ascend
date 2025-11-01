@@ -215,6 +215,7 @@ class TestAscendConfig(TestBase):
             fake_model_config = ModelConfig(model=model_path)
             fake_model_config.hf_config = PretrainedConfig()
             fake_model_config.hf_config.model_type = "llama"
+            fake_model_config.hf_config.architectures = ["dummy_arch"]
             test_vllm_config.model_config = fake_model_config
             init_ascend_config(test_vllm_config)
             check_ascend_config(test_vllm_config, False)
