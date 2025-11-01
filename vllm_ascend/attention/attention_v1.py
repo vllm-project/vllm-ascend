@@ -1317,7 +1317,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # CP dimension all_gather and fusion
         if self.pcp_size > 1:
             # filter non-zero chunk part of prefix_output
-            # current_seq_lens = torch.tensor(attn_metadata.query_lens, dtype=torch.int32, device=query.device).contiguous()
             current_seq_lens = attn_metadata.query_lens.detach().clone()
             current_seq_lens.mul_(self.pcp_size)  # q_full
             current_seq_lens_cpu = current_seq_lens.cpu()
