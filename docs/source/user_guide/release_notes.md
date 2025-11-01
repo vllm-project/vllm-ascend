@@ -1,5 +1,27 @@
 # Release Notes
 
+## v0.11.0rc1 - 2025.11.04
+
+This is the first release candidate of v0.11.0 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.11.0-dev) to get started.
+v0.11.0 will be the next official release version of vLLM Ascend. We'll release it in the next few days. Any feedback is welcome to help us improve v0.11.0.
+
+### Highlights
+- Deepseek series models work with aclgraph now.
+- PrefixCache and Chunked Prefill are enabled by default.
+- W4A8 quantization is supported now.
+
+### Core
+- Performance of Qwen and Deepseek series models are improved.
+- Mooncake store connector, Mooncake layerwise connector, CPU offload connector are supported now
+- MTP > 1 is supported now.
+- Dynamic and Static EPLB feature is supported now.
+- aclgraph full graph mode is experimental supported now.
+- Pooling model, such as bge-m3, is supported now.
+
+### Other
+- Torchair is deprecated. We'll remove it once the performance of aclgraph is good enough. The deadline is Q1 2026.
+- LLMDatadist KV Connector is deprecated. We'll remove it in Q4 2025.
+
 ## v0.11.0rc0 - 2025.09.30
 
 This is the special release candidate of v0.11.0 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started.
