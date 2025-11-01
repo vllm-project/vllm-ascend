@@ -389,6 +389,9 @@ setup(
     ext_modules=ext_modules,
     cmdclass=cmdclass,
     extras_require={},
+    package_data={
+        "vllm_ascend": ["service_profiling_symbols.yaml"],
+    },
     entry_points={
         "vllm.platform_plugins": ["ascend = vllm_ascend:register"],
         "vllm.general_plugins": [

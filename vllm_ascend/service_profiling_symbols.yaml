@@ -1,0 +1,90 @@
+# ===== Batch / Scheduler =====
+- symbol: vllm.v1.engine.processor:Processor.process_inputs
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.batch_hookers:process_inputs
+
+- symbol: vllm.v1.core.sched.scheduler:Scheduler.schedule
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.batch_hookers:schedule
+  name: batchFrameworkProcessing
+
+- symbol: vllm_ascend.core.scheduler:AscendScheduler.schedule
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.batch_hookers:schedule
+  name: batchFrameworkProcessing
+
+- symbol: vllm.v1.core.sched.scheduler:Scheduler._free_request
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.batch_hookers:free_request
+
+- symbol: vllm.v1.core.sched.scheduler:Scheduler.add_request
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.batch_hookers:add_request
+
+# ===== KV Cache =====
+- symbol: vllm.v1.core.kv_cache_manager:KVCacheManager.allocate_slots
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.kvcache_hookers:allocate_slots
+
+- symbol: vllm.v1.core.kv_cache_manager:KVCacheManager.free
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.kvcache_hookers:free
+
+- symbol: vllm.v1.core.kv_cache_manager:KVCacheManager.get_computed_blocks
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.kvcache_hookers:get_computed_blocks
+
+# ===== Model Execute =====
+- symbol: vllm.model_executor.layers.logits_processor:LogitsProcessor.forward
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.model_hookers:compute_logits
+  name: computing_logits
+
+- symbol: vllm.v1.sample.sampler:Sampler.forward
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.model_hookers:sampler_forward
+  name: sample
+
+- symbol: vllm.v1.executor.abstract:Executor.execute_model
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.model_hookers:execute_model
+  name: modelExec
+
+- symbol: vllm.v1.executor.multiproc_executor:MultiprocExecutor.execute_model
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.model_hookers:execute_model
+  name: modelExec
+
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner.execute_model
+  name: modelRunnerExec
+  domain: ModelExecute
+
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._update_states
+  name: _update_states
+  domain: ModelExecute
+
+- symbol: vllm_ascend.worker.model_runner_v1:NPUModelRunner._prepare_inputs
+  name: _prepare_inputs
+  domain: ModelExecute
+
+#- symbol: vllm.forward_context:set_forward_context
+#  min_version: "0.9.1"
+#  handler: msserviceprofiler.vllm_profiler.vllm_v1.model_hookers:set_forward_context
+#  name: set_forward_context
+
+- symbol: vllm_ascend.utils:ProfileExecuteDuration.capture_async
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.model_hookers:capture_async
+
+# ===== Request Lifecycle =====
+- symbol: vllm.v1.engine.async_llm:AsyncLLM.add_request
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.request_hookers:add_request_async
+
+- symbol: vllm.engine.async_llm_engine:AsyncLLMEngine.add_request
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.request_hookers:add_request_async
+
+- symbol: vllm.v1.engine.output_processor:OutputProcessor.process_outputs
+  min_version: "0.9.1"
+  handler: msserviceprofiler.vllm_profiler.vllm_v1.request_hookers:process_outputs
