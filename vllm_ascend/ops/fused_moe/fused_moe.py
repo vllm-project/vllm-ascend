@@ -41,7 +41,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
                                shared_expert_dp_enabled,
                                shared_experts_calculation_stream,
-                               vllm_version_is)
+                               vllm_version_is, flashcomm2_enable)
 
 if vllm_version_is("0.11.0"):
     from vllm.config import CompilationLevel
@@ -333,7 +333,7 @@ class AscendFusedMoE(FusedMoE):
         hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            replace_allreduce=forward_context.sp_enabled,
+            replace_allreduce=(forward_context.sp_enabled or forward_context.flashcomm_v2_enabled),
             enable_shared_expert_dp=self.enable_shared_expert_dp)
 
         # Matrix multiply.
@@ -449,6 +449,10 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         if enable_sp():
             logger.info_once(
                 "Sequence parallelism is enabled, shared experts are replicated for best performance."
+            )
+        if flashcomm2_enable():
+            logger.info_once(
+                "Flashcomm2 is enabled, shared experts are replicated for best performance."
             )
 
         self._gate = gate
