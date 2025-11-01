@@ -10,7 +10,7 @@ RED="\033[0;31m"
 NC="\033[0m" # No Color
 
 branch=${1:-pooling_async_memecpy_v1}
-point=${2:-9d96b2e1dd76cc601d76b1b4c5f6e04605cd81d3}
+point=${2:-8fce1ffab3930fec2a8b8d3be282564dfa1bb186}
 
 repo_url="https://github.com/AscendTransport/Mooncake"
 repo_name="Mooncake"
