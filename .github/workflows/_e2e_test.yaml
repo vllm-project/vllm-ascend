@@ -77,7 +77,6 @@ jobs:
           # pytest -sv tests/e2e/singlecard/test_aclgraph.py
           # pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair
 
       - name: Run e2e test
         env:
@@ -172,6 +171,7 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: |
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
+          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair
 
       - name: Run vllm-project/vllm-ascend test (full)
         env:
