@@ -22,9 +22,34 @@ ARG COMPILE_CUSTOM_KERNELS=1
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
+# Install build tools and GCC 13 toolset to match dev environment
 RUN yum update -y && \
-    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
+    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel gcc-toolset-13 && \
     rm -rf /var/cache/yum
+
+# Prefer GCC 13 from gcc-toolset-13
+ENV GCC_TOOLSET_ROOT=/opt/rh/gcc-toolset-13/root
+ENV PATH=${GCC_TOOLSET_ROOT}/usr/bin:${PATH}
+ENV LD_LIBRARY_PATH=${GCC_TOOLSET_ROOT}/usr/lib64:${LD_LIBRARY_PATH}
+ENV CC=${GCC_TOOLSET_ROOT}/usr/bin/gcc
+ENV CXX=${GCC_TOOLSET_ROOT}/usr/bin/g++
+ENV CMAKE_C_COMPILER=${GCC_TOOLSET_ROOT}/usr/bin/gcc
+ENV CMAKE_CXX_COMPILER=${GCC_TOOLSET_ROOT}/usr/bin/g++
+
+# Ensure absolute calls to /usr/bin/gcc/g++ resolve to GCC 13
+RUN alternatives --install /usr/bin/gcc gcc ${GCC_TOOLSET_ROOT}/usr/bin/gcc 100 \
+    --slave /usr/bin/g++ g++ ${GCC_TOOLSET_ROOT}/usr/bin/g++ \
+    --slave /usr/bin/c++ c++ ${GCC_TOOLSET_ROOT}/usr/bin/g++ && \
+    alternatives --set gcc ${GCC_TOOLSET_ROOT}/usr/bin/gcc
+
+# Avoid accidental use of system GCC 8 cross headers/libs (aarch64/x86_64)
+# so that builds pick toolset-13 or Ascend toolchain headers instead
+RUN rm -rf /usr/lib/gcc/aarch64-redhat-linux/8 || true && \
+    rm -rf /usr/lib/gcc/x86_64-redhat-linux/8 || true && \
+    rm -rf /usr/include/c++/8 || true
+
+# Ensure Ascend env is visible to all subsequent RUN steps
+ENV ASCEND_CANN_PACKAGE_PATH=/usr/local/Ascend/ascend-toolkit/latest
 
 WORKDIR /workspace
 

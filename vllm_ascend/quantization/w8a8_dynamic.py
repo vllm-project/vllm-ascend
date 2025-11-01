@@ -26,6 +26,8 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.moe_comm_method import (FusedAlltoAllCommImpl,
+                                                       FusedMC2CommImpl)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, is_enable_nz,
                                vllm_version_is)
 
@@ -245,12 +247,14 @@ class AscendW8A8DynamicFusedMoEMethod:
         topk_weights = topk_weights.to(x.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
+        flag = (isinstance(moe_comm_method, FusedAlltoAllCommImpl)
+                or isinstance(moe_comm_method, FusedMC2CommImpl))
         return moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale_fp32,
+            w1_scale=self.scale1 if flag else layer.w13_weight_scale_fp32,
             w2=layer.w2_weight,
-            w2_scale=layer.w2_weight_scale,
+            w2_scale=self.scale2 if flag else layer.w2_weight_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             use_int8_w8a8=True,
@@ -282,3 +286,13 @@ class AscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
+        self.scale1 = scale_from_float_to_int64(layer.w13_weight_scale.data)
+        self.scale2 = scale_from_float_to_int64(layer.w2_weight_scale.data)
+
+
+def scale_from_float_to_int64(scale):
+    import numpy as np
+    scale = torch.from_numpy(
+        np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(),
+                      dtype=np.int32).astype(np.int64)).to(scale.device)
+    return scale
