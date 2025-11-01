@@ -237,6 +237,17 @@ class AscendAttentionMetadataBuilder:
             self.model_config.max_model_len,
             AscendAttentionBackend.get_supported_block_size()[0])
 
+        self.speculative_config = vllm_config.speculative_config
+        self.decode_threshold = 1
+        if self.speculative_config:
+            spec_token_num = self.speculative_config.num_speculative_tokens
+            self.decode_threshold += spec_token_num
+            assert self.decode_threshold <= 16, f"decode_threshold exceeded \
+                npu_fused_infer_attention_score TND layout's limit of 16, \
+                got {self.decode_threshold}"
+
+        self.reorder_batch_threshold = self.decode_threshold
+
     def reorder_batch(self, input_batch,
                       scheduler_output: "SchedulerOutput") -> bool:
         return False

@@ -146,9 +146,18 @@ class MtpProposer(Proposer):
         with set_default_torch_dtype(
                 draft_model_config.dtype), set_current_vllm_config(
                     self.vllm_config):
-            self.model = DeepSeekMTP(
-                vllm_config=self.vllm_config).to(target_device)
-
+            architecture = self.vllm_config.model_config.architecture
+            if architecture == "DeepseekV3ForCausalLM":
+                self.model = DeepSeekMTP(
+                    vllm_config=self.vllm_config).to(target_device)
+            elif architecture == "Qwen3NextForCausalLM":
+                # use lazy import to avoid a patch bug
+                from vllm_ascend.models.qwen3_next_mtp import \
+                    CustomQwen3NextMTP
+                self.model = CustomQwen3NextMTP(
+                    vllm_config=self.vllm_config).to(target_device)
+            else:
+                raise ValueError("Invalid architecture for mtp.")
         draft_attn_layer_names = (get_layers_from_vllm_config(
             self.vllm_config, AttentionLayerBase).keys() -
                                   target_attn_layer_names)
@@ -218,7 +227,11 @@ class MtpProposer(Proposer):
                            aux_hidden_states: torch.Tensor = None):
         common_attn_metadata = self.runner.spec_decode_common_attn_metadata
         if attn_metadata is not None and isinstance(attn_metadata, dict):
-            attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
+            architecture = self.vllm_config.model_config.architecture
+            if architecture == "Qwen3NextForCausalLM":
+                attn_metadata = attn_metadata['model.layers.3.self_attn.attn']
+            else:
+                attn_metadata = attn_metadata['model.layers.0.self_attn.attn']
 
         if self.speculative_config.disable_padded_drafter_batch:
             # When padded-batch is disabled, the sampled_token_ids should be

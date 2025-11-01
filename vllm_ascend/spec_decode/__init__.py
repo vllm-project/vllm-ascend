@@ -35,6 +35,8 @@ def get_spec_decode_method(method,
         if is_torchair_graph:
             return TorchairMtpProposer(vllm_config, device, runner)
         return MtpProposer(vllm_config, device, runner)
+    elif method == 'qwen3_next_mtp':
+        return MtpProposer(vllm_config, device, runner)
     else:
         raise ValueError("Unknown speculative decoding method: "
                          f"{method}")

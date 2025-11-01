@@ -55,7 +55,7 @@ def causal_conv1d_ref(
         final_states = F.pad(x, (width - 1 - x.shape[-1], 0)).to(
             dtype_in)  # (batch, dim, width - 1)
         if final_states_out is not None:
-            final_states_out.copy_(final_states)
+            final_states_out[..., :(width - 1)].copy_(final_states)
         else:
             final_states_out = final_states
     out = (out if activation is None else F.silu(out)).to(dtype=dtype_in)
