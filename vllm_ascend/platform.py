@@ -44,6 +44,8 @@ else:
     VllmConfig = None
     FlexibleArgumentParser = None
 
+ASCEND_MAX_MODEL_LEN = 65535
+
 
 class NPUPlatform(Platform):
 
@@ -498,3 +500,20 @@ class NPUPlatform(Platform):
     @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
+
+    @classmethod
+    def check_max_model_len(cls, max_model_len: int) -> int:
+        """
+        Check max_model_len for the current platform.
+        """
+        if max_model_len > ASCEND_MAX_MODEL_LEN:
+            logger.warning(
+                "max_model_len is not specified and the default value"
+                "derived from the model config is %d, which is too large"
+                "and will make the engine stuck in initializing distributed"
+                "communication. Set max_model_len to %d.",
+                max_model_len,
+                ASCEND_MAX_MODEL_LEN,
+            )
+            max_model_len = ASCEND_MAX_MODEL_LEN
+        return max_model_len
