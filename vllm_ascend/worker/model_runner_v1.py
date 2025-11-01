@@ -1025,6 +1025,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                              attn_state) -> torch.Tensor:
         if self.pcp_size > 1:
             return None
+        if self.dcp_size > 1:
+            return self.attn_mask_builder.get_splitfuse_attn_mask()
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
         # Pooling situation.
@@ -1032,11 +1034,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return self.attn_mask_builder.get_pooling_mask(self.device)
         # Chunk Prefill situation.
         elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
-            if self.dcp_size > 1:
-                max_seq_len = max(seq_lens.max().item(), 0)
-                return self.attn_mask_builder.get_attn_mask(
-                    max_seq_len, self.dtype, self.device)
-            elif torch.version.cann.startswith("8.3"):
+            if torch.version.cann.startswith("8.3") or self.dcp_size > 1:
                 return self.attn_mask_builder.get_splitfuse_attn_mask()
             else:
                 return self.attn_mask_builder.get_splitfuse_attn_mask(
@@ -4385,6 +4383,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_decodes = sum(self.input_batch.num_computed_tokens_cpu[:num_reqs]
                           >= self.input_batch.num_prompt_tokens[:num_reqs])
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_size
+        num_computed_tokens_of_pcp_dcp_for_chunk = self.input_batch.num_computed_tokens_of_pcp_dcp_for_chunk[num_decodes:num_reqs]
+        mask_for_non_zero_chunk, max_chunk_num = self._get_chunked_req_mask_and_max_chunk(
+                    num_computed_tokens_of_pcp_dcp_for_chunk)
         long_seq_metadata = None
         if self.pcp_size * self.dcp_size > 1:
             long_seq_metadata = AscendPrefillContextParallelMetadata(
@@ -4395,8 +4396,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.dcp_size,
                     self.parallel_config.cp_kv_cache_interleave_size,
                 ).numpy(),
-                num_computed_tokens_of_pcp_dcp_for_chunk=self.input_batch.
-                num_computed_tokens_of_pcp_dcp_for_chunk[num_decodes:num_reqs],
+                num_computed_tokens_of_pcp_dcp_for_chunk=num_computed_tokens_of_pcp_dcp_for_chunk,
+                mask_for_non_zero_chunk=mask_for_non_zero_chunk,
+                max_chunk_num=max_chunk_num
             )
             if self.pcp_size > 1:
                 q_head_idx, q_tail_idx = [], []
@@ -4508,10 +4510,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 }
                 long_seq_metadata.pcp_allgather_restore_idx = self.pcp_allgather_restore_idx[:
                                                                                              num_actual_tokens_pcp_padded]
-                mask_for_non_zero_chunk, max_chunk_num = self._get_chunked_req_mask_and_max_chunk(
-                    long_seq_metadata.num_computed_tokens_of_pcp_dcp_for_chunk)
-                long_seq_metadata.mask_for_non_zero_chunk = mask_for_non_zero_chunk
-                long_seq_metadata.max_chunk_num = max_chunk_num
                 long_seq_metadata.cp_kv_recover_idx_for_chunk = self.cp_kv_recover_idx_for_chunk
                 long_seq_metadata.q_head_idx_tensor = self.q_head_idx_tensor
                 long_seq_metadata.q_tail_idx_tensor = self.q_tail_idx_tensor
