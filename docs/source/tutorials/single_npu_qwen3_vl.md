@@ -1,4 +1,6 @@
-# Single NPU (Qwen2.5-VL 7B)
+# Single NPU (Qwen3-VL 8B)
+
+**Note on Model Compatibility**: All steps and configurations provided in this guide, including **Offline Inference** and **Online Serving**, are also **applicable** to the **Qwen2.5-VL 7B** model. To use this model, simply replace the model path `Qwen/Qwen3-VL-8B-Instruct` in the configuration or code with `Qwen/Qwen2.5-VL-7B-Instruct`.
 
 ## Run vllm-ascend on Single NPU
 
@@ -52,7 +54,7 @@ from transformers import AutoProcessor
 from vllm import LLM, SamplingParams
 from qwen_vl_utils import process_vision_info
 
-MODEL_PATH = "Qwen/Qwen2.5-VL-7B-Instruct"
+MODEL_PATH = "Qwen/Qwen3-VL-8B-Instruct"
 
 llm = LLM(
     model=MODEL_PATH,
@@ -144,14 +146,14 @@ docker run --rm \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
-vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+vllm serve Qwen/Qwen3-VL-8B-Instruct \
 --dtype bfloat16 \
 --max_model_len 16384 \
---max-num-batched-tokens 16384 
+--max-num-batched-tokens 16384
 ```
 
 :::{note}
-Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-7B-Instruct model's max seq len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
+Add `--max_model_len` option to avoid ValueError that the Qwen3-VL-8B-Instruct model's max seq len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
 :::
 
 If your service start successfully, you can see the info shown below:
@@ -168,7 +170,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
-    "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "model": "Qwen/Qwen3-VL-8B-Instruct",
     "messages": [
     {"role": "system", "content": "You are a helpful assistant."},
     {"role": "user", "content": [
@@ -182,7 +184,7 @@ curl http://localhost:8000/v1/chat/completions \
 If you query the server successfully, you can see the info shown below (client):
 
 ```bash
-{"id":"chatcmpl-f04fb20e79bb40b39b8ed7fdf5bd613a","object":"chat.completion","created":1741749149,"model":"Qwen/Qwen2.5-VL-7B-Instruct","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":null,"content":"The text in the illustration reads \"TONGYI Qwen.\"","tool_calls":[]},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":74,"total_tokens":89,"completion_tokens":15,"prompt_tokens_details":null},"prompt_logprobs":null}
+{"id":"chatcmpl-f04fb20e79bb40b39b8ed7fdf5bd613a","object":"chat.completion","created":1741749149,"model":"Qwen/Qwen3-VL-8B-Instruct","choices":[{"index":0,"message":{"role":"assistant","reasoning_content":null,"content":"The text in the illustration reads \"TONGYI Qwen.\"","tool_calls":[]},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":74,"total_tokens":89,"completion_tokens":15,"prompt_tokens_details":null},"prompt_logprobs":null}
 ```
 
 Logs of the vllm server:
