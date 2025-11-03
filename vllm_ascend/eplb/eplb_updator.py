@@ -77,6 +77,7 @@ class EplbUpdator:
         self.cur_iterations += 1
         if self.cur_iterations == (self.num_iterations_eplb_update + \
                                    self.num_wait_worker_iterations + self.num_moe_layers):
+            logger.info("Finish expert parallel load balancing.")
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(
                     self.shared_dict["expert_maps"],

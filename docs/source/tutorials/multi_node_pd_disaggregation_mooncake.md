@@ -97,11 +97,11 @@ cp mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend
 cp mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
 ```
 
-## Prefiller / Decoder Deployment
+## Prefiller/Decoder Deployment
 
-We can run the following scripts to launch a server on the prefiller/decoder node respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
+We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
-### layerwise
+### Layerwise
 
 :::::{tab-set}
 
@@ -284,7 +284,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 ::::
 
-::::{tab-item} Decoder node 2 (primary Node)
+::::{tab-item} Decoder node 2 (primary node)
 
 ```shell
 unset ftp_proxy
@@ -348,7 +348,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 :::::
 
-### non-layerwise
+### Non-layerwise
 
 :::::{tab-set}
 
@@ -470,7 +470,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 ::::
 
-::::{tab-item} Decoder node 1 (master Node)
+::::{tab-item} Decoder node 1 (master node)
 
 ```shell
 unset ftp_proxy
@@ -595,13 +595,13 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 :::::
 
-## Example proxy for Deployment
+## Example Proxy for Deployment
 
-Run a proxy server on the same node with prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py) or [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py) or [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 :::::{tab-set}
 
-::::{tab-item} layerwise
+::::{tab-item} Layerwise
 
 ```shell
 python load_balance_proxy_layerwise_server_example.py \
@@ -615,7 +615,7 @@ python load_balance_proxy_layerwise_server_example.py \
 
 ::::
 
-::::{tab-item} non-layerwise
+::::{tab-item} Non-layerwise
 
 ```shell
 python load_balance_proxy_server_example.py \

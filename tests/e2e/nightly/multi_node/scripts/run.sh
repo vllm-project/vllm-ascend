@@ -20,6 +20,11 @@ print_section() {
     echo -e "\n${BLUE}=== $1 ===${NC}"
 }
 
+print_failure() {
+    echo -e "${RED}${FAIL_TAG} ✗ ERROR: $1${NC}"
+    exit 1
+}
+
 # Function to print success messages
 print_success() {
     echo -e "${GREEN}✓ $1${NC}"
@@ -121,7 +126,7 @@ download_go() {
 }
 
 install_ais_bench() {
-    local AIS_BENCH="$SRC_DIR/benchmark"
+    local AIS_BENCH="$SRC_DIR/vllm-ascend/benchmark"
     git clone https://gitee.com/aisbench/benchmark.git $AIS_BENCH
     cd $AIS_BENCH
     git checkout v3.0-20250930-master
@@ -161,15 +166,24 @@ kill_npu_processes() {
   sleep 4
 }
 
-run_tests() {
-    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py
+run_tests_with_log() {
+    set +e
     kill_npu_processes
-    ret=$?
+    BASENAME=$(basename "$CONFIG_YAML_PATH" .yaml)
+    # each worker should have log file
+    LOG_FILE="${RESULT_FILE_PATH}/${BASENAME}_worker_${LWS_WORKER_INDEX}.log"
+    mkdir -p ${RESULT_FILE_PATH}
+    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee $LOG_FILE
+    ret=${PIPESTATUS[0]}
+    set -e
     if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
-        mkdir -p "$(dirname "$RESULT_PATH")"
-        echo $ret > "$RESULT_PATH"
+        if [ $ret -eq 0 ]; then
+            print_success "All tests passed!"
+        else
+            print_failure "Some tests failed!"
+            mv LOG_FILE error_${LOG_FILE}
+        fi
     fi
-    return $ret
 }
 
 main() {
@@ -185,7 +199,7 @@ main() {
     . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
     pooling_async_memecpy_v1 9d96b2e1dd76cc601d76b1b4c5f6e04605cd81d3
     cd "$WORKSPACE/source_code/vllm-ascend"
-    run_tests
+    run_tests_with_log
 }
 
 main "$@"
