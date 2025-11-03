@@ -8,4 +8,5 @@ This section provides an overview of the features implemented in vLLM Ascend. De
 patch
 ModelRunner_prepare_inputs
 ACL_Graph
+KV_Cache_Pool_Guide
 :::
