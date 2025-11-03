@@ -425,6 +425,7 @@ class MooncakeStoreConfig:
     device_name: str
     master_server_address: str
     use_ascend_direct: bool
+    alloc_in_same_node: bool
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
@@ -438,7 +439,9 @@ class MooncakeStoreConfig:
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
-            use_ascend_direct=config.get("use_ascend_direct", False))
+            use_ascend_direct=config.get("use_ascend_direct", False),
+            alloc_in_same_node=config.get("alloc_in_same_node", False),
+        )
 
     @staticmethod
     def load_from_env() -> "MooncakeStoreConfig":
