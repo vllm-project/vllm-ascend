@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import Optional
 
 import torch
@@ -31,6 +32,12 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 from vllm_ascend.utils import enable_sp
 
 
+class QuantType(Enum):
+    NONE = 0
+    W8A8 = 1
+    W4A8 = 2
+
+
 class PrepareAndFinalize(ABC):
     """
     Abstract base class for MoE (Mixture-of-Experts) tensor preparation and finalization
@@ -43,9 +50,9 @@ class PrepareAndFinalize(ABC):
                                      sizes, ranks, and communication settings.
     """
 
-    def __init__(self, moe_config: FusedMoEConfig, is_w8a8_dynamic):
+    def __init__(self, moe_config: FusedMoEConfig, quant_type: QuantType):
         self.moe_config = moe_config
-        self.is_w8a8_dynamic = is_w8a8_dynamic
+        self.quant_type = quant_type
 
     @abstractmethod
     def prepare(
@@ -105,8 +112,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
     Will be used when num_tokens exceed mc2's limitation (512 tokens/rank).
     """
 
-    def __init__(self, moe_config: FusedMoEConfig, is_w8a8_dynamic):
-        super().__init__(moe_config, is_w8a8_dynamic)
+    def __init__(self, moe_config: FusedMoEConfig, quant_type: QuantType):
+        super().__init__(moe_config, quant_type)
         self._restore_tp_across_dp()
 
     def _restore_tp_across_dp(self):
@@ -197,8 +204,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     Relies on `mc2_mask` and `padded_num_tokens` from forward_context for alignment.
     """
 
-    def __init__(self, moe_config: FusedMoEConfig, is_w8a8_dynamic):
-        super().__init__(moe_config, is_w8a8_dynamic)
+    def __init__(self, moe_config: FusedMoEConfig, quant_type: QuantType):
+        super().__init__(moe_config, quant_type)
         self._restore_tp_across_dp()
 
     def _restore_tp_across_dp(self):
@@ -319,7 +326,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         pertoken_scale = None
-        if self.is_w8a8_dynamic:
+        if self.quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
                 hidden_states)
             pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(

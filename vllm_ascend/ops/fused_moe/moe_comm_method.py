@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from enum import Enum
 from typing import Any, Dict, Optional
 
 import torch
@@ -28,7 +27,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.prepare_finalize import (
     PrepareAndFinalizeWithAll2All, PrepareAndFinalizeWithAllGather,
-    PrepareAndFinalizeWithMC2, PrepareAndFinalizeWithNaiveMulticast)
+    PrepareAndFinalizeWithMC2, PrepareAndFinalizeWithNaiveMulticast, QuantType)
 from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAll2AllV, TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2, TokenDispatcherWithMoge)
@@ -53,12 +52,6 @@ def setup_moe_comm_method(moe_config, quant_method):
     _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config, quant_method)
     _MoECommMethods[MoECommType.NAIVE_MULTICAST] = NaiveMulticastCommImpl(
         moe_config, quant_method)
-
-
-class QuantType(Enum):
-    NONE = 0
-    W8A8 = 1
-    W4A8 = 2
 
 
 class MoECommMethod(ABC):
@@ -233,8 +226,8 @@ class AllGatherCommImpl(MoECommMethod):
                 num_local_experts=self.moe_config.num_local_experts)
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithAllGather(
-            self.moe_config, self.quant_type == QuantType.W8A8)
+        return PrepareAndFinalizeWithAllGather(self.moe_config,
+                                               self.quant_type)
 
 
 class MC2CommImpl(MoECommMethod):
@@ -251,8 +244,7 @@ class MC2CommImpl(MoECommMethod):
         return TokenDispatcherWithMC2()
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithMC2(self.moe_config,
-                                         self.quant_type == QuantType.W8A8)
+        return PrepareAndFinalizeWithMC2(self.moe_config, self.quant_type)
 
 
 class AlltoAllCommImpl(MoECommMethod):
@@ -272,8 +264,7 @@ class AlltoAllCommImpl(MoECommMethod):
             num_local_experts=self.moe_config.num_local_experts)
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithAll2All(self.moe_config,
-                                             self.quant_type == QuantType.W8A8)
+        return PrepareAndFinalizeWithAll2All(self.moe_config, self.quant_type)
 
 
 class NaiveMulticastCommImpl(MoECommMethod):
@@ -302,5 +293,5 @@ class NaiveMulticastCommImpl(MoECommMethod):
             num_local_experts=self.moe_config.num_local_experts)
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithNaiveMulticast(
-            self.moe_config, self.quant_type == QuantType.W8A8)
+        return PrepareAndFinalizeWithNaiveMulticast(self.moe_config,
+                                                    self.quant_type)
