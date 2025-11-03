@@ -45,7 +45,7 @@ By introducing KV Connector V1, users can seamlessly combine HBM-based Prefix Ca
 
 When used together with Mooncake PD (Prefill-Decode) Disaggregation, the KV Cache Pool can further decouple prefill and decode stages across devices or nodes.
 
-Currently, we only perform put and get operation of KV Pool for **Prefiil Nodes**, and Decode Nodes get their KV Cache from Mooncake P2P KV Connector, i.e. MooncakeConnector.
+Currently, we only perform put and get operation of KV Pool for **Prefill Nodes**, and Decode Nodes get their KV Cache from Mooncake P2P KV Connector, i.e. MooncakeConnector.
 
  The key benefit of doing this is that we can keep the gain in performance by computing less with Prefix Caching from HBM and KV Pool for Prefill Nodes while not sacrificing the data transfer efficiency between Prefill and Decode nodes with P2P KV Connector that transfer KV Caches between NPU devices directly.
 
@@ -80,4 +80,4 @@ The KV Connector methods that need to be implemented can be categorized into sch
 
 1. Currently, Mooncake Store for vLLM-Ascend only supports DRAM as the storage for KV Cache pool.
 
-2. For now, if we successfully looked up a key and found it exists, but failed to get it when calling KV Pool's get function, we just output a log indicating the get operation failed and keep going; hence, the accuracy of that specific request may be affected. gWe will handle this situation by falling back the request and re-compute everything assuming there's no prefix cache hit (or even better, revert only one block and keep using the Prefix Caches before that).
+2. For now, if we successfully looked up a key and found it exists, but failed to get it when calling KV Pool's get function, we just output a log indicating the get operation failed and keep going; hence, the accuracy of that specific request may be affected. We will handle this situation by falling back the request and re-compute everything assuming there's no prefix cache hit (or even better, revert only one block and keep using the Prefix Caches before that).

@@ -108,14 +108,14 @@ python3 -m vllm.entrypoints.openai.api_server \
                     }
                 }
             },
-                    {
+            {
                 "kv_connector": "MooncakeConnectorStoreV1",
                 "kv_role": "kv_producer",
                 "mooncake_rpc_port":"0"
             }  
         ]
     }
-}' > p.log 2>&1
+    }' > p.log 2>&1
 ```
 
 `decode` Node：
@@ -156,7 +156,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     "kv_connector_extra_config": {
         "use_layerwise": false,
         "connectors": [
-        {
+            {
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_consumer",
                 "kv_port": "20002",
