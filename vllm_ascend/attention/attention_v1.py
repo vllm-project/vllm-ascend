@@ -178,7 +178,7 @@ class AscendMetadataForPrefill:
         Optional[list[Optional[list[int]]]]]]]] = None
     cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
     block_tables: torch.Tensor = None
-    actual_seq_lengths_q: List[int] = None
+    actual_seq_lengths_q: torch.Tensor = None
 
 
 @dataclass
