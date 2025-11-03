@@ -26,13 +26,19 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
                                              get_tp_group)
-from vllm.utils import get_ip, logger, make_zmq_path, make_zmq_socket
+from vllm.utils import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import get_ip, make_zmq_path, make_zmq_socket
+else:
+    from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -73,6 +79,10 @@ class KVCacheTaskTracker:
         # be force-freed.
         self.record_finished_requests: set[str] = set()
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
+
+    def add_not_transfer_request(self, request_id: str):
+        with self.done_task_lock:
+            self.finished_requests.add(request_id)
 
     def update_done_task_count(self, request_id: str):
         with self.done_task_lock:
@@ -150,6 +160,9 @@ class KVCacheSendingThread(threading.Thread):
             A set of request IDs that have been completed.
         """
         return self.task_tracker.get_and_clear_finished_requests()
+
+    def add_not_transfer_request(self, request_id: str):
+        self.task_tracker.add_not_transfer_request(request_id)
 
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         return self.task_tracker.add_delayed_request(request_id,
@@ -652,10 +665,6 @@ class MooncakeConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
-    def get_finished_count(self) -> Optional[int]:
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.get_finished_count()
-
     ############################################################
     # Worker Side Methods
     ############################################################
@@ -839,39 +848,6 @@ class MooncakeConnectorScheduler:
             remote_port=self.side_channel_port,
             last_token_id=request.output_token_ids[-1],
         )
-
-    def get_finished_count(self) -> Optional[int]:
-        prefill_parallel_config: dict[
-            str,
-            Any] = self.vllm_config.kv_transfer_config.get_from_extra_config(
-                "prefill", {})
-
-        assert "tp_size" in prefill_parallel_config.keys()
-        self._prefill_tp_size = prefill_parallel_config["tp_size"]
-        decode_parallel_config: dict[
-            str,
-            Any] = self.vllm_config.kv_transfer_config.get_from_extra_config(
-                "decode", {})
-        assert "tp_size" in decode_parallel_config.keys()
-        self._decode_tp_size = decode_parallel_config["tp_size"]
-        num_key_value_heads = self.vllm_config.model_config.hf_config.num_key_value_heads
-        if self.vllm_config.model_config.use_mla or hasattr(
-                self.vllm_config.model_config.hf_config, "index_topk"):
-            num_need_pulls = 1
-        else:
-            num_p_block_heads = max(
-                1, num_key_value_heads // self._prefill_tp_size)
-            num_d_block_heads = max(
-                1, num_key_value_heads // self._decode_tp_size)
-            num_need_pulls = num_d_block_heads // num_p_block_heads
-        kv_role = self.vllm_config.kv_transfer_config.kv_role
-        logger.debug(
-            "get_finished_count, kv_role=%s, num_need_pulls=%d, decode_tp_size=%d",
-            kv_role, num_need_pulls, self._decode_tp_size)
-        if kv_role == 'kv_producer':
-            return num_need_pulls * self._decode_tp_size
-        else:
-            return self._decode_tp_size
 
 
 class MooncakeConnectorWorker:
@@ -1144,6 +1120,8 @@ class MooncakeConnectorWorker:
                 if self.tp_rank in self._prefill_get_remote_tp_rank(req_id):
                     self.kv_send_thread.add_delayed_request(
                         req_id, delay_start_time)
+                else:
+                    self.kv_send_thread.add_not_transfer_request(req_id)
 
     def _prefill_get_remote_tp_rank(self, req_id: str) -> List[int]:
         return sum(self._get_remote_tp_ranks_for_req(req_id), [])

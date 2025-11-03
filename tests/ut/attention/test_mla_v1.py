@@ -176,15 +176,29 @@ class TestAscendMLAMetadata(TestBase):
 
 class TestAscendMLAMetadataBuilder(TestBase):
 
-    def test_ascend_mla_metadata_builder_default(self):
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_ascend_mla_metadata_builder_default(self, mock_get_dcp_size,
+                                                 mock_dcp, mock_get_dcp_group):
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
 
         mock_vllm_config.speculative_config = None
 
@@ -200,15 +214,30 @@ class TestAscendMLAMetadataBuilder(TestBase):
                 builder.chunked_prefill_enabled,
                 mock_vllm_config.scheduler_config.chunked_prefill_enabled)
 
-    def test_ascend_mla_metadata_builder_spec_decode(self):
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_ascend_mla_metadata_builder_spec_decode(self, mock_get_dcp_size,
+                                                     mock_dcp,
+                                                     mock_get_dcp_group):
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
 
         mock_spec_config = MagicMock()
         mock_spec_config.num_speculative_tokens = 3
@@ -226,15 +255,29 @@ class TestAscendMLAMetadataBuilder(TestBase):
                 builder.chunked_prefill_enabled,
                 mock_vllm_config.scheduler_config.chunked_prefill_enabled)
 
-    def test_reorder_batch(self):
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_reorder_batch(self, mock_get_dcp_size, mock_dcp,
+                           mock_get_dcp_group):
         ascend_config = MagicMock()
 
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
         mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         mock_device = 'cpu'
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
 
         mock_vllm_config.speculative_config = None
 
@@ -303,13 +346,12 @@ class TestAscendMLAImpl(TestBase):
         kv_a_layernorm.weight = torch.randn(96)
         kv_a_layernorm.variance_epsilon = 1e-6
         kwargs = {
-            "q_lora_rank": 64,
             "kv_lora_rank": 32,
             "qk_nope_head_dim": 64,
             "qk_rope_head_dim": 32,
             "qk_head_dim": 96,
             "v_head_dim": 128,
-            "rotary_emb": MagicMock(),
+            "q_lora_rank": 64,
             "q_proj": MagicMock(),
             "q_b_proj": MagicMock(),
             "kv_b_proj": MagicMock(),
@@ -317,6 +359,7 @@ class TestAscendMLAImpl(TestBase):
             "kv_a_proj_with_mqa": MagicMock(),
             "fused_qkv_a_proj": MagicMock(),
             "kv_a_layernorm": kv_a_layernorm,
+            "rotary_emb": MagicMock(),
         }
 
         self.impl = AscendMLAImpl(num_heads=num_heads,
@@ -338,13 +381,11 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.scale, 0.1)
         self.assertEqual(self.impl.num_kv_heads, 8)
         self.assertEqual(self.impl.kv_cache_dtype, "auto")
-        self.assertEqual(self.impl.q_lora_rank, 64)
         self.assertEqual(self.impl.kv_lora_rank, 32)
         self.assertEqual(self.impl.qk_nope_head_dim, 64)
         self.assertEqual(self.impl.qk_rope_head_dim, 32)
         self.assertEqual(self.impl.qk_head_dim, 96)
         self.assertEqual(self.impl.v_head_dim, 128)
-        self.assertIsNotNone(self.impl.rotary_emb)
         self.assertIsNotNone(self.impl.q_proj)
         self.assertIsNotNone(self.impl.kv_b_proj)
         self.assertIsNotNone(self.impl.o_proj)
@@ -625,11 +666,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(k_nope.shape[-1], self.impl.kv_lora_rank)
 
     @patch('vllm_ascend.attention.mla_v1.get_forward_context')
-    @patch("torch.npu.stream")
-    @patch("vllm_ascend.attention.mla_v1.get_multistream_comm_context")
     @patch("torch_npu.npu_fused_infer_attention_score")
     def test_forward_decode(self, mock_npu_fused_infer_attention_score,
-                            mock_get_multistream_comm_context, mock_npu_stream,
                             mock_get_forward_context):
         B = 2
         N = self.impl.num_kv_heads
@@ -653,24 +691,7 @@ class TestAscendMLAImpl(TestBase):
         mock_npu_fused_infer_attention_score.return_value = [
             torch.randn(B, N, self.impl.kv_lora_rank), None
         ]
-        mock_get_multistream_comm_context.return_value = None
-
         mock_get_forward_context.return_value = MagicMock(capturing=False)
-        result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
-                                           attn_metadata)
-
-        self.assertEqual(result.shape[0], B)
-        self.assertEqual(result.shape[1], N)
-        self.assertEqual(result.shape[2], HD)
-
-        self.impl.enable_kv_nz = False
-        attn_metadata.attn_state = None
-        mock_return_value = MagicMock()
-        mock_get_multistream_comm_context.return_value = mock_return_value
-        mock_return_value.before_comm_event = MagicMock()
-        mock_return_value.comm_stream = MagicMock()
-        mock_npu_stream.return_value = MagicMock()
-
         result = self.impl._forward_decode(q_nope, q_pe, k_nope, k_pe, BS,
                                            attn_metadata)
 

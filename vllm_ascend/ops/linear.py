@@ -237,7 +237,9 @@ class AscendRowParallelLinear(RowParallelLinear):
     ):
         compilation_config = get_current_vllm_config().compilation_config
         # TODO(shaopeng-666): Remove the visual check after the mm model reconstruction is complete.
+        # TODO(MengqingCao): Remove the empty string check, after specifying the prefix in linear layers of some models in the vLLM.
         if prefix in compilation_config.static_forward_context and \
+            prefix != "" and \
             "visual" not in prefix:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self

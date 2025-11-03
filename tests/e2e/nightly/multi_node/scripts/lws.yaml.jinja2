@@ -7,7 +7,7 @@ spec:
   replicas: {{ replicas | default(1) }}
   leaderWorkerTemplate:
     size: {{ size | default(2) }}
-    restartPolicy: RecreateGroupOnPodRestart
+    restartPolicy: None
     leaderTemplate:
       metadata:
         labels:
@@ -17,26 +17,33 @@ spec:
           - name: vllm-leader
             image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11") }}
             env:
+              - name: CONFIG_YAML_PATH
+                value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: WORKSPACE
                 value: "/root/workspace"
               # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
               - name: VLLM_VERSION
                 value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
-                value: "main"
+                value: {{ vllm_ascend_ref | default("main") }}
+              - name: VLLM_ASCEND_REMOTE_URL
+                value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: RESULT_FILE_PATH
+                value: {{ result_file_path | default("/root/.cache/tests/ret") }}
+              - name: FAIL_TAG
+                value: {{ fail_tag | default("FAIL_TAG") }}
             command:
               - sh
               - -c
               - |
                 bash /root/.cache/tests/run.sh
-                tail -f /dev/null
             resources:
               limits:
-                huawei.com/ascend-1980: "16"
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
-                huawei.com/ascend-1980: "16"
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
             ports:
@@ -70,26 +77,33 @@ spec:
           - name: vllm-worker
             image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11") }}
             env:
+              - name: CONFIG_YAML_PATH
+                value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: WORKSPACE
                 value: "/root/workspace"
               # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
               - name: VLLM_VERSION
                 value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
-                value: "main"
+                value: {{ vllm_ascend_ref | default("main") }}
+              - name: VLLM_ASCEND_REMOTE_URL
+                value: {{ vllm_ascend_remote_url | default("https://github.com/vllm-project/vllm-ascend.git") }}
+              - name: RESULT_FILE_PATH
+                value: {{ result_file_path | default("/root/.cache/tests/ret/test_result.txt") }}
+              - name: FAIL_TAG
+                value: {{ fail_tag | default("FAIL_TAG") }}
             command:
               - sh
               - -c
               - |
                 bash /root/.cache/tests/run.sh
-                tail -f /dev/null
             resources:
               limits:
-                huawei.com/ascend-1980: "16"
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
                 memory: 512Gi
                 ephemeral-storage: 100Gi
               requests:
-                huawei.com/ascend-1980: "16"
+                huawei.com/ascend-1980: {{ npu_per_node | default("16") }}
                 ephemeral-storage: 100Gi
                 cpu: 125
             volumeMounts:

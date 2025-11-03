@@ -5,12 +5,18 @@
 * Software:
   * Python >= 3.9, < 3.12
   * CANN >= 8.2.rc1
-  * PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
+  * PyTorch == 2.7.1, torch-npu == 2.7.1
   * vLLM：main branch
   * vLLM-Ascend：main branch
   * Mooncake：[AscendTransport/Mooncake at pooling-async-memcpy](https://github.com/AscendTransport/Mooncake/tree/pooling-async-memcpy)(Currently available branch code, continuously updated.)
     Installation and Compilation Guide：https://github.com/AscendTransport/Mooncake/tree/pooling-async-memcpy?tab=readme-ov-file#build-and-use-binaries
-    
+
+### KV Pooling Parameter Description
+**kv_connector_extra_config**:Additional Configurable Parameters for Pooling
+    **mooncake_rpc_port**:Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.
+    **load_async**:Whether to Enable Asynchronous Loading. The default value is false.
+    **register_buffer**:Whether to Register Video Memory with the Backend. Registration is Not Required When Used with MooncakeConnectorV1; It is Required in All Other Cases. The Default Value is false.
+
 ## run mooncake master
 
 ### 1.Configure mooncake.json

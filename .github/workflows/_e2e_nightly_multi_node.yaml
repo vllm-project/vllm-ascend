@@ -1,0 +1,197 @@
+name: 'e2e nightly test multi_node'
+
+on:
+  workflow_call:
+    inputs:
+      soc_version:
+        required: true
+        type: string
+        description: use a2 or a3
+      runner:
+        required: false
+        type: string
+        default: linux-aarch64-a3-0
+      image:
+        required: false
+        type: string
+        description: base image for pods
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11"
+      config_file_path:
+        required: true
+        type: string
+        description: the model config for multi_node test
+      replicas:
+        required: false
+        default: "1"
+        type: string
+        description: replicas of the k8s cluster
+      size:
+        required: false
+        default: "2"
+        type: string
+        description: how many pods will be pulled up via lws.yaml, indicates number of nodes we need
+      vllm_version:
+        required: false
+        default: "v0.11.0"
+        type: string
+        description: vllm version to use
+      vllm_ascend_remote_url:
+        required: false
+        default: https://github.com/vllm-project/vllm-ascend.git
+        type: string
+        description: used for pr level tests
+      vllm_ascend_ref:
+        required: false
+        default: main
+        type: string
+        description: used for pr level tests
+    secrets:
+      KUBECONFIG_B64:
+        required: true
+
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+# and ignore the lint / 8 cards test type
+concurrency:
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: ${{ inputs.config_file_path }}
+    # This is the runner with no NPU for k8s controller
+    runs-on: ${{ inputs.runner }}
+    container:
+      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      env:
+        KUBECONFIG: /tmp/kubeconfig
+        KUBECTL: /root/.cache/.kube/kubectl
+        NAMESPACE: vllm-project
+        LEADER_POD: vllm-0
+        RESULT_FILE: /root/.cache/tests/ret_${{ inputs.soc_version }}
+    steps:
+        - name: Install system denpendencies
+          run: |
+           # configure apt and pip source
+           sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+           pip install jinja2-cli
+
+           #apt-get update -y && apt-get install -y git curl
+
+        - name: Install kubectl
+          run: |
+            # Install kubectl
+            arch=$(uname -m)
+
+            if echo "$arch" | grep -qiE "arm|aarch64"; then
+              echo "Detected ARM architecture: $arch"
+              KUBECTL="$KUBECTL"_arm
+            fi
+            install -o root -g root -m 0755 $KUBECTL /usr/local/bin/kubectl
+
+            # Verify kubectl installation
+            kubectl version --client=true
+
+        - name: Decode kubeconfig from secrets
+          run: |
+            # Decode and save kubeconfig
+            echo "${{ secrets.KUBECONFIG_B64 }}" | base64 -d > $KUBECONFIG
+
+        - name: Checkout code
+          uses: actions/checkout@v4
+
+        - name: Prepare scripts
+          run: |
+            # prepare for lws entrypoint scripts
+            install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
+
+        - name: Clear resources
+          run: |
+            # pre clear the crd resources created by lws
+            kubectl delete leaderworkerset vllm -n "$NAMESPACE" --ignore-not-found
+        - name: Launch cluster
+          id: launcher
+          run: |
+            set -e
+
+            size="${{ inputs.size }}"
+            replicas="${{ inputs.replicas }}"
+            image="${{ inputs.image }}"
+            config_file_path="${{ inputs.config_file_path }}"
+            vllm_version="${{ inputs.vllm_version }}"
+            vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
+            vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
+            result_file_path="$RESULT_FILE"
+            fail_tag=FAIL_TAG_"${{ inputs.config_file_path }}"
+            echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
+
+            required_params=("size" "replicas" "image" "config_file_path")
+            for param in "${required_params[@]}"; do
+              if [ -z "${!param}" ]; then
+                echo "Error: Parameter '$param' is required but empty"
+                exit 1
+              fi
+            done
+
+            if [ "${{ inputs.soc_version }}" = "a3" ]; then
+              npu_per_node=16
+            else
+              npu_per_node=8
+            fi
+
+            jinja2 tests/e2e/nightly/multi_node/scripts/lws.yaml.jinja2 \
+              -D size="$size" \
+              -D replicas="$replicas" \
+              -D image="$image" \
+              -D config_file_path="$config_file_path" \
+              -D vllm_version="$vllm_version" \
+              -D vllm_ascend_remote_url="$vllm_ascend_remote_url" \
+              -D vllm_ascend_ref="$vllm_ascend_ref" \
+              -D result_file_path="$result_file_path" \
+              -D npu_per_node="$npu_per_node" \
+              -D fail_tag="$fail_tag" \
+              --outfile lws.yaml
+
+            kubectl apply -f ./lws.yaml
+
+        - name: Waiting for pod ready
+          run: |
+            echo "waiting for Pod [$LEADER_POD] in namespace [$NAMESPACE] to Ready..."
+
+            while true; do
+              # get pod status
+              READY_STATUS=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}')
+
+              if [[ "$READY_STATUS" == "true" ]]; then
+                echo "Pod [$LEADER_POD] is Ready!"
+                break
+              else
+                echo "Pod [$LEADER_POD] not ready, waiting..."
+                sleep 3
+              fi
+            done
+
+        - name: Stream logs
+          run: |
+            set -euo pipefail
+            echo "Looking for logs containing: $FAIL_TAG"
+            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | while read -r line; do
+              echo "$line"
+              if echo "$line" | grep -q "$FAIL_TAG"; then
+                exit 1   # workflow step failed
+              fi
+            done
+
+        - name: Post process
+          if: always()
+          run: |
+            kubectl get pods -n $NAMESPACE
+            kubectl delete -f ./lws.yaml
