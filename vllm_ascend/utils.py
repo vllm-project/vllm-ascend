@@ -680,7 +680,7 @@ def is_moe_model(vllm_config: VllmConfig):
     return _IS_MOE_MODEL
 
 
-def _is_contain_expert(config: dict | str):
+def _is_contain_expert(config: Any):
     if isinstance(config, dict):
         for k, v in config.items():
             if "expert" in str(k):
