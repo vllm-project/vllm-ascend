@@ -367,13 +367,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                              use_sparse=self.use_sparse)
         if self.pcp_size > 1:
             self.attn_mask_builder = None
-        elif torch.version.cann.startswith("8.3"):
+        else:
             self.attn_mask_builder = AttentionMaskBuilder(
                 self.scheduler_config.max_num_batched_tokens, self.dtype,
                 self.device)
-        else:
-            self.attn_mask_builder = AttentionMaskBuilder(
-                self.model_config.max_model_len, self.dtype)
 
         self._set_up_drafter()
 
@@ -988,11 +985,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_seq_len = max(seq_lens.max().item(), 0)
                 return self.attn_mask_builder.get_attn_mask(
                     max_seq_len, self.dtype, self.device)
-            elif torch.version.cann.startswith("8.3"):
-                return self.attn_mask_builder.get_splitfuse_attn_mask()
             else:
-                return self.attn_mask_builder.get_splitfuse_attn_mask(
-                    seq_lens, position, self.dtype, self.device)
+                return self.attn_mask_builder.get_splitfuse_attn_mask()
 
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
@@ -1001,12 +995,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_seq_len, self.dtype, self.device)
         # Prefill with cache hit.
         elif attn_state == AscendAttentionState.PrefillCacheHit:
-            if torch.version.cann.startswith("8.3"):
-                return self.attn_mask_builder.get_attn_mask(
-                    2048, self.dtype, self.device)
-            else:
-                return self.attn_mask_builder.get_attn_mask(
-                    128, self.dtype, self.device)
+            return self.attn_mask_builder.get_attn_mask(
+                2048, self.dtype, self.device)
         # Decode-only situation.
         else:
             return None
