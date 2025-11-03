@@ -212,3 +212,30 @@ The current stream requirement calculation for size captures only accounts for m
 
 ### 19. How to install custom version of torch_npu?
 torch-npu will be overridden  when installing vllm-ascend. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after vllm-ascend is installed.
+
+### 20. On certain systems (e.g., Kylin OS), `docker pull` may fail with an `invalid tar header` error
+
+On certain operating systems, such as Kylin OS , you may encounter an `invalid tar header` error during the `docker pull` process:
+
+```text
+failed to register layer: ApplyLayer exit status 1 stdout: stderr: archive/tar: invalid tar header
+```
+
+This is often due to system compatibility issues. You can resolve this by using an offline loading method with a second machine.
+
+1. On a separate host machine (e.g., a standard Ubuntu server), pull the image for the target ARM64 architecture and package it into a `.tar` file.
+
+   ```bash
+   export IMAGE_TAG=v0.10.0rc1-310p
+   export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
+   # If in China region, uncomment to use a mirror:
+   # export IMAGE_NAME="m.daocloud.io/quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
+   
+   # Pull the image for the ARM64 platform and save it
+   docker pull --platform linux/arm64 "${IMAGE_NAME}"
+   docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
+   ```
+
+2. Transfer the image archive
+
+Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine
