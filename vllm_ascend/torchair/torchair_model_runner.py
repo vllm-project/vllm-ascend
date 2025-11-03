@@ -31,6 +31,7 @@ from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
+import numpy as np
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.platform import NPUPlatform
@@ -178,6 +179,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         num_reqs: int,
         num_tokens: int,
         max_query_len: int,
+        num_scheduled_tokens: np.ndarray,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
     ) -> Optional[dict[str, Any]]:
@@ -186,7 +188,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         if with_prefill or self.enable_shared_expert_dp:
             attn_metadata = super()._build_dummy_attn_metadata(
                 with_prefill, num_reqs, num_tokens, max_query_len,
-                aclgraph_runtime_mode, force_attention)
+                num_scheduled_tokens, aclgraph_runtime_mode, force_attention)
         else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
