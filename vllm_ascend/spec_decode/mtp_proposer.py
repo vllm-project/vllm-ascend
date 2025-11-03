@@ -19,11 +19,11 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
-from vllm_ascend.patch.worker.patch_deepseek_mtp import \
-    AscendDeepSeekMTP as DeepSeekMTP
 from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                set_mtp_graph_params,
                                                update_mla_attn_params)
+from vllm_ascend.patch.worker.patch_deepseek_mtp import \
+    AscendDeepSeekMTP as DeepSeekMTP
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.torchair.models.torchair_deepseek_mtp import \
     TorchairDeepSeekMTP
@@ -75,19 +75,20 @@ class MtpProposer(Proposer):
         self.use_sparse = hasattr(vllm_config.model_config.hf_config,
                                   "index_topk")
 
-        self.actual_seq_lengths_q = list(
-            range(1, self.runner.max_num_tokens + 1, 1))
-        self.query_start_loc = torch.zeros(self.runner.max_num_reqs + 1,
-                                           dtype=torch.int32,
-                                           device=self.device)
-        self.query_start_loc_cpu = torch.zeros(self.runner.max_num_reqs + 1,
-                                               dtype=torch.int32,
-                                               device="cpu",
-                                               pin_memory=True)
+        self.query_start_loc = torch.zeros(
+            self.runner.max_num_reqs * (self.num_speculative_tokens + 1) + 1,
+            dtype=torch.int32,
+            device=self.device)
+        self.query_start_loc_cpu = torch.zeros(
+            self.runner.max_num_reqs * (self.num_speculative_tokens + 1) + 1,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=True)
         self.slot_mapping = torch.zeros(self.runner.max_num_tokens,
                                         dtype=torch.int32,
                                         device=self.device)
-        self.seq_lens_cpu = torch.zeros(self.runner.max_num_reqs,
+        self.seq_lens_cpu = torch.zeros(self.runner.max_num_reqs *
+                                        (self.num_speculative_tokens + 1),
                                         dtype=torch.int32,
                                         device="cpu",
                                         pin_memory=True)
@@ -173,9 +174,8 @@ class MtpProposer(Proposer):
             attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
                 common_attn_metadata)
         elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
-            assert with_prefill is False, \
-                "Full decode graph only supports uniform batch now."
-            num_reqs = num_tokens
+            # assert with_prefill is False, \
+            #     "Full decode graph only supports uniform batch now."
             max_seq_lens = self.runner.model_config.max_model_len
             self.seq_lens_cpu[:num_reqs] = max_seq_lens
             self.seq_lens_cpu[num_reqs:] = 0
@@ -184,7 +184,7 @@ class MtpProposer(Proposer):
                     self.runner.input_batch.
                     num_computed_tokens_cpu_tensor[:num_reqs])
                 query_start_loc = torch.tensor(
-                    [0] + self.actual_seq_lengths_q[:num_reqs],
+                    [0] + self.runner.actual_seq_lengths_q[:num_reqs],
                     device=self.runner.device,
                     dtype=torch.int32)
                 self.query_start_loc[:num_reqs + 1].copy_(query_start_loc)
@@ -207,7 +207,7 @@ class MtpProposer(Proposer):
                     spec_attn_mask=self.runner.spec_attn_mask,
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
-                    cos=self.runner.cos,  # 考虑mrope，是否可以共用？
+                    cos=self.runner.cos,
                     sin=self.runner.sin,
                 )
 
@@ -226,7 +226,9 @@ class MtpProposer(Proposer):
         input_ids = self.input_ids[:num_tokens]
         positions = self.positions[:num_tokens]
         previous_hidden_states = self.hidden_states[:num_tokens]
-        for _ in range(self.num_speculative_tokens):
+        for i in range(self.num_speculative_tokens):
+            if i > 0:
+                aclgraph_runtime_mode = CUDAGraphMode.NONE
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -317,6 +319,22 @@ class MtpProposer(Proposer):
             target_hidden_states = hidden_states[:num_scheduled_tokens]
             target_slot_mapping = attn_metadata.slot_mapping
             cu_num_tokens = attn_metadata.query_start_loc
+
+            query_start_loc_num = len(cu_num_tokens)
+            self.query_start_loc[:query_start_loc_num].copy_(
+                cu_num_tokens[:query_start_loc_num])
+            self.query_start_loc[query_start_loc_num:].fill_(0)
+            self.query_start_loc_cpu[:query_start_loc_num].copy_(
+                self.query_start_loc[:query_start_loc_num], non_blocking=True)
+            self.query_start_loc_cpu[query_start_loc_num:].fill_(0)
+
+            target_slot_mapping_len = target_slot_mapping.shape[0]
+            self.slot_mapping[:target_slot_mapping_len].copy_(
+                target_slot_mapping)
+            self.slot_mapping[target_slot_mapping_len:].fill_(0)
+            target_positions_len = target_positions.shape[0]
+            self.positions[:target_positions_len].copy_(target_positions)
+            self.positions[target_positions_len:].fill_(0)
         else:
             # TODO(woosuk): Refactor this.
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
@@ -350,7 +368,8 @@ class MtpProposer(Proposer):
             block_table=attn_metadata.block_tables,
             sampling_metadata=sampling_metadata,
             token_indices=accepted_token_indices,
-            scheduler_output=scheduler_output)
+            scheduler_output=scheduler_output,
+            num_scheduled_tokens=num_scheduled_tokens)
         spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
 
@@ -416,12 +435,16 @@ class MtpProposer(Proposer):
         batch_size = num_rejected_tokens.shape[0]
         self.query_start_loc[:batch_size + 1].copy_(cu_num_tokens[:batch_size +
                                                                   1])
+        self.query_start_loc[batch_size + 1:].fill_(0)
         self.query_start_loc_cpu[:batch_size + 1].copy_(
             self.query_start_loc[:batch_size + 1], non_blocking=True)
+        self.query_start_loc_cpu[batch_size + 1:].fill_(0)
         target_positions_len = target_positions.shape[0]
         self.positions[:target_positions_len].copy_(target_positions)
+        self.positions[target_positions_len:].fill_(0)
         target_slot_mapping_len = target_slot_mapping.shape[0]
         self.slot_mapping[:target_slot_mapping_len].copy_(target_slot_mapping)
+        self.slot_mapping[target_slot_mapping_len:].fill_(0)
 
         return cu_num_tokens, token_indices, target_token_ids, target_positions, target_hidden_states, target_slot_mapping
 
@@ -443,7 +466,8 @@ class MtpProposer(Proposer):
             block_table: torch.Tensor,
             sampling_metadata: SamplingMetadata,
             token_indices=None,
-            scheduler_output: SchedulerOutput = None) -> torch.Tensor:
+            scheduler_output: SchedulerOutput = None,
+            num_scheduled_tokens: int = 0) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
@@ -451,6 +475,7 @@ class MtpProposer(Proposer):
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
         self.input_ids[:num_tokens - 1] = target_token_ids[1:]
+        self.input_ids[num_tokens - 1:].fill_(0)
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         if token_indices is not None and self.torchair_graph_enabled:
@@ -477,6 +502,10 @@ class MtpProposer(Proposer):
         if is_running_torchair:
             # Torchair graph mode, padding is same as the main model
             num_input_tokens = self.runner.graph_pad_size
+        elif self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
+        ) and num_scheduled_tokens <= self.runner.aclgraph_batch_sizes[-1]:
+            num_input_tokens = self.vllm_config.pad_for_cudagraph(
+                num_scheduled_tokens)
         elif (self.runner.use_aclgraph
               and num_tokens <= self.runner.aclgraph_batch_sizes[-1]):
             # Acl graph mode, add padding to the batch size
@@ -489,6 +518,40 @@ class MtpProposer(Proposer):
         seq_lens = seq_lens.int()
         seq_lens_len = seq_lens.shape[0]
         self.seq_lens_cpu[:seq_lens_len].copy_(seq_lens, non_blocking=True)
+        self.seq_lens_cpu[seq_lens_len:].fill_(0)
+
+        if not self.torchair_graph_enabled:
+            # torch mode need to update num_tokens_across_dp
+            # TODO: adapt enable_dbo later
+            (num_input_tokens, num_tokens_across_dp, with_prefill,
+             _) = self.runner._sync_metadata_across_dp(
+                 num_input_tokens, self.runner.with_prefill, False)
+        else:
+            # torchair mode can reuse self.runner.num_tokens_across_dp
+            num_tokens_across_dp = self.runner.num_tokens_across_dp
+            with_prefill = self.runner.with_prefill
+
+        if scheduler_output:
+            uniform_decode = (max_query_len in list(
+                range(1, self.num_speculative_tokens + 2))) and (
+                    scheduler_output.total_num_scheduled_tokens ==
+                    self.runner.input_batch.num_reqs *
+                    (self.num_speculative_tokens + 1))
+            batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
+                                               uniform_decode=uniform_decode)
+        else:
+            batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
+                                               uniform_decode=False)
+        aclgraph_runtime_mode, batch_descriptor = \
+            self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
+
+        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
+        ) and aclgraph_runtime_mode == CUDAGraphMode.FULL:
+            graph_pad_size = num_input_tokens
+        else:
+            # Currently, if not torchair, runner.graph_pad_size will always be -1.
+            graph_pad_size = self.runner.graph_pad_size
+
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc[:batch_size + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[:batch_size + 1],
@@ -504,7 +567,7 @@ class MtpProposer(Proposer):
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            graph_pad_size=self.runner.graph_pad_size,
+            graph_pad_size=graph_pad_size,
             decode_token_per_req=self.runner.decode_token_per_req,
             num_computed_tokens_cpu=None,
             seq_lens=None)
@@ -522,36 +585,11 @@ class MtpProposer(Proposer):
             attn_metadata = self.runner.attn_metadata_builder.build(
                 0, common_attn_metadata, self.runner.get_model())
 
-        self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
-
-        if not self.torchair_graph_enabled:
-            # torch mode need to update num_tokens_across_dp
-            # TODO: adapt enable_dbo later
-            (num_input_tokens, num_tokens_across_dp, with_prefill,
-             _) = self.runner._sync_metadata_across_dp(
-                 num_input_tokens, self.runner.with_prefill, False)
-        else:
-            # torchair mode can reuse self.runner.num_tokens_across_dp
-            num_tokens_across_dp = self.runner.num_tokens_across_dp
-            with_prefill = self.runner.with_prefill
+        self.hidden_states[num_tokens:].fill_(0)
 
         moe_comm_type = self.runner._select_moe_comm_method(
             num_input_tokens, with_prefill)
-
-        if scheduler_output:
-            uniform_decode = (max_query_len in list(
-                range(1, self.num_speculative_tokens + 2))) and (
-                    scheduler_output.total_num_scheduled_tokens //
-                    (self.num_speculative_tokens + 2 - max_query_len)
-                    == self.runner.input_batch.num_reqs * max_query_len)
-            batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                               uniform_decode=uniform_decode)
-        else:
-            batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                               uniform_decode=False)
-        aclgraph_runtime_mode, batch_descriptor = \
-            self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
 
         for step in range(self.num_speculative_tokens):
             with set_ascend_forward_context(
@@ -655,6 +693,12 @@ class MtpProposer(Proposer):
             if not self.torchair_graph_enabled:
                 attn_metadata_i.decode.actual_seq_lengths_q = attn_metadata_i.query_start_loc[
                     1:batch_size + 1].tolist()
+                if aclgraph_runtime_mode == CUDAGraphMode.FULL:
+                    attn_metadata_i.decode.actual_seq_lengths_q = \
+                        builder.pad_actual_seq_len_q(
+                            graph_pad_size - batch_size,
+                            batch_size,
+                            attn_metadata_i.decode.actual_seq_lengths_q)
                 attn_metadata_i.decode.cos = builder.cos_cache[
                     positions].unsqueeze(1).unsqueeze(2)
                 attn_metadata_i.decode.sin = builder.sin_cache[
@@ -706,12 +750,19 @@ class MtpProposer(Proposer):
                 attn_metadata_i.decode.seq_lens = attn_metadata_i.seq_lens
                 attn_metadata_i.decode.seq_lens_list = attn_metadata_i.decode.seq_lens.tolist(
                 )
+                decode_seq_lens_list = attn_metadata_i.decode.seq_lens_list
+                if aclgraph_runtime_mode == CUDAGraphMode.FULL and \
+                        graph_pad_size > len(decode_seq_lens_list):
+                    attn_metadata_i.decode.seq_lens_list = decode_seq_lens_list + [
+                        0
+                    ] * (graph_pad_size - len(decode_seq_lens_list))
                 attn_metadata_i.decode.input_positions = self.positions[:
                                                                         num_input_tokens]
                 attn_metadata_i.decode.max_seq_lens += 1
                 attn_metadata_i.decode.max_seq_lens = min(
                     attn_metadata_i.decode.max_seq_lens,
                     self.runner.model_config.max_model_len)
+            torch.npu.synchronize()
 
         # mtp>1: [batch_size, k]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)

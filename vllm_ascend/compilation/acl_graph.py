@@ -279,6 +279,13 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                     spec_multiple * (i + 1)
                     for i in range(runtime_shape // spec_multiple)
                 ]
+            elif forward_context.is_mtp_model:
+                actual_seq_lengths = forward_context.attn_metadata[
+                    key].decode.actual_seq_lengths_q
+                block_table = forward_context.attn_metadata[
+                    key].decode.block_table
+                seq_lens_list = seq_lens_list + [0] * (
+                    len(actual_seq_lengths) - len(seq_lens_list))
             else:
                 seq_lens_list = seq_lens_list + [0] * (runtime_shape -
                                                        len(seq_lens_list))
@@ -347,22 +354,14 @@ def get_graph_params():
     return _graph_params
 
 
-@dataclass
-class MTPGraphParams:
-    events: dict[int, list[torch.npu.ExternalEvent]]
-    workspaces: dict[int, torch.Tensor]
-    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
-    attn_params: dict[int, list[tuple]]
-
-
-_mtp_graph_params: Optional[MTPGraphParams] = None
+_mtp_graph_params: Optional[GraphParams] = None
 
 
 def set_mtp_graph_params(aclgraph_capture_sizes: set[int]):
     global _mtp_graph_params
     if _mtp_graph_params is not None:
         raise ValueError("MTPGraph parameters have already been set!")
-    _mtp_graph_params = MTPGraphParams(
+    _mtp_graph_params = GraphParams(
         {size: []
          for size in aclgraph_capture_sizes},
         {size: None
