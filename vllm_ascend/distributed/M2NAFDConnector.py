@@ -71,7 +71,7 @@ class M2NAFDConnector(AFDConnectorBase):
         #ffn_ranks = [i for i in range(ffn_size, ffn_size + attn_size)]
         #attn_ranks = [i for i in range(attn_size)]
         world_rank = self.rank if role == "attention" else self.rank + self.attn_size
-
+        self.rank = world_rank
         logger.info(
             f"world_size = {self.ffn_size + self.attn_size}, world_rank = {world_rank}")
         # TODO : get backend to replace hardcode
@@ -94,7 +94,7 @@ class M2NAFDConnector(AFDConnectorBase):
                 ranks = list([attn_ranks[i], ffn_ranks[i]])
                 sub_group_ranks.append(ranks)
             self.process_group = init_model_parallel_group(sub_group_ranks,
-                                                 self.rank,
+                                                 world_rank,
                                                  backend="hccl",
                                                  group_name="ae")
 

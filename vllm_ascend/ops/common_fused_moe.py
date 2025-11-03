@@ -365,8 +365,6 @@ class AscendFusedMoE(FusedMoE):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
-        print('fused_expert forward_impl')
-        print('w1=', self.w13_weight)
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
         quantized_x_for_share, dynamic_scale_for_share = None, None
 
@@ -509,7 +507,6 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         # Make sure the shared experts stream begins after hidden_states are ready.
-        print("shared_expert forward_impl")
         if self.multistream_overlap_shared_expert:
             self.shared_expert_stream.wait_stream(  # type: ignore
                 torch.npu.current_stream())
