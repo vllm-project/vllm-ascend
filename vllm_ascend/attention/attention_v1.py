@@ -22,7 +22,6 @@ from typing import ClassVar, List, Optional, Tuple, Type
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -38,9 +37,9 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         split_decodes_and_prefills,
+                                         extract_req_dcp_by_chunk_cp,
                                          filter_chunked_req_indices,
-                                         extract_req_dcp_by_chunk_cp)
+                                         split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
@@ -176,7 +175,7 @@ class AscendMetadataForPrefill:
     pcp_allgather_restore_idx: Optional[List[int]] = None
     chunked_context: Optional[ChunkedContextMetadata] = None
     num_computed_tokens_of_pcp_dcp_for_chunk: Optional[list[Optional[list[
-        Optional[list[int]]]]]] = None
+        Optional[list[Optional[list[int]]]]]]]] = None
     cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
     block_tables: torch.Tensor = None
     actual_seq_lengths_q: List[int] = None
@@ -1136,6 +1135,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 decode_query, attn_metadata)
             output[:num_decode_tokens] = output_decode
         if has_prefill:
+            assert attn_metadata.prefill is not None
             prefill_query = query[num_decode_tokens:]
             key = key[self.pcp_size * num_decode_tokens:]
             value = value[self.pcp_size * num_decode_tokens:]
@@ -1252,7 +1252,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             # 2. Attention computation
             actual_seq_lengths_kv = torch.cumsum(seq_lens_current_chunk_rank,
-                                                 dim=0).tolist()  # TODO 待优化
+                                                 dim=0).tolist()
 
             prefix_output, prefix_lse = torch.ops.npu.npu_fused_infer_attention_score(
                 query,
@@ -1417,7 +1417,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             kv_local = torch.cat([key, value], dim=-1)
             head_dim = kv_local.size(-1)
-            kv_full = torch.empty((total_toks, head_dim),
+            kv_full = torch.empty((total_toks, num_heads, head_dim),
                                   device=query.device,
                                   dtype=query.dtype)
 
@@ -1428,10 +1428,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                           axis=0).tolist(),
                 group=self.dcp_group,
                 async_op=False)
-            key, value = kv_full.split([self.head_size, self.head_size],
-                                       dim=-1)
-            key = key.unsqueeze(dim=1)
-            value = value.unsqueeze(dim=1)
+            key, value = kv_full.split([head_size, head_size], dim=-1)
 
             seq_lens_current_chunk_rank = torch.tensor(
                 np.sum(np.array(output_split_sizes), axis=1),
