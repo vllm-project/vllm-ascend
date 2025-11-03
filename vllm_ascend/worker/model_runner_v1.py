@@ -479,6 +479,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.pcp_padded_slot_mapping = torch.zeros(self.max_num_tokens,
                                                    dtype=torch.int32,
                                                    device=self.device)
+        self.num_actual_tokens_pcp_padded = 0
         if self.speculative_config and self.pcp_size > 1:
             self.input_ids_pcp_full = torch.zeros(self.max_num_tokens,
                                                   dtype=torch.int32,
@@ -1925,7 +1926,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states = hidden_states[:-pad_size, :]
 
         if self.pcp_size > 1:
-            hidden_states = get_pcp_group().all_gather(hidden_states, 0)
+            hidden_states = get_pcp_group().all_gather(
+                hidden_states[:self.num_actual_tokens_pcp_padded //
+                              self.pcp_size], 0)
             hidden_states = torch.index_select(
                 hidden_states, 0,
                 self.pcp_allgather_restore_idx[:hidden_states.shape[0]])
@@ -4314,6 +4317,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_decodes = sum(self.input_batch.num_computed_tokens_cpu[:num_reqs]
                           >= self.input_batch.num_prompt_tokens[:num_reqs])
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_size
+        self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
         long_seq_metadata = None
         if self.pcp_size * self.dcp_size > 1:
             long_seq_metadata = AscendPrefillContextParallelMetadata(
