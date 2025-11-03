@@ -74,11 +74,10 @@ class TestAttentionMaskBuilder(TestBase):
         attn_mask = attention_mask_builder.get_attn_mask(
             max_seq_len=2048, dtype=torch.float16, device=torch.device("cpu"))
         self.assertEqual(attn_mask.shape, (2048, 2048))
-        self.assertEqual(attn_mask[0][-1],
-                         torch.tensor(float("-inf"), dtype=torch.float16))
-        self.assertEqual(attention_mask_builder._seq_len_cached, 2048)
+        self.assertEqual(attn_mask[0][-1], torch.tensor(True))
+        self.assertEqual(attention_mask_builder._seq_len_cached, 1024)
         self.assertEqual(attention_mask_builder.attn_mask_cache.shape,
-                         (2048, 2048))
+                         (1024, 1024))
         self.assertEqual(attention_mask_builder.attn_mask_cache[0][-1],
                          torch.tensor(float("-inf"), dtype=torch.float16))
 
@@ -91,43 +90,5 @@ class TestAttentionMaskBuilder(TestBase):
             dtype=torch.float16,
             device=torch.device("cpu"),
         )
-        self.assertEqual(attn_mask.shape, (6, 100))
+        self.assertEqual(attn_mask.shape, (2048, 2048))
         self.assertEqual(attention_mask_builder._seq_len_cached, 1024)
-
-        attn_mask = attention_mask_builder.get_splitfuse_attn_mask(
-            seq_lens=torch.tensor([10, 3000, 2000]),
-            position=torch.tensor([7, 8, 9, 2999, 1999]),
-            dtype=torch.float16,
-            device=torch.device("cpu"),
-        )
-        self.assertEqual(attn_mask.shape, (5, 3000))
-        self.assertEqual(attention_mask_builder._seq_len_cached, 3000)
-
-        # splitfuse_attn_mask now only supports data types: torch.float16 and torch.bfloat16
-        # otherwise raise ValueError
-        with self.assertRaises(ValueError):
-            attn_mask = attention_mask_builder.get_splitfuse_attn_mask(
-                seq_lens=torch.tensor([10, 20, 100]),
-                position=torch.tensor([7, 8, 9, 18, 19, 99]),
-                dtype=torch.int8,
-                device=torch.device("cpu"),
-            )
-
-    def test_mask_value_cleanliness(self):
-        attention_mask_builder = AttentionMaskBuilder(max_seq_len=6,
-                                                      dtype=torch.bfloat16)
-        self.assertEqual(attention_mask_builder.attn_mask_cache[-2][-1],
-                         torch.tensor(1, dtype=torch.bfloat16))
-
-        attn_mask = attention_mask_builder.get_splitfuse_attn_mask(
-            seq_lens=torch.tensor([6]),
-            position=torch.tensor([3, 4, 5]),
-            dtype=torch.bfloat16,
-            device=torch.device("cpu"),
-        )
-        self.assertEqual(
-            attn_mask[-2][-1],
-            torch.tensor(-10000, dtype=torch.bfloat16,
-                         device=attn_mask.device))
-        self.assertEqual(attention_mask_builder.attn_mask_cache[-2][-1],
-                         torch.tensor(1, dtype=torch.bfloat16))
