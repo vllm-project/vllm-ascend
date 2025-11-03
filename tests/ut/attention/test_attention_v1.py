@@ -344,8 +344,9 @@ class TestAscendAttentionBackendImpl(TestBase):
         assert output.shape == (10, 8 * 64)
 
     @patch('torch_npu._npu_reshape_and_cache')
-    @patch('torch_npu._npu_flash_attention_qlens')
-    def test_forward_prefill_cache_hit(self, mock_flash_attention_qlens,
+    @patch('torch_npu.npu_fused_infer_attention_score')
+    def test_forward_prefill_cache_hit(self,
+                                       mock_npu_fused_infer_attention_score,
                                        mock_npu_reshape_and_cache):
         """Test forward pass in PrefillCacheHit state"""
         query = torch.randn(10, 8 * 64)
@@ -370,7 +371,7 @@ class TestAscendAttentionBackendImpl(TestBase):
                                    metadata,
                                    trace_flag=False)
 
-        mock_flash_attention_qlens.assert_called_once()
+        mock_npu_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8 * 64)
 
     @patch('vllm_ascend.attention.attention_v1.get_forward_context')
@@ -613,8 +614,9 @@ class TestAscendAttentionBackendImpl(TestBase):
         assert output.shape == (10, 8 * 192)
 
     @patch('torch_npu._npu_reshape_and_cache')
-    @patch('torch_npu._npu_paged_attention_splitfuse')
-    def test_forward_normal_v1_situation(self, mock_paged_attention,
+    @patch('torch_npu.npu_fused_infer_attention_score')
+    def test_forward_normal_v1_situation(self,
+                                         mock_npu_fused_infer_attention_score,
                                          mock_npu_reshape_and_cache):
         """Test forward pass in normal V1 situation"""
         query = torch.randn(10, 8 * 64)
@@ -638,14 +640,15 @@ class TestAscendAttentionBackendImpl(TestBase):
                                    metadata,
                                    trace_flag=False)
 
-        mock_paged_attention.assert_called_once()
+        mock_npu_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8 * 64)
 
     @patch('torch_npu.npu_format_cast')
     @patch('torch_npu._npu_reshape_and_cache')
-    @patch('torch_npu._npu_paged_attention_splitfuse')
+    @patch('torch_npu.npu_fused_infer_attention_score')
     @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=True)
-    def test_forward_310p_device(self, mock_is_310p, mock_paged_attention,
+    def test_forward_310p_device(self, mock_is_310p,
+                                 mock_npu_fused_infer_attention_score,
                                  mock_npu_reshape_and_cache,
                                  mock_npu_format_cast):
         """Test forward pass on 310P device"""
@@ -671,7 +674,7 @@ class TestAscendAttentionBackendImpl(TestBase):
                                    metadata,
                                    trace_flag=False)
 
-        mock_paged_attention.assert_called_once()
+        mock_npu_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8 * 64)
 
     @patch('torch_npu._npu_reshape_and_cache')

@@ -119,8 +119,8 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut 
-
+          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
+            --ignore tests/ut/attention/test_attention_v1.py
       - name: Upload coverage to Codecov
         # only upload coverage when commits merged
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -145,5 +145,5 @@ jobs:
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
       type: light

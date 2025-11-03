@@ -319,13 +319,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                              self.block_size,
                                              use_mla=self.model_config.use_mla,
                                              use_sparse=self.use_sparse)
-        if torch.version.cann.startswith("8.3"):
-            self.attn_mask_builder = AttentionMaskBuilder(
-                self.scheduler_config.max_num_batched_tokens, self.dtype,
-                self.device)
-        else:
-            self.attn_mask_builder = AttentionMaskBuilder(
-                self.model_config.max_model_len, self.dtype)
+        self.attn_mask_builder = AttentionMaskBuilder(
+            self.scheduler_config.max_num_batched_tokens, self.dtype,
+            self.device)
 
         # Set up speculative decoding.
         self.spec_attn_mask = None
@@ -899,11 +895,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return self.attn_mask_builder.get_pooling_mask(self.device)
         # Chunk Prefill situation.
         elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
-            if torch.version.cann.startswith("8.3"):
-                return self.attn_mask_builder.get_splitfuse_attn_mask()
-            else:
-                return self.attn_mask_builder.get_splitfuse_attn_mask(
-                    seq_lens, position, self.dtype, self.device)
+            return self.attn_mask_builder.get_splitfuse_attn_mask()
 
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:

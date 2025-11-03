@@ -64,7 +64,7 @@ jobs:
     with:
       vllm: v0.11.0
       runner: ${{ matrix.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_qwen3_32b_int8.py
   qwen3-32b-in8-a2:
     strategy:
@@ -86,7 +86,7 @@ jobs:
     with:
       vllm: v0.11.0
       runner: ${{ matrix.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_qwen3_235b_a22b_w8a8_eplb.py
   deepseek-r1-w8a8-eplb:
     strategy:
@@ -99,7 +99,7 @@ jobs:
     with:
       vllm: v0.11.0
       runner: ${{ matrix.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-a3-ubuntu22.04-py3.11
       tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
 
 
