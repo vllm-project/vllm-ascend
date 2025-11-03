@@ -197,7 +197,7 @@ main() {
     install_go
     cd "$WORKSPACE/source_code"
     . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
-    pooling_async_memecpy_v1 8fce1ffab3930fec2a8b8d3be282564dfa1bb186
+    "pooling_async_memecpy_v1" "8fce1ffab3930fec2a8b8d3be282564dfa1bb186"
     cd "$WORKSPACE/source_code/vllm-ascend"
     run_tests_with_log
 }
