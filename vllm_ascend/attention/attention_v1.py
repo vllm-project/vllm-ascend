@@ -318,6 +318,7 @@ class AscendAttentionMetadataBuilder:
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
                                                                        num_reqs
                                                                        + 1]
+        num_computed_tokens_cpu = (seq_lens - query_lens)
 
         if attn_state == AscendAttentionState.DecodeOnly and \
                 common_attn_metadata.num_input_tokens > num_actual_tokens:
@@ -343,7 +344,6 @@ class AscendAttentionMetadataBuilder:
 
         query_start_loc = query_start_loc_cpu.to(self.device,
                                                  non_blocking=True)
-        num_computed_tokens_cpu = (seq_lens - query_lens)
 
         if is_310p():
             if attn_state == AscendAttentionState.PrefillNoCache:
@@ -912,7 +912,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         tail_attn_nomask_seqlens = attn_metadata.prefill.pcp_metadata.tail_attn_nomask_seqlens
         mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
 
-        # 1. Attention calculation in the first half of Q in load balancing  先 mask, 再nomask
+        # 1. Attention calculation in the first half of Q in load balancing
         output_heads, lse_heads = self._attention_with_nomask_and_mask(
             q=torch.index_select(query, 0, q_head_idx),
             q_seqlens=attn_mask_seqlens,
@@ -1136,7 +1136,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output[:num_decode_tokens] = output_decode
         if has_prefill:
             assert attn_metadata.prefill is not None
-            prefill_query = query[num_decode_tokens:]
+            num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
+            prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded]
             key = key[self.pcp_size * num_decode_tokens:]
             value = value[self.pcp_size * num_decode_tokens:]
             if self.pcp_size > 1:
