@@ -117,7 +117,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         # NOTE: To be clear, we need to make sure that during graph capture, the number of
         # tokens is less than or equal to mc2_tokens_capacity. According to _set_cudagraph_sizes,
         # the max number of tokens in graph is min(max_num_seqs * uniform_decode_query_len, 512).
-        max_num_tokens = self.parallel_config.tensor_parallel_size
+        max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
         tp_size = self.parallel_config.tensor_parallel_size
         # Use integer arithmetic for ceiling division.
         max_graph_batch_size = self.calculate_new_torchair_graph_batch_size(
