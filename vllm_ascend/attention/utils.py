@@ -116,7 +116,11 @@ class AscendCommonAttentionMetadata:
         AscendPrefillContextParallelMetadata] = None
 
 
-def extract_req_dcp_by_chunk_cp(lst, chunk_idx, dcp_size, pcp_rank, fill_value=0):
+def extract_req_dcp_by_chunk_cp(lst,
+                                chunk_idx,
+                                dcp_size,
+                                pcp_rank,
+                                fill_value=0):
     num_reqs = len(lst)
     results: List[List[int]] = []
     for i in range(num_reqs):

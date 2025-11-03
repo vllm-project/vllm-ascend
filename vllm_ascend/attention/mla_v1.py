@@ -1,6 +1,6 @@
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, ClassVar, List, NamedTuple, Optional, Tuple,
-                    Type, TypeVar)
+from typing import (TYPE_CHECKING, ClassVar, NamedTuple, Optional, Tuple, Type,
+                    TypeVar)
 
 import numpy as np
 import torch
@@ -28,11 +28,13 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import (
-    AscendCommonAttentionMetadata, filter_chunked_req_indices,
-    extract_req_dcp_by_chunk_cp, maybe_save_kv_layer_to_connector,
-    split_decodes_and_prefills, trans_rope_weight, transdata,
-    wait_for_kv_layer_from_connector)
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         extract_req_dcp_by_chunk_cp,
+                                         filter_chunked_req_indices,
+                                         maybe_save_kv_layer_to_connector,
+                                         split_decodes_and_prefills,
+                                         trans_rope_weight, transdata,
+                                         wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
