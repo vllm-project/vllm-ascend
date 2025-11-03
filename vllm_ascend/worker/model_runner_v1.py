@@ -1894,7 +1894,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )
 
         forward_context = get_forward_context()
-        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
+        if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL \
+            and not self.use_sparse:
             # TODO: maybe_padded_num_tokens will be removed, use num_input_tokens instead
             if self.vllm_config.model_config.use_mla:
                 if self.pcp_size * self.dcp_size > 1:
@@ -2687,11 +2688,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         [0] * dcp_world_size for _ in range(pcp_world_size)
                     ] for _ in range(num_tokens)]
                     long_seq_metadata.num_computed_tokens_of_pcp_dcp = num_computed_tokens_of_pcp_dcp
-                common_attn_metadata = AscendCommonAttentionMetadata(
-                    query_start_loc=torch.tensor(
+                if self.speculative_config:
+                    query_start_loc = torch.tensor(
                         [0] + self.actual_seq_lengths_q[:num_reqs],
                         device=self.device,
-                        dtype=torch.int32),
+                        dtype=torch.int32)
+                else:
+                    query_start_loc = self.query_start_loc[:num_reqs + 1]
+                common_attn_metadata = AscendCommonAttentionMetadata(
+                    query_start_loc=query_start_loc,
                     query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
                                                                  1],
                     seq_lens_cpu=self.seq_lens_cpu,
@@ -2737,7 +2742,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         forward_context = get_forward_context()
         assert forward_context is not None
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
-            not forward_context.capturing:
+            not forward_context.capturing and not self.use_sparse:
             if self.vllm_config.model_config.use_mla:
                 # FIXME: Try using `auto_dispatch_capture=True`
                 if self.pcp_size * self.dcp_size > 1:
