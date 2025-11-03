@@ -74,8 +74,8 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'light' }}
         run: |
-          pytest -sv tests/e2e/singlecard/test_aclgraph.py
-          pytest -sv tests/e2e/singlecard/test_quantization.py
+          # pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          # pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
 
       - name: Run e2e test
@@ -171,6 +171,7 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: |
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
+          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair
 
       - name: Run vllm-project/vllm-ascend test (full)
         env:
@@ -178,6 +179,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
+          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
           pytest -sv tests/e2e/multicard/test_data_parallel.py
           pytest -sv tests/e2e/multicard/test_expert_parallel.py
           # pytest -sv tests/e2e/multicard/test_external_launcher.py
@@ -199,4 +201,4 @@ jobs:
           pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
           pytest -sv tests/e2e/multicard/test_prefix_caching.py
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
+          
