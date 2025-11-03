@@ -411,9 +411,8 @@ class SequenceRowParallelOp(CustomRowParallelOp):
                                                    quant_per_tensor)
 
         # For unquant
-        if mmrs_fusion and isinstance(
-                self.layer.quant_method, UnquantizedLinearMethod
-        ) and torch.version.cann.startswith("8.3"):
+        if mmrs_fusion and isinstance(self.layer.quant_method,
+                                      UnquantizedLinearMethod):
             output = torch_npu.npu_mm_reduce_scatter_base(
                 x,
                 self.layer.weight.t(),
@@ -429,8 +428,7 @@ class SequenceRowParallelOp(CustomRowParallelOp):
         elif mmrs_fusion and (
                 isinstance(self.layer.quant_method, AscendLinearMethod)
                 and isinstance(self.layer.quant_method.quant_method,
-                               AscendW8A8LinearMethod)
-        ) and torch.version.cann.startswith("8.3"):
+                               AscendW8A8LinearMethod)):
             if x.dtype != torch.int8:
                 x_quant = quant_per_tensor(
                     x, self.layer.aclnn_input_scale_reciprocal,

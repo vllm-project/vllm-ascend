@@ -15,7 +15,7 @@ spec:
       spec:
         containers:
           - name: vllm-leader
-            image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11") }}
+            image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11") }}
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
@@ -75,7 +75,7 @@ spec:
       spec:
         containers:
           - name: vllm-worker
-            image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11") }}
+            image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11") }}
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
