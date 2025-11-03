@@ -356,6 +356,8 @@ class KVCacheRecvingThread(threading.Thread):
         remote_host = req_meta["remote_host"]
         remote_handshake_port = req_meta["remote_handshake_port"]
         all_task_done = req_meta["all_task_done"]
+        offset = req_meta["offset"]
+        tp_num_need_pulls = req_meta["tp_num_need_pulls"]
 
         try:
             logger.debug(
@@ -391,7 +393,7 @@ class KVCacheRecvingThread(threading.Thread):
         # P worker that we have the blocks we need.
         if len(local_block_ids) == 0:
             return
-
+        
         # Check if we have the remote metadata cached.
         if remote_engine_id not in self.kv_caches_base_addr or \
             remote_handshake_port not in self.kv_caches_base_addr[remote_engine_id]:
@@ -405,17 +407,21 @@ class KVCacheRecvingThread(threading.Thread):
             local_block_ids = list(map(lambda x: [x], local_block_ids))
             grouped_remote_block_ids, grouped_local_block_ids = remote_block_ids, local_block_ids
         num_transfer_groups = len(grouped_remote_block_ids)
-        origin_offset = offset
-        pp_rank = offset // tp_num_need_pulls
-        offset = offset % tp_num_need_pulls
+        # tp_num_need_pulls: number of KV caches each Decode node needs to pull from each PP stage
+        # Due to GQA, different KV heads are distributed across different ranks, so there are offsets 
+        # indicating which KV head to pull
+        global_offset = offset  # Global offset of request across all ranks
+        prefill_pp_rank = offset // tp_num_need_pulls   # PP rank where current request resides
+        inner_offset = offset % tp_num_need_pulls   # Offset within each PP stage
         
         remote_kv_caches_base_addrs = \
             self.kv_caches_base_addr[remote_engine_id][remote_handshake_port]
         num_layers = self.model_config.hf_config.num_hidden_layers
-        first_layer_index, end_layer_index = get_pp_indices(num_layers, pp_rank, self._prefill_pp_size)
+        first_layer_index, end_layer_index = get_pp_indices(num_layers, prefill_pp_rank, self._prefill_pp_size)
+        num_cache_per_layer = len(list(self.kv_caches.values())[0]) # Number of KV caches per layer
         local_kv_caches_base_addrs = \
-            self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][first_layer_index*2 : end_layer_index*2]
-        logger.debug(f"chenxiao--debug first_layer_index:{first_layer_index} , end_layer_index:{end_layer_index}")
+            self.kv_caches_base_addr[self.local_engine_id][self.local_handshake_port][first_layer_index*num_cache_per_layer : end_layer_index*num_cache_per_layer]
+        logger.debug(f"transfer kv cache first_layer_index:{first_layer_index} , end_layer_index:{end_layer_index}")
         remote_transfer_port = self.remote_te_port[remote_engine_id][
             remote_handshake_port]
         num_blocks = len(local_block_ids)
@@ -435,7 +441,7 @@ class KVCacheRecvingThread(threading.Thread):
             for remote_block_id, local_block_id in zip(
                     grouped_remote_block_ids, grouped_local_block_ids):
                 src = src_layer_base_addr + local_block_id[
-                    0] * block_len + offset * inner_block_len
+                    0] * block_len + inner_offset * inner_block_len
                 dst = dst_layer_base_addr + remote_block_id[0] * inner_block_len
                 length = inner_block_len * len(local_block_id)
                 src_list.append(src)
@@ -457,8 +463,11 @@ class KVCacheRecvingThread(threading.Thread):
             request_id, req_transfer_elapsed, num_transfer_groups, num_blocks,
             get_ip(), self.tp_rank, session_id)
 
-        need_cat_cache = tp_num_need_pulls > 1 and origin_offset == tp_num_need_pulls * self._prefill_pp_size - 1
-        need_nz_cache = get_ascend_config().torchair_graph_config.enable_kv_nz and origin_offset == tp_num_need_pulls * self._prefill_pp_size - 1
+        # Determine if the current position is the offset position at the end of the KV transmission.
+        is_kv_transfer_end = (global_offset == tp_num_need_pulls * self._prefill_pp_size - 1)
+        need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
+        need_nz_cache = get_ascend_config().torchair_graph_config.enable_kv_nz and is_kv_transfer_end
+        # need_nz_cache maybe caused error in non-MLA models
         if need_nz_cache or need_cat_cache: 
             self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls,
                                    need_cat_cache, need_nz_cache)
@@ -537,7 +546,6 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _cat_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer,
                       tp_num_need_pulls, num_blocks, block_len, slot_mapping):
-        logger.debug("chenxiao--debug kvcat")
         def transpose_kv_cache_between_head(buffer: torch.Tensor):
             buffer = buffer.view(num_blocks, tp_num_need_pulls, self.block_size,
                                  -1)
@@ -557,7 +565,6 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer,
                      kv_shape, slot_mapping):
-        logger.debug("chenxiao--debug kvnz")
         nz_fmt_last_dim = 16
         k_cache_layer = k_cache_layer.view(
             kv_shape[0],
@@ -1080,15 +1087,25 @@ class MooncakeConnectorWorker:
         prefill_parallel_config: dict[
             str, Any] = vllm_config.kv_transfer_config.get_from_extra_config(
                 "prefill", {})
-        self._prefill_tp_size = prefill_parallel_config.get("tp_size", 1)
-        self._prefill_dp_size = prefill_parallel_config.get("dp_size", 1)
+
+        assert "tp_size" in prefill_parallel_config.keys()
+        self._prefill_tp_size = prefill_parallel_config["tp_size"]
+
+        assert "dp_size" in prefill_parallel_config.keys()
+        self._prefill_dp_size = prefill_parallel_config["dp_size"]
+        # get prefill pp size from extra config
         self._prefill_pp_size = prefill_parallel_config.get("pp_size", 1)
         # get decode tp and dp size from extra config
         decode_parallel_config: dict[
             str, Any] = vllm_config.kv_transfer_config.get_from_extra_config(
                 "decode", {})
-        self._decode_tp_size = decode_parallel_config.get("tp_size", 1)
-        self._decode_dp_size = decode_parallel_config.get("dp_size", 1)
+        assert "tp_size" in decode_parallel_config.keys()
+        self._decode_tp_size = decode_parallel_config["tp_size"]
+        assert "dp_size" in decode_parallel_config.keys()
+        self._decode_dp_size = decode_parallel_config["dp_size"]
+         # get prefill pp size from extra config
+        self._decode_pp_size = prefill_parallel_config.get("pp_size", 1)
+        assert self._decode_pp_size == 1, "decode pp size must be 1"
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
