@@ -277,9 +277,12 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 ## Accuracy Evaluation
 
-### AISBench Accuracy Evaluation
+### Using AISBench
+
+As an example, take the `ceval` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-V3.2-Exp-W8A8` in online mode.
 
 Refer to [AISBench Installation](../developer_guide/evaluation/using_ais_bench.md#install-aisbench) for installation.
+
 Refer to [Download Dataset](../developer_guide/evaluation/using_ais_bench.md#download-dataset) for dataset.
 
 Update the file `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
@@ -326,11 +329,37 @@ After execution, you can get the result as following.
 |----- | ----- | ----- | ----- | -----|
 | cevaldataset | - | accuracy | gen | 92.20 |
 
+### Using Language Model Evaluation Harness
+
+As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-V3.2-Exp-W8A8` in online mode.
+
+Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
+
+Run `lm_eval` to execute the accuracy evaluation.
+
+```shell
+lm_eval \
+  --model local-completions \
+  --model_args model=/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8,base_url=http://127.0.0.1:8000/v1/completions,tokenized_requests=False,trust_remote_code=True \
+  --tasks gsm8k \
+  --output_path ./
+```
+
+After execution, you can get the result as following.
+
+|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
+|-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
+|gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.9591|±  |0.0055|
+|     |       |strict-match    |     5|exact_match|↑  |0.9583|±  |0.0055|
+
 ## Performance
 
-### AISBench Performance Evaluation
+### Using AISBench
+
+As an example, take the `ceval` dataset as a test dataset, and run performance evaluation of `DeepSeek-V3.2-Exp-W8A8` in online mode.
 
 Refer to [AISBench Installation](../developer_guide/evaluation/using_ais_bench.md#install-aisbench) for installation.
+
 Refer to [Download Dataset](../developer_guide/evaluation/using_ais_bench.md#download-dataset) for dataset.
 
 Update the file `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
@@ -379,3 +408,50 @@ After execution, you can get the result as following.
 |InputTokens|total|119.5996|73.0|355.0|108.0|136.0|171.0|250.65|1346|
 |OutputTokens|total|325.9926|67.0|3623.0|242.0|343.0|533.0|1696.2|1346|
 |OutputTokenThroughput|total|1.2036 token/s|0.2206 token/s|9.3449 token/s|0.9022 token/s|1.2678 token/s|2.0254 token/s|8.6098 token/s|1346|
+
+### Using vLLM Benchmark
+
+Run performance evaluation of `DeepSeek-V3.2-Exp-W8A8` as an example.
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+
+There are three `vllm bench` subcommand:
+- `latency`: Benchmark the latency of a single batch of requests.
+- `serve`: Benchmark the online serving throughput.
+- `throughput`: Benchmark offline inference throughput.
+
+Take the `serve` as an example. Run the code as follows.
+
+```shell
+export VLLM_USE_MODELSCOPE=true
+vllm bench serve --model vllm-ascend/DeepSeek-V3.2-Exp-W8A8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+```
+
+After about several minutes, you can get the online serving performance evaluation.
+
+```shell
+============ Serving Benchmark Result ============
+Successful requests:                     200       
+Request rate configured (RPS):           1.00      
+Benchmark duration (s):                  235.18    
+Total input tokens:                      39780     
+Total generated tokens:                  23467     
+Request throughput (req/s):              0.85      
+Output token throughput (tok/s):         99.78     
+Peak output token throughput (tok/s):    192.00    
+Peak concurrent requests:                38.00     
+Total Token throughput (tok/s):          268.93    
+---------------Time to First Token----------------
+Mean TTFT (ms):                          12536.55  
+Median TTFT (ms):                        14678.55  
+P99 TTFT (ms):                           23300.81  
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          141.89    
+Median TPOT (ms):                        145.62    
+P99 TPOT (ms):                           163.16    
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           144.10    
+Median ITL (ms):                         98.17     
+P99 ITL (ms):                            598.55    
+==================================================
+```
