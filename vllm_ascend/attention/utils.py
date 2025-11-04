@@ -134,8 +134,8 @@ def extract_req_dcp_by_chunk_cp(lst,
 
 
 def filter_chunked_req_indices(
-        seq_len: torch.Tensor,
-        mask_for_non_zero_chunk: Optional[List[bool]],
+    seq_len: torch.Tensor,
+    mask_for_non_zero_chunk: Optional[List[bool]],
 ) -> torch.Tensor:
     """
     filter the reqs which are doing real chunk_prefill.
@@ -158,8 +158,8 @@ def filter_chunked_req_indices(
 
 
 def split_decodes_and_prefills(
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        decode_threshold: int = 1,
+    common_attn_metadata: AscendCommonAttentionMetadata,
+    decode_threshold: int = 1,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -212,8 +212,8 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
 
 def maybe_save_kv_layer_to_connector(
-        layer_name: str,
-        kv_cache_layer: List[torch.Tensor],
+    layer_name: str,
+    kv_cache_layer: List[torch.Tensor],
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return
