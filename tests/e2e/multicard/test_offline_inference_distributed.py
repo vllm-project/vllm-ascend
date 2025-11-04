@@ -189,6 +189,25 @@ def test_sp_for_qwen3_moe() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "1"})
+def test_fc2_for_qwen3_moe() -> None:
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    sampling_params = SamplingParams(max_tokens=5,
+                                     temperature=0.0,
+                                     top_k=50,
+                                     top_p=0.9)
+
+    with VllmRunner(snapshot_download("Qwen/Qwen3-30B-A3B"),
+                    dtype="auto",
+                    tensor_parallel_size=2,
+                    distributed_executor_backend="mp",
+                    enable_expert_parallel=True,
+                    enforce_eager=True) as vllm_model:
+        vllm_model.generate(example_prompts, sampling_params)
+
+
 @pytest.mark.parametrize("model", QWEN_DENSE_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1"})
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
