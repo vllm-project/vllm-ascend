@@ -1,7 +1,7 @@
 from unittest.mock import MagicMock, patch
 
-# import torch
-# from torch import nn
+import torch
+from torch import nn
 # from vllm.distributed.parallel_state import GroupCoordinator
 # from vllm.model_executor.layers.linear import LinearBase
 
