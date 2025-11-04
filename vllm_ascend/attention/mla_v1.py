@@ -887,22 +887,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         ).device_group if self.tp_size > 1 else None
 
     def _v_up_proj(self, x):
-        if self.W_UV.shape[0] * self.W_UV.shape[
-                1] < 65536 and not self.dcp_size * self.pcp_size > 1:
-            x = x.view(-1, self.num_heads, self.kv_lora_rank)
-            x = torch_npu.npu_transpose_batchmatmul(x,
-                                                    self.W_UV,
-                                                    perm_x1=[1, 0, 2],
-                                                    perm_x2=[0, 1, 2],
-                                                    perm_y=[1, 0, 2])
-            x = x.reshape(-1, self.num_heads * self.v_head_dim)
-        else:
-            # Convert from (B, N, L) to (N, B, L)
-            x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-            # # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-            x = torch.bmm(x, self.W_UV)
-            # # Convert from (N, B, V) to (B, N * V)
-            x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        x = x.view(-1, self.num_heads, self.kv_lora_rank)
+        b, _, _ = x.shape
+        res2 = torch.empty((b, self.num_heads, self.v_head_dim),
+                           dtype=x.dtype,
+                           device=x.device)
+        torch.ops._C_ascend.batch_matmul_transpose(x, self.W_UV, res2)
+        x = res2.reshape(-1, self.num_heads * self.v_head_dim)
         return x
 
     # Return `ql_nope`, `q_pe`
