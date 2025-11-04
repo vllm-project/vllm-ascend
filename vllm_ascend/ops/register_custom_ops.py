@@ -36,7 +36,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(
             x = tensor_model_parallel_all_gather(x, 0)
             pad_size = forward_context.pad_size
             if pad_size > 0:
-                x = x[:-pad_size, :]
+                x = x[:-pad_size]
         else:
             x = get_ep_group().all_gather(x, 0)
             # unpad
@@ -50,8 +50,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(
             offset = 0
             for idx in range(dp_size):
                 num_tokens_dp = num_tokens_across_dp_cpu[idx]
-                result[offset:offset +
-                       num_tokens_dp, :] = x[idx, :num_tokens_dp, :]
+                result[offset:offset + num_tokens_dp] = x[idx, :num_tokens_dp]
                 offset += num_tokens_dp
             x = result
 
