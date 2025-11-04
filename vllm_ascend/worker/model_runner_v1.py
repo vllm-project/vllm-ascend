@@ -3234,9 +3234,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                device=self.device)
                         #### k cache: for deepseek sparse attention
                         if dsa_k_cache_factor is not None:
-                            k_cache_tensor = torch.zeros(dsa_k_cache_size,
-                                                         dtype=torch.int8,
-                                                         device=self.device)
+                            dsa_k_cache_tensor = torch.zeros(
+                                dsa_k_cache_size,
+                                dtype=torch.int8,
+                                device=self.device)
                     else:
                         k_tensor = torch.zeros(k_tensor_size + alignment,
                                                dtype=torch.int8,
@@ -3250,19 +3251,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             v_tensor, alignment)[:v_tensor_size]
                         #### k cache: for deepseek sparse attention
                         if dsa_k_cache_factor is not None and dsa_k_cache_size is not None:
-                            k_cache_tensor = torch.zeros(dsa_k_cache_size +
-                                                         alignment,
-                                                         dtype=torch.int8,
-                                                         device=self.device)
-                            k_cache_tensor = self._align_memory(
-                                k_cache_tensor, alignment)[:dsa_k_cache_size]
+                            dsa_k_cache_tensor = torch.zeros(
+                                dsa_k_cache_size + alignment,
+                                dtype=torch.int8,
+                                device=self.device)
+                            dsa_k_cache_tensor = self._align_memory(
+                                dsa_k_cache_tensor,
+                                alignment)[:dsa_k_cache_size]
 
                     for layer_name_inner in kv_cache_tensor.shared_by:
                         # shared the kvcache between the self_attn specs in the same group
                         if ("attn" in layer_name_inner
                                 and "linear_attn" not in layer_name_inner):
                             kv_cache_raw_tensors[layer_name_inner] = (k_tensor, v_tensor) if \
-                                not self.use_sparse else (k_tensor, v_tensor, k_cache_tensor)
+                                not self.use_sparse else (k_tensor, v_tensor, dsa_k_cache_tensor)
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
@@ -3302,13 +3304,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
-                    raw_dsa_k_cache = None
+                    raw_dsa_k_tensor = None
                     if self.use_sparse:
-                        raw_k_tensor, raw_v_tensor, raw_dsa_k_cache = kv_cache_raw_tensors[  # type: ignore
+                        raw_k_tensor, raw_v_tensor, raw_dsa_k_tensor = kv_cache_raw_tensors[  # type: ignore
                             layer_name]
-                        assert raw_dsa_k_cache is not None
+                        assert raw_dsa_k_tensor is not None
                         sum_page_size_bytes = raw_k_tensor.numel(
-                        ) + raw_v_tensor.numel() + raw_dsa_k_cache.numel()
+                        ) + raw_v_tensor.numel() + raw_dsa_k_tensor.numel()
                     else:
                         raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
                             layer_name]
@@ -3367,13 +3369,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     k_cache = self._convert_torch_format(k_cache)
                     v_cache = raw_v_tensor.view(dtype).view(v_shape)
                     v_cache = self._convert_torch_format(v_cache)
-                    if self.use_sparse and raw_dsa_k_cache is not None:
+                    if self.use_sparse and raw_dsa_k_tensor is not None:
                         dsa_k_cache_shape = (num_blocks,
                                              kv_cache_spec.block_size, 1, 128)
                         dsa_k_cache_size = (
                             num_blocks
                         ) * kv_cache_spec.block_size * 128 * dtype.itemsize
-                        dsa_k_cache = raw_dsa_k_cache[:dsa_k_cache_size].view(
+                        dsa_k_cache = raw_dsa_k_tensor[:dsa_k_cache_size].view(
                             dtype).view(dsa_k_cache_shape)
                         kv_caches[layer_name] = (k_cache, v_cache, dsa_k_cache)
                     else:
