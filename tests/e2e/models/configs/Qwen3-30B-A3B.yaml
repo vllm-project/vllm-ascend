@@ -1,5 +1,4 @@
 model_name: "Qwen/Qwen3-30B-A3B"
-runner: "linux-aarch64-a2-2"
 hardware: "Atlas A2 Series"
 tasks:
 - name: "gsm8k"
