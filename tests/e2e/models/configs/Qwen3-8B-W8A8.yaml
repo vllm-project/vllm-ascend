@@ -1,0 +1,12 @@
+model_name: "vllm-ascend/Qwen3-8B-W8A8"
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.80
+  - name: "exact_match,flexible-extract"
+    value: 0.82
+num_fewshot: 5
+enable_thinking: False
+quantization: ascend
