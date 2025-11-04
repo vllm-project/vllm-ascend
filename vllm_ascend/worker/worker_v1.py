@@ -54,7 +54,7 @@ from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (check_ascend_device_type, is_enable_nz,
                                register_ascend_customop, sleep_mode_enabled,
-                               try_register_lib)
+                               try_register_lib, vllm_version_is, enable_sp)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
@@ -277,9 +277,14 @@ class NPUWorker(WorkerBase):
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         if forward_pass and not get_pp_group().is_first_rank:
+            # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise it will conflict with the all-gather operation in flashcomm1.
+            if enable_sp(self.vllm_config):
+                all_gather_group = None
+            else:
+                all_gather_group = get_tp_group()
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group()))
+                    all_gather_group=all_gather_group))
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
@@ -290,9 +295,13 @@ class NPUWorker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != (
             "external_launcher") and not get_pp_group().is_last_rank
-
+        # If flashcomm1 is used, this all_gather_group parameter needs to be removed, otherwise it will conflict with the all-gather operation in flashcomm1.
+        if enable_sp(self.vllm_config):
+            all_gather_group = None
+        else:
+            all_gather_group = get_tp_group()
         get_pp_group().send_tensor_dict(output.tensors,
-                                        all_gather_group=get_tp_group())
+                                        all_gather_group=all_gather_group)
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
