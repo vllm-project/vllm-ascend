@@ -20,6 +20,10 @@
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci0
 # Update the vllm-ascend image
+# Atlas A2:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+# Atlas A3:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
@@ -50,6 +54,10 @@ apt-get update -y && apt-get install -y curl
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci0
 # Update the vllm-ascend image
+# Atlas A2:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
+# Atlas A3:
+# export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3-openeuler
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
 docker run --rm \
 --name vllm-ascend \
