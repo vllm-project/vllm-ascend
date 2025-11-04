@@ -122,10 +122,10 @@ After 30 minutes, the output is as shown below:
 ```
 The markdown format results is as below:
 
-Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
+|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
 |gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.3215|±  |0.0129|
-|     |       |strict-match    |     5|exact_match|↑  |0.2077|±  |0.0112|
+|gsm8k|      3|strict-match    |     5|exact_match|↑  |0.2077|±  |0.0112|
 
 ```
 
@@ -187,7 +187,7 @@ The markdown format results is as below:
 Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
 |gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.3412|±  |0.0131|
-|     |       |strict-match    |     5|exact_match|↑  |0.3139|±  |0.0128|
+|gsm8k|      3|strict-match    |     5|exact_match|↑  |0.3139|±  |0.0128|
 
 ```
 
