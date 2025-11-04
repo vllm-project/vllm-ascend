@@ -111,12 +111,6 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         hf_config = get_current_vllm_config().model_config.hf_config
         self.enable_shared_expert_dp = get_ascend_config(
         ).enable_shared_expert_dp
-        if hf_config.model_type == "longcat_flash":
-            self.debug_layer_idx = int(self.prefix.split(".")[2])
-            hf_config.first_k_dense_replace = 0
-        else:
-            self.debug_layer_idx = int(self.prefix.split(".")[-2])
-        self.first_k_dense_replace = hf_config.first_k_dense_replace
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
         if mla_modules.indexer is not None:

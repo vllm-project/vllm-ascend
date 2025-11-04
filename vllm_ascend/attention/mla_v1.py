@@ -368,11 +368,11 @@ class AscendMLAMetadataBuilder:
                                                          num_actual_tokens_pcp_padded]
 
         if self.cos_cache is None:
-            if self.model_config.hf_config.model_type == "longcat_flash":
-                cos_cached, sin_cached = \
-                    model.model.layers[model.model.start_layer].self_attn[0].rotary_emb.cos_sin_cache.chunk(2, dim=-1)
-                self.cos_cache = torch.cat((cos_cached, cos_cached), dim=-1)
-                self.sin_cache = torch.cat((sin_cached, sin_cached), dim=-1)
+            if isinstance(model.model.layers[model.model.start_layer].self_attn, nn.ModuleList):
+                self.cos_cache = model.model.layers[
+                    model.model.start_layer].self_attn[0].rotary_emb.cos_cached
+                self.sin_cache = model.model.layers[
+                    model.model.start_layer].self_attn[0].rotary_emb.sin_cached
             else:
                 self.cos_cache = model.model.layers[
                     model.model.start_layer].self_attn.rotary_emb.cos_cached
