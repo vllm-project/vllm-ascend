@@ -188,6 +188,7 @@ def test_sp_for_qwen3_moe() -> None:
                     enforce_eager=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
+
 @patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "1"})
 def test_fc2_for_qwen3_moe() -> None:
     example_prompts = [

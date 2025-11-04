@@ -664,8 +664,7 @@ def enable_sp(vllm_config=None) -> bool:
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp or enable_sp(
-    ) or flashcomm2_enable()
+    return get_ascend_config().enable_shared_expert_dp or enable_sp()
 
 
 def prefill_context_parallel_enable() -> bool:
@@ -890,26 +889,22 @@ class FlashcommEnable:
         """Check basic conditions: tp_world_size > 1 and num_tokens exists"""
         return self.tp_world_size > 1 and self.num_tokens is not None
 
+    def _check_model_type_condition(self):
+        if self.is_moe:
+            return True
+        return self.num_tokens > 1000
+
     def is_flashcomm_v1_enabled(self):
         if not self._check_base_conditions():
             return False
-
-        base_enabled = self._flashcomm1_enable(self.vllm_config)
-        if not base_enabled:
-            return False
-
-        # Apply different token conditions based on whether it's an MoE model
-        if self.is_moe:
-            return True
-        else:
-            return self.num_tokens > 1000
+        return self._check_model_type_condition() and self._flashcomm1_enable(
+            self.vllm_config)
 
     def is_flashcomm_v2_enabled(self):
         if not self._check_base_conditions():
             return False
+        return self._check_model_type_condition() and self._flashcomm2_enable()
 
-        return self._flashcomm2_enable()
-
-    def is_any_flashcomm_enabled(self):
+    def is_flashcomm_enabled(self):
         """Check if any flashcomm strategy is enabled"""
         return self.is_flashcomm_v1_enabled() or self.is_flashcomm_v2_enabled()

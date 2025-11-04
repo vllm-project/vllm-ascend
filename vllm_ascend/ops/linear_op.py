@@ -375,6 +375,12 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         else:
             output = output_parallel
 
+        if not forward_context.sp_enabled:
+            # flashcomm1 not enabled
+            output = get_tp_group().all_gather(output, 0)
+            if num_padding_tokens > 0:
+                output = output[:-num_padding_tokens]
+
         # Handle bias return based on configuration
         output_bias = self.bias if self.skip_bias_add else None
 
@@ -594,7 +600,7 @@ def _get_column_parallel_op(
 ) -> Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp]]:
     if mlp_tp_enable() and "gate_up_proj" in prefix:
         return MLPColumnParallelOp(layer)
-    if enable_sp() or flashcomm2_enable():
+    if enable_sp():
         if "shared_expert" in prefix:
             return None
         if "gate_up_proj" in prefix:
@@ -619,12 +625,8 @@ def _get_row_parallel_op(
     if matmul_allreduce_enable():
         return MatmulAllreduceRowParallelOp(layer)
     if flashcomm2_enable():
-        if "shared_expert" in prefix:
-            return None
         if "o_proj" in prefix or "out_proj" in prefix:
             return Flashcomm2OProjRowParallelOp(layer)
-        if "down_proj" in prefix:
-            return SequenceRowParallelOp(layer)
     if enable_sp():
         if "shared_expert" in prefix:
             return None

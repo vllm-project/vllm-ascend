@@ -102,7 +102,8 @@ class AscendW8A8LinearMethod:
     ) -> torch.Tensor:
         quant_comm_config = getattr(layer, '_quant_comm_config', {})
         comm_fn = quant_comm_config.get('communication_fn')
-        enable_flashcomm2_quant_comm = comm_fn is not None and "o_proj" in layer.prefix
+        enable_flashcomm2_quant_comm = comm_fn is not None and (
+            "o_proj" in layer.prefix or "out_proj" in layer.prefix)
         if x.dtype != torch.int8:
             layer_cls_name = layer.__class__.__name__
             try:
