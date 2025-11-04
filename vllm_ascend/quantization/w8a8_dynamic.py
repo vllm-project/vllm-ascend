@@ -25,7 +25,7 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, is_enable_nz,
                                vllm_version_is)
 
@@ -240,9 +240,16 @@ class AscendW8A8DynamicFusedMoEMethod:
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type)
+            global_num_experts=global_num_experts)
+
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
+                expert_indices=topk_ids,
+                expert_scales=topk_weights,
+                num_experts=global_num_experts,
+                zero_expert_type=zero_expert_type,
+                hidden_states=x,
+            )
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
@@ -253,7 +260,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
-        return moe_comm_method.fused_experts(
+        final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
             w1=layer.w13_weight,
@@ -270,6 +277,9 @@ class AscendW8A8DynamicFusedMoEMethod:
             dynamic_scale_for_share=dynamic_scale_for_share,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            final_hidden_states += zero_expert_result
+        return final_hidden_states
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

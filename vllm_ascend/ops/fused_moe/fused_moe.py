@@ -35,7 +35,7 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
                                               determine_default_log2phy_map)
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
@@ -145,6 +145,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts)
 
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            topk_ids, topk_weights, zero_expert_result = zero_experts_compute(
+                expert_indices=topk_ids,
+                expert_scales=topk_weights,
+                num_experts=global_num_experts,
+                zero_expert_type=zero_expert_type,
+                hidden_states=x,
+            )
+
         topk_weights = topk_weights.to(x.dtype)
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
@@ -153,7 +162,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         moe_comm_method = get_forward_context().moe_comm_method
-        return moe_comm_method.fused_experts(
+        final_hidden_states = moe_comm_method.fused_experts(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
@@ -165,6 +174,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             apply_router_weight_on_input=apply_router_weight_on_input,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
+        if zero_expert_num > 0 and zero_expert_type is not None:
+            final_hidden_states += zero_expert_result
+        return final_hidden_states
 
 
 class AscendFusedMoE(FusedMoE):

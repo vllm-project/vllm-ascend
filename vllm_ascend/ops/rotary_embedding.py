@@ -124,6 +124,16 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         self.sin = None
         super().__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
+        self._set_cos_sin_cache(dtype=dtype)
+
+    def _set_cos_sin_cache(self, dtype):
+        cos_cached, sin_cached = self.cos_sin_cache.chunk(2, dim=-1)
+        cos_cached = torch.cat((cos_cached, cos_cached), dim=-1)
+        sin_cached = torch.cat((sin_cached, sin_cached), dim=-1)
+        cos_cached = cos_cached.to(dtype)
+        sin_cached = sin_cached.to(dtype)
+        self.register_buffer("cos_cached", cos_cached, persistent=False)
+        self.register_buffer("sin_cached", sin_cached, persistent=False)
 
     def forward_oot(
         self,

@@ -288,3 +288,27 @@ def _native_select_experts(
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
+
+
+def zero_experts_compute(
+    expert_indices: torch.Tensor,
+    expert_scales: torch.Tensor,
+    num_experts: int,
+    zero_expert_type: str,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if zero_expert_type == "identity":
+        zero_expert_mask = expert_indices < num_experts
+        zero_expert_scales = expert_scales.clone()
+        zero_expert_scales = torch.where(zero_expert_mask, 0.0, zero_expert_scales)
+
+        hidden_states = hidden_states.unsqueeze(1)
+        zero_expert_scales = zero_expert_scales.unsqueeze(2)
+        result = hidden_states * zero_expert_scales
+        result = result.sum(dim=1)
+
+    normal_expert_mask = expert_indices >= num_experts
+    expert_indices = torch.where(normal_expert_mask, 0, expert_indices)
+    expert_scales = torch.where(normal_expert_mask, 0.0, expert_scales)
+
+    return expert_indices, expert_scales, result
