@@ -29,8 +29,12 @@ docker run --rm \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
 /bin/bash
-vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 4096 &
+vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 35000 &
 ```
+
+:::{note}
+`--max_model_len` should be greater than `35000`, this will be suitable for most datasets. Otherwise the accuracy evaluation may be affected.
+:::
 
 The vLLM server is started successfully, if you see logs as below:
 
@@ -40,7 +44,7 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-### 2. Run C-Eval dataset using AISBench
+### 2. Run different dataset using AISBench
 
 #### Install AISBench
 
@@ -64,6 +68,10 @@ Run `ais_bench -h` to check the installation.
 
 #### Download Dataset
 
+You can choose one or multiple datasets to execute accuracy evaluation.
+
+1. `C-Eval` dataset.
+
 Take `C-Eval` dataset as an example. And you can refer to [Datasets](https://gitee.com/aisbench/benchmark/tree/master/ais_bench/benchmark/configs/datasets) for more datasets. Every datasets have a `README.md` for detailed download and installation process.
 
 Download dataset and install it to specific path.
@@ -78,7 +86,62 @@ unzip ceval-exam.zip
 rm ceval-exam.zip
 ```
 
-#### Update Model Config Python File
+2. `MMLU` dataset.
+
+```shell
+cd ais_bench/datasets
+wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/mmlu.zip
+unzip mmlu.zip
+rm mmlu.zip
+```
+
+3. `GPQA` dataset.
+
+```shell
+cd ais_bench/datasets
+wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gpqa.zip
+unzip gpqa.zip
+rm gpqa.zip
+```
+
+4. `MATH` dataset.
+
+```shell
+cd ais_bench/datasets
+wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/math.zip
+unzip math.zip
+rm math.zip
+```
+
+5. `LiveCodeBench` dataset.
+
+```shell
+cd ais_bench/datasets
+git lfs install
+git clone https://huggingface.co/datasets/livecodebench/code_generation_lite
+```
+
+6. `AIME 2024` dataset.
+
+```shell
+cd ais_bench/datasets
+mkdir aime/
+cd aime/
+wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/aime.zip
+unzip aime.zip
+rm aime.zip
+```
+
+7. `GSM8K` dataset.
+
+```shell
+cd ais_bench/datasets
+wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gsm8k.zip
+unzip gsm8k.zip
+rm gsm8k.zip
+```
+
+#### Configuration
 
 Update the file `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
 There are several arguments that you should update according to your environment.
@@ -86,7 +149,7 @@ There are several arguments that you should update according to your environment
 - `path`: Update to your model weight path.
 - `model`: Update to your model name in vLLM.
 - `host_ip` and `host_port`: Update to your vLLM server ip and port.
-- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max-model-len`(config in your vllm server).
+- `max_out_len`: Note `max_out_len` + LLM input length should be less than `max-model-len`(config in your vllm server), `32768` will be suitable for most datasets.
 - `batch_size`: Update according to your dataset.
 - `temperature`: Update inference argument.
 
@@ -123,13 +186,30 @@ models = [
 
 #### Execute Accuracy Evaluation
 
-Run the following code to execute the accuracy evaluation.
+Run the following code to execute different accuracy evaluation.
 
 ```shell
+# run C-Eval dataset
 ais_bench --models vllm_api_general_chat --datasets ceval_gen_0_shot_cot_chat_prompt.py --mode all --dump-eval-details --merge-ds
+
+# run MMLU dataset
+ais_bench --models vllm_api_general_chat --datasets mmlu_gen_0_shot_cot_chat_prompt.py --mode all --dump-eval-details --merge-ds
+
+# run GPQA dataset
+ais_bench --models vllm_api_general_chat --datasets gpqa_gen_0_shot_str.py --mode all --dump-eval-details --merge-ds
+
+# run MATH-500 dataset
+ais_bench --models vllm_api_general_chat --datasets math500_gen_0_shot_cot_chat_prompt.py --mode all --dump-eval-details --merge-ds
+
+# run LiveCodeBench dataset
+ais_bench --models vllm_api_general_chat --datasets livecodebench_code_generate_lite_gen_0_shot_chat.py --mode all --dump-eval-details --merge-ds
+
+# run AIME 2024 dataset
+ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt.py --mode all --dump-eval-details --merge-ds
+
 ```
 
-After execution, you can get the result from saved files such as `outputs/default/20250628_151326`, there is an example as follows:
+After each dataset execution, you can get the result from saved files such as `outputs/default/20250628_151326`, there is an example as follows:
 
 ```
 20250628_151326/
@@ -157,7 +237,23 @@ After execution, you can get the result from saved files such as `outputs/defaul
 #### Execute Performance Evaluation
 
 ```shell
+# run C-Eval dataset
 ais_bench --models vllm_api_general_chat --datasets ceval_gen_0_shot_cot_chat_prompt.py --summarizer default_perf --mode perf
+
+# run MMLU dataset
+ais_bench --models vllm_api_general_chat --datasets mmlu_gen_0_shot_cot_chat_prompt.py --summarizer default_perf --mode perf
+
+# run GPQA dataset
+ais_bench --models vllm_api_general_chat --datasets gpqa_gen_0_shot_str.py --summarizer default_perf --mode perf
+
+# run MATH-500 dataset
+ais_bench --models vllm_api_general_chat --datasets math500_gen_0_shot_cot_chat_prompt.py --summarizer default_perf --mode perf
+
+# run LiveCodeBench dataset
+ais_bench --models vllm_api_general_chat --datasets livecodebench_code_generate_lite_gen_0_shot_chat.py --summarizer default_perf --mode perf
+
+# run AIME 2024 dataset
+ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt.py --summarizer default_perf --mode perf
 ```
 
 After execution, you can get the result from saved files, there is an example as follows:

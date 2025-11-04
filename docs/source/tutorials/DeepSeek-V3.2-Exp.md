@@ -4,22 +4,22 @@
 
 DeepSeek-V3.2-Exp is a sparse attention model. The main architecture is similar to DeepSeek-V3.1, but with a sparse attention mechanism, which is designed to explore and validate optimizations for training and inference efficiency in long-context scenarios.
 
-:::{note}
-Only machines with AArch64 are supported currently. x86 will be supported soon. This guide takes A3 as the example.
-:::
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
 ## Supported Features
 
-Refer to [supported models](../user_guide/support_matrix/supported_models.md) to get the model's detail.
+Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [supported features](../user_guide/support_matrix/supported_features.md) to get the supported features.
+Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
 
-## Environment
+## Environment Preparation
 
 ### Model Weight
 
-- `DeepSeek-V3.2-Exp`: require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8). [Model weight link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
-- `DeepSeek-V3.2-Exp-w8a8`: require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8). [Model weight link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
+- `DeepSeek-V3.2-Exp`: require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
+- `DeepSeek-V3.2-Exp(Quantized version)`: require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
+
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ### Verify Multi-node Communication(Optional)
 
@@ -27,9 +27,101 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp`(for Atlas 800 A3). These images include CANN 8.2RC1 + [SparseFlashAttention/LightningIndexer](https://gitcode.com/cann/cann-recipes-infer/tree/master/ops/ascendc) + [MLAPO](https://github.com/vllm-project/vllm-ascend/pull/3226). You can also build your own image by referring to [link](https://github.com/vllm-project/vllm-ascend/issues/3278).
+:::::{tab-set}
+::::{tab-item} Use deepseek-v3.2 docker image
 
-Refer to [installation](../installation.md#set-up-using-docker) to set up environment using Docker.
+Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp`(for Atlas 800 A3).
+
+Refer to [using docker](../installation.md#set-up-using-docker) to set up environment using Docker, remember to replace the image with deepseek-v3.2 docker image.
+
+:::{note}
+The image is based on a specific version and will not continue to release new version.
+Only AArch64 architecture are supported currently due to extra operator's installation limitations.
+:::
+
+::::
+::::{tab-item} Use vllm-ascend docker image
+
+You can using our official docker image and install extra operator for supporting `DeepSeek-V3.2-Exp`.
+
+:::{note}
+Only AArch64 architecture are supported currently due to extra operator's installation limitations.
+:::
+
+For `A3` image:
+
+1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+
+2. Install the package `custom-ops` to make the kernels available.
+
+```shell
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
+chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+```
+
+3. Download and install `MLAPO`.
+
+```shell
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-mlapo-linux.aarch64.run
+# please set a custom install-path, here take `/`vllm-workspace/CANN` as example.
+chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run 
+./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/torch_npu-2.7.1%2Bgitb7c90d0-cp311-cp311-linux_aarch64.whl
+pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/libopsproto_rt2.0.so
+cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
+# Don't forget to replace `/vllm-workspace/CANN/` to the custom path you set before.
+source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
+export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
+```
+
+For `A2` image, you should change all `wget` commands as above, and replace `A3` with `A2` release file.
+
+1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+
+2. Install the package `custom-ops` to make the kernels available.
+
+```shell
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/CANN-custom_ops-sfa-linux.aarch64.run
+chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+```
+
+3. Download and install `MLAPO`.
+
+```shell
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/CANN-custom_ops-mlapo-linux.aarch64.run
+# please set a custom install-path, here take `/`vllm-workspace/CANN` as example.
+chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run 
+./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/torch_npu-2.7.1%2Bgitb7c90d0-cp311-cp311-linux_aarch64.whl
+pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
+wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/libopsproto_rt2.0.so
+cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
+# Don't forget to replace `/vllm-workspace/CANN/` to the custom path you set before.
+source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
+export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
+```
+
+::::
+::::{tab-item} Build from source
+
+You can build all from source.
+
+- Install `vllm-ascend`, refer to [set up using python](../installation.md#set-up-using-python).
+- Install extra operator for supporting `DeepSeek-V3.2-Exp`, refer to `Use vllm-ascend docker image` tab.
+
+::::
+:::::
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -71,10 +163,6 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 ::::{tab-item} DeepSeek-V3.2-Exp A3 series
 
 Run the following scripts on two nodes respectively.
-
-:::{note}
-Before launching the inference server, ensure the following environment variables are set for multi-node communication.
-:::
 
 **Node 0**
 
@@ -258,7 +346,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 
 ### Prefill-Decode Disaggregation
 
-TODO
+Not supported yet.
 
 ## Functional Verification
 
@@ -277,53 +365,13 @@ curl http://<node0_ip>:<port>/v1/completions \
 
 ## Accuracy Evaluation
 
+Here are two accuracy evaluation methods.
+
 ### Using AISBench
 
-As an example, take the `ceval` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-V3.2-Exp-W8A8` in online mode.
+1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
 
-Refer to [AISBench Installation](../developer_guide/evaluation/using_ais_bench.md#install-aisbench) for installation.
-
-Refer to [Download Dataset](../developer_guide/evaluation/using_ais_bench.md#download-dataset) for dataset.
-
-Update the file `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
-
-```python
-from ais_bench.benchmark.models import VLLMCustomAPIChat
-from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
-
-models = [
-    dict(
-        attr="service",
-        type=VLLMCustomAPIChat,
-        abbr='vllm-api-general-chat',
-        path="/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8",
-        model="deepseek_v3.2",
-        request_rate = 0,
-        retry = 2,
-        host_ip = "localhost",
-        host_port = 8000,
-        max_out_len = 4096,
-        batch_size=128,
-        trust_remote_code=False,
-        generation_kwargs = dict(
-            temperature = 0.6,
-            top_k = 10,
-            top_p = 0.95,
-            seed = None,
-            repetition_penalty = 1.03,
-        ),
-        pred_postprocessor=dict(type=extract_non_reasoning_content)
-    )
-]
-```
-
-Then, run the following code to execute the accuracy evaluation.
-
-```shell
-ais_bench --models vllm_api_general_chat --datasets ceval_gen_0_shot_cot_chat_prompt.py --mode all --dump-eval-details --merge-ds
-```
-
-After execution, you can get the result as following.
+2. After execution, you can get the result, here is the result of `DeepSeek-V3.2-Exp-W8A8` in `vllm-ascend:0.11.0rc0` for reference only.
 
 | dataset | version | metric | mode | vllm-api-general-chat |
 |----- | ----- | ----- | ----- | -----|
@@ -333,9 +381,9 @@ After execution, you can get the result as following.
 
 As an example, take the `gsm8k` dataset as a test dataset, and run accuracy evaluation of `DeepSeek-V3.2-Exp-W8A8` in online mode.
 
-Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
+1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
 
-Run `lm_eval` to execute the accuracy evaluation.
+2. Run `lm_eval` to execute the accuracy evaluation.
 
 ```shell
 lm_eval \
@@ -345,7 +393,7 @@ lm_eval \
   --output_path ./
 ```
 
-After execution, you can get the result as following.
+3. After execution, you can get the result, here is the result of `DeepSeek-V3.2-Exp-W8A8` in `vllm-ascend:0.11.0rc0` for reference only.
 
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
@@ -356,58 +404,7 @@ After execution, you can get the result as following.
 
 ### Using AISBench
 
-As an example, take the `ceval` dataset as a test dataset, and run performance evaluation of `DeepSeek-V3.2-Exp-W8A8` in online mode.
-
-Refer to [AISBench Installation](../developer_guide/evaluation/using_ais_bench.md#install-aisbench) for installation.
-
-Refer to [Download Dataset](../developer_guide/evaluation/using_ais_bench.md#download-dataset) for dataset.
-
-Update the file `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
-
-```python
-from ais_bench.benchmark.models import VLLMCustomAPIChat
-from ais_bench.benchmark.utils.model_postprocessors import extract_non_reasoning_content
-
-models = [
-    dict(
-        attr="service",
-        type=VLLMCustomAPIChat,
-        abbr='vllm-api-general-chat',
-        path="/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8",
-        model="deepseek_v3.2",
-        request_rate = 0,
-        retry = 2,
-        host_ip = "localhost",
-        host_port = 8000,
-        max_out_len = 4096,
-        batch_size=128,
-        trust_remote_code=False,
-        generation_kwargs = dict(
-            temperature = 0.6,
-            top_k = 10,
-            top_p = 0.95,
-            seed = None,
-            repetition_penalty = 1.03,
-        ),
-        pred_postprocessor=dict(type=extract_non_reasoning_content)
-    )
-]
-```
-
-Then, run the following code to execute the performance evaluation.
-
-```shell
-ais_bench --models vllm_api_general_chat --datasets ceval_gen_0_shot_cot_chat_prompt.py --summarizer default_perf --mode perf
-```
-
-After execution, you can get the result as following.
-
-|Performance Parameters|Stage|Average|Min|Max|Median|P75|P90|P99|N|
-|-|-|-|-|-|-|-|-|-|-|
-|E2EL|total|293508.5923 ms|15623.5345 ms|888088.5333 ms|266600.0363 ms|302340.1144 ms|459604.5972 ms|589600.1589 ms|1346|
-|InputTokens|total|119.5996|73.0|355.0|108.0|136.0|171.0|250.65|1346|
-|OutputTokens|total|325.9926|67.0|3623.0|242.0|343.0|533.0|1696.2|1346|
-|OutputTokenThroughput|total|1.2036 token/s|0.2206 token/s|9.3449 token/s|0.9022 token/s|1.2678 token/s|2.0254 token/s|8.6098 token/s|1346|
+Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
 
@@ -427,31 +424,4 @@ export VLLM_USE_MODELSCOPE=true
 vllm bench serve --model vllm-ascend/DeepSeek-V3.2-Exp-W8A8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
-After about several minutes, you can get the online serving performance evaluation.
-
-```shell
-============ Serving Benchmark Result ============
-Successful requests:                     200       
-Request rate configured (RPS):           1.00      
-Benchmark duration (s):                  235.18    
-Total input tokens:                      39780     
-Total generated tokens:                  23467     
-Request throughput (req/s):              0.85      
-Output token throughput (tok/s):         99.78     
-Peak output token throughput (tok/s):    192.00    
-Peak concurrent requests:                38.00     
-Total Token throughput (tok/s):          268.93    
----------------Time to First Token----------------
-Mean TTFT (ms):                          12536.55  
-Median TTFT (ms):                        14678.55  
-P99 TTFT (ms):                           23300.81  
------Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          141.89    
-Median TPOT (ms):                        145.62    
-P99 TPOT (ms):                           163.16    
----------------Inter-token Latency----------------
-Mean ITL (ms):                           144.10    
-Median ITL (ms):                         98.17     
-P99 ITL (ms):                            598.55    
-==================================================
-```
+After about several minutes, you can get the performance evaluation result.

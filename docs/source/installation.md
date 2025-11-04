@@ -297,12 +297,14 @@ Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt
 ## Multi-node Deployment
 ### Verify Multi-Node Communication
 
+First, check physical layer connectivity, then verify each node, and finally verify the inter-node connectivity.
+
 #### Physical Layer Requirements:
 
 - The physical machines must be located on the same WLAN, with network connectivity.
 - All NPUs are connected with optical modules, and the connection status must be normal.
 
-#### Verification Process:
+#### Each Node Verification:
 
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
@@ -345,7 +347,7 @@ Execute the following commands on each node in sequence. The results must all be
 ::::
 :::::
 
-#### NPU Interconnect Verification:
+#### Interconnect Verification:
 ##### 1. Get NPU IP Addresses
 :::::{tab-set}
 ::::{tab-item} A2 series
