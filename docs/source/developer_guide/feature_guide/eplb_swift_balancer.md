@@ -16,7 +16,7 @@ Please refer to the EPLB section of the user guide for detailed information: [Ho
 vllm_ascend
 ├── eplb
 │   ├── adaptor
-│   │   ├── abstrat_adaptor.py
+│   │   ├── abstract_adaptor.py
 │   │   ├── vllm_adaptor.py
 │   ├── core
 │   │   ├── policy
