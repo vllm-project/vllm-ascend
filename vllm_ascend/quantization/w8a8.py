@@ -129,6 +129,7 @@ class AscendW8A8LinearMethod:
                     layer.aclnn_input_offset,
                 )
                 comm_input = quant_x.view(x.size(0), -1)
+                assert comm_fn is not None
                 x = comm_fn(comm_input)
             else:
                 # quant
