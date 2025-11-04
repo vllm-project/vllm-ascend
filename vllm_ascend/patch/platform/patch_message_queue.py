@@ -11,7 +11,7 @@ from vllm.distributed.utils import sched_yield
 from vllm.logger import logger
 from vllm.utils import (get_ip, get_mp_context, get_open_port,
                         get_open_zmq_ipc_path, is_valid_ipv6_address)
-from zmq import Context, IPV6, XPUB, XPUB_VERBOSE  # type: ignore
+from zmq import IPV6, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
