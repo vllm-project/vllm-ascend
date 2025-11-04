@@ -59,6 +59,8 @@ jobs:
             model_name: DeepSeek-V2-Lite
           - runner: a2-4
             model_name: Qwen3-Next-80B-A3B-Instruct
+          - runner: a2-1  
+            model_name: Qwen3-8B-W8A8
       fail-fast: false
     # test will be triggered when tag 'accuracy-test' & 'ready-for-test'
     if:  >-
