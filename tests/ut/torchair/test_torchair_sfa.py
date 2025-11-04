@@ -39,7 +39,7 @@ class TestAscendSFATorchairBackend(TestBase):
 class TestAscendSFATorchairPrefillMetadata(TestBase):
 
     def test_ascend_sfa_prefill_metadata_default(self):
-        attn_mask = torch.tensort([[1, 0], [1, 1]], dtype=torch.bool)
+        attn_mask = torch.tensor([[1, 0], [1, 1]], dtype=torch.bool)
         query_lens = [1, 2]
         seq_lens = [2, 2]
         context_lens = torch.tensor([1, 2])
@@ -87,7 +87,7 @@ class TestAscendSFATorchairPrefillMetadata(TestBase):
             chunk_seq_lens=chunk_seq_lens)
 
         metadata = AscendSFATorchairPrefillMetadata(
-            attn_mask=torch.tensort([[1, 0], [1, 1]], dtype=torch.bool),
+            attn_mask=torch.tensor([[1, 0], [1, 1]], dtype=torch.bool),
             query_lens=[1, 2],
             seq_lens=[2, 2],
             context_lens=torch.tensor([1, 2]),
@@ -120,6 +120,8 @@ class TestAscendSFATorchairDecodeMetadata(TestBase):
         metadata = AscendSFATorchairDecodeMetadata(input_positions,
                                                    block_table, seq_lens,
                                                    max_seq_lens, seq_lens_list,
+                                                   None,
+                                                   None
                                                    attn_mask)
 
         self.assertIs(metadata.input_positions, input_positions)
