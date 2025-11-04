@@ -10,6 +10,7 @@ import types
 import pytest
 from unittest.mock import patch
 from typing import List, Dict, Tuple, Any
+from multiprocessing import Queue
 from functools import partial
 from vllm import LLM, SamplingParams
 from vllm.utils import get_open_port
