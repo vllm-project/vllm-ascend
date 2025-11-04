@@ -390,7 +390,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
                 decode_token_pre_req=1,
                 actual_seq_lengths_q=[0, 1, 2],
                 attn_mask=torch.zeros((1, 1), dtype=torch.bool),
-                spec_attn_mask=torch.zeors((1, 1), dtype=torch.bool),
+                spec_attn_mask=torch.zeros((1, 1), dtype=torch.bool),
             )
             metadata = builder.build_torchair_graph_dummy(common_attn_metadata)
 
