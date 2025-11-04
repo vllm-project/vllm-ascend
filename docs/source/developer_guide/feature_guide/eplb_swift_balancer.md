@@ -5,7 +5,7 @@ When using Expert Parallelism (EP), different experts are assigned to different 
 
 To facilitate reproduction and deployment, Vllm Ascend supported deployed EP load balancing algorithm in `vllm_ascend/eplb/core/policy`. The algorithm computes a balanced expert replication and placement plan based on the estimated expert loads. Note that the exact method for predicting expert loads is outside the scope of this repository. A common method is to use a moving average of historical statistics.
 
-![eplb](./images/eplb.png)
+![eplb](../../assets/eplb.png)
 ## How to Use EPLB?
 Please refer to the EPLB section of the user guide for detailed information: [How to Use EPLB](../../user_guide/feature_guide/eplb_swift_balancer.md)
 
