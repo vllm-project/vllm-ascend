@@ -15,6 +15,8 @@
  */
 
 #include <iostream>
+#include <stdexcept>
+#include <string>
 
 extern "C" {
 
@@ -49,7 +51,7 @@ void create_and_map(unsigned long long device, ssize_t size, void* d_mem,
   ensure_context(device);
   // Define memory allocation properties
   aclrtPhysicalMemProp prop = {};
-  prop.handleType = ACL_MEM_HANDLE_TYPE_NONE ;
+  prop.handleType = ACL_MEM_HANDLE_TYPE_NONE;
   prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
   prop.memAttr = ACL_HBM_MEM_HUGE;
   prop.location.id = device;
@@ -59,15 +61,21 @@ void create_and_map(unsigned long long device, ssize_t size, void* d_mem,
   // Allocate memory using aclrtMallocPhysical
   aclError error_code = aclrtMallocPhysical(p_memHandle, size, &prop, 0);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-            << __LINE__ << std::endl;  
-    return;
+    if (error_code == ACL_ERROR_RT_MEMORY_ALLOCATION) {
+      throw std::runtime_error("aclrtMallocPhysical failed with acl error code: " + 
+                              std::to_string(error_code) + "(OOM: Out of Memory, allocation failed) " + 
+                              __FILE__ + ":" + std::to_string(__LINE__));
+    } else {
+      throw std::runtime_error("aclrtMallocPhysical failed with acl error code: " +
+                              std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
+    }
   }
+
+  // Map memory
   error_code = aclrtMapMem(d_mem, size, 0, *p_memHandle, 0);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-            << __LINE__ << std::endl;  
-    return;
+    throw std::runtime_error("aclrtMapMem failed with acl error code: " +
+                            std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
 }
 
@@ -79,15 +87,13 @@ void unmap_and_release(unsigned long long device, ssize_t size,
   ensure_context(device);
   aclError error_code = aclrtUnmapMem(d_mem);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-            << __LINE__ << std::endl;  
-    return;
+    throw std::runtime_error("aclrtUnmapMem failed with acl error code: " +
+                            std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
   error_code = aclrtFreePhysical(*p_memHandle);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-            << __LINE__ << std::endl;  
-    return;
+    throw std::runtime_error("aclrtFreePhysical failed with acl error code: " +
+                            std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
 }
 
@@ -139,25 +145,29 @@ __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device
                                    ACL_RT_MEM_ALLOC_GRANULARITY_MINIMUM,
                                    &granularity);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-            << __LINE__ << std::endl;  
-    return nullptr;
+    throw std::runtime_error("aclrtMemGetAllocationGranularity failed with acl error code: " +
+                            std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
   size_t alignedSize = ((size + granularity - 1) / granularity) * granularity;
   void *d_mem;
   error_code = aclrtReserveMemAddress(&d_mem, alignedSize, 0, nullptr, 0);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-                << __LINE__ << std::endl;  
-    return nullptr;
+    if (error_code == ACL_ERROR_RT_MEMORY_ALLOCATION) {
+      throw std::runtime_error("aclrtReserveMemAddress failed with acl error code: " + 
+                              std::to_string(error_code) + "(OOM: Out of Memory, allocation failed) " + 
+                              __FILE__ + ":" + std::to_string(__LINE__));
+    } else {
+      throw std::runtime_error("aclrtReserveMemAddress failed with acl error code: " +
+                              std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
+    }
   }
   // allocate the aclrtDrvMemHandle
   aclrtDrvMemHandle* p_memHandle =
       (aclrtDrvMemHandle*)malloc(sizeof(aclrtDrvMemHandle));
 
   if (!g_python_malloc_callback) {
-    std::cerr << "ERROR: g_python_malloc_callback not set.\n";
-    return nullptr;
+    throw std::runtime_error("my_malloc ERROR: g_python_malloc_callback not set." +
+                            std::string(" ") + __FILE__ + ":" + std::to_string(__LINE__));
   }
 
   // Acquire GIL (not in stable ABI officially, but often works)
@@ -189,8 +199,8 @@ __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device
 __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, int device, aclrtStream stream) {
   // get memory handle from the pointer
   if (!g_python_free_callback) {
-    std::cerr << "ERROR: g_python_free_callback not set.\n";
-    return;
+    throw std::runtime_error("aclrtDrvMemHandle ERROR: g_python_malloc_callback not set." +
+                            std::string(" ") + __FILE__ + ":" + std::to_string(__LINE__));
   }
 
   // Acquire GIL (not in stable ABI officially, but often works)
@@ -232,9 +242,8 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
   // free address and the handle
   aclError error_code = aclrtReleaseMemAddress(d_mem);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-        << __LINE__ << std::endl;  
-    return;
+    throw std::runtime_error("aclrtReleaseMemAddress failed with acl error code: " +
+                            std::to_string(error_code) + " " + __FILE__ + ":" + std::to_string(__LINE__));
   }
   free(p_memHandle);
 }
