@@ -50,7 +50,9 @@ class PrepareAndFinalize(ABC):
                                      sizes, ranks, and communication settings.
     """
 
-    def __init__(self, moe_config: FusedMoEConfig, quant_type: QuantType):
+    def __init__(self,
+                 moe_config: FusedMoEConfig,
+                 quant_type: QuantType = QuantType.NONE):
         self.moe_config = moe_config
         self.quant_type = quant_type
 
@@ -112,7 +114,9 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
     Will be used when num_tokens exceed mc2's limitation (512 tokens/rank).
     """
 
-    def __init__(self, moe_config: FusedMoEConfig, quant_type: QuantType):
+    def __init__(self,
+                 moe_config: FusedMoEConfig,
+                 quant_type: QuantType = QuantType.NONE):
         super().__init__(moe_config, quant_type)
         self._restore_tp_across_dp()
 
@@ -204,7 +208,9 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     Relies on `mc2_mask` and `padded_num_tokens` from forward_context for alignment.
     """
 
-    def __init__(self, moe_config: FusedMoEConfig, quant_type: QuantType):
+    def __init__(self,
+                 moe_config: FusedMoEConfig,
+                 quant_type: QuantType = QuantType.NONE):
         super().__init__(moe_config, quant_type)
         self._restore_tp_across_dp()
 
