@@ -2,7 +2,7 @@
 
 ## Overview
 
-Expert balancing for MoE models in LLM serving is essential for optimal performance. Dynamically changing experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Tokens Per Output Token) due to stop-the-world operations. SwiftBalancer enables asynchronous expert load balancing with zero-overhead expert movement, ensuring seamless service continuity.
+Expert balancing for MoE models in LLM serving is essential for optimal performance. Dynamically changing experts during inference can negatively impact TTFT (Time To First Token) and TPOT (Time Per Output Token) due to stop-the-world operations. SwiftBalancer enables asynchronous expert load balancing with zero-overhead expert movement, ensuring seamless service continuity.
 
 ## EPLB Effects
 
@@ -16,7 +16,7 @@ Expert balancing for MoE models in LLM serving is essential for optimal performa
 
 ### Dynamic EPLB
 
-We need to add environment variable `export DYNAMIC_EPLB="true"` to enable vllm eplb. Enable dynamic balancing with auto-tuned parameters. Adjust num_iterations_eplb_update and num_wait_worker_iterations based on workload patterns.
+We need to add the environment variable `export PYTHONOPTIMIZE=1` to get context of the vllm process. Enable dynamic balancing with auto-tuned parameters. Adjust num_iterations_eplb_update and num_wait_worker_iterations based on workload patterns.
 
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
@@ -32,7 +32,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 ### Static EPLB
 #### Initial Setup (Record Expert Map)
 
-We need to add environment variable `export EXPERT_MAP_RECORD="true"` to record expert map.Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
+Generate the initial expert distribution map using expert_map_record_path. This creates a baseline configuration for future deployments.
 
 ```shell
 vllm serve Qwen/Qwen3-235B-A22 \
@@ -61,16 +61,16 @@ vllm serve Qwen/Qwen3-235B-A22 \
 ## Critical Considerations
 1. Parameter Tuning:
    - num_iterations_eplb_update: Higher values (e.g., 400+) for stable workloads; lower values (e.g., 100-200) for fluctuating traffic.
-   - num_wait_worker_iterations: Should be ≥30 to avoid premature balancing during startup.
+   - num_wait_worker_iterations: Should be ≥ 30 to avoid premature balancing during startup.
    - init_redundancy_expert: Must match tensor-parallel size (e.g., 16 for 16 GPUs) to ensure sufficient redundancy.
 
 2. Hardware Requirements:
-   - Ensure all GPUs have identical memory capacity and compute capabilities.
-   - Network bandwidth must support expert redistribution traffic (≥10Gbps recommended).
+   - Ensure that all GPUs have identical memory capacity and compute capabilities.
+   - Network bandwidth must support expert redistribution traffic (≥ 10 Gbps recommended).
 
 3. Model Compatibility:
    - Only MoE models with explicit expert parallelism support (e.g., Qwen3-235B-A22) are compatible.
-   - Verify model architecture supports dynamic expert routing via --enable-expert-parallel.
+   - Verify model architecture supports dynamic expert routing through --enable-expert-parallel.
 
 4. Gating Configuration:
    - When gate_eplb=true, validate that the gating mechanism can handle expert movement without routing errors.
@@ -83,7 +83,7 @@ vllm serve Qwen/Qwen3-235B-A22 \
 
 6. Startup Behavior:
    - Initial requests may experience higher latency during the first balancing cycle (typically 1-2 minutes).
-   - Avoid sudden traffic spikes during warm-up phase.
+   - Avoid sudden traffic spikes during the warm-up phase.
 
 7. Common Pitfalls:
    - Incorrect tensor-parallel-size vs. actual GPU count → causes resource underutilization.

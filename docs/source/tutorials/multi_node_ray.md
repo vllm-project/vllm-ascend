@@ -1,10 +1,10 @@
 # Multi-Node-Ray (Qwen/Qwen3-235B-A22B)
 
-Multi-node inference is suitable for the scenarios that the model cannot be deployed on a single machine. In such cases, the model can be distributed using tensor parallelism or pipeline parallelism. The specific parallelism strategies will be covered in the following sections. To successfully deploy multi-node inference, the following three steps need to be completed:
+Multi-node inference is suitable for scenarios where the model cannot be deployed on a single machine. In such cases, the model can be distributed using tensor parallelism or pipeline parallelism. The specific parallelism strategies will be covered in the following sections. To successfully deploy multi-node inference, the following three steps need to be completed:
 
 * **Verify Multi-Node Communication Environment**
 * **Set Up and Start the Ray Cluster**
-* **Start the Online Inference Service on multinode**
+* **Start the Online Inference Service on Multi-node**
 
 ## Verify Multi-Node Communication Environment
 
@@ -48,9 +48,9 @@ hccn_tool -i 0 -ping -g address 10.20.0.20
 
 ## Set Up and Start the Ray Cluster
 ### Setting Up the Basic Container
-To ensure a consistent execution environment across all nodes, including the model path and Python environment, it is recommended to use Docker images.
+To ensure a consistent execution environment across all nodes, including the model path and Python environment, it is advised to use Docker images.
 
-For setting up a multi-node inference cluster with Ray, **containerized deployment** is the preferred approach. Containers should be started on both the master and worker nodes, with the `--net=host` option to enable proper network connectivity.
+For setting up a multi-node inference cluster with Ray, **containerized deployment** is the preferred approach. Containers should be started on both the primary and secondary nodes, with the `--net=host` option to enable proper network connectivity.
 
 Below is the example container setup command, which should be executed on **all nodes** :
 
@@ -89,13 +89,13 @@ docker run --rm \
 ### Start Ray Cluster
 After setting up the containers and installing vllm-ascend on each node, follow the steps below to start the Ray cluster and execute inference tasks.
 
-Choose one machine as the head node and the others as worker nodes. Before proceeding, use `ip addr` to check your `nic_name` (network interface name).
+Choose one machine as the primary node and the others as secondary nodes. Before proceeding, use `ip addr` to check your `nic_name` (network interface name).
 
 Set the `ASCEND_RT_VISIBLE_DEVICES` environment variable to specify the NPU devices to use. For Ray versions above 2.1, also set the `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES` variable to avoid device recognition issues.
 
-Below are the commands for the head and worker nodes:
+Below are the commands for the primary and secondary nodes:
 
-**Head node**:
+**Primary node**:
 
 :::{note}
 When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect.
@@ -112,7 +112,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 ray start --head
 ```
 
-**Worker node**:
+**Secondary node**:
 
 :::{note}
 When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect. Updating the environment variables requires restarting the Ray cluster.
@@ -130,7 +130,7 @@ ray start --address='{head_node_ip}:6379' --node-ip-address={local_ip}
 
 Once the cluster is started on multiple nodes, execute `ray status` and `ray list nodes` to verify the Ray cluster's status. You should see the correct number of nodes and NPUs listed.
 
-## Start the Online Inference Service on multinode scenario
+## Start the Online Inference Service on Multi-node scenario
 In the container, you can use vLLM as if all NPUs were on a single node. vLLM will utilize NPU resources across all nodes in the Ray cluster.
 
 **You only need to run the vllm command on one node.**

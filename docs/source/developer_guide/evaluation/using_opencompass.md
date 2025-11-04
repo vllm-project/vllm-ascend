@@ -1,7 +1,7 @@
 # Using OpenCompass
-This document will guide you have a accuracy testing using [OpenCompass](https://github.com/open-compass/opencompass).
+This document guides you to conduct accuracy testing using [OpenCompass](https://github.com/open-compass/opencompass).
 
-## 1. Online Serving
+## 1. Online Server
 
 You can run docker container to start the vLLM server on a single NPU:
 
@@ -30,7 +30,7 @@ docker run --rm \
 vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
 ```
 
-If your service start successfully, you can see the info shown below:
+The vLLM server is started successfully, if you see information as below:
 
 ```
 INFO:     Started server process [6873]
@@ -38,7 +38,7 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-Once your server is started, you can query the model with input prompts in new terminal:
+Once your server is started, you can query the model with input prompts in a new terminal.
 
 ```
 curl http://localhost:8000/v1/completions \
@@ -51,8 +51,8 @@ curl http://localhost:8000/v1/completions \
     }'
 ```
 
-## 2. Run ceval accuracy test using OpenCompass
-Install OpenCompass and configure the environment variables in the container.
+## 2. Run C-Eval using OpenCompass for accuracy testing
+Install OpenCompass and configure the environment variables in the container:
 
 ```bash
 # Pin Python 3.10 due to:
@@ -64,7 +64,7 @@ export DATASET_SOURCE=ModelScope
 git clone https://github.com/open-compass/opencompass.git
 ```
 
-Add `opencompass/configs/eval_vllm_ascend_demo.py` with the following content:
+Add the following content to `opencompass/configs/eval_vllm_ascend_demo.py`:
 
 ```python
 from mmengine.config import read_base
@@ -110,7 +110,7 @@ Run the following command:
 python3 run.py opencompass/configs/eval_vllm_ascend_demo.py --debug
 ```
 
-After 1-2 mins, the output is as shown below:
+After 1 to 2 minutes, the output is shown below:
 
 ```
 The markdown format results is as below:

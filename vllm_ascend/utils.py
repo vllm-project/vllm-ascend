@@ -58,6 +58,7 @@ _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
 _ENABLE_SP = None
+_HAS_LAYER_IDX = None
 
 
 def is_310p():
@@ -494,36 +495,6 @@ class ProfileExecuteDuration:
         return durations
 
 
-# TODO(ttanzhiqiang): rm_router_logits
-# dp>1 will trigger
-# In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
-def get_rm_router_logits_state(ep_size: int, dp_size: int,
-                               is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if dp_size > 1:
-        if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-                and is_deepseek_v3_r1):
-            return True
-        elif ep_size == 1 and is_deepseek_v3_r1:
-            return True
-    return False
-
-
-# TODO(ttanzhiqiang): all_reduce merge
-# When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-# Currently, all_reduce_merge is enabled by default in the AllGather, AllGatherEP and NaiveMulticast scenarios of the deepseek model.
-def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-            and is_deepseek_v3_r1):
-        return True
-    elif ep_size == 1 and is_deepseek_v3_r1:
-        return True
-    return False
-
-
 def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
@@ -539,8 +510,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
                                                   AscendSharedFusedMoE)
-    from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
-                                           AscendQuantRMSNorm, AscendRMSNorm)
+    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
@@ -575,12 +545,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
-
-    if vllm_config is not None and \
-        vllm_config.quant_config is not None and \
-        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()) and \
-            not version_check():
-        REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -686,6 +650,13 @@ def weak_ref_tensors(
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
+
+    This function should be used in the following scenario:
+    When a tensor is created during graph capture, and it's held by a method
+    that's not part of the graph, we don't really need to store it, but we
+    **do need** its buffer pointer. If we don't handle this, it cannot
+    be garbage collected, leading to a memory leak. To avoid this,
+    we should create a weak reference to the tensor.
     """
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
@@ -765,16 +736,12 @@ def is_hierarchical_communication_enabled():
             and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
 
 
-@functools.cache
-def version_check():
-    """check if torch_npu version >= dev20250919"""
-    import re
-    torch_npu_version = torch_npu.version.__version__
-    date_pattern = r'dev(\d{8})'
+def has_layer_idx(model_instance: torch.nn.Module) -> bool:
+    if model_instance is None:
+        return False
 
-    match = re.search(date_pattern, torch_npu_version)
-    if match:
-        full_date = match.group(1)
-        if full_date >= "20250919":
-            return True
-    return False
+    global _HAS_LAYER_IDX
+    if _HAS_LAYER_IDX is None:
+        _HAS_LAYER_IDX = hasattr(model_instance, "model") and \
+            hasattr(model_instance.model, "start_layer")
+    return _HAS_LAYER_IDX

@@ -1,16 +1,16 @@
 # Contributing
 
-## Building and testing
-It's recommended to set up a local development environment to build and test
+## Building and Testing
+It's recommended to set up a local development environment to build vllm-ascend and run tests
 before you submit a PR.
 
-### Setup development environment
+### Set up a development environment
 
 Theoretically, the vllm-ascend build is only supported on Linux because
 `vllm-ascend` dependency `torch_npu` only supports Linux.
 
-But you can still set up dev env on Linux/Windows/macOS for linting and basic
-test as following commands:
+But you can still set up a development environment on Linux/Windows/macOS for linting and running basic
+tests.
 
 #### Run lint locally
 
@@ -27,13 +27,13 @@ cd vllm-ascend
 # Install lint requirement and enable pre-commit hook
 pip install -r requirements-lint.txt
 
-# Run lint (You need install pre-commits deps via proxy network at first time)
+# Run lint (You need to install pre-commits deps via proxy network at first time)
 bash format.sh
 ```
 
 #### Run CI locally
 
-After complete "Run lint" setup, you can run CI locally:
+After completing "Run lint" setup, you can run CI locally:
 
 ```{code-block} bash
    :substitutions:
@@ -68,9 +68,9 @@ git commit -sm "your commit info"
 
 🎉 Congratulations! You have completed the development environment setup.
 
-### Test locally
+### Testing locally
 
-You can refer to [Testing](./testing.md) doc to help you setup testing environment and running tests locally.
+You can refer to [Testing](./testing.md)  to set up a testing environment and running tests locally.
 
 ## DCO and Signed-off-by
 
@@ -88,7 +88,7 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 - `[Platform]` for new features or optimization in platform.
 - `[Worker]` for new features or optimization in worker.
 - `[Core]` for new features or optimization  in the core vllm-ascend logic (such as platform, attention, communicators, model runner)
-- `[Kernel]` changes affecting compute kernels and ops.
+- `[Kernel]` for changes affecting compute kernels and ops.
 - `[Bugfix]` for bug fixes.
 - `[Doc]` for documentation fixes and improvements.
 - `[Test]` for tests (such as unit tests).

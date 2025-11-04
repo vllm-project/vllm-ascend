@@ -26,7 +26,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Load model from ModelScope to speed up download
@@ -164,7 +164,7 @@ vllm serve Qwen/Qwen3-8B --max_model_len 26240 --enforce-eager
 :::::
 
 :::{note}
-Add `--max_model_len` option to avoid ValueError that the Qwen2.5-7B model's max seq len (32768) is larger than the maximum number of tokens that can be stored in KV cache (26240). This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
+Add `--max_model_len` option to avoid ValueError that the Qwen2.5-7B model's max seq len (32768) is larger than the maximum number of tokens that can be stored in KV cache (26240). This will differ with different NPU series based on the HBM size. Please modify the value according to a suitable value for your NPU series.
 :::
 
 If your service start successfully, you can see the info shown below:

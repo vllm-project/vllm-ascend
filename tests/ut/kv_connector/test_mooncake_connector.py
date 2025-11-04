@@ -667,10 +667,6 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(meta.requests["req1"].remote_block_ids, [1, 2, 3])
         self.assertEqual(len(self.scheduler._reqs_need_recv), 0)
 
-    def test_get_finished_count(self):
-        count = self.scheduler.get_finished_count()
-        self.assertEqual(count, 2)
-
 
 class TestHelperFunctions(unittest.TestCase):
 

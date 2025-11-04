@@ -1,7 +1,7 @@
 # Multi-NPU (Qwen3-Next)
 
 ```{note}
-The Qwen3 Next are using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes around stability, accuracy and performance improvement.
+The Qwen3 Next is using [Triton Ascend](https://gitee.com/ascend/triton-ascend) which is currently experimental. In future versions, there may be behavioral changes related to stability, accuracy, and performance improvement.
 ```
 
 ## Run vllm-ascend on Multi-NPU with Qwen3 Next
@@ -31,7 +31,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Load model from ModelScope to speed up download
@@ -41,7 +41,7 @@ export VLLM_USE_MODELSCOPE=True
 ### Install Triton Ascend
 
 :::::{tab-set}
-::::{tab-item} Linux (aarch64)
+::::{tab-item} Linux (AArch64)
 
 The [Triton Ascend](https://gitee.com/ascend/triton-ascend) is required when you run Qwen3 Next, please follow the instructions below to install it and its dependency.
 
@@ -72,7 +72,7 @@ Coming soon ...
 
 ### Inference on Multi-NPU
 
-Please make sure you already executed the command:
+Please make sure you have already executed the command:
 
 ```bash
 source /usr/local/Ascend/8.3.RC1/bisheng_toolkit/set_env.sh
@@ -81,15 +81,15 @@ source /usr/local/Ascend/8.3.RC1/bisheng_toolkit/set_env.sh
 :::::{tab-set}
 ::::{tab-item} Online Inference
 
-Run the following script to start the vLLM server on Multi-NPU:
+Run the following script to start the vLLM server on multi-NPU:
 
-For an Atlas A2 with 64GB of NPU card memory, tensor-parallel-size should be at least 4, and for 32GB of memory, tensor-parallel-size should be at least 8.
+For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 4, and for 32 GB of memory, tensor-parallel-size should be at least 8.
 
 ```bash
 vllm serve Qwen/Qwen3-Next-80B-A3B-Instruct --tensor-parallel-size 4 --max-model-len 4096 --gpu-memory-utilization 0.7 --enforce-eager
 ```
 
-Once your server is started, you can query the model with input prompts
+Once your server is started, you can query the model with input prompts.
 
 ```bash
 curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{

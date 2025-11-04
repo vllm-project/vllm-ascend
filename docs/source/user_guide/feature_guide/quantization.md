@@ -2,13 +2,13 @@
 
 Model quantization is a technique that reduces the size and computational requirements of a model by lowering the data precision of the weights and activation values in the model, thereby saving the memory and improving the inference speed.
 
-Since 0.9.0rc2 version, quantization feature is experimentally supported in vLLM Ascend. Users can enable quantization feature by specifying `--quantization ascend`. Currently, only Qwen, DeepSeek series models are well tested. We’ll support more quantization algorithm and models in the future.
+Since version 0.9.0rc2, the quantization feature is experimentally supported by vLLM Ascend. Users can enable the quantization feature by specifying `--quantization ascend`. Currently, only Qwen, DeepSeek series models are well tested. We will support more quantization algorithms and models in the future.
 
-## Install modelslim
+## Install ModelSlim
 
-To quantize a model, users should install [ModelSlim](https://gitee.com/ascend/msit/blob/master/msmodelslim/README.md) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
+To quantize a model, you should install [ModelSlim](https://gitee.com/ascend/msit/blob/master/msmodelslim/README.md) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
 
-Install modelslim:
+Install ModelSlim:
 
 ```bash
 # The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
@@ -23,16 +23,16 @@ pip install accelerate
 ## Quantize model
 
 :::{note}
-You can choose to convert the model yourself or use the quantized model we uploaded,
-see https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8
-This conversion process will require a larger CPU memory, please ensure that the RAM size is greater than 2TB
+You can choose to convert the model yourself or use the quantized model we uploaded.
+See https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8.
+This conversion process requires a larger CPU memory, ensure that the RAM size is greater than 2 TB.
 :::
 
-### Adapts and change
+### Adapt to changes
 1. Ascend does not support the `flash_attn` library. To run the model, you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and comment out certain parts of the code in `modeling_deepseek.py` located in the weights folder.
-2. The current version of transformers does not support loading weights in FP8 quantization format. you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and delete the quantization related fields from `config.json` in the weights folder
+2. The current version of transformers does not support loading weights in FP8 quantization format. you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and delete the quantization related fields from `config.json` in the weights folder.
 
-### Generate the w8a8 weights
+### Generate the W8A8 weights
 
 ```bash
 cd example/DeepSeek
@@ -63,7 +63,7 @@ Here is the full converted model files except safetensors:
 
 ## Run the model
 
-Now, you can run the quantized models with vLLM Ascend. Here is the example for online and offline inference.
+Now, you can run the quantized model with vLLM Ascend. Examples for online and offline inference are provided as follows:
 
 ### Offline inference
 
@@ -93,26 +93,25 @@ for output in outputs:
 
 ### Online inference
 
-Enable quantization by specifying `--quantization ascend`, for more details, see DeepSeek-V3-W8A8 [tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html)
+Enable quantization by specifying `--quantization ascend`, for more details, see the [DeepSeek-V3-W8A8 Tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html).
 
 ## FAQs
 
-### 1. How to solve the KeyError: 'xxx.layers.0.self_attn.q_proj.weight' problem?
+### 1. How to solve the KeyError "xxx.layers.0.self_attn.q_proj.weight"?
 
-First, make sure you specify `ascend` quantization method. Second, check if your model is converted by this `br_release_MindStudio_8.1.RC2_TR5_20260624` modelslim version. Finally, if it still doesn't work, please
-submit a issue, maybe some new models need to be adapted.
+First, make sure you specify `ascend` as the quantization method. Second, check if your model is converted by the `br_release_MindStudio_8.1.RC2_TR5_20260624` ModelSlim version. Finally, if it still does not work, submit an issue. Maybe some new models need to be adapted.
 
 ### 2. How to solve the error "Could not locate the configuration_deepseek.py"?
 
-Please convert DeepSeek series models using `br_release_MindStudio_8.1.RC2_TR5_20260624` modelslim, this version has fixed the missing configuration_deepseek.py error.
+Please convert DeepSeek series models using `br_release_MindStudio_8.1.RC2_TR5_20260624` ModelSlim, where the missing configuration_deepseek.py error has been fixed.
 
-### 3. When converting deepseek series models with modelslim, what should you pay attention?
+### 3. What should be considered when converting DeepSeek series models with ModelSlim?
 
-When the mla portion of the weights used `W8A8_DYNAMIC` quantization, if torchair graph mode is enabled, please modify the configuration file in the CANN package to prevent incorrect inference results.
+When the MLA portion of the weights used the `W8A8_DYNAMIC` quantization with the torchair graph mode enabled, modify the configuration file in the CANN package to prevent incorrect inference results.
 
 The operation steps are as follows:
 
-1. Search in the CANN package directory used, for example:
+1. Search in the CANN package directory, for example:
 find /usr/local/Ascend/ -name fusion_config.json
 
 2. Add `"AddRmsNormDynamicQuantFusionPass":"off",` and `"MultiAddRmsNormDynamicQuantFusionPass":"off",` to the fusion_config.json you find, the location is as follows:

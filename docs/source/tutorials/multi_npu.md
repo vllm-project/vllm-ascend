@@ -27,7 +27,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Load model from ModelScope to speed up download
@@ -39,13 +39,13 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 
 ### Online Inference on Multi-NPU
 
-Run the following script to start the vLLM server on Multi-NPU:
+Run the following script to start the vLLM server on multi-NPU:
 
 ```bash
 vllm serve Qwen/QwQ-32B --max-model-len 4096 --port 8000 -tp 4
 ```
 
-Once your server is started, you can query the model with input prompts
+Once your server is started, you can query the model with input prompts.
 
 ```bash
 curl http://localhost:8000/v1/completions \

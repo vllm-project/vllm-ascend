@@ -1,8 +1,8 @@
 # Using lm-eval
-This document will guide you have a accuracy testing using [lm-eval][1].
+This document guides you to conduct accuracy testing using [lm-eval][1].
 
 ## Online Server
-### 1. start the vLLM server
+### 1. Start the vLLM server
 You can run docker container to start the vLLM server on a single NPU:
 
 ```{code-block} bash
@@ -31,7 +31,7 @@ docker run --rm \
 vllm serve Qwen/Qwen2.5-0.5B-Instruct --max_model_len 4096 &
 ```
 
-Started the vLLM server successfully,if you see log as below:
+The vLLM server is started successfully, if you see logs as below:
 
 ```
 INFO:     Started server process [9446]
@@ -39,9 +39,9 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 ```
 
-### 2. Run gsm8k accuracy test using lm-eval
+### 2. Run GSM8K using lm-eval for accuracy testing
 
-You can query result with input prompts:
+You can query the result with input prompts:
 
 ```
 curl http://localhost:8000/v1/completions \
@@ -98,7 +98,7 @@ The output format matches the following:
 }
 ```
 
-Install lm-eval in the container.
+Install lm-eval in the container:
 
 ```bash
 export HF_ENDPOINT="https://hf-mirror.com"
@@ -116,7 +116,7 @@ lm_eval \
   --output_path ./
 ```
 
-After 30 mins, the output is as shown below:
+After 30 minutes, the output is as shown below:
 
 ```
 The markdown format results is as below:
@@ -158,8 +158,8 @@ docker run --rm \
 /bin/bash
 ```
 
-### 2. Run gsm8k accuracy test using lm-eval
-Install lm-eval in the container.
+### 2. Run GSM8K using lm-eval for accuracy testing
+Install lm-eval in the container:
 
 ```bash
 export HF_ENDPOINT="https://hf-mirror.com"
@@ -177,7 +177,7 @@ lm_eval \
   --batch_size auto
 ```
 
-After 1-2 mins, the output is as shown below:
+After 1 to 2 minutes, the output is shown below:
 
 ```
 The markdown format results is as below:
@@ -189,9 +189,9 @@ Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 
 ```
 
-## Use offline Datasets
+## Use Offline Datasets
 
-Take gsm8k(single dataset) and mmlu(multi-subject dataset) as examples, and you can see more from [here][2].
+Take GSM8K (single dataset) and MMLU (multi-subject dataset) as examples, and you can see more from [here][2].
 
 ```bash
 # set HF_DATASETS_OFFLINE when using offline datasets
@@ -205,7 +205,7 @@ cd lm_eval/tasks/gsm8k
 cd lm_eval/tasks/mmlu/default
 ```
 
-set [gsm8k.yaml][3] as follows:
+Set [gsm8k.yaml][3] as follows:
 
 ```yaml
 tag:
@@ -230,7 +230,7 @@ training_split: train
 fewshot_split: train
 test_split: test
 doc_to_text: 'Q: {{question}}
-  A(Please follow the summarize the result at the end with the format of "The answer is xxx", where xx is the result.):'
+  A(Please follow the summarized result at the end with the format of "The answer is xxx", where xx is the result.):'
 doc_to_target: "{{answer}}" #" {{answer.split('### ')[-1].rstrip()}}"
 metric_list:
   - metric: exact_match
@@ -268,7 +268,7 @@ metadata:
   version: 3.0
 ```
 
-set [_default_template_yaml][4] as follows:
+Set [_default_template_yaml][4] as follows:
 
 ```yaml
 # set dataset_path according to the downloaded dataset

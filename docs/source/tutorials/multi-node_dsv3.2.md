@@ -1,7 +1,7 @@
 # Multi-Node (DeepSeek V3.2)
 
 :::{note}
-Only machines with aarch64 is supported currently, x86 is coming soon. This guide take A3 as the example.
+Only machines with AArch64 are supported currently. x86 will be supported soon. This guide takes A3 as the example.
 :::
 
 ## Verify Multi-Node Communication Environment
@@ -80,14 +80,14 @@ for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
 hccn_tool -i 0 -ping -g address 10.20.0.20
 ```
 
-## Deploy DeepSeek-V3.2-Exp with vLLM-Ascend:
+## Deploy DeepSeek-V3.2-Exp with vLLM-Ascend
 
-Currently, we provide a all-in-one image (include CANN 8.2RC1 + [SparseFlashAttention/LightningIndexer](https://gitcode.com/cann/cann-recipes-infer/tree/master/ops/ascendc) + [MLAPO](https://github.com/vllm-project/vllm-ascend/pull/3226)). You can also build your own image refer to [link](https://github.com/vllm-project/vllm-ascend/issues/3278).
+Currently, we provide a all-in-one image (include CANN 8.2RC1 + [SparseFlashAttention/LightningIndexer](https://gitcode.com/cann/cann-recipes-infer/tree/master/ops/ascendc) + [MLAPO](https://github.com/vllm-project/vllm-ascend/pull/3226)). You can also build your own image by referring to [link](https://github.com/vllm-project/vllm-ascend/issues/3278).
 
-- `DeepSeek-V3.2-Exp`: requreid 2 Atlas 800 A3(64G*16) nodes or 4 Atlas 800 A2(64G*8). [Model weight link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
-- `DeepSeek-V3.2-Exp-w8a8`: requreid 1 Atlas 800 A3(64G*16) node or 2 Atlas 800 A2(64G*8). [Model weight link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
+- `DeepSeek-V3.2-Exp`: require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8). [Model weight link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
+- `DeepSeek-V3.2-Exp-w8a8`: require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8). [Model weight link](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
 
-Run the following command to start the container in each node(This guide suppose you have download the weight to /root/.cache already):
+Run the following command to start the container in each node (You should download the weight to /root/.cache in advance):
 
 :::::{tab-set}
 ::::{tab-item} A2 series
@@ -180,13 +180,13 @@ docker run --rm \
 :::::{tab-set}
 ::::{tab-item} DeepSeek-V3.2-Exp A3 series
 
-Run the following scripts on two nodes respectively
+Run the following scripts on two nodes respectively.
 
 :::{note}
-Before launch the inference server, ensure the following environment variables are set for multi node communication
+Before launching the inference server, ensure the following environment variables are set for multi-node communication.
 :::
 
-**node0**
+**Node 0**
 
 ```shell
 #!/bin/sh
@@ -225,7 +225,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
-**node1**
+**Node 1**
 
 ```shell
 #!/bin/sh
@@ -297,9 +297,9 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 ::::
 ::::{tab-item} DeepSeek-V3.2-Exp-W8A8 A2 series
 
-Run the following scripts on two nodes respectively
+Run the following scripts on two nodes respectively.
 
-**node0**
+**Node 0**
 
 ```shell
 #!/bin/sh
@@ -341,7 +341,7 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
 ```
 
-**node1**
+**Node 1**
 
 ```shell
 #!/bin/sh

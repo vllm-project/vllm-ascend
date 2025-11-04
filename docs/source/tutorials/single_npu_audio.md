@@ -26,7 +26,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Load model from ModelScope to speed up download
@@ -119,4 +119,4 @@ The sport referenced is baseball, and the nursery rhyme is 'Mary Had a Little La
 
 ### Online Serving on Single NPU
 
-Currently, vllm's OpenAI-compatible server doesn't support audio inputs, find more details [<u>here</u>](https://github.com/vllm-project/vllm/issues/19977).
+Currently, vLLM's OpenAI-Compatible server doesn't support audio inputs. Find more details [<u>here</u>](https://github.com/vllm-project/vllm/issues/19977).

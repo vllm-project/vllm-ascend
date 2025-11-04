@@ -2,9 +2,9 @@
 
 The Qwen3 Embedding model series is the latest proprietary model of the Qwen family, specifically designed for text embedding and ranking tasks. Building upon the dense foundational models of the Qwen3 series, it provides a comprehensive range of text embeddings and reranking models in various sizes (0.6B, 4B, and 8B). This guide describes how to run the model with vLLM Ascend. Note that only 0.9.2rc1 and higher versions of vLLM Ascend support the model.
 
-## Run docker container
+## Run Docker Container
 
-Take Qwen3-Embedding-8B model as an example, first run the docker container with the following command:
+Using the Qwen3-Embedding-8B model as an example, first run the docker container with the following command:
 
 ```{code-block} bash
    :substitutions:
@@ -26,7 +26,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Load model from ModelScope to speed up download
@@ -42,7 +42,7 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 vllm serve Qwen/Qwen3-Embedding-8B --task embed
 ```
 
-Once your server is started, you can query the model with input prompts
+Once your server is started, you can query the model with input prompts.
 
 ```bash
 curl http://localhost:8000/v1/embeddings -H "Content-Type: application/json" -d '{
