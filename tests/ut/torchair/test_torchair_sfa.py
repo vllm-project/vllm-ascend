@@ -2,16 +2,14 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from torch import nn
-# from vllm.distributed.parallel_state import GroupCoordinator
-# from vllm.model_executor.layers.linear import LinearBase
-
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.torchair.torchair_sfa import (
-    AscendSFATorchairBackend, AscendSFATorchairImpl, 
-    AscendSFATorchairMetadata,AscendSFATorchairMetadataBuilder, 
-    AscendSFATorchairDecodeMetadata, AscendSFATorchairPrefillMetadata)
-
+    AscendSFATorchairBackend, AscendSFATorchairDecodeMetadata, 
+    AscendSFATorchairImpl, AscendSFATorchairMetadata, 
+    AscendSFATorchairMetadataBuilder, AscendSFATorchairPrefillMetadata)
+from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 class TestAscendSFATorchairBackend(TestBase):
 
@@ -50,7 +48,7 @@ class TestAscendSFATorchairPrefillMetadata(TestBase):
         max_seq_lens = 2
 
         metadata = AscendSFATorchairPrefillMetadata(
-            atten_mask=atten_mask,
+            attn_mask=attn_mask,
             query_lens=query_lens,
             seq_lens=seq_lens,
             context_lens=context_lens,
@@ -59,8 +57,8 @@ class TestAscendSFATorchairPrefillMetadata(TestBase):
             block_table=block_table,
             max_query_len=max_query_len,
             max_seq_lens=max_seq_lens)
-        self.assertIs(matadata.attn_mask, attn_mask)
-        self.assertEqual(matadata.query_lens, query_lens)
+        self.assertIs(metadata.attn_mask, attn_mask)
+        self.assertEqual(metadata.query_lens, query_lens)
         self.assertEqual(metadata.seq_lens, seq_lens)
         self.assertIs(metadata.context_lens, context_lens)
         self.assertIs(metadata.input_positions, input_positions)
@@ -84,19 +82,18 @@ class TestAscendSFATorchairPrefillMetadata(TestBase):
             seq_tot=seq_tot,
             max_seq_lens=max_seq_lens,
             workspace=workspace,
-            chunk_seq_lens=chunk_seq_lens
-        )
+            chunk_seq_lens=chunk_seq_lens)
 
         metadata = AscendSFATorchairPrefillMetadata(
-            attn_mask = torch.tensort([[1, 0], [1, 1]], dtype=torch.bool),
-            query_lens = [1, 2],
-            seq_lens = [2, 2],
-            context_lens = torch.tensor([1, 2]),
-            input_positions = torch.tensor([0, 1, 0, 1]),
-            query_start_loc = torch.tensor([0, 1, 3]),
-            block_table = torch.tensor([[0, 1], [2, 3]]),
-            max_query_len = 2,
-            max_seq_lens = 2,
+            attn_mask=torch.tensort([[1, 0], [1, 1]], dtype=torch.bool),
+            query_lens=[1, 2],
+            seq_lens=[2, 2],
+            context_lens=torch.tensor([1, 2]),
+            input_positions=torch.tensor([0, 1, 0, 1]),
+            query_start_loc=torch.tensor([0, 1, 3]),
+            block_table=torch.tensor([[0, 1], [2, 3]]),
+            max_query_len=2,
+            max_seq_lens=2,
             chunked_context=chunked_context)
 
         self.assertIsNotNone(metadata.chunked_context)
@@ -109,6 +106,7 @@ class TestAscendSFATorchairPrefillMetadata(TestBase):
 
 
 class TestAscendSFATorchairDecodeMetadata(TestBase):
+
     
     def test_ascend_sfa_decode_metadata_default(self):
         input_positions = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]])
@@ -206,7 +204,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
                 builder.chunked_prefill_enabled,
                 mock_vllm_config.scheduler_config.chunked_prefill_enabled)
             self.assertEqual(builder.torchair_graph_enabled, True)
-            self.assertEqual(builder.max_blocks, (mock_vllm_config.model_config.max_model_len + 
+            self.assertEqual(builder.max_blocks, (mock_vllm_config.model_config.max_model_len +
                                                   mock_vllm_config.cache_config.block_size - 1) \
                                                   // mock_vllm_config.cache_config.block_size)
 
@@ -333,7 +331,8 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
         self.assertTrue(torch.equal(result, block_tables[:, :4]))
 
     @patch("vllm_ascend.torchair.torchair_sfa.get_ascend_config")
-    def test_get_graph_runner_block_tables_from_numpy(self, mock_ascend_config):
+    def test_get_graph_runner_block_tables_from_numpy(self, 
+                                                      mock_ascend_config):
         ascend_config = MagicMock()
         mock_ascend_config.return_value = ascend_config
         ascend_config.torchair_graph_config.enabled = False
@@ -400,7 +399,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
                                 64,
                                 dtype=torch.float16,
                                 device=mock_device)
-        cos_gloden = torch.ones(3,
+        cos_golden = torch.ones(3,
                                 1,
                                 1,
                                 64,
@@ -476,7 +475,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
             
             metadata = builder.build(1, common_attn_metadata, model)
 
-        self.assertIsInstance(metadata,  AscendSFATorchairMetadata)
+        self.assertIsInstance(metadata, AscendSFATorchairMetadata)
         self.assertEqual(metadata.num_input_tokens, 0)
         self.assertEqual(metadata.num_actual_tokens, 3)
         self.assertEqual(metadata.num_decodes, 3)
