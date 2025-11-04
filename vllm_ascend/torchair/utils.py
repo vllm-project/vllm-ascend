@@ -15,6 +15,8 @@ try:
 except ImportError:
     from torchair.ops import NpuStreamSwitch as _npu_stream_switch
     from torchair.ops import npu_wait_tensor as _npu_wait_tensor
+
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 KV_CACHE_BYTES_CACHE_PATH_NAME = ".kv_cache_bytes"
@@ -210,7 +212,7 @@ def torchair_quant_method_register():
 
 def torchair_ops_patch():
     from vllm_ascend.ops.activation import AscendSiluAndMul
-    from vllm_ascend.ops.layernorm import AscendRMSNorm
+    from vllm_ascend.ops.layernorm import AscendQuantRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import \
@@ -232,9 +234,42 @@ def torchair_ops_patch():
     AscendRMSNorm.__init__ = torchair_layernorm.torchair_rmsnorm_init_  # type: ignore[method-assign]
     AscendRMSNorm.forward_oot = torchair_layernorm.torchair_rmsnorm_forward_oot  # type: ignore[method-assign]
 
+    AscendQuantRMSNorm.__init__ = torchair_layernorm.torchair_rmsnorm_init_  # type: ignore[method-assign]
+    AscendQuantRMSNorm.forward_oot = torchair_layernorm.torchair_rmsnorm_forward_oot  # type: ignore[method-assign]
+
     AscendSiluAndMul.forward_oot = torchair_activation.torchair_silu_and_mul_forward_oot  # type: ignore[method-assign]
     AscendVocabParallelEmbedding.forward = vocab_embedding_forward  # type: ignore[method-assign]
 
 
 def super_kernel(prefix: str, option: str, enabled: bool = True):
     return _super_kernel(prefix, option) if enabled else nullcontext()
+
+
+# TODO(ttanzhiqiang): rm_router_logits
+# dp>1 will trigger
+# In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
+def get_rm_router_logits_state(ep_size: int, dp_size: int,
+                               is_deepseek_v3_r1: bool):
+    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
+    # only supports deepseek v3/r1
+    if dp_size > 1:
+        if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+                and is_deepseek_v3_r1):
+            return True
+        elif ep_size == 1 and is_deepseek_v3_r1:
+            return True
+    return False
+
+
+# TODO(ttanzhiqiang): all_reduce merge
+# When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+# Currently, all_reduce_merge is enabled by default in the AllGather, AllGatherEP and NaiveMulticast scenarios of the deepseek model.
+def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
+    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
+    # only supports deepseek v3/r1
+    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+            and is_deepseek_v3_r1):
+        return True
+    elif ep_size == 1 and is_deepseek_v3_r1:
+        return True
+    return False

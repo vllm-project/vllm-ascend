@@ -8,9 +8,9 @@ Since the generation and training phases may employ different model parallelism 
 
 ## Getting started
 
-With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in vllm will under a specific memory pool, during loading model and initialize kv_caches, we tag the memory as a map: `{"weight": data, "kv_cache": data}`.
+With `enable_sleep_mode=True`, the way we manage memory (malloc, free) in vllm is under a specific memory pool. During model loading and KV cache initialization, we tag the memory as a map: `{"weight": data, "kv_cache": data}`.
 
-The engine(v0/v1) supports two sleep levels to manage memory during idle periods:
+The engine (v0/v1) supports two sleep levels to manage memory during idle periods:
 
 - Level 1 Sleep
     - Action: Offloads model weights and discards the KV cache.
@@ -20,16 +20,16 @@ The engine(v0/v1) supports two sleep levels to manage memory during idle periods
 
 - Level 2 Sleep
     - Action: Discards both model weights and KV cache.
-    - Memory: The content of both the model weights and kv cache is forgotten.
+    - Memory: The content of both the model weights and KV cache is forgotten.
     - Use Case: Ideal when switching to a different model or updating the current one.
 
-Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) and building from source, if you are using v0.7.3, remember to set `export COMPILE_CUSTOM_KERNELS=1`, for the latest version(v0.9.x+), the environment variable `COMPILE_CUSTOM_KERNELS` will be set 1 by default while building from source.
+Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) and build from source. If you are using v0.7.3, remember to set `export COMPILE_CUSTOM_KERNELS=1`. For the latest version (v0.9.x+), the environment variable `COMPILE_CUSTOM_KERNELS` will be set to 1 by default while building from source.
 
 ## Usage
 
 The following is a simple example of how to use sleep mode.
 
-- offline inference:
+- Offline inference:
 
     ```python
     import os
@@ -68,9 +68,9 @@ The following is a simple example of how to use sleep mode.
         assert output[0].outputs[0].text == output2[0].outputs[0].text
     ```
 
-- online serving:
+- Online serving:
     :::{note}
-    Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicit specify the develop env: `VLLM_SERVER_DEV_MODE` to expose these endpoints(sleep/wake up).
+    Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicit specify the dev environment `VLLM_SERVER_DEV_MODE` to expose these endpoints (sleep/wake up).
     :::
 
     ```bash

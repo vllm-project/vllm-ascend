@@ -269,7 +269,8 @@ class AscendFusedMoE(FusedMoE):
             self.expert_map != -1) if self.expert_map is not None else
                              self.global_num_experts)
         if self.dynamic_eplb:
-            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
+            self.moe_load = torch.zeros(local_num_experts,
+                                        dtype=torch.int64).npu()
 
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
@@ -291,7 +292,7 @@ class AscendFusedMoE(FusedMoE):
 
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
-        setup_moe_comm_method(self.moe_config)
+        setup_moe_comm_method(self.moe_config, self.quant_method)
 
     def update_expert_map(self, new_expert_map):
         self.expert_map = new_expert_map
@@ -338,11 +339,17 @@ class AscendFusedMoE(FusedMoE):
             replace_allreduce=forward_context.sp_enabled,
             enable_shared_expert_dp=self.enable_shared_expert_dp)
 
+        if isinstance(hidden_states, tuple):
+            hidden_states, pertoken_scale = hidden_states
+        else:
+            pertoken_scale = None
+
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
+            pertoken_scale=pertoken_scale,
             top_k=self.top_k,
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
@@ -366,10 +373,9 @@ class AscendFusedMoE(FusedMoE):
 
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
-
-        if self.dynamic_eplb:
-            self.moe_load += expert_tokens if group_list_type else \
-                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+            if self.dynamic_eplb:
+                self.moe_load += expert_tokens if group_list_type == 1 else \
+                    torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,

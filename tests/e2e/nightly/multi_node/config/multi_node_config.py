@@ -15,8 +15,9 @@ from tests.e2e.nightly.multi_node.config.utils import (get_avaliable_port,
 
 setup_logger()
 logger = logging.getLogger(__name__)
-DISAGGREGATED_PREFILL_PROXY_SCRIPT = "examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py"
+DISAGGREGATED_PREFILL_PROXY_SCRIPT = "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py"
 DISAGGEGATED_PREFILL_PORT = 5333
+CONFIG_BASE_PATH = "tests/e2e/nightly/multi_node/config/models/"
 
 
 @dataclass
@@ -84,16 +85,17 @@ class MultiNodeConfig:
         self.envs["LOCAL_IP"] = self.cur_ip
         self.envs["NIC_NAME"] = self.nic_name
 
+        master_ip = self.cluster_ips[0]
         if self.disaggregated_prefill:
             self.envs[
                 "DISAGGREGATED_PREFILL_RANK_TABLE_PATH"] = self.disaggregated_prefill.get(
                     "ranktable_path")
             if self.cur_index < self.decode_start_index:
-                self.envs["MASTER_IP"] = self.cluster_ips[0]
+                master_ip = self.cluster_ips[0]
             else:
-                self.envs["MASTER_IP"] = self.cluster_ips[
-                    self.decode_start_index]
+                master_ip = self.cluster_ips[self.decode_start_index]
 
+        self.envs["MASTER_IP"] = master_ip
         ascend_path = "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages"
         self.envs[
             "LD_LIBRARY_PATH"] = f"{ascend_path}:{self.envs.get('LD_LIBRARY_PATH', os.environ.get('LD_LIBRARY_PATH', ''))}"
@@ -186,9 +188,8 @@ class MultiNodeConfig:
     @classmethod
     def from_yaml(cls, yaml_path: Optional[str] = None):
         if not yaml_path:
-            yaml_path = os.getenv(
-                "CONFIG_YAML_PATH",
-                "tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml")
+            yaml_path = os.getenv("CONFIG_YAML_PATH", "DeepSeek-V3.yaml")
+        yaml_path = os.path.join(CONFIG_BASE_PATH, yaml_path)
         with open(yaml_path, 'r') as file:
             config_data = yaml.safe_load(file)
         test_name = config_data.get("test_name", "default_test")
@@ -254,6 +255,7 @@ class MultiNodeConfig:
         ranktable_path = self.disaggregated_prefill.get("ranktable_path")
         assert ranktable_gen_path is not None and ranktable_path is not None
         if os.path.exists(str(ranktable_path)):
+            logger.info("ranktable has already generated")
             return
 
         local_host = self.cur_ip
@@ -285,11 +287,8 @@ class MultiNodeConfig:
         assert self.nic_name is not None
         env["GLOO_SOCKET_IFNAME"] = self.nic_name
 
+        logger.info(
+            f"Generating ranktable from command: {' '.join(map(str, cmd))}")
         subprocess.run(cmd, env=env, check=True)
         assert os.path.exists(
             str(ranktable_path)), "failed generate ranktable.json"
-
-
-if __name__ == '__main__':
-    config = MultiNodeConfig.from_yaml()
-    print(config.perf_cmd)

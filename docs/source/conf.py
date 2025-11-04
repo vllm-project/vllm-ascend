@@ -75,10 +75,13 @@ myst_substitutions = {
     'pip_vllm_ascend_version': "0.11.0rc0",
     'pip_vllm_version': "0.11.0",
     # CANN image tag
-    'cann_image_tag': "8.2.rc1-910b-ubuntu22.04-py3.11",
+    'cann_image_tag': "8.3.rc1-910b-ubuntu22.04-py3.11",
     # vllm version in ci
-    'ci_vllm_version': 'v0.11.0rc3',
+    'ci_vllm_version': 'v0.11.0',
 }
+
+# For cross-file header anchors
+myst_heading_anchors = 5
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']

@@ -48,7 +48,7 @@ def get_local_model_path_with_retry(
 async def get_completions(url: str, model: str, prompts: Union[str, List[str]],
                           **api_kwargs: Any) -> List[str]:
     """
-    Asynchronously send HTTP requests to a /v1/completions endpoint.
+    Asynchronously send HTTP requests to endpoint.
 
     Args:
         url: Full endpoint URL, e.g. "http://localhost:1025/v1/completions"
@@ -88,7 +88,10 @@ async def get_completions(url: str, model: str, prompts: Union[str, List[str]],
 @pytest.mark.asyncio
 async def test_multi_node() -> None:
     config = MultiNodeConfig.from_yaml()
+    # To avoid modelscope 400 HttpError, we should download the model with retry
     local_model_path = get_local_model_path_with_retry(config.model)
+    config.server_cmd = config.server_cmd.replace(config.model,
+                                                  local_model_path)
     assert local_model_path is not None, "can not find any local weight for test"
     env_dict = config.envs
     perf_cmd = config.perf_cmd
@@ -113,15 +116,13 @@ async def test_multi_node() -> None:
         ) as remote_server:
             if config.is_master:
                 port = proxy_port if disaggregated_prefill else server_port
-                base_url = f"http://localhost:{port}/v1/completions"
-                _ = await get_completions(url=base_url,
-                                          model=local_model_path,
-                                          prompts=prompts,
-                                          api_kwargs=api_keyword_args)
                 # aisbench test
-                if acc_cmd:
-                    run_aisbench_cases(local_model_path, port, acc_cmd)
-                if perf_cmd:
-                    run_aisbench_cases(local_model_path, port, perf_cmd)
+                aisbench_cases = [acc_cmd, perf_cmd]
+                run_aisbench_cases(local_model_path,
+                                   port,
+                                   aisbench_cases,
+                                   host_ip=config.cluster_ips[0])
             else:
-                remote_server.hang_until_terminated()
+                # for the nodes except master, should hang until the task complete
+                master_url = f"http://{config.cluster_ips[0]}:{server_port}/health"
+                remote_server.hang_until_terminated(master_url)

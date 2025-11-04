@@ -109,55 +109,55 @@ Yes, vllm-ascend supports Prefill Disaggregation feature with LLMdatadist, Moonc
 
 Currently, w8a8, w4a8 and w4a4 quantization methods are already supported by vllm-ascend.
 
-### 10. How to run w8a8 DeepSeek model?
+### 10. How to run a W8A8 DeepSeek model?
 
-Please following the [inferencing tutorail](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_npu_quantization.html) and replace model to DeepSeek.
+Follow the [inference tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html) and replace the model with DeepSeek.
 
-### 11. How vllm-ascend is tested
+### 11. How is vllm-ascend tested?
 
-vllm-ascend is tested by functional test, performance test and accuracy test.
+vllm-ascend is tested in three aspects, functions, performance, and accuracy.
 
-- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functionality、popular models availability and [supported features](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html) via e2e test
+- **Functional test**: We added CI, including part of vllm's native unit tests and vllm-ascend's own unit tests. On vllm-ascend's test, we test basic functionalities, popular model availability, and [supported features](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html) through E2E test.
 
-- **Performance test**: we provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for end-to-end performance benchmark which can easily to re-route locally, we'll publish a perf website to show the performance test results for each pull request
+- **Performance test**: We provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for E2E performance benchmark, which can be easily re-routed locally. We will publish a perf website to show the performance test results for each pull request.
 
-- **Accuracy test**: we're working on adding accuracy test to CI as well.
+- **Accuracy test**: We are working on adding accuracy test to the CI as well.
 
 - **Nightly test**: we'll run full test every night to make sure the code is working.
 
 Finnall, for each release, we'll publish the performance test and accuracy test report in the future.
 
 ### 12. How to fix the error "InvalidVersion" when using vllm-ascend?
-It's usually because you have installed an dev/editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use. Please set the env variable `VLLM_VERSION` to the version of vLLM package you have installed. The format of `VLLM_VERSION` should be `X.Y.Z`.
+The problem is usually caused by the installation of a dev or editable version of the vLLM package. In this case, we provide the environment variable `VLLM_VERSION` to let users specify the version of vLLM package to use. Please set the environment variable `VLLM_VERSION` to the version of the vLLM package you have installed. The format of `VLLM_VERSION` should be `X.Y.Z`.
 
-### 13. How to handle Out Of Memory?
-OOM errors typically occur when the model exceeds the memory capacity of a single NPU. For general guidance, you can refer to [vLLM's OOM troubleshooting documentation](https://docs.vllm.ai/en/latest/getting_started/troubleshooting.html#out-of-memory).
+### 13. How to handle the out-of-memory issue?
+OOM errors typically occur when the model exceeds the memory capacity of a single NPU. For general guidance, you can refer to [vLLM OOM troubleshooting documentation](https://docs.vllm.ai/en/latest/getting_started/troubleshooting.html#out-of-memory).
 
-In scenarios where NPUs have limited HBM (High Bandwidth Memory) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
+In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
 
 - **Limit --max-model-len**:  It can save the HBM usage for kv cache initialization step.
 
-- **Adjust `--gpu-memory-utilization`**: If unspecified, will use the default value of `0.9`. You can decrease this param to reserve more memory to reduce fragmentation risks. See more note in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/serving/engine_args.html#vllm.engine.arg_utils-_engine_args_parser-cacheconfig).
+- **Adjust `--gpu-memory-utilization`**: If unspecified, the default value is `0.9`. You can decrease this value to reserve more memory to reduce fragmentation risks. See details in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/serving/engine_args.html#vllm.engine.arg_utils-_engine_args_parser-cacheconfig).
 
-- **Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to optimize NPU memory management. For example, you can `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory feature to mitigate memory fragmentation caused by frequent dynamic memory size adjustments during runtime, see more note in: [PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html).
+- **Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to optimize NPU memory management. For example, you can use `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory feature to mitigate memory fragmentation caused by frequent dynamic memory size adjustments during runtime. See details in: [PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html).
 
-### 14. Failed to enable NPU graph mode when running DeepSeek?
-You may encounter the following error if running DeepSeek with NPU graph mode enabled. The allowed number of queries per kv when enabling both MLA and Graph mode only support {32, 64, 128}, **Thus this is not supported for DeepSeek-V2-Lite**, as it only has 16 attention heads. The NPU graph mode support on DeepSeek-V2-Lite will be done in the future.
+### 14. Failed to enable NPU graph mode when running DeepSeek.
+You may encounter the following error if running DeepSeek with NPU graph mode is enabled. The allowed number of queries per KV when enabling both MLA and Graph mode is {32, 64, 128}. **Thus this is not supported for DeepSeek-V2-Lite**, as it only has 16 attention heads. The NPU graph mode support on DeepSeek-V2-Lite will be implemented in the future.
 
-And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, num_heads / num_kv_heads in {32, 64, 128}.
+And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, num_heads/num_kv_heads is {32, 64, 128}.
 
 ```bash
 [rank0]: RuntimeError: EZ9999: Inner Error!
 [rank0]: EZ9999: [PID: 62938] 2025-05-27-06:52:12.455.807 numHeads / numKvHeads = 8, MLA only support {32, 64, 128}.[FUNC:CheckMlaAttrs][FILE:incre_flash_attention_tiling_check.cc][LINE:1218]
 ```
 
-### 15. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend?
-You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source using pip. If the installation fails, it is recommended to use `python setup.py install` to install, or use `python setup.py clean` to clear the cache.
+### 15. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend.
+You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source using pip. If the installation fails, use `python setup.py install` (recommended) to install, or use `python setup.py clean` to clear the cache.
 
-### 16. How to generate determinitic results when using vllm-ascend?
+### 16. How to generate deterministic results when using vllm-ascend?
 There are several factors that affect output certainty:
 
-1. Sampler Method: using **Greedy sample** by setting `temperature=0` in `SamplingParams`, e.g.:
+1. Sampler method: using **Greedy sample** by setting `temperature=0` in `SamplingParams`, e.g.:
 
 ```python
 from vllm import LLM, SamplingParams
@@ -182,7 +182,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-2. Set the following enveriments parameters:
+2. Set the following environment parameters:
 
 ```bash
 export LCCL_DETERMINISTIC=1
@@ -191,9 +191,9 @@ export ATB_MATMUL_SHUFFLE_K_ENABLE=0
 export ATB_LLM_LCOC_ENABLE=0
 ```
 
-### 17. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？
-The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met `pip install qwen-omni-utils`,
-this package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring audio processing functionality works correctly.
+### 17. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the Qwen2.5-Omni model？
+The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met `pip install qwen-omni-utils`.
+This package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensure that the audio processing functionality works correctly.
 
 ### 18. How to troubleshoot and resolve size capture failures resulting from stream resource exhaustion, and what are the underlying causes?
 
@@ -208,7 +208,34 @@ Recommended mitigation strategies:
 2. Employ ACLgraph's full graph mode as an alternative to the piece-wise approach.
 
 Root cause analysis:
-The current stream requirement calculation for size captures only accounts for measurable factors including: data parallel size, tensor parallel size, expert parallel configuration, piece graph count, multistream overlap shared expert settings, and HCCL communication mode (AIV/AICPU). However, numerous unquantifiable elements - such as operator characteristics and specific hardware features - consume additional streams outside of this calculation framework, resulting in stream resource exhaustion during size capture operations.
+The current stream requirement calculation for size captures only accounts for measurable factors including: data parallel size, tensor parallel size, expert parallel configuration, piece graph count, multistream overlap shared expert settings, and HCCL communication mode (AIV/AICPU). However, numerous unquantifiable elements, such as operator characteristics and specific hardware features, consume additional streams outside of this calculation framework, resulting in stream resource exhaustion during size capture operations.
 
 ### 19. How to install custom version of torch_npu?
-torch-npu will be overried when installing vllm-ascend. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after vllm-ascend is installed.
+torch-npu will be overridden  when installing vllm-ascend. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after vllm-ascend is installed.
+
+### 20. On certain systems (e.g., Kylin OS), `docker pull` may fail with an `invalid tar header` error
+
+On certain operating systems, such as Kylin OS , you may encounter an `invalid tar header` error during the `docker pull` process:
+
+```text
+failed to register layer: ApplyLayer exit status 1 stdout: stderr: archive/tar: invalid tar header
+```
+
+This is often due to system compatibility issues. You can resolve this by using an offline loading method with a second machine.
+
+1. On a separate host machine (e.g., a standard Ubuntu server), pull the image for the target ARM64 architecture and package it into a `.tar` file.
+
+   ```bash
+   export IMAGE_TAG=v0.10.0rc1-310p
+   export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
+   # If in China region, uncomment to use a mirror:
+   # export IMAGE_NAME="m.daocloud.io/quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
+   
+   # Pull the image for the ARM64 platform and save it
+   docker pull --platform linux/arm64 "${IMAGE_NAME}"
+   docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
+   ```
+
+2. Transfer the image archive
+
+Copy the `vllm_ascend_<tag>.tar` file (where `<tag>` is the image tag you used) to your target machine

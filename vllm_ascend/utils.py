@@ -58,6 +58,7 @@ _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
 _ENABLE_SP = None
+_HAS_LAYER_IDX = None
 
 
 def is_310p():
@@ -535,36 +536,6 @@ class ProfileExecuteDuration:
         return durations
 
 
-# TODO(ttanzhiqiang): rm_router_logits
-# dp>1 will trigger
-# In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
-def get_rm_router_logits_state(ep_size: int, dp_size: int,
-                               is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if dp_size > 1:
-        if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-                and is_deepseek_v3_r1):
-            return True
-        elif ep_size == 1 and is_deepseek_v3_r1:
-            return True
-    return False
-
-
-# TODO(ttanzhiqiang): all_reduce merge
-# When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-# Currently, all_reduce_merge is enabled by default in the AllGather, AllGatherEP and NaiveMulticast scenarios of the deepseek model.
-def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-            and is_deepseek_v3_r1):
-        return True
-    elif ep_size == 1 and is_deepseek_v3_r1:
-        return True
-    return False
-
-
 def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
@@ -577,12 +548,10 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
-    from vllm_ascend.models.layers.sfa import AscendSparseFlashAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
                                                      AscendSharedFusedMoE)
-    from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
-                                           AscendQuantRMSNorm, AscendRMSNorm)
+    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
@@ -616,19 +585,10 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
     }
-
-    if vllm_config is not None and \
-        vllm_config.quant_config is not None and \
-        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()) and \
-            not version_check():
-        REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
     mla_to_register = "MultiHeadLatentAttention" if vllm_version_is(
         "0.11.0") else "MultiHeadLatentAttentionWrapper"
     if vllm_config and vllm_config.model_config and vllm_config.model_config.use_mla:
-        AscendMLAAttentionWarrper = AscendSparseFlashAttention if hasattr(
-            vllm_config.model_config.hf_config,
-            "index_topk") else AscendMultiHeadLatentAttention
-        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMLAAttentionWarrper
+        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMultiHeadLatentAttention
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -712,12 +672,22 @@ def prefill_context_parallel_enable() -> bool:
 
 
 def is_moe_model(vllm_config: VllmConfig):
+    """Checks if the model is a MoE model by config"""
     global _IS_MOE_MODEL
     if _IS_MOE_MODEL is None:
-        config = vllm_config.model_config.hf_config
-        _IS_MOE_MODEL = any('experts' in key.lower()
-                            for key in config.to_dict())
+        model_configs = vllm_config.model_config.hf_config.to_dict()
+        _IS_MOE_MODEL = _is_contain_expert(model_configs)
     return _IS_MOE_MODEL
+
+
+def _is_contain_expert(config: Any):
+    if isinstance(config, dict):
+        for k, v in config.items():
+            if "expert" in str(k):
+                return True
+            if _is_contain_expert(v):
+                return True
+    return False
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -824,16 +794,12 @@ def is_hierarchical_communication_enabled():
             and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
 
 
-@functools.cache
-def version_check():
-    """check if torch_npu version >= dev20250919"""
-    import re  # noqa
-    torch_npu_version = torch_npu.version.__version__
-    date_pattern = r'dev(\d{8})'
+def has_layer_idx(model_instance: torch.nn.Module) -> bool:
+    if model_instance is None:
+        return False
 
-    match = re.search(date_pattern, torch_npu_version)
-    if match:
-        full_date = match.group(1)
-        if full_date >= "20250919":
-            return True
-    return False
+    global _HAS_LAYER_IDX
+    if _HAS_LAYER_IDX is None:
+        _HAS_LAYER_IDX = hasattr(model_instance, "model") and \
+            hasattr(model_instance.model, "start_layer")
+    return _HAS_LAYER_IDX
