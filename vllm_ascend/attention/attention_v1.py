@@ -1156,8 +1156,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             self._process_chunk_prefill(attn_output_prefill, attn_lse_prefill,
                                         kv_cache, prefill_query, attn_metadata)
-            output[num_decode_tokens:output_prefill.shape[0] +
-                   num_decode_tokens] = output_prefill
+            output[num_decode_tokens:attn_output_prefill.shape[0] +
+                   num_decode_tokens] = attn_output_prefill
         return output
 
     def _process_chunk_prefill(self, current_attn_output_prefill,
