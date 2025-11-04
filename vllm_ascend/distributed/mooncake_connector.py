@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-import os
 import contextlib
 import hashlib
 import math
+import os
 import queue
 import random
 import struct
@@ -857,7 +857,8 @@ class MooncakeConnectorWorker:
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self._get_prefill_decode_size(vllm_config)
-        os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
+        os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(
+            get_transfer_timeout_value())
         if self._prefill_tp_size < self._decode_tp_size:
             raise ValueError(
                 f"prefill_tp_size: {self._prefill_tp_size} must be greater than"

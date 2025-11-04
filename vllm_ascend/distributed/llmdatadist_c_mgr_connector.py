@@ -30,8 +30,8 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request, RequestStatus
 
-from vllm_ascend.distributed.utils import get_transfer_timeout_value
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.distributed.utils import get_transfer_timeout_value
 from vllm_ascend.utils import (AscendSocVersion, get_ascend_soc_version,
                                prefill_context_parallel_enable,
                                vllm_version_is)
