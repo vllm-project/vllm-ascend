@@ -42,7 +42,7 @@ def mtp_correctness(
 
     graph_mode_str = "PIECEWISE"
     if graph_mode == CUDAGraphMode.FULL:
-        graph_mode_str = "FULL"
+        graph_mode_str = "FULL_DECODE_ONLY"
 
     with VllmRunner(
             model_name,
@@ -58,7 +58,9 @@ def mtp_correctness(
             enforce_eager=False,
             max_model_len=2000,
             compilation_config=CompilationConfig(
-                cudagraph_mode=graph_mode_str),
+                cudagraph_mode=graph_mode_str,
+                cudagraph_capture_sizes=[12],
+            ),
             additional_config={"ascend_scheduler_config": {
                 "enabled": False
             }}) as spec_llm:

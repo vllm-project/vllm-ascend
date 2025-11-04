@@ -21,6 +21,7 @@ import math
 import types
 from typing import Any, Optional
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
