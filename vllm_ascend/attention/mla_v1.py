@@ -29,7 +29,7 @@ from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         extract_req_dcp_by_chunk_cp,
+                                         extract_req_dcp_by_chunk_pcp,
                                          filter_chunked_req_indices,
                                          maybe_save_kv_layer_to_connector,
                                          split_decodes_and_prefills,
@@ -1087,30 +1087,30 @@ class AscendMLAImpl(MLAAttentionImpl):
                     dim=-1)  # [local_toks, latent_dim + rope_dim]
 
                 # Step 2: use all_gather_into_tensor_uneven (gather + cat)
-                output_split_sizes = extract_req_dcp_by_chunk_cp(
+                output_split_sizes = extract_req_dcp_by_chunk_pcp(
                     local_chunked_kv_lens, i, self.dcp_size, self.pcp_rank
                 )  # need to know num tokens of each rank in dcp group before all_gather     # [reqs, dcp]
-                assert len(output_split_sizes) == num_requests and all(
+                assert len(req_dcp_sizes) == num_requests and all(
                     len(dcp_arr) == self.dcp_size
-                    for dcp_arr in output_split_sizes)
-                total_toks = np.sum(np.array(output_split_sizes))
+                    for dcp_arr in req_dcp_sizes)
+                total_toks = np.sum(np.array(req_dcp_sizes))
                 latent_rope_dim = kv_c_k_pe_local.size(-1)
                 kv_c_k_pe_full = torch.empty((total_toks, latent_rope_dim),
                                              device=kv_c_k_pe_local.device,
                                              dtype=kv_c_k_pe_local.dtype)
-
-                torch_npu.distributed.all_gather_into_tensor_uneven(
-                    kv_c_k_pe_full,
-                    kv_c_k_pe_local,
-                    output_split_sizes=np.sum(np.array(output_split_sizes),
-                                              axis=0).tolist(),
-                    group=self.dcp_group,
-                    async_op=False)
-
+                
+                kv_c_k_pe_full_list = [None for _ in range(self.dcp_size)]
+                dist.all_gather_object(kv_c_k_pe_full_list, kv_c_k_pe_local, group=self.dcp_group)
+                kv_c_k_pe_full_list = [kv_c_k_pe for kv_c_k_pe in kv_c_k_pe_full_list if kv_c_k_pe is not None and kv_c_k_pe.numel() > 0]
+                if len(kv_c_k_pe_full_list) > 0:
+                    kv_c_k_pe_full = torch.cat(kv_c_k_pe_full_list, dim=0)
                 kv_c_normed_full, k_pe_full = torch.split(
                     kv_c_k_pe_full, [latent_kv_dim, rope_dim], dim=-1)
 
                 # Step 3: process complete sequence with TP projection to get current rank's head slice
+                # Case that no kv_cache has been stored on this CP rank(after dcp all_gather), no need to do following computation.
+                if total_toks == 0:
+                    continue
                 kv_nope = self.kv_b_proj(kv_c_normed_full)[0].view(
                     -1, self.num_heads,
                     self.qk_nope_head_dim + self.v_head_dim)
@@ -1118,7 +1118,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
                 k_pe = k_pe_full.unsqueeze(1).expand((*k_nope.shape[:-1], -1))
 
-                seq_len2 = torch.tensor(np.sum(np.array(output_split_sizes),
+                seq_len2 = torch.tensor(np.sum(np.array(req_dcp_sizes),
                                                axis=1),
                                         dtype=torch.int32,
                                         device=q_nope.device)  # [reqs]
@@ -1132,9 +1132,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
             seq_len = torch.stack([seq_len1.cpu(), seq_len2.cpu()])
+            # Case that no kv_cache has been stored on this CP rank, no need to do following computation.
+            if torch.all(seq_len2 == 0).item():
+                continue
             if self.pcp_size > 1:
                 # CP+DCP mode: first compute this rank's contribution to the chunk
-                # Case that no kv_cache has been stored on this rank, no need to do following computation.
                 if i == 0:
                     torch_npu.atb.npu_ring_mla(
                         q_nope=q_nope,
@@ -1222,6 +1224,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             prefix_lse_filtered_bt = None
             for r in range(self.pcp_size):
                 out_lse_r = out_lse_list[r]
+                if torch.all(out_lse_r == 0).item():
+                    continue
                 out_r, lse_r = torch.split(out_lse_r, [self.v_head_dim, 1],
                                            dim=-1)
                 token_mask = torch.ones([out_r.size(0)],
@@ -1231,9 +1235,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                     prefix_output_filtered, prefix_lse_filtered_bt, out_r,
                     lse_r, token_mask)
             # convert lse back to [heads, bs]
-            if prefix_lse_filtered_bt is not None:
-                prefix_lse_filtered = prefix_lse_filtered_bt.squeeze(
-                    -1).permute(1, 0).contiguous()
+            assert prefix_output_filtered is not None and prefix_lse_filtered_bt is not None
+            prefix_lse_filtered = prefix_lse_filtered_bt.squeeze(
+                -1).permute(1, 0).contiguous()
 
             prefix_output[filtered_indices, :, :] = prefix_output_filtered.to(
                 prefix_output.dtype)

@@ -37,7 +37,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         extract_req_dcp_by_chunk_cp,
+                                         extract_req_dcp_by_chunk_pcp,
                                          filter_chunked_req_indices,
                                          split_decodes_and_prefills)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
@@ -1394,7 +1394,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             context_starts_rank[req_idx] += local_chunked_kv_lens[req_idx][i][
                 self.pcp_rank][self.dcp_rank]
         if self.dcp_size > 1:
-            output_split_sizes = extract_req_dcp_by_chunk_cp(
+            output_split_sizes = extract_req_dcp_by_chunk_pcp(
                 local_chunked_kv_lens, i, self.dcp_size, self.pcp_rank)
             assert len(output_split_sizes) == num_requests and all(
                 len(dcp_arr) == self.dcp_size

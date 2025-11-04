@@ -116,7 +116,7 @@ class AscendCommonAttentionMetadata:
         AscendPrefillContextParallelMetadata] = None
 
 
-def extract_req_dcp_by_chunk_cp(lst,
+def extract_req_dcp_by_chunk_pcp(lst,
                                 chunk_idx,
                                 dcp_size,
                                 pcp_rank,
