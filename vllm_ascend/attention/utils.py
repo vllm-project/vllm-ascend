@@ -21,8 +21,8 @@ class AscendPrefillContextParallelMetadata:
     num_computed_tokens_of_pcp_dcp: Optional[list[Optional[list[Optional[
         list[int]]]]]] = None
 
-    local_chunked_kv_lens: Optional[list[Optional[list[
-        Optional[list[Optional[list[int]]]]]]]] = None
+    local_chunked_kv_lens: Optional[list[Optional[list[Optional[list[Optional[
+        list[int]]]]]]]] = None
 
     mask_for_non_zero_chunk: Optional[List[bool]] = None
 
@@ -56,7 +56,7 @@ class AscendCommonAttentionMetadata:
     """
     Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
-    
+
     For many of the tensors we keep both GPU and CPU versions.
     """
 
@@ -134,12 +134,12 @@ def extract_req_dcp_by_chunk_cp(lst,
 
 
 def filter_chunked_req_indices(
-    seq_len: torch.Tensor,
-    mask_for_non_zero_chunk: Optional[List[bool]],
+        seq_len: torch.Tensor,
+        mask_for_non_zero_chunk: Optional[List[bool]],
 ) -> torch.Tensor:
     """
     filter the reqs which are doing real chunk_prefill.
-    
+
     Args:
         seq_len: contains multi-req length: [req0_len, req1_len, ...]
         mask_for_non_zero_chunk: [True, False, True, False, ...]
@@ -158,8 +158,8 @@ def filter_chunked_req_indices(
 
 
 def split_decodes_and_prefills(
-    common_attn_metadata: AscendCommonAttentionMetadata,
-    decode_threshold: int = 1,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        decode_threshold: int = 1,
 ) -> tuple[int, int, int, int]:
     """
     Assuming a reordered batch, finds the boundary between prefill and decode
@@ -212,8 +212,8 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
 
 def maybe_save_kv_layer_to_connector(
-    layer_name: str,
-    kv_cache_layer: List[torch.Tensor],
+        layer_name: str,
+        kv_cache_layer: List[torch.Tensor],
 ):
     if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
         return

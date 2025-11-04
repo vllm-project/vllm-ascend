@@ -4457,9 +4457,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dcp_world_size = get_dcp_group().world_size
         num_requests = len(num_computed_tokens)
         assert request_ids is not None and len(request_ids) == num_requests
-        local_chunked_kv_lens = [[
-            [0] * self.dcp_world_size for _ in range(self.pcp_world_size)
-        ] for _ in range(num_requests)]
+        local_chunked_kv_lens = [[[0] * self.dcp_world_size
+                                  for _ in range(self.pcp_world_size)]
+                                 for _ in range(num_requests)]
         total_ranks = self.pcp_world_size * self.dcp_world_size
 
         for req_idx, (req_id, total_tokens) in enumerate(
@@ -4529,8 +4529,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _get_chunked_req_mask_and_max_chunk(
         self,
-        local_chunked_kv_lens: Optional[list[Optional[list[
-            Optional[list[Optional[list[int]]]]]]]] = None
+        local_chunked_kv_lens: Optional[list[Optional[list[Optional[list[
+            Optional[list[int]]]]]]]] = None
     ) -> Tuple[List[bool], int]:
         """
         given 4-d list [req][chunk][pcp][dcp], return:
@@ -4541,12 +4541,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if len(local_chunked_kv_lens) == 0:
             return ([], 0)
         mask_for_non_zero_chunk = [
-            len(req) > 0 for req in local_chunked_kv_lens
-            if req is not None
+            len(req) > 0 for req in local_chunked_kv_lens if req is not None
         ]
         max_chunk_num = max(
-            (len(req) for req in local_chunked_kv_lens
-             if req is not None),
+            (len(req) for req in local_chunked_kv_lens if req is not None),
             default=0)
         return mask_for_non_zero_chunk, max_chunk_num
 
@@ -4571,8 +4569,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.dcp_size,
                     self.parallel_config.cp_kv_cache_interleave_size,
                 ).numpy(),
-                local_chunked_kv_lens=
-                local_chunked_kv_lens,
+                local_chunked_kv_lens=local_chunked_kv_lens,
                 mask_for_non_zero_chunk=mask_for_non_zero_chunk,
                 max_chunk_num=max_chunk_num)
             if self.pcp_size > 1:

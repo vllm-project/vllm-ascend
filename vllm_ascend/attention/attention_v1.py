@@ -174,8 +174,8 @@ class AscendMetadataForPrefill:
     pcp_metadata: Optional[AscendPCPMetadata] = None
     pcp_allgather_restore_idx: Optional[List[int]] = None
     chunked_context: Optional[ChunkedContextMetadata] = None
-    local_chunked_kv_lens: Optional[list[Optional[list[
-        Optional[list[Optional[list[int]]]]]]]] = None
+    local_chunked_kv_lens: Optional[list[Optional[list[Optional[list[Optional[
+        list[int]]]]]]]] = None
     cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
     block_tables: torch.Tensor = None
     actual_seq_lengths_q: torch.Tensor = None
@@ -440,8 +440,7 @@ class AscendAttentionMetadataBuilder:
                     pcp_allgather_restore_idx
                     if common_long_seq_metadata is not None else None,
                     chunked_context=chunked_context_metadata,
-                    local_chunked_kv_lens=
-                    local_chunked_kv_lens,
+                    local_chunked_kv_lens=local_chunked_kv_lens,
                     cp_kv_recover_idx_for_chunk=cp_kv_recover_idx_for_chunk,
                     block_tables=block_table[num_decodes:],
                     actual_seq_lengths_q=torch.cumsum(query_lens, dim=0))
@@ -1127,7 +1126,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if has_prefill:
             assert attn_metadata.prefill is not None
             num_actual_tokens_pcp_padded = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
-            prefill_query = query[num_decode_tokens:num_actual_tokens_pcp_padded]
+            prefill_query = query[
+                num_decode_tokens:num_actual_tokens_pcp_padded]
             key = key[self.pcp_size * num_decode_tokens:]
             value = value[self.pcp_size * num_decode_tokens:]
             if self.pcp_size > 1:
@@ -1239,8 +1239,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         for i in range(iters):
             key, value, seq_lens_current_chunk_rank = self._load_kv_for_chunk(
                 attn_metadata, kv_cache, context_starts_rank, i,
-                local_chunked_kv_lens, prefill_metadata,
-                query)
+                local_chunked_kv_lens, prefill_metadata, query)
 
             # 2. Attention computation
             actual_seq_lengths_kv = torch.cumsum(seq_lens_current_chunk_rank,
@@ -1323,8 +1322,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 prefix_lse.dtype)
 
     def _load_kv_for_chunk(self, attn_metadata, kv_cache, context_starts_rank,
-                           i, local_chunked_kv_lens,
-                           prefill_metadata, query):
+                           i, local_chunked_kv_lens, prefill_metadata, query):
 
         cache_key = kv_cache[0]
         cache_value = kv_cache[1]
@@ -1347,8 +1345,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         for req_idx in range(num_requests):
             if i >= len(local_chunked_kv_lens[req_idx]):
                 continue
-            n_computed_acc = local_chunked_kv_lens[req_idx][
-                i]
+            n_computed_acc = local_chunked_kv_lens[req_idx][i]
             total_toks += n_computed_acc[self.pcp_rank][self.dcp_rank]
             seq_lens_current_chunk_rank[req_idx] = n_computed_acc[
                 self.pcp_rank][self.dcp_rank]
@@ -1394,13 +1391,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # Before dealing with a new chunk, set to zero, and accumulate the start positions as chunk prefill step increases
             if i >= len(local_chunked_kv_lens[req_idx]):
                 continue
-            context_starts_rank[
-                req_idx] += local_chunked_kv_lens[req_idx][
-                    i][self.pcp_rank][self.dcp_rank]
+            context_starts_rank[req_idx] += local_chunked_kv_lens[req_idx][i][
+                self.pcp_rank][self.dcp_rank]
         if self.dcp_size > 1:
             output_split_sizes = extract_req_dcp_by_chunk_cp(
-                local_chunked_kv_lens, i, self.dcp_size,
-                self.pcp_rank)
+                local_chunked_kv_lens, i, self.dcp_size, self.pcp_rank)
             assert len(output_split_sizes) == num_requests and all(
                 len(dcp_arr) == self.dcp_size
                 for dcp_arr in output_split_sizes)
