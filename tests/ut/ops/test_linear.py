@@ -63,32 +63,19 @@ class TestAscendUnquantizedLinearMethod(TestBase):
 
     @mock.patch("vllm_ascend.ops.linear.is_enable_nz")
     @mock.patch("torch_npu.npu_format_cast")
-    @mock.patch("torch.version")
-    def test_process_weights_after_loading_is_8_3_enable_nz(
-            self, mock_version, mock_format_cast, mock_is_nz):
-        mock_version.cann = "8.3.RC1"
+    def test_process_weights_after_loading_enable_nz(self, mock_format_cast,
+                                                     mock_is_nz):
         mock_is_nz.return_value = 1
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_called_once()
 
     @mock.patch("vllm_ascend.ops.linear.is_enable_nz")
     @mock.patch("torch_npu.npu_format_cast")
-    @mock.patch("torch.version")
-    def test_process_weights_after_loading_is_8_3_disable_nz(
-            self, mock_version, mock_format_cast, mock_is_nz):
-        mock_version.cann = "8.3.RC1"
+    def test_process_weights_after_loading_disable_nz(self, mock_format_cast,
+                                                      mock_is_nz):
         mock_is_nz.return_value = 0
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_not_called()
-
-    @mock.patch("vllm_ascend.ops.linear.is_enable_nz")
-    @mock.patch("torch.version")
-    def test_process_weights_after_loading_not_8_3(self, mock_version,
-                                                   mock_is_nz):
-        mock_version.cann = "8.2.RC1"
-        mock_is_nz.return_value = 1
-        # Should not raise exception
-        self.method.process_weights_after_loading(self.layer)
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):
