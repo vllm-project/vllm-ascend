@@ -68,6 +68,8 @@ jobs:
             model_name: Qwen2.5-Omni-7B
           - runner: a2-1
             model_name: Meta-Llama-3.1-8B-Instruct
+          - runner: a2-4
+            model_name: Qwen3-30B-A3B-W8A8
       fail-fast: false
     # test will be triggered when tag 'accuracy-test' & 'ready-for-test'
     if:  >-
