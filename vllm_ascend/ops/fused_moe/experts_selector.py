@@ -198,7 +198,8 @@ def _select_experts_with_fusion_ops(
     if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax":
         if e_score_correction_bias is not None and \
                 e_score_correction_bias.dtype != router_logits.dtype:
-            e_score_correction_bias = e_score_correction_bias.to(router_logits.dtype)
+            e_score_correction_bias = e_score_correction_bias.to(
+                router_logits.dtype)
         topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
             x=router_logits,
             k=top_k,
@@ -300,7 +301,8 @@ def zero_experts_compute(
     if zero_expert_type == "identity":
         zero_expert_mask = expert_indices < num_experts
         zero_expert_scales = expert_scales.clone()
-        zero_expert_scales = torch.where(zero_expert_mask, 0.0, zero_expert_scales)
+        zero_expert_scales = torch.where(zero_expert_mask, 0.0,
+                                         zero_expert_scales)
 
         hidden_states = hidden_states.unsqueeze(1)
         zero_expert_scales = zero_expert_scales.unsqueeze(2)

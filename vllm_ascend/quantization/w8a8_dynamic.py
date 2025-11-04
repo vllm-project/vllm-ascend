@@ -25,7 +25,8 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
+from vllm_ascend.ops.fused_moe.experts_selector import (select_experts,
+                                                        zero_experts_compute)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, is_enable_nz,
                                vllm_version_is)
 

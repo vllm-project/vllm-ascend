@@ -368,7 +368,9 @@ class AscendMLAMetadataBuilder:
                                                          num_actual_tokens_pcp_padded]
 
         if self.cos_cache is None:
-            if isinstance(model.model.layers[model.model.start_layer].self_attn, nn.ModuleList):
+            if isinstance(
+                    model.model.layers[model.model.start_layer].self_attn,
+                    nn.ModuleList):
                 self.cos_cache = model.model.layers[
                     model.model.start_layer].self_attn[0].rotary_emb.cos_cached
                 self.sin_cache = model.model.layers[
