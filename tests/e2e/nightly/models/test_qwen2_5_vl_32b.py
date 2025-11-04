@@ -86,7 +86,8 @@ async def test_models(model: str, tp_size: int) -> None:
         str(port), "--max-model-len", "30000", "--max-num-batched-tokens",
         "40000", "--max-num-seqs", "400", "--trust-remote-code",
         "--gpu-memory-utilization", "0.8", "--additional-config",
-        '{"ascend_scheduler_config":{"enabled":false}}'
+        '{"ascend_scheduler_config":{"enabled":false}}',
+        "--compilation_config", '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
