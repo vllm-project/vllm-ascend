@@ -9,7 +9,7 @@ import multiprocessing
 import types
 import pytest
 from unittest.mock import patch
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 from functools import partial
 from vllm import LLM, SamplingParams
 from vllm.utils import get_open_port
@@ -143,7 +143,7 @@ def run_with_lmhead_tp(
     dp_per_node = dp_size // node_size
 
     procs = []
-    dp_result_queue=multiprocessing.Queue()
+    dp_result_queue:Queue[Dict[str,Any]]=multiprocessing.Queue()
     for local_dp_rank, global_dp_rank in enumerate(
             range(node_rank * dp_per_node, (node_rank + 1) * dp_per_node)):
         proc = multiprocessing.Process(
@@ -232,7 +232,7 @@ def test_lmhead_tp_mtp_dp2(model):
     # When lmhead_tp_size=tp_size,lmhead_tp is not enabled
     lmhead_tp_sizes=[1,2]
 
-    global_result_queue=multiprocessing.Queue()
+    global_result_queue:Queue[Dict[str,Any]]=multiprocessing.Queue()
     for lmhead_tp_size in lmhead_tp_sizes:
         proc=multiprocessing.Process(
             target=run_with_lmhead_tp,
