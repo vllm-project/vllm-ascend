@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 from torch import nn
+
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -108,7 +109,6 @@ class TestAscendSFATorchairPrefillMetadata(TestBase):
 
 class TestAscendSFATorchairDecodeMetadata(TestBase):
 
-    
     def test_ascend_sfa_decode_metadata_default(self):
         input_positions = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]])
         block_table = torch.tensor([[0, 3, 2, 1], [0, 2, 1, 3]])
@@ -138,7 +138,7 @@ class TestAscendSFATorchairMetadata(TestBase):
         query_start_loc = torch.tensor([1, 2, 3, 4])
         seq_lens = [30, 50]
         block_tables = torch.randint(0, 100, (100, 4))
-         
+
         num_decodes = 4
         num_decode_tokens = 8
         num_prefills = 8
