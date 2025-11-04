@@ -52,4 +52,4 @@ def get_transfer_timeout_value():
     hccl_rdma_timeout = int(os.getenv('HCCL_RDMA_TIMEOUT', '20'))
     hccl_rdma_retry_cnt = int(os.getenv('HCCL_RDMA_RETRY_CNT', '7'))
     return int((4.096 * (2**hccl_rdma_timeout)) * hccl_rdma_retry_cnt // 1000 +
-                3000)
+               3000)
