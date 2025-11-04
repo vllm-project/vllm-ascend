@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import os
 import contextlib
 import copy
 import hashlib
@@ -31,7 +32,8 @@ from vllm.v1.core.sched.output import SchedulerOutput
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.utils import (align_memory,
-                                           kv_alltoall_and_rearrange)
+                                           kv_alltoall_and_rearrange,
+                                           get_transfer_timeout_value)
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.11.0"):
@@ -602,6 +604,7 @@ class MooncakeLayerwiseConnectorWorker:
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self._get_prefill_decode_size(vllm_config)
+        os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(get_transfer_timeout_value())
         if self._prefill_tp_size < self._decode_tp_size:
             raise ValueError(
                 f"prefill_tp_size: {self._prefill_tp_size} must be greater than"

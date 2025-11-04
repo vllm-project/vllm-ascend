@@ -30,6 +30,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request, RequestStatus
 
+from vllm_ascend.distributed.utils import get_transfer_timeout_value
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import (AscendSocVersion, get_ascend_soc_version,
                                prefill_context_parallel_enable,
@@ -438,7 +439,7 @@ class LLMDataDistCMgrConnectorWorker():
         assert self.local_agent_metadata is not None
         llm_config = LLMConfig()
         llm_config.device_id = self.local_rank
-        llm_config.sync_kv_timeout = 20000
+        llm_config.sync_kv_timeout = get_transfer_timeout_value()
         llm_config.enable_switch_role = True
         llm_config.enable_cache_manager = True
         llm_config.enable_remote_cache_accessible = True
