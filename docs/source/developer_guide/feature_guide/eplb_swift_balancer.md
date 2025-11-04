@@ -109,6 +109,7 @@ class RandomLoadBalance(EplbPolicy):
 
         return 1, [-i for i in range(num_layers)], new_table
 ```
+
 2. To add a new EPLB algorithm, include the policy type and its corresponding implementation class in the `PolicyFactory` of `policy_factory.py`.
 
 ### Add a New MoE Model
@@ -117,27 +118,27 @@ class RandomLoadBalance(EplbPolicy):
 1. **Adapter File Modification**  
    - Inherit or modify `vllm_ascend/eplb/adaptor/vllm_adaptor.py`
    - Add processing logic for key parameters:
-    - `num_dense_layers`
-    - `global_expert_num`
-    - `num_roe_layers`
+     - `num_dense_layers`
+     - `global_expert_num`
+     - `num_roe_layers`
    - Ensure parameter synchronization in the `model_register` function.
-   
-   For example:
 
-    Modify `__init__` of `vllm_adaptor.py` to add a new moe model eplb params:
+     For example:
 
-    ```python
-       if self.model.config.model_type == "qwen3_moe":
-        self.num_dense_layers = 0
-        self.global_expert_num = self.model.config.num_experts
-    ```
+     Modify `__init__` of `vllm_adaptor.py` to add a new moe model eplb params:
 
-   Modify `model_register` of `vllm_adaptor.py` to register eplb params for new moe model:
-   
-    ```python
-        if config.model_type == "qwen3_moe":
-            model.num_moe_layers = config.num_hidden_layers
-    ```
+     ```python
+        if self.model.config.model_type == "qwen3_moe":
+         self.num_dense_layers = 0
+         self.global_expert_num = self.model.config.num_experts
+     ```
+
+      Modify `model_register` of `vllm_adaptor.py` to register eplb params for new moe model:
+
+     ```python
+         if config.model_type == "qwen3_moe":
+             model.num_moe_layers = config.num_hidden_layers
+     ```
 
 2. **MoE Feature Integration**  
    - Extend `vllm_ascend/eplb/utils.py` with MoE-specific methods  
