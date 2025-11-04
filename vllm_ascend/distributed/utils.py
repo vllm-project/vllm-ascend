@@ -48,6 +48,7 @@ def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
     offset = (aligned_addr - data_ptr) // tensor.element_size()
     return tensor[int(offset):]
 
+
 def get_transfer_timeout_value():
     hccl_rdma_timeout = int(os.getenv('HCCL_RDMA_TIMEOUT', '20'))
     hccl_rdma_retry_cnt = int(os.getenv('HCCL_RDMA_RETRY_CNT', '7'))
