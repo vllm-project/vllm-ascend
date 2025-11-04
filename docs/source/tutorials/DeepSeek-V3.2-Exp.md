@@ -6,6 +6,8 @@ DeepSeek-V3.2-Exp is a sparse attention model. The main architecture is similar 
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
+The `DeepSeek-V3.2-Exp` model is first supported in `vllm-ascend:v0.11.0rc0`.
+
 ## Supported Features
 
 Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -16,8 +18,8 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
-- `DeepSeek-V3.2-Exp`: require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
-- `DeepSeek-V3.2-Exp(Quantized version)`: require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
+- `DeepSeek-V3.2-Exp`(BF16 version): require 2 Atlas 800 A3 (64G × 16) nodes or 4 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-BF16)
+- `DeepSeek-V3.2-Exp-w8a8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) node or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelers.cn/models/Modelers_Park/DeepSeek-V3.2-Exp-w8a8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -398,7 +400,7 @@ lm_eval \
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
 |gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.9591|±  |0.0055|
-|     |       |strict-match    |     5|exact_match|↑  |0.9583|±  |0.0055|
+|gsm8k|      3|strict-match    |     5|exact_match|↑  |0.9583|±  |0.0055|
 
 ## Performance
 
