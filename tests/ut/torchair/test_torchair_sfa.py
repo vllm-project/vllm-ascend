@@ -4,12 +4,13 @@ import torch
 from torch import nn
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.torchair.torchair_sfa import (
-    AscendSFATorchairBackend, AscendSFATorchairDecodeMetadata, 
-    AscendSFATorchairImpl, AscendSFATorchairMetadata, 
+    AscendSFATorchairBackend, AscendSFATorchairDecodeMetadata,
+    AscendSFATorchairImpl, AscendSFATorchairMetadata,
     AscendSFATorchairMetadataBuilder, AscendSFATorchairPrefillMetadata)
 from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+
 
 class TestAscendSFATorchairBackend(TestBase):
 
@@ -331,7 +332,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
         self.assertTrue(torch.equal(result, block_tables[:, :4]))
 
     @patch("vllm_ascend.torchair.torchair_sfa.get_ascend_config")
-    def test_get_graph_runner_block_tables_from_numpy(self, 
+    def test_get_graph_runner_block_tables_from_numpy(self,
                                                       mock_ascend_config):
         ascend_config = MagicMock()
         mock_ascend_config.return_value = ascend_config
@@ -405,7 +406,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
                                 64,
                                 dtype=torch.float16,
                                 device=mock_device)
-        
+
         self.assertIsInstance(metadata, AscendSFATorchairMetadata)
         self.assertEqual(metadata.nmum_input_tokens, 3)
         self.assertEqual(metadata.num_actual_tokens, 3)
@@ -472,7 +473,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
                 attn_state=AscendAttentionState.ChunkedPrefill,
                 num_computed_tokens_cpu=None,
                 seq_lens=None)
-            
+
             metadata = builder.build(1, common_attn_metadata, model)
 
         self.assertIsInstance(metadata, AscendSFATorchairMetadata)
