@@ -121,7 +121,7 @@ class TestAscendSFATorchairDecodeMetadata(TestBase):
                                                    block_table, seq_lens,
                                                    max_seq_lens, seq_lens_list,
                                                    None,
-                                                   None
+                                                   None,
                                                    attn_mask)
 
         self.assertIs(metadata.input_positions, input_positions)
