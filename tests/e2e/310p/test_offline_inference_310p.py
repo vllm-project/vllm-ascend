@@ -48,7 +48,7 @@ def test_models(model: str, dtype: str, max_tokens: int) -> None:
 VL_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 
 
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model", VL_MODELS)
 @pytest.mark.parametrize("dtype", ["float16"])
 def test_vl_model_with_samples(model: str, dtype: str) -> None:
     example_prompts = [
