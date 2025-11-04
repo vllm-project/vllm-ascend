@@ -30,7 +30,7 @@ jobs:
     runs-on: ${{ inputs.runner }}
     name: ${{ inputs.model_name }} accuracy
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
       env:
         VLLM_USE_MODELSCOPE: True
         # 1. If version specified (work_dispatch), do specified branch accuracy test
@@ -176,7 +176,7 @@ jobs:
 
       - name: Upload Report
         if: ${{ inputs.upload == true }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: "report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}"
           path: ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md

@@ -69,12 +69,12 @@ jobs:
     name: e2e-full
     strategy:
       matrix:
-        vllm_version: [c9461e05a4ed3557cfbf4b15ded1e26761cc39ca, v0.11.0]
+        vllm_version: [83f478bb19489b41e9d208b47b4bb5a95ac171ac, v0.11.0]
     needs: [changes]
     if: ${{ needs.changes.outputs.e2e_tracker == 'true' }}
     uses: ./.github/workflows/_e2e_test.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
       runner: linux-aarch64-a2
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
       type: full

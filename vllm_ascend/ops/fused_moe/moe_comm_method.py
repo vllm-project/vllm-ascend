@@ -37,7 +37,7 @@ _MoECommMethods: Dict[Optional[MoECommType], MoECommMethod] = {}
 
 def get_moe_comm_method(
         moe_comm_type: Optional[MoECommType]) -> Optional[MoECommMethod]:
-    return _MoECommMethods.get(moe_comm_type)
+    return _MoECommMethods.get(moe_comm_type, None)
 
 
 def setup_moe_comm_method(moe_config):
@@ -64,13 +64,12 @@ class MoECommMethod(ABC):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False,
-        gate=None
+        replace_allreduce: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         hidden_states, router_logits, mc2_mask, context_metadata = self.prepare_finalize.prepare(
             hidden_states, router_logits, enable_shared_expert_dp,
-            replace_allreduce, gate)
+            replace_allreduce)
         return hidden_states, router_logits, mc2_mask, context_metadata
 
     def finalize(self,
@@ -131,7 +130,8 @@ class MoECommMethod(ABC):
             dynamic_scale_for_share=dynamic_scale_for_share,
             mc2_mask=mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            with_quant=use_int8_w8a8 or use_int4_w4a8)
+            with_quant=use_int8_w8a8 or use_int4_w4a8,
+            dynamic_eplb=dynamic_eplb)
 
         permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, context_metadata = \
             results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("context_metadata")

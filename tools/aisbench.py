@@ -14,11 +14,17 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
+import tempfile
+from pathlib import Path
 
+import filelock
+import huggingface_hub
 import pandas as pd
 from modelscope import snapshot_download  # type: ignore
 
@@ -62,12 +68,16 @@ class AisbenchRunner:
                  model: str,
                  port: int,
                  aisbench_config: dict,
+                 host_ip: str = "localhost",
                  verify=True):
-        self.dataset_path = snapshot_download(aisbench_config["dataset_path"],
-                                              repo_type='dataset')
         self.model = model
-        self.model_path = snapshot_download(model)
+        self.dataset_path = maybe_download_from_modelscope(
+            aisbench_config["dataset_path"], repo_type="dataset")
+        self.model_path = maybe_download_from_modelscope(model)
+        assert self.dataset_path is not None and self.model_path is not None, \
+            f"Failed to download dataset or model: dataset={self.dataset_path}, model={self.model_path}"
         self.port = port
+        self.host_ip = host_ip
         self.task_type = aisbench_config["case_type"]
         self.request_conf = aisbench_config["request_conf"]
         self.dataset_conf = aisbench_config.get("dataset_conf")
@@ -123,6 +133,7 @@ class AisbenchRunner:
             content = f.read()
         content = re.sub(r'model=.*', f'model="{self.model}",', content)
         content = re.sub(r'host_port.*', f'host_port = {self.port},', content)
+        content = re.sub(r'host_ip.*', f'host_ip = "{self.host_ip}",', content)
         content = re.sub(r'max_out_len.*',
                          f'max_out_len = {self.max_out_len},', content)
         content = re.sub(r'batch_size.*', f'batch_size = {self.batch_size},',
@@ -181,8 +192,8 @@ class AisbenchRunner:
                                             line).group(1)
                 return
             if "ERROR" in line:
-                raise RuntimeError(
-                    "Some errors happen to Aisbench task.") from None
+                error_msg = f"Some errors happened to Aisbench runtime, the first error is {line}"
+                raise RuntimeError(error_msg) from None
 
     def _wait_for_task(self):
         self._wait_for_exp_folder()
@@ -194,8 +205,8 @@ class AisbenchRunner:
                 self.result_line = line
                 return
             if "ERROR" in line:
-                raise RuntimeError(
-                    "Some errors happen to Aisbench task.") from None
+                error_msg = f"Some errors happened to Aisbench runtime, the first error is {line}"
+                raise RuntimeError(error_msg) from None
 
     def _get_result_performance(self):
         result_dir = re.search(r'Performance Result files locate in (.*)',
@@ -230,21 +241,31 @@ class AisbenchRunner:
         assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, f"Accuracy verification failed. The accuracy of {self.dataset_path} is {acc_value}, which is not within {self.threshold} relative to baseline {self.baseline}."
 
 
-def run_aisbench_cases(model, port, aisbench_cases):
+def run_aisbench_cases(model,
+                       port,
+                       aisbench_cases,
+                       server_args="",
+                       host_ip="localhost"):
     aisbench_results = []
     aisbench_errors = []
     for aisbench_case in aisbench_cases:
+        if not aisbench_case:
+            continue
         try:
-            with AisbenchRunner(model, port, aisbench_case) as aisbench:
+            with AisbenchRunner(model=model,
+                                port=port,
+                                host_ip=host_ip,
+                                aisbench_config=aisbench_case) as aisbench:
                 aisbench_results.append(aisbench.result)
         except Exception as e:
             aisbench_results.append("")
             aisbench_errors.append([aisbench_case, e])
             print(e)
     for failed_case, error_info in aisbench_errors:
-        print(
-            f"The following aisbench case failed: {failed_case}, reason is {error_info}."
-        )
+        error_msg = f"The following aisbench case failed: {failed_case}, reason is {error_info}"
+        if server_args:
+            error_msg += f"\nserver_args are {server_args}"
+        logging.error(error_msg)
     assert not aisbench_errors, "some aisbench cases failed, info were shown above."
     return aisbench_results
 
@@ -252,3 +273,51 @@ def run_aisbench_cases(model, port, aisbench_cases):
 def get_TTFT(result):
     TTFT = result[0][0].loc["TTFT", "Average"][:-3]
     return float(TTFT)
+
+
+temp_dir = tempfile.gettempdir()
+
+
+def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
+    lock_dir = cache_dir or temp_dir
+    model_name_or_path = str(model_name_or_path)
+    os.makedirs(os.path.dirname(lock_dir), exist_ok=True)
+    model_name = model_name_or_path.replace("/", "-")
+    hash_name = hashlib.sha256(model_name.encode()).hexdigest()
+    # add hash to avoid conflict with old users' lock files
+    lock_file_name = hash_name + model_name + ".lock"
+    # mode 0o666 is required for the filelock to be shared across users
+    lock = filelock.FileLock(os.path.join(lock_dir, lock_file_name),
+                             mode=0o666)
+    return lock
+
+
+def maybe_download_from_modelscope(
+    model: str,
+    repo_type: str = "model",
+    revision: str | None = None,
+    download_dir: str | None = None,
+    ignore_patterns: str | list[str] | None = None,
+    allow_patterns: list[str] | str | None = None,
+) -> str:
+    """
+    Download model/dataset from ModelScope hub.
+    Returns the path to the downloaded model, or None if the model is not
+    downloaded from ModelScope.
+    """
+    # Use file lock to prevent multiple processes from
+    # downloading the same model weights at the same time.
+    with get_lock(model, download_dir):
+        if not os.path.exists(model):
+            model_path = snapshot_download(
+                model_id=model,
+                repo_type=repo_type,
+                cache_dir=download_dir,
+                local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+                revision=revision,
+                ignore_file_pattern=ignore_patterns,
+                allow_patterns=allow_patterns,
+            )
+        else:
+            model_path = model
+    return model_path

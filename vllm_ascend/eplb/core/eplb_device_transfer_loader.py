@@ -126,7 +126,7 @@ class D2DExpertWeightLoader:
                                                       local_expert_to_replace,
                                                       buffer_tensor_id)
 
-        logger.info(
+        logger.debug(
             f"[EPLB] finished update expert weight for layer: {self.layer_id}")
 
         self.recv_expert_list = []
