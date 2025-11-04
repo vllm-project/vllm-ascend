@@ -74,7 +74,7 @@ class CachedRequestState:
     prompt_embeds: Optional[torch.Tensor] = None
 
     # pcp/dcp param
-    num_computed_tokens_of_pcp_dcp_for_chunk: Optional[list[Optional[list[
+    local_chunked_kv_lens: Optional[list[Optional[list[
         Optional[
             list[int]]]]]] = None  # Records computed tokens for each chunk
     next_cp_dcp_start_rank: int = 0  # Tracks next starting rank for round-robin distribution
@@ -321,7 +321,7 @@ class InputBatch:
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
 
         # pcp/dcp parameters
-        self.num_computed_tokens_of_pcp_dcp_for_chunk: list[Optional[list[
+        self.local_chunked_kv_lens: list[Optional[list[
             Optional[list[Optional[list[int]]]]]]] = [None] * max_num_reqs
 
     @property
@@ -397,8 +397,8 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         # Add PCP/DCP tracking fields
-        self.num_computed_tokens_of_pcp_dcp_for_chunk[
-            req_index] = request.num_computed_tokens_of_pcp_dcp_for_chunk
+        self.local_chunked_kv_lens[
+            req_index] = request.local_chunked_kv_lens
 
         if sampling_params := request.sampling_params:
             if (self.is_spec_decode

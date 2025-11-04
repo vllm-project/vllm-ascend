@@ -367,13 +367,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                              use_sparse=self.use_sparse)
         if self.pcp_size > 1:
             self.attn_mask_builder = None
-        elif torch.version.cann.startswith("8.3"):
+        else:
             self.attn_mask_builder = AttentionMaskBuilder(
                 self.scheduler_config.max_num_batched_tokens, self.dtype,
                 self.device)
-        else:
-            self.attn_mask_builder = AttentionMaskBuilder(
-                self.model_config.max_model_len, self.dtype)
 
         self._set_up_drafter()
 
@@ -485,6 +482,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.max_num_tokens + 2 * self.pcp_size * self.max_num_reqs,
             dtype=torch.int32,
             device=self.device)
+        self.num_actual_tokens_pcp_padded = 0
         if self.speculative_config and self.pcp_size > 1:
             self.input_ids_pcp_full = torch.zeros(self.max_num_tokens,
                                                   dtype=torch.int32,
@@ -757,7 +755,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
-                num_computed_tokens_of_pcp_dcp_for_chunk=None,
+                local_chunked_kv_lens=None,
                 **backward_kwargs,
             )
 
@@ -783,12 +781,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     req_state.token_blank_in_last_blk = temp_start_rank_dict[
                         req_id][1]
 
-                    req_state.num_computed_tokens_of_pcp_dcp_for_chunk = [
+                    req_state.local_chunked_kv_lens = [
                         copy.deepcopy(current_distribution)
                     ]
                 else:
                     # No computed tokens yet
-                    req_state.num_computed_tokens_of_pcp_dcp_for_chunk = []
+                    req_state.local_chunked_kv_lens = []
 
             self.requests[req_id] = req_state
 
@@ -814,8 +812,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Compute CP/DCP tracking fields for chunked prefill
             if self.pcp_size * self.dcp_size > 1:
                 # If this is the first chunk, initialize tracking fields
-                if req_state.num_computed_tokens_of_pcp_dcp_for_chunk is None:
-                    req_state.num_computed_tokens_of_pcp_dcp_for_chunk = []
+                if req_state.local_chunked_kv_lens is None:
+                    req_state.local_chunked_kv_lens = []
 
                 # Compute tokens added in this chunk (not cumulative)
                 chunk_tokens = num_computed_tokens - prev_num_computed_tokens
@@ -843,7 +841,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         req_id][1]
 
                     # Append this chunk's distribution to accumulation list
-                    req_state.num_computed_tokens_of_pcp_dcp_for_chunk.append(
+                    req_state.local_chunked_kv_lens.append(
                         copy.deepcopy(chunk_distribution))
 
             if not is_last_rank:
@@ -891,8 +889,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     new_block_ids, req_index)
 
             # Update PCP/DCP tracking fields in input_batch
-            self.input_batch.num_computed_tokens_of_pcp_dcp_for_chunk[
-                req_index] = req_state.num_computed_tokens_of_pcp_dcp_for_chunk
+            self.input_batch.local_chunked_kv_lens[
+                req_index] = req_state.local_chunked_kv_lens
 
             # For the last rank, we don't need to update the token_ids_cpu
             # because the sampled tokens are already cached.
@@ -1065,11 +1063,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return self.attn_mask_builder.get_pooling_mask(self.device)
         # Chunk Prefill situation.
         elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
-            if torch.version.cann.startswith("8.3"):
-                return self.attn_mask_builder.get_splitfuse_attn_mask()
+            if self.dcp_size > 1:
+                max_seq_len = max(seq_lens.max().item(), 0)
+                return self.attn_mask_builder.get_attn_mask(
+                    max_seq_len, self.dtype, self.device)
             else:
-                return self.attn_mask_builder.get_splitfuse_attn_mask(
-                    seq_lens, position, self.dtype, self.device)
+                return self.attn_mask_builder.get_splitfuse_attn_mask()
 
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
@@ -1078,12 +1077,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_seq_len, self.dtype, self.device)
         # Prefill with cache hit.
         elif attn_state == AscendAttentionState.PrefillCacheHit:
-            if torch.version.cann.startswith("8.3"):
-                return self.attn_mask_builder.get_attn_mask(
-                    2048, self.dtype, self.device)
-            else:
-                return self.attn_mask_builder.get_attn_mask(
-                    128, self.dtype, self.device)
+            return self.attn_mask_builder.get_attn_mask(
+                2048, self.dtype, self.device)
         # Decode-only situation.
         else:
             return None
@@ -2052,7 +2047,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states = hidden_states[:-pad_size, :]
 
         if self.pcp_size > 1:
-            hidden_states = get_pcp_group().all_gather(hidden_states, 0)
+            hidden_states = get_pcp_group().all_gather(
+                hidden_states[:self.num_actual_tokens_pcp_padded //
+                              self.pcp_size], 0)
             hidden_states = torch.index_select(
                 hidden_states, 0,
                 self.pcp_allgather_restore_idx[:hidden_states.shape[0]])
@@ -4460,7 +4457,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dcp_world_size = get_dcp_group().world_size
         num_requests = len(num_computed_tokens)
         assert request_ids is not None and len(request_ids) == num_requests
-        num_computed_tokens_of_pcp_dcp_for_chunk = [[
+        local_chunked_kv_lens = [[
             [0] * self.dcp_world_size for _ in range(self.pcp_world_size)
         ] for _ in range(num_requests)]
         total_ranks = self.pcp_world_size * self.dcp_world_size
@@ -4486,12 +4483,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     pcp_idx = start_rank // self.dcp_world_size
                     dcp_idx = start_rank % self.dcp_world_size
-                    num_computed_tokens_of_pcp_dcp_for_chunk[req_idx][pcp_idx][
+                    local_chunked_kv_lens[req_idx][pcp_idx][
                         dcp_idx] += consumed_tokens
                     request_start_rank_dict[req_id] = (start_rank,
                                                        tokens_blank)
                     return cast(List[Optional[List[Optional[List[int]]]]],
-                                num_computed_tokens_of_pcp_dcp_for_chunk)
+                                local_chunked_kv_lens)
 
             virtual_size = total_ranks * cp_kv_cache_interleave_size
             base = int(total_tokens) // virtual_size
@@ -4502,7 +4499,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for rank_idx in range(total_ranks):
                 pcp_idx = rank_idx // self.dcp_world_size
                 dcp_idx = rank_idx % self.dcp_world_size
-                num_computed_tokens_of_pcp_dcp_for_chunk[req_idx][pcp_idx][
+                local_chunked_kv_lens[req_idx][pcp_idx][
                     dcp_idx] = base * cp_kv_cache_interleave_size
 
             # Distribute remainder tokens starting from start_rank
@@ -4511,11 +4508,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 pcp_idx = rank // self.dcp_world_size
                 dcp_idx = rank % self.dcp_world_size
                 if i < remain_blocks - 1 or remainder % cp_kv_cache_interleave_size == 0:  # not last block or divisible
-                    num_computed_tokens_of_pcp_dcp_for_chunk[req_idx][pcp_idx][
+                    local_chunked_kv_lens[req_idx][pcp_idx][
                         dcp_idx] += 1 * cp_kv_cache_interleave_size
                     tokens_blank = 0
                 else:  # if last block and undivisible
-                    num_computed_tokens_of_pcp_dcp_for_chunk[req_idx][pcp_idx][
+                    local_chunked_kv_lens[req_idx][pcp_idx][
                         dcp_idx] += remainder % cp_kv_cache_interleave_size
                     tokens_blank = cp_kv_cache_interleave_size - (
                         remainder % cp_kv_cache_interleave_size)
@@ -4528,11 +4525,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 request_start_rank_dict[req_id] = (start_rank, tokens_blank)
 
         return cast(List[Optional[List[Optional[List[int]]]]],
-                    num_computed_tokens_of_pcp_dcp_for_chunk)
+                    local_chunked_kv_lens)
 
     def _get_chunked_req_mask_and_max_chunk(
         self,
-        num_computed_tokens_of_pcp_dcp_for_chunk: Optional[list[Optional[list[
+        local_chunked_kv_lens: Optional[list[Optional[list[
             Optional[list[Optional[list[int]]]]]]]] = None
     ) -> Tuple[List[bool], int]:
         """
@@ -4540,15 +4537,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         1. if each req has any chunk (list[bool])
         2. max chunk num along all reqs (int)
         """
-        assert num_computed_tokens_of_pcp_dcp_for_chunk is not None
-        if len(num_computed_tokens_of_pcp_dcp_for_chunk) == 0:
+        assert local_chunked_kv_lens is not None
+        if len(local_chunked_kv_lens) == 0:
             return ([], 0)
         mask_for_non_zero_chunk = [
-            len(req) > 0 for req in num_computed_tokens_of_pcp_dcp_for_chunk
+            len(req) > 0 for req in local_chunked_kv_lens
             if req is not None
         ]
         max_chunk_num = max(
-            (len(req) for req in num_computed_tokens_of_pcp_dcp_for_chunk
+            (len(req) for req in local_chunked_kv_lens
              if req is not None),
             default=0)
         return mask_for_non_zero_chunk, max_chunk_num
@@ -4559,10 +4556,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_decodes = sum(self.input_batch.num_computed_tokens_cpu[:num_reqs]
                           >= self.input_batch.num_prompt_tokens[:num_reqs])
         num_actual_tokens_pcp_padded = total_num_scheduled_tokens * self.pcp_size
-        num_computed_tokens_of_pcp_dcp_for_chunk = self.input_batch.num_computed_tokens_of_pcp_dcp_for_chunk[
+        self.num_actual_tokens_pcp_padded = num_actual_tokens_pcp_padded
+        local_chunked_kv_lens = self.input_batch.local_chunked_kv_lens[
             num_decodes:num_reqs]
         mask_for_non_zero_chunk, max_chunk_num = self._get_chunked_req_mask_and_max_chunk(
-            num_computed_tokens_of_pcp_dcp_for_chunk)
+            local_chunked_kv_lens)
         long_seq_metadata = None
         if self.pcp_size * self.dcp_size > 1:
             long_seq_metadata = AscendPrefillContextParallelMetadata(
@@ -4573,8 +4571,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.dcp_size,
                     self.parallel_config.cp_kv_cache_interleave_size,
                 ).numpy(),
-                num_computed_tokens_of_pcp_dcp_for_chunk=
-                num_computed_tokens_of_pcp_dcp_for_chunk,
+                local_chunked_kv_lens=
+                local_chunked_kv_lens,
                 mask_for_non_zero_chunk=mask_for_non_zero_chunk,
                 max_chunk_num=max_chunk_num)
             if self.pcp_size > 1:

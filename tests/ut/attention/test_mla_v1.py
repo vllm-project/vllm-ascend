@@ -481,7 +481,7 @@ class TestAscendMLAImpl(TestBase):
         chunk_ctx.starts = [torch.tensor([0])]
         chunk_ctx.max_chunk_num = 1
         chunk_ctx.mask_for_non_zero_chunk = [True]
-        chunk_ctx.num_computed_tokens_of_pcp_dcp_for_chunk = [[[[8]]]]
+        chunk_ctx.local_chunked_kv_lens = [[[[8]]]]
 
         prefill_meta = MagicMock()
         prefill_meta.chunked_context = chunk_ctx

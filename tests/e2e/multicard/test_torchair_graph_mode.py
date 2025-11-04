@@ -225,3 +225,66 @@ def test_e2e_qwen2_with_torchair():
 
 def test_e2e_qwen3_moe_with_torchair():
     _qwen_torchair_test_fixture("Qwen/Qwen3-30B-A3B", 2, True)
+
+
+# test deepseek-v2-lite
+def _deepseek_v2_lite_torchair_test_fixure(
+    additional_config: Dict,
+    *,
+    tensor_parallel_size=2,
+    use_v1_schduler=False,
+):
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    kwargs = {}
+    if not use_v1_schduler:
+        kwargs = {
+            "ascend_scheduler_config": {
+                "enable": True,
+            },
+            "refresh": True,
+        }
+    additional_config.update(**kwargs)
+
+    with VllmRunner(
+            "deepseek-ai/DeepSeek-V2-Lite",
+            dtype="half",
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend="mp",
+            additional_config=additional_config,
+    ) as vllm_model:
+        vllm_output = vllm_model.generate_greedy(example_prompts, 5)
+
+    # NOTE: deepseek-ai/DeepSeek-V2-Lite is a random weight of
+    # DeepSeek-V2-Lite with 2 hidden layers, thus the golden results seems
+    # inaccurate. This will only change if accuracy improves with the
+    # official weights of DeepSeek-V2-Lite.
+
+    for i in range(len(vllm_output)):
+        generated_text = vllm_output[i][1]
+        assert len(
+            generated_text.strip()) > 0, f"The {i}-th output is null, failed"
+
+
+def test_e2e_deepseekv2lite_with_torchair():
+    additional_config = {
+        "torchair_graph_config": {
+            "enabled": True,
+        },
+    }
+    _deepseek_v2_lite_torchair_test_fixure(additional_config)
+
+
+def test_e2e_deepseekv2lite_with_torchair_v1scheduler():
+    additional_config = {
+        "torchair_graph_config": {
+            "enabled": True,
+        },
+    }
+    _deepseek_v2_lite_torchair_test_fixure(additional_config,
+                                           use_v1_schduler=True)

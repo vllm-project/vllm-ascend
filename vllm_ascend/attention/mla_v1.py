@@ -115,7 +115,7 @@ class AscendMLAPrefillMetadata:
         chunk_seq_lens: torch.Tensor
         mask_for_non_zero_chunk: Optional[list[bool]] = None
         max_chunk_num: int = 0
-        num_computed_tokens_of_pcp_dcp_for_chunk: Optional[list[Optional[list[
+        local_chunked_kv_lens: Optional[list[Optional[list[
             Optional[list[Optional[list[int]]]]]]]] = None
 
     attn_mask: torch.Tensor
@@ -354,7 +354,7 @@ class AscendMLAMetadataBuilder:
         num_actual_tokens_pcp_padded = long_seq_metadata.num_actual_tokens_pcp_padded if long_seq_metadata else None
         num_computed_tokens_of_pcp_dcp = long_seq_metadata.num_computed_tokens_of_pcp_dcp if long_seq_metadata else None
         cp_kv_recover_idx_for_chunk = long_seq_metadata.cp_kv_recover_idx_for_chunk if long_seq_metadata else None
-        num_computed_tokens_of_pcp_dcp_for_chunk = long_seq_metadata.num_computed_tokens_of_pcp_dcp_for_chunk if long_seq_metadata else None
+        local_chunked_kv_lens = long_seq_metadata.local_chunked_kv_lens if long_seq_metadata else None
         mask_for_non_zero_chunk = long_seq_metadata.mask_for_non_zero_chunk if long_seq_metadata else None
         max_chunk_num = long_seq_metadata.max_chunk_num if long_seq_metadata else 0
 
@@ -462,7 +462,7 @@ class AscendMLAMetadataBuilder:
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     chunk_seq_lens=chunk_seq_lens,
                     workspace=self.chunked_prefill_workspace,
-                    num_computed_tokens_of_pcp_dcp_for_chunk=num_computed_tokens_of_pcp_dcp_for_chunk,
+                    local_chunked_kv_lens=local_chunked_kv_lens,
                     mask_for_non_zero_chunk=mask_for_non_zero_chunk,
                     max_chunk_num=max_chunk_num,
                 )
@@ -931,10 +931,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_metadata = attn_metadata.prefill
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
-        num_computed_tokens_of_pcp_dcp_for_chunk = prefill_metadata.chunked_context.num_computed_tokens_of_pcp_dcp_for_chunk
+        local_chunked_kv_lens = prefill_metadata.chunked_context.local_chunked_kv_lens
         mask_for_non_zero_chunk = prefill_metadata.chunked_context.mask_for_non_zero_chunk
         max_chunk_num = prefill_metadata.chunked_context.max_chunk_num
-        assert num_computed_tokens_of_pcp_dcp_for_chunk is not None and mask_for_non_zero_chunk is not None and max_chunk_num > 0
+        assert local_chunked_kv_lens is not None and mask_for_non_zero_chunk is not None and max_chunk_num > 0
 
         if self.pcp_size > 1:
             prefix_output = torch.zeros(q_nope.shape[0],
@@ -985,7 +985,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 ## DCP mode: each rank processes its own (cp,dcp) historical context slice per request dimension
                 num_requests = len(seq_len1)
                 assert num_requests == len(
-                    num_computed_tokens_of_pcp_dcp_for_chunk)
+                    local_chunked_kv_lens)
                 # Before dealing with a new chunk, set to zero, and accumulate the start positions as chunk prefill step increases
                 context_starts_rank = torch.zeros(
                     num_requests, dtype=torch.int32, device=q_nope.device
@@ -997,9 +997,9 @@ class AscendMLAImpl(MLAAttentionImpl):
 
                 for req_idx in range(num_requests):
                     if i >= len(
-                            num_computed_tokens_of_pcp_dcp_for_chunk[req_idx]):
+                            local_chunked_kv_lens[req_idx]):
                         continue
-                    n_computed_acc = num_computed_tokens_of_pcp_dcp_for_chunk[
+                    n_computed_acc = local_chunked_kv_lens[
                         req_idx][i]
                     total_toks += n_computed_acc[self.pcp_rank][self.dcp_rank]
                     seq_len2_rank[req_idx] = n_computed_acc[self.pcp_rank][
@@ -1047,10 +1047,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 for req_idx in range(num_requests):
                     # Before dealing with a new chunk, set to zero, and accumulate the start positions as chunk prefill step increases
                     if i >= len(
-                            num_computed_tokens_of_pcp_dcp_for_chunk[req_idx]):
+                            local_chunked_kv_lens[req_idx]):
                         continue
                     context_starts_rank[
-                        req_idx] += num_computed_tokens_of_pcp_dcp_for_chunk[
+                        req_idx] += local_chunked_kv_lens[
                             req_idx][i][self.pcp_rank][self.dcp_rank]
             else:
                 # Original logic: CP-only mode
@@ -1092,7 +1092,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
                 # Step 2: use all_gather_into_tensor_uneven (gather + cat)
                 output_split_sizes = extract_req_dcp_by_chunk_cp(
-                    num_computed_tokens_of_pcp_dcp_for_chunk, i, self.dcp_size,
+                    local_chunked_kv_lens, i, self.dcp_size,
                     self.pcp_rank
                 )  # need to know num tokens of each rank in dcp group before all_gather     # [reqs, dcp]
                 assert len(output_split_sizes) == num_requests and all(

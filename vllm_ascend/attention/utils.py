@@ -21,7 +21,7 @@ class AscendPrefillContextParallelMetadata:
     num_computed_tokens_of_pcp_dcp: Optional[list[Optional[list[Optional[
         list[int]]]]]] = None
 
-    num_computed_tokens_of_pcp_dcp_for_chunk: Optional[list[Optional[list[
+    local_chunked_kv_lens: Optional[list[Optional[list[
         Optional[list[Optional[list[int]]]]]]]] = None
 
     mask_for_non_zero_chunk: Optional[List[bool]] = None
