@@ -1,0 +1,11 @@
+model_name: "OpenBMB/MiniCPM3-4B"
+runner: "linux-aarch64-a2-1"	
+hardware: "Atlas A2 Series"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.76
+  - name: "exact_match,flexible-extract"
+    value: 0.76
+trust_remote_code: True
