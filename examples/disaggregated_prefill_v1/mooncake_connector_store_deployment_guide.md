@@ -5,7 +5,7 @@
 * Software:
   * Python >= 3.9, < 3.12
   * CANN >= 8.2.rc1
-  * PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
+  * PyTorch == 2.7.1, torch-npu == 2.7.1
   * vLLM：main branch
   * vLLM-Ascend：main branch
   * Mooncake：[AscendTransport/Mooncake at pooling-async-memcpy](https://github.com/AscendTransport/Mooncake/tree/pooling-async-memcpy)(Currently available branch code, continuously updated.)

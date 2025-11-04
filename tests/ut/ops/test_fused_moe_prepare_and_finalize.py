@@ -191,13 +191,7 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         hidden_states = torch.randn(3, 8)
         router_logits = torch.randn(3, 2)
 
-        # Mock the gate function for rm_router_logits=False case
-        mock_gate = MagicMock()
-        mock_gate.return_value = (router_logits.repeat(2, 1), None)
-
-        h_out, r_out, _ = layer.prepare(hidden_states,
-                                        router_logits,
-                                        gate=mock_gate)
+        h_out, r_out, _ = layer.prepare(hidden_states, router_logits)
 
         # After all-gather with DP=2, should double the batch size
         self.assertEqual(h_out.shape[0], 12)
@@ -258,14 +252,8 @@ class TestFusedMoEPrepareAndFinalize(unittest.TestCase):
         hidden_states = torch.randn(3, 8)
         router_logits = torch.randn(3, 2)
 
-        # Mock gate for router logits recomputation
-        mock_gate = MagicMock()
-        mock_gate.return_value = (torch.randn(7, 2), None)
-
         # Run prepare
-        h_out, r_out, _ = layer.prepare(hidden_states,
-                                        router_logits,
-                                        gate=mock_gate)
+        h_out, r_out, _ = layer.prepare(hidden_states, router_logits)
 
         # Should be global tensor: [7, 8] and [7, 2]
         self.assertEqual(h_out.shape, (7, 8))

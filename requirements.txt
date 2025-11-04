@@ -10,7 +10,7 @@ pyyaml
 scipy
 setuptools>=64
 setuptools-scm>=8
-torch>=2.7.1
+torch==2.7.1
 torchvision
 wheel
 opencv-python-headless<=4.11.0.86 # Required to avoid numpy version conflict with vllm
@@ -23,6 +23,6 @@ quart
 numba
 
 # Install torch_npu
---pre
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
-torch-npu==2.7.1.dev20250724
+#--pre
+#--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+torch-npu==2.7.1

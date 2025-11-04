@@ -314,13 +314,6 @@ def get_max_hidden_layers(hf_config) -> int:
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
-    from vllm.config.compilation import CUDAGraphMode
-    if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-        if vllm_config.speculative_config is not None and \
-            vllm_config.speculative_config.num_speculative_tokens > 1:
-            _update_spec_aclgraph_sizes(vllm_config)
-        return
-
     # NOTE: Currently, we can only capture 1800 graphs at most,
     # due to the limitation of ACL graph. This number is bounded by
     # the number of streams, which is 2048, we save 248 streams
@@ -428,43 +421,25 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             vllm_config.model_config.architectures[0], num_hidden_layers,
             len(original_sizes))
 
-    if vllm_config.speculative_config is not None and \
-        vllm_config.speculative_config.num_speculative_tokens > 1:
-        _update_spec_aclgraph_sizes(vllm_config)
-
-
-def _update_spec_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     # default or defined cudagraph_capture_sizes may not consider num_speculative_tokens>1 scenario
     # the maximum size cudagraph_capture_sizes[0] should be greater or equal than
     # (num_speculative_tokens+1)*max_num_seqs, otherwise draft model will run in eager mode
-    from vllm.config.compilation import CUDAGraphMode
-    compilation_config = vllm_config.compilation_config
-    num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
-    uniform_decode_query_len = num_speculative_tokens + 1
-    max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-    max_num_tokens = max_num_seqs * uniform_decode_query_len
-    original_sizes, compilation_config.cudagraph_capture_sizes = \
-        compilation_config.cudagraph_capture_sizes, None
-    assert len(original_sizes) > 0
-
-    if vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY and \
-        not all(size % uniform_decode_query_len == 0 for size in original_sizes):
-        enlarged_sizes = [
-            size * uniform_decode_query_len for size in original_sizes
-            if max_num_tokens >= size >= uniform_decode_query_len
-        ]
-        compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
-        logger.info("Adjusted ACL graphs: %s → %s for speculative decoding",
-                    original_sizes, enlarged_sizes)
-    elif original_sizes[0] < max_num_tokens:
-        enlarged_sizes = [
-            size * uniform_decode_query_len for size in original_sizes
-        ]
-        compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
-        logger.info("Adjusted ACL graphs: %s → %s for speculative decoding",
-                    original_sizes, enlarged_sizes)
-    else:
-        compilation_config.cudagraph_capture_sizes = original_sizes
+    if vllm_config.speculative_config is not None and \
+        vllm_config.speculative_config.num_speculative_tokens > 1:
+        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        original_sizes, compilation_config.cudagraph_capture_sizes = \
+            compilation_config.cudagraph_capture_sizes, None
+        assert len(original_sizes) > 0
+        if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
+            enlarged_sizes = [(num_speculative_tokens + 1) * size
+                              for size in original_sizes]
+            compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            logger.info(
+                "Adjusted ACL graphs: %s → %s for speculative decoding",
+                original_sizes, enlarged_sizes)
+        else:
+            compilation_config.cudagraph_capture_sizes = original_sizes
 
 
 # TODO(wxy): Move to ops module
@@ -520,36 +495,6 @@ class ProfileExecuteDuration:
         return durations
 
 
-# TODO(ttanzhiqiang): rm_router_logits
-# dp>1 will trigger
-# In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
-def get_rm_router_logits_state(ep_size: int, dp_size: int,
-                               is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if dp_size > 1:
-        if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-                and is_deepseek_v3_r1):
-            return True
-        elif ep_size == 1 and is_deepseek_v3_r1:
-            return True
-    return False
-
-
-# TODO(ttanzhiqiang): all_reduce merge
-# When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-# Currently, all_reduce_merge is enabled by default in the AllGather, AllGatherEP and NaiveMulticast scenarios of the deepseek model.
-def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-            and is_deepseek_v3_r1):
-        return True
-    elif ep_size == 1 and is_deepseek_v3_r1:
-        return True
-    return False
-
-
 def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
@@ -565,8 +510,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
     from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
                                                   AscendSharedFusedMoE)
-    from vllm_ascend.ops.layernorm import (AscendGemmaRMSNorm,
-                                           AscendQuantRMSNorm, AscendRMSNorm)
+    from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
@@ -601,12 +545,6 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "SharedFusedMoE": AscendSharedFusedMoE,
         "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
-
-    if vllm_config is not None and \
-        vllm_config.quant_config is not None and \
-        any("norm.bias" in name for name in vllm_config.quant_config.quant_description.keys()) and \
-            not version_check():
-        REGISTERED_ASCEND_OPS["RMSNorm"] = AscendQuantRMSNorm
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -796,21 +734,6 @@ def calculate_dp_buffer_size() -> int:
 def is_hierarchical_communication_enabled():
     return (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
             and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
-
-
-@functools.cache
-def version_check():
-    """check if torch_npu version >= dev20250919"""
-    import re
-    torch_npu_version = torch_npu.version.__version__
-    date_pattern = r'dev(\d{8})'
-
-    match = re.search(date_pattern, torch_npu_version)
-    if match:
-        full_date = match.group(1)
-        if full_date >= "20250919":
-            return True
-    return False
 
 
 def has_layer_idx(model_instance: torch.nn.Module) -> bool:
