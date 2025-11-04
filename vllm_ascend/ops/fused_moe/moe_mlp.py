@@ -72,8 +72,10 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         # Dispose the original unquantized hidden states
         # to save npu memory because they're no longer used.
         dispose_tensor(unquantized_hidden_states)
+        quantized_hidden_states = None
     else:
         pertoken_scale = dynamic_scale
+        quantized_hidden_states = hidden_states
 
     bias1, bias2 = None, None
     _output_dtype = w2_scale.dtype
@@ -92,6 +94,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 group_list=cumsum_group_list(group_list, group_list_type),
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale)
+            if quantized_hidden_states is not None:
+                dispose_tensor(quantized_hidden_states)
         else:
             if w1_scale.dtype != torch.float32:
                 w1_scale = w1_scale.to(torch.float32)
@@ -104,6 +108,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 group_type=0,
                 group_list=group_list,
                 output_dtype=torch.int32)[0]
+            if quantized_hidden_states is not None:
+                dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
             hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
                 x=hidden_states,
@@ -148,6 +154,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 group_list=cumsum_group_list(group_list, group_list_type),
                 weight_scale=w1_scale,
                 x_scale=pertoken_scale)
+            if quantized_hidden_states is not None:
+                dispose_tensor(quantized_hidden_states)
         else:
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
@@ -161,6 +169,8 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 group_type=0,
                 group_list=group_list,
                 output_dtype=_output_dtype)[0]
+            if quantized_hidden_states is not None:
+                dispose_tensor(quantized_hidden_states)
             # act_fn: swiglu
             hidden_states = torch_npu.npu_swiglu(hidden_states)
             hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
