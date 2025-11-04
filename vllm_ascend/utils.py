@@ -52,7 +52,13 @@ _IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _PREFETCH_STREAM = None
+_SHARED_EXPERTS_CALCULATION_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
+_DEFAULT_BUFFER_SIZE = 200
+_MIN_DP_BUFFER_SIZE = 50
+_IS_MOE_MODEL = None
+_ENABLE_SP = None
+_HAS_LAYER_IDX = None
 
 
 def is_310p():
@@ -61,6 +67,10 @@ def is_310p():
         from vllm_ascend import _build_info  # type: ignore
         _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
     return _IS_310P
+
+
+def is_enable_nz():
+    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
 
 
 def sleep_mode_enabled():
@@ -251,6 +261,15 @@ def prefetch_stream() -> torch.npu.Stream:
     return _PREFETCH_STREAM
 
 
+def shared_experts_calculation_stream() -> torch.npu.Stream:
+    global _SHARED_EXPERTS_CALCULATION_STREAM
+    if _SHARED_EXPERTS_CALCULATION_STREAM is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _SHARED_EXPERTS_CALCULATION_STREAM = torch_npu.npu.Stream()
+    return _SHARED_EXPERTS_CALCULATION_STREAM
+
+
 def adapt_patch(is_global_patch: bool = False):
     if is_global_patch:
         from vllm_ascend.patch import platform  # noqa: F401
@@ -291,6 +310,41 @@ def get_max_hidden_layers(hf_config) -> int:
     if not layer_counts:
         raise ValueError("Not found num_hidden_layers in model config.")
     return max(layer_counts)
+
+
+# Update cudagraph capture sizes for vllm config
+def update_cudagraph_capture_sizes(vllm_config: VllmConfig,
+                                   cudagraph_capture_sizes: List[int]):
+
+    valid_max_size = (cudagraph_capture_sizes[-1]
+                      if cudagraph_capture_sizes else 0)
+    if (vllm_config.compilation_config.max_cudagraph_capture_size is not None
+            and vllm_config.compilation_config.max_cudagraph_capture_size
+            != valid_max_size):
+        if vllm_config.compilation_config.cudagraph_capture_sizes is not None:
+            raise ValueError(
+                "customized max_cudagraph_capture_size"
+                f"(={vllm_config.compilation_config.max_cudagraph_capture_size}) "
+                "should be consistent with the max value of "
+                f"cudagraph_capture_sizes(={valid_max_size})")
+        logger.warning(
+            "Truncating max_cudagraph_capture_size to %d",
+            valid_max_size,
+        )
+
+    vllm_config.compilation_config.max_cudagraph_capture_size = valid_max_size
+
+    if vllm_config.compilation_config.cudagraph_capture_sizes is not None and len(
+            cudagraph_capture_sizes) < len(
+                vllm_config.compilation_config.cudagraph_capture_sizes):
+        logger.warning(
+            ("cudagraph_capture_sizes specified in compilation_config"
+             " %s is overridden by config %s"),
+            vllm_config.compilation_config.cudagraph_capture_sizes,
+            cudagraph_capture_sizes,
+        )
+    vllm_config.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
+    vllm_config.compilation_config.post_init_cudagraph_sizes()
 
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
@@ -384,7 +438,10 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         indices[0], indices[-1] = 0, len(original_sizes) - 1
 
         sampled_sizes = [original_sizes[i] for i in indices]
-        compilation_config.init_with_cudagraph_sizes(sampled_sizes)
+        if vllm_version_is("0.11.0"):
+            compilation_config.init_with_cudagraph_sizes(sampled_sizes)
+        else:
+            update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
 
         logger.info(
             "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
@@ -401,6 +458,29 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "No adjustment needed for ACL graph batch sizes: %s model (layers: %d) with %d sizes",
             vllm_config.model_config.architectures[0], num_hidden_layers,
             len(original_sizes))
+
+    # default or defined cudagraph_capture_sizes may not consider num_speculative_tokens>1 scenario
+    # the maximum size cudagraph_capture_sizes[0] should be greater or equal than
+    # (num_speculative_tokens+1)*max_num_seqs, otherwise draft model will run in eager mode
+    if vllm_config.speculative_config is not None and \
+        vllm_config.speculative_config.num_speculative_tokens > 1:
+        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        original_sizes, compilation_config.cudagraph_capture_sizes = \
+            compilation_config.cudagraph_capture_sizes, None
+        assert len(original_sizes) > 0
+        if original_sizes[0] < (num_speculative_tokens + 1) * max_num_seqs:
+            enlarged_sizes = [(num_speculative_tokens + 1) * size
+                              for size in original_sizes]
+            if vllm_version_is("0.11.0"):
+                compilation_config.init_with_cudagraph_sizes(enlarged_sizes)
+            else:
+                update_cudagraph_capture_sizes(vllm_config, enlarged_sizes)
+            logger.info(
+                "Adjusted ACL graphs: %s → %s for speculative decoding",
+                original_sizes, enlarged_sizes)
+        else:
+            compilation_config.cudagraph_capture_sizes = original_sizes
 
 
 # TODO(wxy): Move to ops module
@@ -456,36 +536,6 @@ class ProfileExecuteDuration:
         return durations
 
 
-# TODO(ttanzhiqiang): rm_router_logits
-# dp>1 will trigger
-# In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
-def get_rm_router_logits_state(ep_size: int, dp_size: int,
-                               is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if dp_size > 1:
-        if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-                and is_deepseek_v3_r1):
-            return True
-        elif ep_size == 1 and is_deepseek_v3_r1:
-            return True
-    return False
-
-
-# TODO(ttanzhiqiang): all_reduce merge
-# When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-# Currently, all_reduce_merge is enabled by default in the AllGather, AllGatherEP and NaiveMulticast scenarios of the deepseek model.
-def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-            and is_deepseek_v3_r1):
-        return True
-    elif ep_size == 1 and is_deepseek_v3_r1:
-        return True
-    return False
-
-
 def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     """Register Ascend CustomOP
 
@@ -499,15 +549,17 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
-    from vllm_ascend.ops.common_fused_moe import (AscendFusedMoE,
-                                                  AscendSharedFusedMoE)
+    from vllm_ascend.ops.fused_moe.fused_moe import (AscendFusedMoE,
+                                                     AscendSharedFusedMoE)
     from vllm_ascend.ops.layernorm import AscendGemmaRMSNorm, AscendRMSNorm
     from vllm_ascend.ops.linear import (AscendColumnParallelLinear,
                                         AscendMergedColumnParallelLinear,
                                         AscendQKVParallelLinear,
+                                        AscendReplicatedLinear,
                                         AscendRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
+        AscendDeepseekScalingRotaryEmbedding, AscendMRotaryEmbedding,
+        AscendRotaryEmbedding, AscendYaRNRotaryEmbedding)
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
@@ -517,10 +569,13 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "QuickGELU": AscendQuickGELU,
         "SiluAndMul": AscendSiluAndMul,
         "RotaryEmbedding": AscendRotaryEmbedding,
+        "MRotaryEmbedding": AscendMRotaryEmbedding,
         "ColumnParallelLinear": AscendColumnParallelLinear,
         "RowParallelLinear": AscendRowParallelLinear,
+        "YaRNScalingRotaryEmbedding": AscendYaRNRotaryEmbedding,
         "MergedColumnParallelLinear": AscendMergedColumnParallelLinear,
         "QKVParallelLinear": AscendQKVParallelLinear,
+        "ReplicatedLinear": AscendReplicatedLinear,
         "DeepseekScalingRotaryEmbedding": AscendDeepseekScalingRotaryEmbedding,
         "VocabParallelEmbedding": AscendVocabParallelEmbedding,
         "ParallelLMHead": AscendParallelLMHead,
@@ -529,8 +584,11 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
-        "MultiHeadLatentAttention": AscendMultiHeadLatentAttention,
     }
+    mla_to_register = "MultiHeadLatentAttention" if vllm_version_is(
+        "0.11.0") else "MultiHeadLatentAttentionWrapper"
+    if vllm_config and vllm_config.model_config and vllm_config.model_config.use_mla:
+        REGISTERED_ASCEND_OPS[mla_to_register] = AscendMultiHeadLatentAttention
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
@@ -588,17 +646,48 @@ def dense_optim_enable() -> bool:
 
 
 def enable_sp(vllm_config=None) -> bool:
-    if vllm_config is None:
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-    return (
-        vllm_config.compilation_config.pass_config.enable_sequence_parallelism
-        or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM)
+    global _ENABLE_SP
+    if _ENABLE_SP is None:
+        if vllm_config is None:
+            from vllm.config import get_current_vllm_config
+            vllm_config = get_current_vllm_config()
+        _ENABLE_SP = (
+            vllm_config.compilation_config.pass_config.
+            enable_sequence_parallelism
+            or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
+            # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
+            or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
+
+    return _ENABLE_SP
+
+
+# TODO remove it after vllm has this func
+def shared_expert_dp_enabled() -> bool:
+    return get_ascend_config().enable_shared_expert_dp or enable_sp()
+
+
+def prefill_context_parallel_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL
 
 
 def is_moe_model(vllm_config: VllmConfig):
-    config = vllm_config.model_config.hf_config
-    return any('experts' in key.lower() for key in config.to_dict())
+    """Checks if the model is a MoE model by config"""
+    global _IS_MOE_MODEL
+    if _IS_MOE_MODEL is None:
+        model_configs = vllm_config.model_config.hf_config.to_dict()
+        _IS_MOE_MODEL = _is_contain_expert(model_configs)
+    return _IS_MOE_MODEL
+
+
+def _is_contain_expert(config: Any):
+    if isinstance(config, dict):
+        for k, v in config.items():
+            if "expert" in str(k):
+                return True
+            if _is_contain_expert(v):
+                return True
+    return False
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -619,6 +708,13 @@ def weak_ref_tensors(
     """
     Convenience function to create weak references to tensors,
     for single tensor, list of tensors or tuple of tensors.
+
+    This function should be used in the following scenario:
+    When a tensor is created during graph capture, and it's held by a method
+    that's not part of the graph, we don't really need to store it, but we
+    **do need** its buffer pointer. If we don't handle this, it cannot
+    be garbage collected, leading to a memory leak. To avoid this,
+    we should create a weak reference to the tensor.
     """
     if isinstance(tensors, torch.Tensor):
         return weak_ref_tensor(tensors)
@@ -640,3 +736,70 @@ def npu_stream_switch(target_stream: torch.npu.Stream,
         return nullcontext()
     assert target_stream is not None
     return torch.npu.stream(target_stream)
+
+
+def create_hccl_pg_options(group_name: str):
+    options = torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options()
+    hccl_config = get_hccl_config_for_pg_options(group_name)
+    if hccl_config is not None:
+        options.hccl_config = hccl_config
+    return options
+
+
+def get_hccl_config_for_pg_options(group_name: str) -> Optional[dict]:
+    """
+    Get HCCL process group options for the given communication group name.
+
+    Args:
+        group_name: Name of the communication group
+
+    Returns:
+        HCCL pg_options or None for mc2 group
+    """
+    # FIXME: Current mc2 operators only perform communication space partitioning
+    # based on HCCL_BUFFSIZE configuration. Using pg_options with mc2 group would
+    # result in memory misalignment problems.
+    if group_name and "mc2" in group_name:
+        return None
+    hccl_config_map = {
+        "dp": {
+            "hccl_buffer_size": calculate_dp_buffer_size()
+        },
+    }
+    return hccl_config_map.get(group_name, get_default_buffer_config())
+
+
+def get_default_buffer_config() -> dict:
+    return {"hccl_buffer_size": _DEFAULT_BUFFER_SIZE}
+
+
+def calculate_dp_buffer_size() -> int:
+    """
+    formula of dp buffer size:
+    dp_size + 1 (flags: with_prefill)
+    """
+    from vllm.config import get_current_vllm_config
+    vllm_config = get_current_vllm_config()
+    dp_size = vllm_config.parallel_config.data_parallel_size
+    int32_size = torch.iinfo(torch.int32).bits // 8
+    dp_buffer_size = math.ceil((dp_size + 1) * int32_size / (1024 * 1024))
+    return max(dp_buffer_size, _MIN_DP_BUFFER_SIZE)
+
+
+# Currently, when in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1
+# and HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and
+# significantly improve communication performance of MC2 ops dispatch/combine.
+def is_hierarchical_communication_enabled():
+    return (os.getenv("HCCL_INTRA_ROCE_ENABLE", "") == "0"
+            and os.getenv("HCCL_INTRA_PCIE_ENABLE", "") == "1")
+
+
+def has_layer_idx(model_instance: torch.nn.Module) -> bool:
+    if model_instance is None:
+        return False
+
+    global _HAS_LAYER_IDX
+    if _HAS_LAYER_IDX is None:
+        _HAS_LAYER_IDX = hasattr(model_instance, "model") and \
+            hasattr(model_instance.model, "start_layer")
+    return _HAS_LAYER_IDX

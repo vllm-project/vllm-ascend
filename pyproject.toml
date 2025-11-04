@@ -10,15 +10,18 @@ requires = [
     "pybind11",
     "pyyaml",
     "scipy",
+    "pandas",
+    "pandas-stubs",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "torch-npu==2.7.1.dev20250919",
-    "torch>=2.7.1",
+    "torch-npu==2.7.1",
+    "torch==2.7.1",
     "torchvision",
     "wheel",
     "msgpack",
     "quart",
     "numba",
+    "opencv-python-headless<=4.11.0.86", # Required to avoid numpy version conflict with vllm
 ]
 build-backend = "setuptools.build_meta"
 

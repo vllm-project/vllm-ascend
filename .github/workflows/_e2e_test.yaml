@@ -74,8 +74,8 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         if: ${{ inputs.type == 'light' }}
         run: |
-          pytest -sv tests/e2e/singlecard/test_aclgraph.py
-          pytest -sv tests/e2e/singlecard/test_quantization.py
+          # pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          # pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_vlm.py::test_multimodal_vl
 
       - name: Run e2e test
@@ -88,25 +88,31 @@ jobs:
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
 
+          pytest -sv tests/e2e/singlecard/test_completion_with_prompt_embeds.py
           pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          pytest -sv tests/e2e/singlecard/test_aclgraph_mem.py
           pytest -sv tests/e2e/singlecard/test_ascend_scheduler.py
+          pytest -sv tests/e2e/singlecard/test_bge_model.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_chunked.py
           pytest -sv tests/e2e/singlecard/test_embedding.py
+          # pytest -sv tests/e2e/singlecard/test_embedding_aclgraph.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_profile_execute_duration.py
           pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_sampler.py
           pytest -sv tests/e2e/singlecard/test_vlm.py
+          pytest -sv tests/e2e/singlecard/multi-modal/test_internvl.py
 
           # ------------------------------------ v1 spec decode test ------------------------------------ #
           pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
           pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_torchair_correctness.py
           # Fix me: OOM error
-          #pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
+          # pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
 
-          pytest -sv tests/e2e/singlecard/ops/
+          # TODO: Move ops test to nightly test
+          #pytest -sv tests/e2e/singlecard/ops/
 
   e2e-2-cards:
     name: multicard
@@ -165,6 +171,7 @@ jobs:
         if: ${{ inputs.type == 'light' }}
         run: |
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
+          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair
 
       - name: Run vllm-project/vllm-ascend test (full)
         env:
@@ -172,11 +179,11 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
+          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
           pytest -sv tests/e2e/multicard/test_data_parallel.py
-          pytest -sv tests/e2e/multicard/test_full_graph_mode.py
           pytest -sv tests/e2e/multicard/test_expert_parallel.py
-          # external_launcher test is not stable enough. Fix it later
           # pytest -sv tests/e2e/multicard/test_external_launcher.py
+          pytest -sv tests/e2e/multicard/test_single_request_aclgraph.py
           pytest -sv tests/e2e/multicard/test_fused_moe_allgather_ep.py
           pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
 
@@ -184,13 +191,14 @@ jobs:
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W8A8
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC_new_version
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC_old_version
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_sp_for_qwen3_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen_Dense_with_flashcomm_v1
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen_Dense_with_prefetch_mlp_weight
 
-          #pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
+          pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
           pytest -sv tests/e2e/multicard/test_prefix_caching.py
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
+          

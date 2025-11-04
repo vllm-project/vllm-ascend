@@ -40,6 +40,12 @@ from vllm.model_executor.models.qwen2_vl import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, is_enable_nz,
+                               vllm_version_is)
+
+if not vllm_version_is("0.11.0"):
+    from vllm.model_executor.models.vision import conv3d_to_linear_weight
+
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
 
@@ -265,6 +271,14 @@ class AscendQwen2VisionTransformer(Qwen2VisionTransformer):
             [qkv_weight_first_half_padded, qkv_weight_second_half_padded],
             dim=2)
         qkv_weight_final = qkv_weight_padded.reshape(-1, self.hidden_size)
+
+        if is_enable_nz():
+            qkv_weight_final_copy = torch.empty_like(qkv_weight_final).copy_(
+                qkv_weight_final)
+            qkv_weight_final_copy = torch_npu.npu_format_cast(
+                qkv_weight_final_copy, ACL_FORMAT_FRACTAL_ND)
+            return qkv_weight_final_copy
+
         return qkv_weight_final
 
     def pad_proj_weight(self, data):
@@ -273,6 +287,13 @@ class AscendQwen2VisionTransformer(Qwen2VisionTransformer):
                          self.half_origin_hidden_size_per_attention_head),
             (0, self.half_pad_hidden_size_per_attention_head, 0, 0)).reshape(
                 self.hidden_size, -1)
+
+        if is_enable_nz():
+            out_weight_copy = torch.empty_like(out_weight).copy_(out_weight)
+            out_weight_copy = torch_npu.npu_format_cast(
+                out_weight_copy, ACL_FORMAT_FRACTAL_ND)
+            return out_weight_copy
+
         return out_weight
 
     def load_weights(self, weights: Iterable[Tuple[str,
@@ -287,6 +308,10 @@ class AscendQwen2VisionTransformer(Qwen2VisionTransformer):
         loaded_params: Set[str] = set()
 
         for name, loaded_weight in weights:
+            if not vllm_version_is("0.11.0"):
+                if name.endswith("patch_embed.proj.weight"):
+                    loaded_weight = conv3d_to_linear_weight(loaded_weight)
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -314,6 +339,7 @@ class AscendQwen2VisionTransformer(Qwen2VisionTransformer):
         x: torch.Tensor,
         grid_thw: torch.Tensor,
     ) -> torch.Tensor:
+        grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
         # compute cu_seqlens and avoid cumsum to fit operator unpadFA
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
                                              grid_thw[:,

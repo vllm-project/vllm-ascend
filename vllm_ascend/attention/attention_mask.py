@@ -17,19 +17,15 @@ import torch
 
 def _generate_attn_mask(max_seq_len, dtype):
     # Construct lower triangle matrix.
-    mask_flag = torch.tril(
-        torch.ones((max_seq_len, max_seq_len),
-                   dtype=torch.bool)).view(max_seq_len, max_seq_len)
+    mask_flag = torch.ones((max_seq_len, max_seq_len),
+                           dtype=torch.bool).tril_()
     # Create upper triangle matrix used to mark mask positions.
     mask_flag = ~mask_flag
     # Currently for fp16 dtype, the mask value should be set to -inf.
     # TODO: Eliminate this part in the future.
-    if dtype == torch.float16:
-        mask_value = torch.finfo(torch.float32).min
-    else:
-        mask_value = 1
-    attn_mask = torch.masked_fill(torch.zeros(size=(max_seq_len, max_seq_len)),
-                                  mask_flag, mask_value).to(dtype)
+    mask_value = float('-inf') if dtype == torch.float16 else 1
+    attn_mask = torch.zeros(size=(max_seq_len, max_seq_len), dtype=dtype) \
+        .masked_fill_(mask_flag, mask_value)
     return attn_mask
 
 
@@ -50,11 +46,11 @@ class AttentionMaskBuilder:
         self._seq_len_cached = attn_mask.shape[0]
         self.attn_mask_cache = attn_mask
         self.device = device
-        if torch.version.cann.startswith("8.3"):
-            assigned_mask_dim = 2048
-            self.chunked_prefill_attn_mask = torch.triu(
-                torch.ones(assigned_mask_dim, assigned_mask_dim),
-                diagonal=1).to(torch.int8).to(device)
+        self.pooling_mask = None
+        assigned_mask_dim = 2048
+        self.chunked_prefill_attn_mask = torch.triu(
+            torch.ones(assigned_mask_dim, assigned_mask_dim),
+            diagonal=1).to(torch.int8).to(device)
 
     @staticmethod
     def get_mask_scale_factor(dtype: torch.dtype = torch.float16):
@@ -71,9 +67,19 @@ class AttentionMaskBuilder:
 
     def get_attn_mask(self, max_seq_len: int, dtype: torch.dtype,
                       device: torch.device):
+        if max_seq_len == 2048:
+            return self.chunked_prefill_attn_mask.to(torch.bool)
         self._update_attn_cache(max_seq_len, dtype)
         return self.attn_mask_cache[:max_seq_len, :max_seq_len].contiguous(
         ).to(device, non_blocking=True)
+
+    def get_pooling_mask(self, device):
+        if self.pooling_mask is None:
+            # the compressed attention mask for npu_fusion_attention sparse mode 4
+            self.pooling_mask = torch.triu(torch.ones(
+                2048, 2048), diagonal=1).to(torch.bool).to(device,
+                                                           non_blocking=True)
+        return self.pooling_mask
 
     def get_splitfuse_attn_mask(
         self,
@@ -82,23 +88,7 @@ class AttentionMaskBuilder:
         dtype: torch.dtype = None,
         device: torch.device = None,
     ) -> torch.Tensor:
-        if torch.version.cann.startswith("8.3"):
-            return self.chunked_prefill_attn_mask
-        else:
-            if dtype not in [torch.float16, torch.bfloat16]:
-                raise ValueError(
-                    "splitfuse_attn_mask now only supports bf16 and fp16")
-            max_seq_len = max(seq_lens, default=0)
-            self._update_attn_cache(max_seq_len, dtype)
-            # FIXME: Currently the mask value of chunked-prefill situation and Prefill-Only situation
-            # is not the same. Fix this in the future when kernel is ready.
-            mask_scale_factor = AttentionMaskBuilder.get_mask_scale_factor(
-                dtype)
-            attn_mask = torch.index_select(self.attn_mask_cache,
-                                           dim=0,
-                                           index=position)[:, :max_seq_len]
-            attn_mask *= mask_scale_factor
-            return attn_mask.contiguous().to(device, non_blocking=True)
+        return self.chunked_prefill_attn_mask
 
     def _update_attn_cache(self, seqlen: int, dtype: torch.dtype):
         if seqlen > self._seq_len_cached:

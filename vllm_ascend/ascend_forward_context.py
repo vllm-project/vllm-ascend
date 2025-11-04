@@ -11,7 +11,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, has_layer_idx, is_moe_model
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
@@ -87,7 +87,8 @@ def set_ascend_forward_context(
     ):
         forward_context = get_forward_context()
 
-        from vllm_ascend.ops.moe.moe_comm_method import get_moe_comm_method
+        from vllm_ascend.ops.fused_moe.moe_comm_method import \
+            get_moe_comm_method
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -112,15 +113,23 @@ def set_ascend_forward_context(
         # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
-        sp_enabled = enable_sp(vllm_config) and \
-            tp_world_size > 1 and \
-            num_tokens is not None and num_tokens > 1000
+        mmrs_fusion = True
+        if is_moe_model(vllm_config):
+            sp_enabled = enable_sp(vllm_config) and \
+                tp_world_size > 1 and num_tokens is not None
+            mmrs_fusion = False
+        else:
+            sp_enabled = enable_sp(vllm_config) and \
+                tp_world_size > 1 and \
+                num_tokens is not None and num_tokens > 1000
+        forward_context.mmrs_fusion = mmrs_fusion
 
         if sp_enabled:
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
         forward_context.sp_enabled = sp_enabled
+        forward_context.num_tokens = num_tokens
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
@@ -128,9 +137,7 @@ def set_ascend_forward_context(
         # set layer_idx to enable optimization features that depend on this information.
         # This is only applicable to models that contain these necessary attributes.
         forward_context.layer_idx = None
-        if model_instance is not None and \
-            hasattr(model_instance, "model") and \
-            hasattr(model_instance.model, "start_layer"):
+        if has_layer_idx(model_instance):
             forward_context.layer_idx = model_instance.model.start_layer
 
         # TODO(rjg-lyh): refactor mlp weight prefetch method
@@ -145,7 +152,7 @@ def set_ascend_forward_context(
             forward_context.prefetch_mlp_gate_up_proj = False
             forward_context.prefetch_mlp_down_proj = False
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
-        # TODO(yuzhup): integrate moe weight prefetch method
+        forward_context.model_instance = model_instance
         forward_context.weight_prefetch_method = weight_prefetch_method
 
         # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
@@ -155,8 +162,9 @@ def set_ascend_forward_context(
         # this optim now just support dense models due to the specific operators used.
         # Once the necessary conditions are met, support for MOE models will also be added.
         from vllm_ascend.quantization.quant_config import AscendQuantConfig
+        model_type_scope = ["llama", "qwen2", "qwen3", "qwen3_moe"]
         addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
-            vllm_config.model_config.hf_config.model_type in ["llama", "qwen2", "qwen3", "qwen3_moe"] and \
+            vllm_config.model_config.hf_config.model_type in model_type_scope and \
             forward_context.layer_idx is not None
         if addrmsnorm_quant_fusion_enabled:
             forward_context.model_instance = model_instance
@@ -171,8 +179,14 @@ def set_ascend_forward_context(
 
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
-            max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
-            )
+            max_tokens_across_dp = \
+                forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
+            if sp_enabled:
+                padded_length = (max_tokens_across_dp + tp_world_size -
+                                 1) // tp_world_size * tp_world_size
+                pad_size = padded_length - num_tokens
+                forward_context.padded_length = padded_length
+                forward_context.pad_size = pad_size
         else:
             max_tokens_across_dp = num_tokens
 

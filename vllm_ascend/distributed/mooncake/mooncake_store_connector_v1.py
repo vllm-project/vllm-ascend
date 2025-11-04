@@ -163,6 +163,10 @@ class MooncakeStoreConnectorV1Scheduler:
         self.client = MooncakeLookupClient(vllm_config)
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "consumer_is_to_load", False)
+        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "load_async", False)
         # request_id -> (vllm cached tokes, mooncake cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self._block_size = vllm_config.cache_config.block_size
@@ -192,6 +196,8 @@ class MooncakeStoreConnectorV1Scheduler:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
+            return 0, False
 
         if self._discard_partial_chunks:
             token_block_end = len(request.prompt_token_ids
@@ -225,7 +231,7 @@ class MooncakeStoreConnectorV1Scheduler:
             can_load=False,
         )
 
-        return need_to_allocate, not self.use_layerwise
+        return need_to_allocate, self.load_async
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
@@ -280,7 +286,7 @@ class MooncakeStoreConnectorV1Scheduler:
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
-            self._unfinished_request_ids.remove(finished_req_id)
+            self._unfinished_request_ids.discard(finished_req_id)
 
         meta = MooncakeConnectorMetadata(self._unfinished_request_ids)
 
@@ -414,7 +420,8 @@ class MooncakeStoreConnectorV1Scheduler:
         """
         if self.kv_role == "kv_consumer":
             return False, None
-        if self._request_trackers[request.request_id].num_saved_tokens <= 0:
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
         delay_free_blocks = len(block_ids) > 0
         if delay_free_blocks:
@@ -472,7 +479,8 @@ class MooncakeLookupServer:
             while self.running:
                 frames = self.socket.recv_multipart(copy=False)
                 token_ids = self.decoder.decode(frames)
-                result = self.mooncake_engine.lookup(token_ids, use_layerwise)
+                result = self.mooncake_engine.lookup_scheduler(
+                    token_ids, use_layerwise)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 

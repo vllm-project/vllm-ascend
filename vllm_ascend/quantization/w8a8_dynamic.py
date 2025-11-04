@@ -19,14 +19,20 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch_npu
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, is_enable_nz,
+                               vllm_version_is)
+
+if vllm_version_is("0.11.0"):
+    from vllm.config import CompilationLevel
+else:
+    from vllm.config import CompilationMode
 
 
 class AscendW8A8DynamicLinearMethod:
@@ -62,8 +68,11 @@ class AscendW8A8DynamicLinearMethod:
                                                    dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
+                           params_dtype: torch.dtype,
+                           layer_type: Optional[str] = None) -> Dict[str, Any]:
         return {}
 
     @staticmethod
@@ -101,8 +110,9 @@ class AscendW8A8DynamicLinearMethod:
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         # cast quantized weight tensors in NZ format for higher inference speed
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data,
-                                                      ACL_FORMAT_FRACTAL_NZ)
+        if is_enable_nz():
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
@@ -119,11 +129,20 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        self.use_aclgraph = (
-            vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
-            and not vllm_config.model_config.enforce_eager
-            and not ascend_config.torchair_graph_config.enabled)
-        self.dynamic_eplb = ascend_config.dynamic_eplb
+        if vllm_version_is("0.11.0"):
+            self.use_aclgraph = (
+                vllm_config.compilation_config.level
+                == CompilationLevel.PIECEWISE
+                and not vllm_config.model_config.enforce_eager
+                and not ascend_config.torchair_graph_config.enabled)
+        else:
+            self.use_aclgraph = (
+                vllm_config.compilation_config.mode
+                == CompilationMode.VLLM_COMPILE
+                and not vllm_config.model_config.enforce_eager
+                and not ascend_config.torchair_graph_config.enabled)
+
+        self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
 
         try:
             device_group = get_mc2_group().device_group
@@ -202,9 +221,9 @@ class AscendW8A8DynamicFusedMoEMethod:
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
-            1] == global_num_experts, "Number of global experts mismatch"
+            1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
-        topk_weights, topk_ids, row_idx = select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=top_k,
@@ -223,21 +242,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
-        if self.use_aclgraph:
-            moe_comm_method = get_forward_context().moe_comm_method
-            return moe_comm_method.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                row_idx=row_idx,
-                use_int8_w8a8=True,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                expert_map=expert_map,
-                dynamic_eplb=self.dynamic_eplb)
-
         topk_weights = topk_weights.to(x.dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
@@ -249,7 +253,6 @@ class AscendW8A8DynamicFusedMoEMethod:
             w2_scale=layer.w2_weight_scale,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            row_idx=row_idx,
             use_int8_w8a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
@@ -257,7 +260,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
-            dynamic_eplb=self.dynamic_eplb)
+            dynamic_eplb=self.dynamic_eplb,
+            mc2_mask=kwargs.get("mc2_mask", None))
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
@@ -265,8 +269,9 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
-        torch_npu.npu_format_cast_(layer.w13_weight, ACL_FORMAT_FRACTAL_NZ)
-        torch_npu.npu_format_cast_(layer.w2_weight, ACL_FORMAT_FRACTAL_NZ)
+        if is_enable_nz():
+            torch_npu.npu_format_cast_(layer.w13_weight, ACL_FORMAT_FRACTAL_NZ)
+            torch_npu.npu_format_cast_(layer.w2_weight, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(

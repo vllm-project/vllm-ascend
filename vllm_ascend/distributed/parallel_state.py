@@ -1,12 +1,13 @@
 from typing import Optional
 
 import torch
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
                                              init_model_parallel_group)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import prefill_context_parallel_enable
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
@@ -58,24 +59,54 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     # The layout of all ranks: ExternalDP * EP
     # ExternalDP is the data parallel group that is not part of the model,
     # every dp rank can generate independently (in verl integration).
-    all_ranks = torch.arange(world_size).reshape(
-        -1, parallel_config.data_parallel_size *
-        parallel_config.tensor_parallel_size)
+    if prefill_context_parallel_enable():
+        all_ranks = torch.arange(world_size).reshape(
+            -1, parallel_config.data_parallel_size *
+            parallel_config.prefill_context_parallel_size *
+            parallel_config.tensor_parallel_size)
+    else:
+        all_ranks = torch.arange(world_size).reshape(
+            -1, parallel_config.data_parallel_size *
+            parallel_config.tensor_parallel_size)
 
     pd_tp_ratio = get_ascend_config().pd_tp_ratio
+    pd_head_ratio = get_ascend_config().pd_head_ratio
     global _P_TP
     assert _P_TP is None, (
         "distributed prefill tensor parallel group is already initialized")
-    prefill_tensor_model_parallel_size = pd_tp_ratio if \
-        pd_tp_ratio > 0 and pd_tp_ratio < parallel_config.tensor_parallel_size else parallel_config.tensor_parallel_size
-    group_ranks = all_ranks.view(-1,
-                                 prefill_tensor_model_parallel_size).unbind(0)
-    group_ranks = [x.tolist() for x in group_ranks]
-    num = get_world_group().local_rank // pd_tp_ratio
-    _P_TP = init_model_parallel_group(group_ranks,
-                                      get_world_group().local_rank,
-                                      backend,
-                                      group_name=f"p_tp_{num}")
+    prefill_tensor_model_parallel_size = pd_tp_ratio
+    # divide alltoall groups
+    if pd_head_ratio > 1 and get_current_vllm_config(
+    ).kv_transfer_config.is_kv_producer:
+        num_head_replica = get_ascend_config().num_head_replica
+        remote_tp_size = parallel_config.tensor_parallel_size // pd_tp_ratio
+        if num_head_replica <= 1:
+            group_ranks = all_ranks.view(
+                -1, prefill_tensor_model_parallel_size).unbind(0)
+        else:
+            group_ranks = all_ranks.clone().view(
+                parallel_config.data_parallel_size, -1,
+                num_head_replica)  # [DP_size, num_head, num_head_replica]
+            group_ranks = group_ranks.permute(0, 2, 1)
+            group_ranks = group_ranks.reshape(
+                -1,
+                group_ranks.size(-1))  # [DP_size * num_head_replica, num_head]
+            alltoall_group_size = group_ranks.size(-1) // remote_tp_size
+            group_ranks = group_ranks.unsqueeze(-1).view(
+                parallel_config.data_parallel_size, num_head_replica, -1,
+                alltoall_group_size
+            )  # [DP_size, num_head_replica, num_alltoall_group, alltoall_group_size]
+            group_ranks = group_ranks.reshape(-1,
+                                              alltoall_group_size).unbind(0)
+        group_ranks = [x.tolist() for x in group_ranks]
+        local_rank = get_world_group().local_rank
+        num = next(
+            (i for i, ranks in enumerate(group_ranks) if local_rank in ranks),
+            None)
+        _P_TP = init_model_parallel_group(group_ranks,
+                                          get_world_group().local_rank,
+                                          backend,
+                                          group_name=f"p_tp_{num}")
 
     global _MC2
     group_ranks = all_ranks.unbind(0)

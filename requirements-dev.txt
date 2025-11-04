@@ -13,7 +13,7 @@ types-psutil
 pytest-cov
 regex
 sentence_transformers
-ray>=2.47.1
+ray>=2.47.1,<=2.48.0
 protobuf>3.20.0
 librosa 
 soundfile

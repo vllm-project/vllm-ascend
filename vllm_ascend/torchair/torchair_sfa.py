@@ -21,9 +21,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
-from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
-from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
+from vllm_ascend.utils import is_enable_nz
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -140,7 +139,6 @@ class AscendSFATorchairMetadata:
 
     decode: Optional[AscendSFATorchairDecodeMetadata] = None
     prefill: Optional[AscendSFATorchairPrefillMetadata] = None
-    enable_dbo_across_dp: bool = False
     is_prefill: bool = False
     is_decode: bool = False
 
@@ -152,17 +150,6 @@ class AscendSFATorchairMetadata:
         #     raise ValueError(
         #         f"Only {supported_head_sizes} are supported for head_dim,",
         #         f"received {self.head_dim}.")
-
-    def split_metadata_for_multistream(
-        self,
-        ms_split_config: MSAttentionMetadataSplitConfig,
-    ) -> list["AscendSFATorchairMetadata"]:
-        """Split metadata for multi-stream with AscendSFATorchairMetadata"""
-        return model_input_split_v1_mla_attn(
-            ms_split_config=ms_split_config,
-            attn_metadata=self,
-            _metadata_cls=AscendSFATorchairMetadata,
-        )
 
 
 M = TypeVar("M", bound=AscendSFATorchairMetadata)
@@ -615,7 +602,6 @@ class AscendSFATorchairMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
-            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
             is_prefill=is_prefill,
             is_decode=is_decode)
 
@@ -737,7 +723,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
-        self.enable_prefetch = ascend_config.enable_prefetch
+        self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
         if ascend_config.torchair_graph_config.enabled:
             self.graph_batch_size = ascend_config.torchair_graph_config.graph_batch_sizes[
@@ -838,10 +824,12 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         kv_a_proj_wt = kv_a_proj_wt.t().contiguous()
         wd_qkv = torch.cat((kv_a_proj_wt, self.q_a_proj.weight.data.clone()),
                            dim=-1)
+
         wd_qkv = wd_qkv.t().contiguous()
         wd_qkv = transdata(wd_qkv,
                            block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
+        if is_enable_nz():
+            self.wd_qkv = torch_npu.npu_format_cast(wd_qkv, 29)
 
         kv_a_proj_deq_scl = self.kv_a_proj_with_mqa.deq_scale.clone()
         kv_a_proj_deq_scl = kv_a_proj_deq_scl.reshape(
@@ -874,7 +862,8 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             self.num_heads * (self.qk_nope_head_dim + self.qk_rope_head_dim),
             -1)
         wu_q = transdata(wu_q, block_size=(16, 32)).unsqueeze(0).contiguous()
-        self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
+        if is_enable_nz():
+            self.wu_q = torch_npu.npu_format_cast(wu_q, 29)
 
         qb_deq_scl = self.q_proj.deq_scale.data.clone()
         qb_deq_scl = qb_deq_scl.reshape(
@@ -948,6 +937,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         decode_q_pe = decode_q_pe.view(bsz, self.num_heads, -1)
 
         hidden_states = self.decoder_layer.input_layernorm(hidden_states)
+
         decode_kq = self.q_a_proj(hidden_states)  # q down
         decode_q_c = self.q_a_layernorm(decode_kq)  # q down layernorm
 
@@ -979,7 +969,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
 
         if attn_metadata.prefill is not None:
             assert attn_metadata.num_decodes is not None and \
@@ -990,10 +980,12 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
 
             hidden_states_prefill = hidden_states
             prefill_slot_mapping = attn_metadata.slot_mapping
+
             prefill_kq = self.q_a_proj(hidden_states_prefill)  # q down
             prefill_q_c = self.q_a_layernorm(prefill_kq)  # q down layernorm
             prefill_kv_no_split = self.kv_a_proj_with_mqa(
                 hidden_states_prefill)  # c_kv
+
             if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
                 prefill_kv_no_split = get_tp_group().all_gather(
                     prefill_kv_no_split,
@@ -1107,6 +1099,7 @@ class AscendSFATorchairImpl(MLAAttentionImpl):
             else:
                 q_len = 1
                 hidden_states_decode = hidden_states
+
                 decode_kq = self.q_a_proj(hidden_states_decode)  # q down
                 decode_q_c = self.q_a_layernorm(decode_kq)  # q down layernorm
                 decode_kv_no_split = self.kv_a_proj_with_mqa(

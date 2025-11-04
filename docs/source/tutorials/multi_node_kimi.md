@@ -2,10 +2,10 @@
 
 ## Verify Multi-Node Communication Environment
 
-referring to [multi_node.md](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-process)
+Refer to [multi_node.md](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-process).
 
-## Run with docker
-Assume you have two Atlas 800 A3(64G*16) nodes(or 4 * A2), and want to deploy the `Kimi-K2-Instruct-W8A8` quantitative model across multi-node.
+## Run with Docker
+Assume you have two Atlas 800 A3 (64G*16)  or four A2 nodes, and want to deploy the `Kimi-K2-Instruct-W8A8` quantitative model across multiple nodes.
 
 ```{code-block} bash
    :substitutions:
@@ -14,10 +14,11 @@ export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
-# Note if you are running bridge network with docker, Please expose available ports for multiple nodes communication in advance
+# Note: If you are running bridge network with docker, please expose available ports for multiple nodes communication in advance
 docker run --rm \
 --name $NAME \
 --net=host \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
@@ -47,19 +48,19 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Run the following scripts on two nodes respectively
+Run the following scripts on two nodes respectively.
 
 :::{note}
-Before launch the inference server, ensure the following environment variables are set for multi node communication
+Before launching the inference server, ensure the following environment variables are set for multi-node communication.
 :::
 
-**node0**
+**Node 0**
 
 ```shell
 #!/bin/sh
 
 # this obtained through ifconfig
-# nic_name is the network interface name corresponding to local_ip
+# nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
 local_ip="xxxx"
 
@@ -72,8 +73,8 @@ export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 
-# The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8
-# If you want to the quantization manually, please refer to https://vllm-ascend.readthedocs.io/en/latest/user_guide/feature_guide/quantization.html
+# The w8a8 weight can be obtained from https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8
+# If you want to do the quantization manually, please refer to https://vllm-ascend.readthedocs.io/en/latest/user_guide/feature_guide/quantization.html
 vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 --host 0.0.0.0 \
 --port 8004 \
@@ -96,13 +97,18 @@ vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
 ```
 
-**node1**
+**Node 1**
 
 ```shell
 #!/bin/sh
 
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip of the current node
 nic_name="xxxx"
 local_ip="xxxx"
+
+# The value of node0_ip must be consistent with the value of local_ip set in node0 (master node)
+node0_ip="xxxx"
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
@@ -136,7 +142,7 @@ vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
 ```
 
-The Deployment view looks like:
+The deployment view looks like:
 ![alt text](../assets/multi_node_dp_kimi.png)
 
 Once your server is started, you can query the model with input prompts:

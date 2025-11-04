@@ -10,6 +10,7 @@ Run container:
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
@@ -27,7 +28,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
@@ -43,13 +44,14 @@ git clone https://gitcode.com/ascend-tribe/pangu-pro-moe-model.git
 
 ### Online Inference on Multi-NPU
 
-Run the following script to start the vLLM server on Multi-NPU:
+Run the following script to start the vLLM server on multi-NPU:
 
 ```bash
 vllm serve /path/to/pangu-pro-moe-model \
 --tensor-parallel-size 4 \
 --enable-expert-parallel \
 --trust-remote-code \
+--max_model_len=1024 \
 --enforce-eager
 ```
 
@@ -216,6 +218,7 @@ if __name__ == "__main__":
 
     llm = LLM(model="/path/to/pangu-pro-moe-model",
             tensor_parallel_size=4,
+            enable_expert_parallel=True,
             distributed_executor_backend="mp",
             max_model_len=1024,
             trust_remote_code=True,

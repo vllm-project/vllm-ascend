@@ -1,8 +1,8 @@
 # Single-NPU (Qwen3 8B W4A8)
 
-## Run docker container
+## Run Docker Container
 :::{note}
-w4a8 quantization feature is supported by v0.9.1rc2 or higher
+w4a8 quantization feature is supported by v0.9.1rc2 and later.
 :::
 
 ```{code-block} bash
@@ -11,6 +11,7 @@ w4a8 quantization feature is supported by v0.9.1rc2 or higher
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
@@ -25,7 +26,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-## Install modelslim and convert model
+## Install modelslim and Convert Model
 :::{note}
 You can choose to convert the model yourself or use the quantized model we uploaded,
 see https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8
@@ -33,7 +34,7 @@ see https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8
 
 ```bash
 # The branch(br_release_MindStudio_8.1.RC2_TR5_20260624) has been verified
-git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitee.com/ascend/msit
+git clone -b br_release_MindStudio_8.1.RC2_TR5_20260624 https://gitcode.com/Ascend/msit
 
 cd msit/msmodelslim
 
@@ -65,8 +66,8 @@ python quant_qwen.py \
           --w_method HQQ
 ```
 
-## Verify the quantized model
-The converted model files looks like:
+## Verify the Quantized Model
+The converted model files look like:
 
 ```bash
 .
@@ -84,13 +85,13 @@ The converted model files looks like:
 `-- tokenizer_config.json
 ```
 
-Run the following script to start the vLLM server with quantized model:
+Run the following script to start the vLLM server with the quantized model:
 
 ```bash
 vllm serve /home/models/Qwen3-8B-w4a8 --served-model-name "qwen3-8b-w4a8" --max-model-len 4096 --quantization ascend
 ```
 
-Once your server is started, you can query the model with input prompts
+Once your server is started, you can query the model with input prompts.
 
 ```bash
 curl http://localhost:8000/v1/completions \
@@ -105,10 +106,10 @@ curl http://localhost:8000/v1/completions \
     }'
 ```
 
-Run the following script to execute offline inference on Single-NPU with quantized model:
+Run the following script to execute offline inference on single-NPU with the quantized model:
 
 :::{note}
-To enable quantization for ascend, quantization method must be "ascend"
+To enable quantization for ascend, quantization method must be "ascend".
 :::
 
 ```python

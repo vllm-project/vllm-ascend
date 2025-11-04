@@ -84,16 +84,17 @@
 #
 # For more details, see the code and comments in this file.
 
-
 import argparse
 import asyncio
 import functools
 import heapq
+import json
 import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
-from typing import List
+from dataclasses import dataclass
+from typing import Any, List
 
 import httpx
 from fastapi import FastAPI, Request
@@ -105,6 +106,7 @@ logger = init_logger(__name__)
 # Add uvloop for faster event loop if available
 try:
     import uvloop
+
     asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 except ImportError:
     pass
@@ -443,69 +445,176 @@ async def stream_service_response_with_retry(client: httpx.AsyncClient,
                     raise e
 
 
+async def _handle_select_instance(api: str, req_data: Any,
+                                  request_length: int):
+    prefiller_score = proxy_state.calculate_prefill_scores(request_length)
+    logger.debug(
+        f"Request length: {request_length}, Prefiller score: {prefiller_score}"
+    )
+    request_id = await proxy_state.next_req_id()
+    # Select prefiller
+    prefiller_idx = proxy_state.select_prefiller(prefiller_score)
+    prefiller = proxy_state.prefillers[prefiller_idx]
+    # Send request to prefiller
+    response = await send_request_to_service(
+        prefiller.client,
+        prefiller_idx,
+        api,
+        req_data,
+        request_id,
+        max_retries=global_args.max_retries,
+        base_delay=global_args.retry_delay)
+    proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+    response_json = response.json()
+    kv_transfer_params = response_json.get('kv_transfer_params', {})
+    if kv_transfer_params:
+        req_data["kv_transfer_params"] = kv_transfer_params
+    # Select decoder
+    decoder_score = proxy_state.calculate_decode_scores(request_length)
+    logger.debug("Decoder score: %f", decoder_score)
+    # Use the prefiller's kv_transfer_params to select decoder
+    decoder_idx = proxy_state.select_decoder(decoder_score)
+    decoder = proxy_state.decoders[decoder_idx]
+    logger.debug("Using %s %s", prefiller.url, decoder.url)
+    return InstanceInfo(request_id=request_id,
+                        prefiller_idx=prefiller_idx,
+                        prefiller_score=prefiller_score,
+                        prefiller=prefiller,
+                        decoder=decoder,
+                        decoder_idx=decoder_idx,
+                        decoder_score=decoder_score)
+
+
+@dataclass
+class InstanceInfo:
+    request_id: str
+    prefiller_idx: int
+    prefiller_score: float
+    prefiller: ServerState
+    decoder_idx: int
+    decoder_score: float
+    decoder: ServerState
+
+
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
         req_body = await request.body()
         request_length = len(req_body)
-        prefiller_score = proxy_state.calculate_prefill_scores(request_length)
-        logger.debug(
-            f"Request length: {request_length}, Prefiller score: {prefiller_score}"
-        )
-        request_id = await proxy_state.next_req_id()
-        # Select prefiller
-        prefiller_idx = proxy_state.select_prefiller(prefiller_score)
-        prefiller = proxy_state.prefillers[prefiller_idx]
-        # Send request to prefiller
-        response = await send_request_to_service(
-            prefiller.client,
-            prefiller_idx,
-            api,
-            req_data,
-            request_id,
-            max_retries=global_args.max_retries,
-            base_delay=global_args.retry_delay)
-        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        response_json = response.json()
-        kv_transfer_params = response_json.get('kv_transfer_params', {})
-        if kv_transfer_params:
-            req_data["kv_transfer_params"] = kv_transfer_params
-        # Select decoder
-        decoder_score = proxy_state.calculate_decode_scores(request_length)
-        logger.debug("Decoder score: %f", decoder_score)
-        # Use the prefiller's kv_transfer_params to select decoder
-        decoder_idx = proxy_state.select_decoder(decoder_score)
-        decoder = proxy_state.decoders[decoder_idx]
-        logger.debug("Using %s %s", prefiller.url, decoder.url)
-        # Stream response from decoder
-        released_kv = False
+        instance_info = await _handle_select_instance(api, req_data,
+                                                      request_length)
+        stream_flag = bool(req_data.get("stream", False))
+        chat_flag = "messages" in req_data
+
+        if "prompt" in req_data:
+            origin_prompt = req_data["prompt"]
+        elif chat_flag:
+            messages = req_data["messages"]
+            origin_prompt = messages[0].get("content", "")
+        else:
+            origin_prompt = ""
+        # refer to vLLM sampling_params: max_token default value
+        origin_max_tokens = req_data.get("max_tokens", 16)
 
         async def generate_stream():
-            nonlocal released_kv
+            nonlocal instance_info
+            generated_token = ""
+            released_kv = False
+            retry_count = 0
+            retry = True
+            completion_tokens = 0
             # Only one await per chunk, minimal logic in loop
             try:
-                async for chunk in stream_service_response_with_retry(
-                        decoder.client,
-                        api,
-                        req_data,
-                        request_id=request_id,
-                        max_retries=global_args.max_retries,
-                        base_delay=global_args.retry_delay):
-                    if not released_kv and chunk:
-                        proxy_state.release_prefiller_kv(
-                            prefiller_idx, prefiller_score)
-                        released_kv = True
-                    yield chunk
+                while retry:
+                    retry = False
+                    async for chunk in stream_service_response_with_retry(
+                            instance_info.decoder.client,
+                            api,
+                            req_data,
+                            request_id=instance_info.request_id,
+                            max_retries=global_args.max_retries,
+                            base_delay=global_args.retry_delay):
+                        if not released_kv and chunk:
+                            proxy_state.release_prefiller_kv(
+                                instance_info.prefiller_idx,
+                                instance_info.prefiller_score)
+                            released_kv = True
+                        try:
+                            chunk_str = chunk.decode("utf-8").strip()
+                        except UnicodeDecodeError:
+                            logger.debug(
+                                f"Skipping chunk: {chunk}")
+                            yield chunk
+                            continue
+                        if not chunk_str:
+                            continue
+                        if chunk_str.startswith("data: "):
+                            chunk_str = chunk_str[len("data: "):]
+                        try:
+                            chunk_json = json.loads(chunk_str)
+                        except json.JSONDecodeError:
+                            # if chunk is [done], skip it.
+                            logger.debug(
+                                f"Skipping chunk: {chunk_str}")
+                            yield chunk
+                            continue
+                        choices = chunk_json.get("choices", [])
+                        if not choices:
+                            yield chunk
+                            continue
+
+                        choice = choices[0]
+                        delta = choice.get("delta") or {}
+                        message = choice.get("message") or {}
+                        content = (
+                                delta.get("content")
+                                or message.get("content")
+                                or choice.get("text")
+                                or ""
+                                )
+                        generated_token += content
+
+                        stop_reason = choice.get(
+                            "stop_reason")
+                        usage = chunk_json.get("usage", {})
+                        completion_tokens = (completion_tokens + 1) if stream_flag else \
+                            (completion_tokens + usage.get("completion_tokens"))
+                        if stop_reason == "recomputed":
+                            retry = True
+                            retry_count += 1
+                            if chat_flag:
+                                messages[0][
+                                    "content"] = origin_prompt + generated_token
+                            else:
+                                req_data[
+                                    "prompt"] = origin_prompt + generated_token
+                            req_data[
+                                "max_tokens"] = origin_max_tokens - completion_tokens + retry_count
+                            tmp_request_length = len(
+                                json.dumps(req_data).encode("utf-8"))
+                            instance_info = await _handle_select_instance(
+                                api, req_data, tmp_request_length)
+                            break
+                        if retry_count > 0 and not stream_flag:
+                            if chat_flag:
+                                choice["message"][
+                                    "content"] = generated_token
+                            else:
+                                choice["text"] = generated_token
+                            chunk = json.dumps(chunk_json).encode("utf-8")
+                        yield chunk
             except Exception as e:
                 logger.error(
-                    f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} will be routing to the target prefiller when new request is ready to dispatch to it"
+                    f"Error during streaming from decoder {instance_info.decoder.url}: {str(e)} the aborted request {instance_info.request_id} will be routing to the target prefiller when new request is ready to dispatch to it"
                 )
-                proxy_state.abort_prefiller_request(prefiller_idx, request_id)
-                proxy_state.release_prefiller_kv(prefiller_idx,
-                                                 prefiller_score)
+                proxy_state.abort_prefiller_request(
+                    instance_info.prefiller_idx, instance_info.request_id)
+                proxy_state.release_prefiller_kv(instance_info.prefiller_idx,
+                                                 instance_info.prefiller_score)
 
             # After streaming done, release tokens
-            proxy_state.release_decoder(decoder_idx, decoder_score)
+            proxy_state.release_decoder(instance_info.decoder_idx,
+                                        instance_info.decoder_score)
 
         return StreamingResponse(generate_stream(),
                                  media_type="application/json")
@@ -544,4 +653,5 @@ if __name__ == '__main__':
     global global_args
     global_args = parse_args()
     import uvicorn
+
     uvicorn.run(app, host=global_args.host, port=global_args.port)

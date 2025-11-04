@@ -11,18 +11,18 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/82RC1/releasenote/releasenote_0000.html) | Required for CANN |
-    | CANN          | >= 8.2.RC1                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | >= 2.7.1.dev20250919             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
-    | torch         | >= 2.7.1                         | Required for torch-npu and vllm           |
+    | Ascend HDK    | Refer to [here](https://www.hiascend.com/document/detail/zh/canncommercial/83RC1/releasenote/releasenote_0000.html) | Required for CANN |
+    | CANN          | >= 8.3.RC1                       | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.7.1             | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
+    | torch         | == 2.7.1                         | Required for torch-npu and vllm           |
 
-You have 2 way to install:
+There are two installation methods:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
 - **Using docker**: use the `vllm-ascend` pre-built docker image directly.
 
 ## Configure a new environment
 
-Before installing, you need to make sure firmware/driver and CANN are installed correctly, refer to [link](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
+Before installation, you need to make sure firmware/driver and CANN are installed correctly, refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
 
 ### Configure hardware environment
 
@@ -53,6 +53,7 @@ export DEVICE=/dev/davinci7
 export IMAGE=quay.io/ascend/cann:|cann_image_tag|
 docker run --rm \
     --name vllm-ascend-env \
+    --shm-size=1g \
     --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
@@ -71,27 +72,27 @@ docker run --rm \
 You can also install CANN manually:
 
 ```bash
-# Create a virtual environment
+# Create a virtual environment.
 python -m venv vllm-ascend-env
 source vllm-ascend-env/bin/activate
 
-# Install required python packages.
+# Install required Python packages.
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC1/Ascend-cann-toolkit_8.2.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_8.2.RC1_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_8.2.RC1_linux-"$(uname -i)".run --full
-# https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/Milan-ASL/Milan-ASL%20V100R001C22B800TP052/Ascend-cann-kernels-910b_8.2.rc1_linux-aarch64.run
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.3.RC1_linux-"$(uname -i)".run --full
+# https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/Milan-ASL/Milan-ASL%20V100R001C22B800TP052/Ascend-cann-kernels-910b_8.3.rc1_linux-aarch64.run
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC1/Ascend-cann-kernels-910b_8.2.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-kernels-910b_8.2.RC1_linux-"$(uname -i)".run
-./Ascend-cann-kernels-910b_8.2.RC1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run
+./Ascend-cann-kernels-910b_8.3.RC1_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC1/Ascend-cann-nnal_8.2.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_8.2.RC1_linux-"$(uname -i)".run
-./Ascend-cann-nnal_8.2.RC1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.3.RC1/Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.3.RC1_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
@@ -102,11 +103,11 @@ source /usr/local/Ascend/nnal/atb/set_env.sh
 
 ::::{tab-item} Before using docker
 :sync: docker
-No more extra step if you are using `vllm-ascend` prebuilt docker image.
+No more extra step if you are using `vllm-ascend` prebuilt Docker image.
 ::::
 :::::
 
-Once it's done, you can start to set up `vllm` and `vllm-ascend`.
+Once it is done, you can start to set up `vllm` and `vllm-ascend`.
 
 ## Setup vllm and vllm-ascend
 
@@ -117,7 +118,7 @@ Once it's done, you can start to set up `vllm` and `vllm-ascend`.
 :selected:
 :sync: pip
 
-First install system dependencies and config pip mirror:
+First install system dependencies and configure pip mirror:
 
 ```bash
 # Using apt-get with mirror
@@ -129,7 +130,7 @@ apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl 
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
-**[Optional]** Then config the extra-index of `pip` if you are working on a x86 machine or using torch-npu dev version:
+**[Optional]** Then configure the extra-index of `pip` if you are working on an x86 machine or using torch-npu dev version:
 
 ```bash
 # For torch-npu dev version or x86 machine
@@ -141,8 +142,12 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 ```{code-block} bash
    :substitutions:
 
-# Install vllm-project/vllm from pypi
-pip install vllm==|pip_vllm_version|
+# Install vllm-project/vllm. The newest supported version is |vllm_version|.
+# Because the version |vllm_version| has not been archived in pypi, so you need to install from source.
+git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
+cd vllm
+VLLM_TARGET_DEVICE=empty pip install -v -e .
+cd ..
 
 # Install vllm-project/vllm-ascend from pypi.
 pip install vllm-ascend==|pip_vllm_ascend_version|
@@ -154,26 +159,26 @@ or build from **source code**:
 ```{code-block} bash
    :substitutions:
 
-# Install vLLM
+# Install vLLM.
 git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
 
-# Install vLLM Ascend
+# Install vLLM Ascend.
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 pip install -v -e .
 cd ..
 ```
 
-vllm-ascend will build custom ops by default. If you don't want to build it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it.
+vllm-ascend will build custom operators by default. If you don't want to build it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it.
 :::
 
 ```{note}
 If you are building from v0.7.3-dev and intend to use sleep mode feature, you should set `COMPILE_CUSTOM_KERNELS=1` manually.
-To build custom ops, gcc/g++ higher than 8 and c++ 17 or higher is required. If you're using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
-If you encounter other problems during compiling, it is probably because unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in env to specify your g++ and gcc locations before compiling.
+To build custom operators, gcc/g++ higher than 8 and c++ 17 or higher is required. If you're using `pip install -e .` and encounter a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
+If you encounter other problems during compiling, it is probably because unexpected compiler is being used, you may export `CXX_COMPILER` and `C_COMPILER` in environment to specify your g++ and gcc locations before compiling.
 ```
 
 ::::
@@ -203,6 +208,7 @@ export DEVICE=/dev/davinci7
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend-env \
+    --shm-size=1g \
     --device $DEVICE \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
@@ -216,7 +222,7 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)(`pip install -e`) to help developer immediately take place changes without requiring a new installation.
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html) (`pip install -e`) to help developer immediately take place changes without requiring a new installation.
 ::::
 
 :::::
