@@ -650,7 +650,8 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         # "group_list": group_list,
         # "topk_scales": topk_scales,
         # expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales
-        group_list_type = 0
+        # just for cam
+        group_list_type = 1
         permuted_hidden_states, expert_tokens = hidden_states, group_list
         
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
