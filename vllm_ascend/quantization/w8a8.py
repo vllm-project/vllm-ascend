@@ -100,10 +100,6 @@ class AscendW8A8LinearMethod:
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-        quant_comm_config = getattr(layer, '_quant_comm_config', {})
-        comm_fn = quant_comm_config.get('communication_fn')
-        enable_flashcomm2_quant_comm = comm_fn is not None and (
-            "o_proj" in layer.prefix or "out_proj" in layer.prefix)
         if x.dtype != torch.int8:
             layer_cls_name = layer.__class__.__name__
             try:
@@ -119,18 +115,28 @@ class AscendW8A8LinearMethod:
                     weight=layer.weight,
                     start_flag=x,
                 )
-            if enable_flashcomm2_quant_comm and comm_fn is not None:
-                x = x.contiguous().view(
+
+            quant_comm_config = getattr(layer, "_quant_comm_config", {})
+            comm_fn = quant_comm_config.get("communication_fn")
+            enable_flashcomm2_quant_comm = comm_fn is not None and (
+                "o_proj" in layer.prefix or "out_proj" in layer.prefix)
+            if enable_flashcomm2_quant_comm:
+                quant_input_x = x.contiguous().view(
                     -1, layer.aclnn_input_scale_reciprocal.size(0))
-            # quant
-            x = quant_per_tensor(
-                x,
-                layer.aclnn_input_scale_reciprocal,
-                layer.aclnn_input_offset,
-            )
-            if enable_flashcomm2_quant_comm and comm_fn is not None:
-                comm_input = x.view(x.size(0), -1)
+                quant_x = quant_per_tensor(
+                    quant_input_x,
+                    layer.aclnn_input_scale_reciprocal,
+                    layer.aclnn_input_offset,
+                )
+                comm_input = quant_x.view(x.size(0), -1)
                 x = comm_fn(comm_input)
+            else:
+                # quant
+                x = quant_per_tensor(
+                    x,
+                    layer.aclnn_input_scale_reciprocal,
+                    layer.aclnn_input_offset,
+                )
 
             # prefetch qkvo_proj.weight postprocess
             if weight_prefetch_method:

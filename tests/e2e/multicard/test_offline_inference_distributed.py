@@ -207,6 +207,7 @@ def test_fc2_for_qwen3_moe() -> None:
                     enforce_eager=True) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
+
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"})
 def test_models_distributed_deepseek_v2_lite_with_flashcomm_v1() -> None:
     example_prompts = [

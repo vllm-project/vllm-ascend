@@ -821,9 +821,9 @@ def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
     logger.info(
         f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size={flashcomm2_oproj_tp_size} and global_tp_size={global_tp_size}"
     )
-    if envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
+    if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
         logger.warning_once(
-            "Enabling both FLASHCOMM1 and FLASHCOMM2 will default to using the optimizations of FLASHCOMM2."
+            "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
         )
     if ascend_config.oproj_tensor_parallel_size is not None:
         raise AssertionError(
@@ -837,7 +837,11 @@ def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
         raise AssertionError(
             f"Global tensor parallel size ({global_tp_size}) must be divisible by flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size})"
         )
-    if vllm_config.kv_transfer_config is None or vllm_config.kv_transfer_config.is_kv_consumer:
+    if vllm_config.kv_transfer_config is None:
+        logger.warning_once(
+            "It is recommended to enable FLASHCOMM2 in P-scenario deployments, enable it in hybrid deployment may lead to decode performance degradation."
+        )
+    if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
         raise AssertionError(
             "FLASHCOMM2 primarily targets P-scenario deployments, "
             "with additional support for hybrid deployment scenarios. "

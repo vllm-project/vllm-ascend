@@ -56,6 +56,7 @@ from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
                                                     get_otp_group)
+from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (dense_optim_enable, enable_sp,
                                flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
@@ -279,7 +280,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
         self.reorgnized_batch_ids = get_flashcomm2_reorgnized_batch_ids(
             get_tp_group().world_size)
         self.group_indices = torch.tensor(self.reorgnized_batch_ids).npu()
-        self._quant_comm_config = {}
+        self.layer._quant_comm_config = {}
 
     @property
     def comm_group(self):
@@ -321,7 +322,7 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             input_parallel = nn.functional.pad(input_parallel,
                                                (0, 0, 0, num_padding_tokens))
 
-        def otp_quant_comm(x):
+        def otp_maybe_quant_comm(x):
 
             # Reorganize the tensor so that the batch id and rank id correspond to each other.
             chunk_num = len(self.reorgnized_batch_ids) * len(
@@ -355,9 +356,15 @@ class Flashcomm2OProjRowParallelOp(CustomRowParallelOp):
             return recv_buf.view(all2all_tp_size, chunk_size,
                                  -1).transpose(0, 1).reshape(chunk_size, -1)
 
-        if not hasattr(self, '_quant_comm_config'):
-            self._quant_comm_config = {}
-        self._quant_comm_config['communication_fn'] = otp_quant_comm
+        if not hasattr(self, "_quant_comm_config"):
+            self.layer._quant_comm_config = {}
+        self.layer._quant_comm_config[
+            "communication_fn"] = otp_maybe_quant_comm
+        actual_quant_method = getattr(self.quant_method, 'quant_method',
+                                      self.quant_method)
+        if not isinstance(actual_quant_method, AscendW8A8LinearMethod):
+            # Check if w8a8 quantization is enabled. If not, communicate immediately.
+            otp_maybe_quant_comm(input_parallel)
 
         # Matrix multiply.
         assert self.quant_method is not None
