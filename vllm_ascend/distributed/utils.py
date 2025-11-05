@@ -50,7 +50,7 @@ def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
 
 
 def get_transfer_timeout_value():
-    if os.getenv("ASCEND_TRANSFER_TIMEOUT", None) is not None:
+    if os.getenv("ASCEND_TRANSFER_TIMEOUT") is not None:
         return int(os.getenv("ASCEND_TRANSFER_TIMEOUT"))
     hccl_rdma_timeout = int(os.getenv('HCCL_RDMA_TIMEOUT', '20'))
     hccl_rdma_retry_cnt = int(os.getenv('HCCL_RDMA_RETRY_CNT', '7'))
