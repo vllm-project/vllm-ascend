@@ -249,7 +249,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
         self.assertFalse(modified)
         input_batch.swap_states.assert_not_called()
 
-    def test_reorder_batch_without_torchair_graph(self, ascend_config):
+    def test_reorder_batch_without_torchair_graph(self):
         ascend_config = MagicMock()
         ascend_config.torchair_graph_config = MagicMock()
         ascend_config.torchair_graph_config.enabled = False
@@ -391,7 +391,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=3,
                 num_actual_tokens=3,
-                decode_token_pre_req=1,
+                decode_token_per_req=1,
                 actual_seq_lengths_q=[0, 1, 2],
                 attn_mask=torch.zeros((1, 1), dtype=torch.bool),
                 spec_attn_mask=torch.zeros((1, 1), dtype=torch.bool),
@@ -428,7 +428,7 @@ class TestAscendSFATorchairMetadataBuilder(TestBase):
         assert torch.equal(sin_golden, metadata.decode.sin)
         assert torch.equal(cos_golden, metadata.decode.cos)
 
-    @patch("vllm_ascend.torchair.torchair_mla.get_ascend_config")
+    @patch("vllm_ascend.torchair.torchair_sfa.get_ascend_config")
     def test_build_decode(self, mock_ascend_config):
         ascend_config = MagicMock()
         mock_ascend_config.return_value = ascend_config
