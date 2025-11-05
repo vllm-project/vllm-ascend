@@ -64,7 +64,7 @@ def run_with_dp(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
     # Record the start of the current process
     current_start = start(global_dp_rank)
 
-    prompts = prompts[start(global_dp_rank): start(global_dp_rank + 1)]
+    prompts = prompts[start(global_dp_rank):start(global_dp_rank + 1)]
     if len(prompts) == 0:
         # if any rank has no prompts to process,
         # we need to set a placeholder prompt
