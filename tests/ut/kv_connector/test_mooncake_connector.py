@@ -25,11 +25,11 @@ fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
 
 envs_mod = types.ModuleType("vllm_ascend.envs")
-envs_mod.PHYSICAL_DEVICES = "10,11"
-envs_mod.HCCL_RDMA_TIMEOUT = "20"
-envs_mod.HCCL_RDMA_RETRY_CNT = "7"
+envs_mod.PHYSICAL_DEVICES = "10,11"  # type: ignore
+envs_mod.HCCL_RDMA_TIMEOUT = "20"  # type: ignore
+envs_mod.HCCL_RDMA_RETRY_CNT = "7"  # type: ignore
 pkg_mod = types.ModuleType("vllm_ascend")
-pkg_mod.envs = envs_mod
+pkg_mod.envs = envs_mod  # type: ignore
 sys.modules["vllm_ascend"] = pkg_mod
 sys.modules["vllm_ascend.envs"] = envs_mod
 
@@ -985,7 +985,6 @@ class MockTensor:
         self.element_size = MagicMock(return_value=4)
         self.shape = (10, 16, 8, 16)
         self.data_ptr = MagicMock(return_value=0x1000)
-
 
 
 mock_logger = MagicMock()
