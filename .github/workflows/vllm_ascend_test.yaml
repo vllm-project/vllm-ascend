@@ -76,11 +76,11 @@ jobs:
     if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     runs-on: ubuntu-latest
     container:
-      # fixme: vllm-ascend install failed with 8.3.rc1 on github action
-      image: quay.io/ascend/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      image: quay.io/ascend/cann:8.3.rc1-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        TORCH_DEVICE_BACKEND_AUTOLOAD: 0
     strategy:
       matrix:
         vllm_version: [83f478bb19489b41e9d208b47b4bb5a95ac171ac, v0.11.0]
@@ -116,7 +116,6 @@ jobs:
       - name: Run unit test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
           pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut \
