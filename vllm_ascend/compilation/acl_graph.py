@@ -192,8 +192,10 @@ class ACLGraphWrapper:
 
 def update_attn_params(update_stream, forward_context, runtime_shape):
     graph_params = get_graph_params()
-    # FIXME: Behold! We are using a temporary hack here to update the args
-    # for each layer's attention op in the graph.
+    # For Qwen3-next, since the kv_cache_config has already categorized
+    # linear_attn and self_attn, the attn_metadata is first arranged with
+    # self_attn followed by linear_attn. Therefore, using zip directly
+    # filters out the update operations for linear_attn.
     with torch.npu.stream(update_stream):
         for key, param, handle, event in zip(
                 forward_context.attn_metadata,
@@ -289,9 +291,9 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
 
 
 def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
-    graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
     # for each layer's attention op in the graph.
+    graph_params = get_graph_params()
     with torch.npu.stream(update_stream):
         for key, param, handle, event in zip(
                 forward_context.attn_metadata,
