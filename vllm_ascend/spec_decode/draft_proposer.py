@@ -1,8 +1,7 @@
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Any
 
 import torch
-
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.speculative import SpeculativeConfig
@@ -10,12 +9,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
-
-from vllm_ascend.spec_decode.eagle_proposer import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.attention.utils import extend_flat_seqs
+from vllm_ascend.spec_decode.eagle_proposer import SpecDecodeBaseProposer
 
 logger = init_logger(__name__)
 
@@ -39,18 +37,18 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self._raise_if_vocab_size_mismatch()
         self._raise_if_draft_tp_mismatch()
 
-
-    def generate_token_ids(self,
-                           valid_sampled_token_ids: list[list[int]],
-                           sampling_metadata: SamplingMetadata = None,
-                           scheduler_output: SchedulerOutput = None,
-                           spec_decode_metadata: SpecDecodeMetadata = None,
-                           positions: torch.Tensor = None,
-                           num_scheduled_tokens: int = 0,
-                           hidden_states: torch.Tensor = None,
-                           attn_metadata=None,
-                           aux_hidden_states: torch.Tensor = None):
-        
+    def generate_token_ids(
+        self,
+        valid_sampled_token_ids: list[list[int]],
+        sampling_metadata: SamplingMetadata = None,
+        scheduler_output: SchedulerOutput = None,
+        spec_decode_metadata: SpecDecodeMetadata = None,
+        positions: torch.Tensor = None,
+        num_scheduled_tokens: int = 0,
+        hidden_states: torch.Tensor = None,
+        attn_metadata=None,
+        aux_hidden_states: torch.Tensor = None,
+    ):
         attn_metadata = self._get_atten_dict(scheduler_output)
         attn_metadata = attn_metadata[self.attn_layer_name]
         next_token_ids: list[int] = []
@@ -63,23 +61,26 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 # Get the next token id from the request state.
                 req_id = self.runner.input_batch.req_ids[i]
                 req_state = self.runner.requests[req_id]
-                seq_len = (req_state.num_computed_tokens +
-                           scheduler_output.num_scheduled_tokens[req_id])
+                seq_len = (
+                    req_state.num_computed_tokens
+                    + scheduler_output.num_scheduled_tokens[req_id]
+                )
 
                 next_token_id = req_state.get_token_id(seq_len)
             next_token_ids.append(next_token_id)
-        next_token_ids = torch.tensor(next_token_ids,
-                                      dtype=torch.int32,
-                                      device=self.device)
-        
+        next_token_ids = torch.tensor(
+            next_token_ids, dtype=torch.int32, device=self.device
+        )
+
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
             target_token_ids = self.runner.input_ids[:num_scheduled_tokens]
             target_positions = positions[:num_scheduled_tokens]
-            cu_num_tokens =attn_metadata.query_start_loc
+            cu_num_tokens = attn_metadata.query_start_loc
         else:
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
-            num_rejected_tokens = [n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+            num_rejected_tokens = [
+                n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
                 for i, n in enumerate(num_draft_tokens)
             ]
             num_rejected_tokens = torch.tensor(
@@ -88,22 +89,24 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 device=self.device,
             )
             num_tokens = num_scheduled_tokens - sum(num_rejected_tokens)
-            cu_num_tokens, token_indices = self.prepare_inputs(
-                attn_metadata.query_start_loc, num_rejected_tokens,
-                num_tokens)
+            cu_num_tokens, token_indices = self._prepare_inputs(
+                attn_metadata.query_start_loc, num_rejected_tokens, num_tokens
+            )
             target_token_ids = self.runner.input_ids[token_indices]
-            target_positions = positions[token_indices]       
+            target_positions = positions[token_indices]
 
-        (target_token_ids, target_positions, 
-         target_slot_mapping, cu_num_tokens) = merge_next_token_ids_into_token_ids(
-            input_token_ids=target_token_ids,
-            input_positions=target_positions,
-            cad=attn_metadata,
-            next_token_ids=next_token_ids,
-            block_size=self.block_size,
-            max_model_len=self.vllm_config.model_config.max_model_len,
-            arange=self.arange,
-            cu_num_tokens=cu_num_tokens)
+        (target_token_ids, target_positions, target_slot_mapping, cu_num_tokens) = (
+            merge_next_token_ids_into_token_ids(
+                input_token_ids=target_token_ids,
+                input_positions=target_positions,
+                cad=attn_metadata,
+                next_token_ids=next_token_ids,
+                block_size=self.block_size,
+                max_model_len=self.vllm_config.model_config.max_model_len,
+                arange=self.arange,
+                cu_num_tokens=cu_num_tokens,
+            )
+        )
 
         draft_token_ids = self._propose(
             target_token_ids=target_token_ids,
@@ -118,8 +121,6 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         spec_token_ids = draft_token_ids.tolist()
 
         return spec_token_ids
-    
-
 
     def _raise_if_mrope(self):
         if self.draft_model_config.uses_mrope:
@@ -135,23 +136,23 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 "in the speculative_config."
             )
 
-    def _raise_if_vocab_size_mismatch(self): 
-        speculative_config = self.vllm_config.speculative_config       
-        if (            
-            speculative_config.method == "draft_model"            
-            and speculative_config.target_model_config is not None            
-            and speculative_config.draft_model_config is not None        
-            ):            
-            target_vocab_size = speculative_config.target_model_config.get_vocab_size()            
-            draft_vocab_size = speculative_config.draft_model_config.get_vocab_size()            
-            if target_vocab_size != draft_vocab_size:                
-                raise ValueError(                    
-                    f"Target and draft model should have the same vocabulary size. "                    
-                    f"Target model vocab_size={target_vocab_size}. "                    
-                    f"Draft model vocab_size={draft_vocab_size}. "                    
-                    f"Using models with different tokenizers can cause out-of-bounds "                    
-                    f"errors during speculative decoding."                
-                    )
+    def _raise_if_vocab_size_mismatch(self):
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            speculative_config.method == "draft_model"
+            and speculative_config.target_model_config is not None
+            and speculative_config.draft_model_config is not None
+        ):
+            target_vocab_size = speculative_config.target_model_config.get_vocab_size()
+            draft_vocab_size = speculative_config.draft_model_config.get_vocab_size()
+            if target_vocab_size != draft_vocab_size:
+                raise ValueError(
+                    f"Target and draft model should have the same vocabulary size. "
+                    f"Target model vocab_size={target_vocab_size}. "
+                    f"Draft model vocab_size={draft_vocab_size}. "
+                    f"Using models with different tokenizers can cause out-of-bounds "
+                    f"errors during speculative decoding."
+                )
 
     def _raise_if_draft_tp_mismatch(self):
         # Note(Tomas Ruiz) If we run the target model with TP > 1 and
@@ -210,6 +211,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         )
         self.attn_layer_name = next(iter(draft_attn_layer_names))
 
+
 def create_vllm_config_for_draft_model(
     target_model_vllm_config: VllmConfig,
 ) -> VllmConfig:
@@ -220,16 +222,18 @@ def create_vllm_config_for_draft_model(
     The vllm_config is useful when loading the draft model with get_model().
     """
     old = target_model_vllm_config
-    new_parallel_config = replace(old.speculative_config.draft_parallel_config,
-        rank=old.parallel_config.rank
+    new_parallel_config = replace(
+        old.speculative_config.draft_parallel_config, rank=old.parallel_config.rank
     )
-    
-    new: VllmConfig = replace(old,
+
+    new: VllmConfig = replace(
+        old,
         quant_config=None,  # quant_config is recomputed in __init__()
         model_config=old.speculative_config.draft_model_config,
         parallel_config=new_parallel_config,
     )
     return new
+
 
 def merge_next_token_ids_into_token_ids(
     input_token_ids: torch.Tensor,
@@ -239,8 +243,8 @@ def merge_next_token_ids_into_token_ids(
     block_size: int,
     max_model_len: int,
     arange: torch.Tensor,
-    cu_num_tokens
-    ):
+    cu_num_tokens,
+):
     """
     Merges the next token ids with the existing token ids into a flat sequence.
     Does the same for the positions, computes new slot mapping,
@@ -251,7 +255,7 @@ def merge_next_token_ids_into_token_ids(
         seqs=input_token_ids, end_locs=query_end_locs, new_vals=next_token_ids
     )
     logger.warning("new_token_ids: {}".format(new_token_ids))
-    
+
     # append new positions
     positions_to_append = input_positions[query_end_locs] + 1
     new_positions = extend_flat_seqs(
@@ -260,9 +264,11 @@ def merge_next_token_ids_into_token_ids(
     # recompute slot mapping
     batch_size, n_blocks_per_req = cad.block_tables.shape
     req_indices = torch.arange(batch_size, device=cad.query_start_loc.device)
-    
+
     query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
-    req_indices = torch.repeat_interleave(req_indices, query_lens.to(cad.query_start_loc.device) + 1)
+    req_indices = torch.repeat_interleave(
+        req_indices, query_lens.to(cad.query_start_loc.device) + 1
+    )
     block_table_indices = req_indices * n_blocks_per_req + new_positions // block_size
     block_nums = cad.block_tables.view(-1)[block_table_indices]
     block_offsets = new_positions % block_size
@@ -270,6 +276,6 @@ def merge_next_token_ids_into_token_ids(
     # Mask out the position ids that exceed the max model length.
     exceeds_max_model_len = new_positions >= max_model_len
     new_slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
-  
-    cu_num_tokens = cu_num_tokens +  arange[: len(cu_num_tokens)] 
+
+    cu_num_tokens = cu_num_tokens + arange[: len(cu_num_tokens)]
     return (new_token_ids, new_positions, new_slot_mapping, cu_num_tokens)
