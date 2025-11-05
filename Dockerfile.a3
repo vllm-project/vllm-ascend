@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+FROM quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
@@ -54,7 +54,7 @@ RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
     python3 -m pip cache purge
 
 # Install modelscope (for fast download) and ray (for multinode)
-RUN python3 -m pip install modelscope 'ray>=2.47.1' 'protobuf>3.20.0' && \
+RUN python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
 
 CMD ["/bin/bash"]

@@ -24,7 +24,7 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, CompilationLevel, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group)
@@ -56,6 +56,12 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.torchair.ops.sequence_parallel import (MetadataForPadding,
                                                         init_metadata_for_sp)
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.config import CompilationLevel
+else:
+    from vllm.config import CompilationMode
 
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
@@ -251,7 +257,6 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
                                                  v,
                                                  kv_cache=kv_cache,
                                                  attn_metadata=attn_metadata,
-                                                 trace_flag=False,
                                                  **forward_kwargs)
             output, _ = self.o_proj(attn_output)
             return output
@@ -298,10 +303,16 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         layer_idx = extract_layer_index(prefix)
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
-        self.use_aclgraph = (vllm_config is not None
-                             and vllm_config.compilation_config.level
-                             == CompilationLevel.PIECEWISE
-                             and not vllm_config.model_config.enforce_eager)
+        if vllm_version_is("0.11.0"):
+            self.use_aclgraph = (vllm_config is not None
+                                 and vllm_config.compilation_config.level
+                                 == CompilationLevel.PIECEWISE and
+                                 not vllm_config.model_config.enforce_eager)
+        else:
+            self.use_aclgraph = (vllm_config is not None
+                                 and vllm_config.compilation_config.mode
+                                 == CompilationMode.VLLM_COMPILE and
+                                 not vllm_config.model_config.enforce_eager)
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):

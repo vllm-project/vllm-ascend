@@ -26,7 +26,7 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
 
 
@@ -386,7 +386,6 @@ class AscendW4A8DynamicFusedMoEMethod:
             w2_scale_bias=layer.w2_scale_bias,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            use_int4_w4a8=True,
             expert_map=expert_map,
             log2phy=log2phy,
             global_redundant_expert_num=global_redundant_expert_num,

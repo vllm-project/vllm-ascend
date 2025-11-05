@@ -19,13 +19,16 @@ from typing import Any
 
 import openai
 import pytest
-from vllm.utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
+from vllm_ascend.utils import vllm_version_is
 
-MODELS = [
-    "Qwen/Qwen3-30B-A3B",
-]
+if vllm_version_is("0.11.0"):
+    from vllm.utils import get_open_port
+else:
+    from vllm.utils.network_utils import get_open_port
+
+MODELS = ["Qwen/Qwen3-30B-A3B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
 DATA_PARALLELS = [2]
 
@@ -47,12 +50,21 @@ async def test_single_request_aclgraph(model: str, dp_size: int) -> None:
         "TASK_QUEUE_ENABLE": "1",
         "HCCL_OP_EXPANSION_MODE": "AIV",
     }
-    server_args = [
-        "--no-enable-prefix-caching", "--tensor-parallel-size", "1",
-        "--data-parallel-size",
-        str(dp_size), "--port",
-        str(port), "--trust-remote-code", "--gpu-memory-utilization", "0.9"
-    ]
+    if model == "vllm-ascend/DeepSeek-V2-Lite-W8A8":
+        server_args = [
+            "--no-enable-prefix-caching", "--tensor-parallel-size", "1",
+            "--data-parallel-size",
+            str(dp_size), "--quantization", "ascend", "--max-model-len",
+            "1024", "--port",
+            str(port), "--trust-remote-code", "--gpu-memory-utilization", "0.9"
+        ]
+    else:
+        server_args = [
+            "--no-enable-prefix-caching", "--tensor-parallel-size", "1",
+            "--data-parallel-size",
+            str(dp_size), "--port",
+            str(port), "--trust-remote-code", "--gpu-memory-utilization", "0.9"
+        ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }

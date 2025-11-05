@@ -31,9 +31,11 @@ from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
+import numpy as np
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.torchair.utils import (
     TORCHAIR_CACHE_DIR, TorchairCommonAttentionMetadata,
     check_torchair_cache_exist, converting_weight_acl_format,
@@ -57,6 +59,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                       self.decode_token_per_req))
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             None, None, vllm_config, device)
+        self.use_sparse = hasattr(self.model_config.hf_config, "index_topk")
 
         register_torchair_model()
         torchair_ops_patch()
@@ -82,6 +85,20 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         self._check_batch_sizes_consistency()
 
+    def _set_up_drafter(self):
+        super()._set_up_drafter()
+        if self.speculative_config:
+            # Torchair do not support disable_padded_drafter_batch
+            # Enforce to disable this feature
+            self.speculative_config.disable_padded_drafter_batch = True
+
+    def _get_drafter(self):
+        return get_spec_decode_method(self.speculative_config.method,
+                                      self.vllm_config,
+                                      self.device,
+                                      self,
+                                      is_torchair_graph=True)
+
     def _may_pad_kv_consumer_num_seq(self):
         # pd disaggregation scenario need redundant_batch_sizes to avoid each batch's seq_len exceed 16 tokens
         # self.max_num_reqs here is greater than the actual maximum request number
@@ -104,35 +121,44 @@ class NPUTorchairModelRunner(NPUModelRunner):
         max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
         tp_size = self.parallel_config.tensor_parallel_size
         # Use integer arithmetic for ceiling division.
-        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        # maintain the same calculation logic as the function _align_graph_size_divisible_by_tp_size()
-        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+        max_graph_batch_size = self.calculate_new_torchair_graph_batch_size(
+            max_num_tokens, tp_size)
+        self.mc2_tokens_capacity = max_graph_batch_size
+
+        if get_ascend_soc_version(
+        ) == AscendSocVersion.A3 and self.mc2_tokens_capacity > 512:
+            logger.error(
+                f"A3: the max number of tokens must smaller then 512, but now is {self.mc2_tokens_capacity}"
+            )
+        if get_ascend_soc_version(
+        ) == AscendSocVersion.A2 and self.mc2_tokens_capacity > 256:
+            logger.error(
+                f"A2: the max number of tokens must smaller then 256, but now is {self.mc2_tokens_capacity}"
+            )
 
     def _sync_metadata_across_dp(
-            self, num_tokens: int, with_prefill: bool, enable_dbo: bool
-    ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
+            self, num_tokens: int,
+            with_prefill: bool) -> tuple[int, Optional[torch.Tensor], bool]:
         """Override from NPUModelRunner to pad num_tokens"""
         if self.enable_shared_expert_dp:
             # Padding is not required for shared_expert_dp cases in eager mode.
-            return num_tokens, None, with_prefill, enable_dbo
+            return num_tokens, None, with_prefill
         if self.dp_size == 1:
             if not with_prefill:
                 maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
                     num_tokens)
-                return maybe_padded_num_tokens, None, with_prefill, enable_dbo
-            return num_tokens, None, with_prefill, enable_dbo
+                return maybe_padded_num_tokens, None, with_prefill
+            return num_tokens, None, with_prefill
 
-        num_tokens_across_dp = torch.zeros(self.dp_size + 2,
+        num_tokens_across_dp = torch.zeros(self.dp_size + 1,
                                            dtype=torch.int32,
                                            device="npu")
         num_tokens_across_dp[self.dp_rank] = num_tokens
-        num_tokens_across_dp[-2] = int(with_prefill)
-        num_tokens_across_dp[-1] = int(not enable_dbo)
+        num_tokens_across_dp[-1] = int(with_prefill)
         dist.all_reduce(num_tokens_across_dp,
                         group=get_dp_group().device_group)
-        with_prefill = bool(num_tokens_across_dp[-2])
-        enable_dbo = not bool(num_tokens_across_dp[-1])
-        num_tokens_across_dp = num_tokens_across_dp[:-2]
+        with_prefill = bool(num_tokens_across_dp[-1])
+        num_tokens_across_dp = num_tokens_across_dp[:-1]
 
         if not with_prefill:
             max_num_token = num_tokens_across_dp.max().item()
@@ -145,7 +171,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         else:
             maybe_padded_num_tokens = num_tokens
 
-        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
+        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill
 
     def _build_dummy_attn_metadata(
         self,
@@ -153,6 +179,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         num_reqs: int,
         num_tokens: int,
         max_query_len: int,
+        num_scheduled_tokens: np.ndarray,
         aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
         force_attention: bool = False,
     ) -> Optional[dict[str, Any]]:
@@ -161,7 +188,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         if with_prefill or self.enable_shared_expert_dp:
             attn_metadata = super()._build_dummy_attn_metadata(
                 with_prefill, num_reqs, num_tokens, max_query_len,
-                aclgraph_runtime_mode, force_attention)
+                num_scheduled_tokens, aclgraph_runtime_mode, force_attention)
         else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
@@ -450,6 +477,17 @@ class NPUTorchairModelRunner(NPUModelRunner):
             self.torchair_graph_batch_sizes.append(start_graph_batch_size)
             start_graph_batch_size *= 2
 
+    def calculate_new_torchair_graph_batch_size(self, old_graph_batch_size,
+                                                tp_size):
+        cur_graph_batch_size = (old_graph_batch_size + tp_size -
+                                1) // tp_size * tp_size
+        # MTP > 1: Cal LCMLeast Common Multiple with graph_batch_size and tp_size,
+        # Both adapter multi-dp and FIA operator
+        if self.speculative_config is not None and self.speculative_config.num_speculative_tokens > 1:
+            cur_graph_batch_size = (tp_size * old_graph_batch_size) \
+                                    // math.gcd(tp_size, old_graph_batch_size)
+        return cur_graph_batch_size
+
     def select_torchair_padded_batch_size(self, batch_size: int):
         for padded_batch_size in self.torchair_graph_batch_sizes:
             if batch_size <= padded_batch_size:
@@ -501,13 +539,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
         tp_size = self.parallel_config.tensor_parallel_size
         new_graph_batch_sizes = []
         for graph_batch_size in self.torchair_graph_batch_sizes:
-            cur_graph_batch_size = (graph_batch_size + tp_size -
-                                    1) // tp_size * tp_size
-            # MTP > 1: Cal LCMLeast Common Multiple with graph_batch_size and tp_size,
-            # Both adapter multi-dp and FIA operator
-            if self.speculative_config is not None and self.speculative_config.num_speculative_tokens > 1:
-                cur_graph_batch_size = (tp_size * graph_batch_size) \
-                                       // math.gcd(tp_size, graph_batch_size)
+            cur_graph_batch_size = self.calculate_new_torchair_graph_batch_size(
+                graph_batch_size, tp_size)
             if cur_graph_batch_size not in new_graph_batch_sizes and \
                 cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
                 new_graph_batch_sizes.append(cur_graph_batch_size)

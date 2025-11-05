@@ -45,15 +45,21 @@ from vllm.inputs import TextPrompt
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import get_open_port
 
 from tests.e2e.model_utils import (TokensTextLogprobs,
                                    TokensTextLogprobsPromptLogprobs)
+from tests.e2e.nightly.multi_node.config.multi_node_config import NodeInfo
 from vllm_ascend.ascend_config import clear_ascend_config
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
 from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import get_open_port
+else:
+    from vllm.utils.network_utils import get_open_port
 
 adapt_patch(True)
 adapt_patch(False)
@@ -110,11 +116,14 @@ class RemoteOpenAIServer:
                  model: str,
                  vllm_serve_args: Union[list[str], str],
                  *,
-                 server_host: str = "0.0.0.0",
+                 server_host: str = '0.0.0.0',
                  server_port: int = 8080,
                  env_dict: Optional[dict[str, str]] = None,
                  seed: Optional[int] = None,
                  auto_port: bool = True,
+                 nodes_info: Optional[list[NodeInfo]] = None,
+                 disaggregated_prefill: Optional[dict] = None,
+                 proxy_port: Optional[int] = None,
                  max_wait_seconds: Optional[float] = None,
                  override_hf_configs: Optional[dict[str, Any]] = None) -> None:
         if isinstance(vllm_serve_args, str):
@@ -144,13 +153,24 @@ class RemoteOpenAIServer:
                 "--hf-overrides",
                 json.dumps(override_hf_configs)
             ]
+
         self.host = str(server_host)
         self.port = int(server_port)
+        # for multi-nodes test
+        self.nodes_info = nodes_info
+        self.disaggregated_prefill = disaggregated_prefill
+        self.cur_index = os.getenv("LWS_WORKER_INDEX", 0)
+        self.proxy_port = proxy_port
 
         self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 7200
-        self._wait_for_server(url=self.url_for("health"),
-                              timeout=max_wait_seconds)
+        max_wait_seconds = max_wait_seconds or 1800
+        if self.disaggregated_prefill:
+            assert proxy_port is not None, "for disaggregated_prefill, proxy port must be provided"
+            self._wait_for_server_pd(proxy_port=proxy_port,
+                                     timeout=max_wait_seconds)
+        else:
+            self._wait_for_server(url=self.url_for("health"),
+                                  timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
@@ -167,7 +187,7 @@ class RemoteOpenAIServer:
         """Subclasses override this method to customize process polling"""
         return self.proc.poll()
 
-    def hang_until_terminated(self) -> None:
+    def hang_until_terminated(self, url) -> None:
         """
         Wait until the server process terminates.
         This is for headless mode, where the api server
@@ -177,7 +197,7 @@ class RemoteOpenAIServer:
         try:
             while True:
                 try:
-                    resp = client.get(self.url_for("health"), timeout=5)
+                    resp = client.get(url, timeout=5)
                     if resp.status_code != 200:
                         break
                     time.sleep(5)
@@ -186,6 +206,21 @@ class RemoteOpenAIServer:
         finally:
             if isinstance(client, httpx.Client):
                 client.close()
+
+    def _wait_for_server_pd(self, proxy_port: int, timeout: float):
+        # Wait for all api_server nodes ready
+        assert self.nodes_info is not None, "cluster info must be provided"
+        for node_info in self.nodes_info:
+            if node_info.headless:
+                continue
+
+            url_health = f"http://{node_info.ip}:{node_info.server_port}/health"
+            self._wait_for_server(url=url_health, timeout=timeout)
+
+        # Wait for proxy ready
+        master_node = self.nodes_info[0]
+        url_proxy = f"http://{master_node.ip}:{proxy_port}/healthcheck"
+        self._wait_for_server(url=url_proxy, timeout=timeout)
 
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check

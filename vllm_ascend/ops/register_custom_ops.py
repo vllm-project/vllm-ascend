@@ -7,12 +7,17 @@ from vllm.distributed import (get_dp_group, get_ep_group,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
-from vllm.utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.utils import npu_stream_switch, prefetch_stream
+from vllm_ascend.utils import (npu_stream_switch, prefetch_stream,
+                               vllm_version_is)
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import direct_register_custom_op
+else:
+    from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def _maybe_all_gather_and_maybe_unpad_impl(
@@ -31,7 +36,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(
             x = tensor_model_parallel_all_gather(x, 0)
             pad_size = forward_context.pad_size
             if pad_size > 0:
-                x = x[:-pad_size, :]
+                x = x[:-pad_size]
         else:
             x = get_ep_group().all_gather(x, 0)
             # unpad
@@ -45,8 +50,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(
             offset = 0
             for idx in range(dp_size):
                 num_tokens_dp = num_tokens_across_dp_cpu[idx]
-                result[offset:offset +
-                       num_tokens_dp, :] = x[idx, :num_tokens_dp, :]
+                result[offset:offset + num_tokens_dp] = x[idx, :num_tokens_dp]
                 offset += num_tokens_dp
             x = result
 

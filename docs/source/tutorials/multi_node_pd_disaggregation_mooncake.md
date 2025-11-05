@@ -57,7 +57,7 @@ for i in {0..15}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
-git clone -b pooling_async_memecpy_v1 https://github.com/AscendTransport/Mooncake
+git clone https://github.com/kvcache-ai/Mooncake.git
 ```
 
 Update and install Python
@@ -67,22 +67,25 @@ apt-get update
 apt-get install python3
 ```
 
-Install the relevant dependencies. The installation of Go is not required.
+Modify Mooncake compilation option
 
 ```shell
 cd Mooncake
-bash dependencies.sh -y
+vi mooncake-common/common.cmake
+# find this row and set USE_ASCEND_DIRECT ON.
+option(USE_ASCEND_DIRECT "option for using ascend npu with adxl engine" ON)
 ```
 
 Install mpi
 
 ```shell
-apt purge mpich libmpich-dev -y
-apt purge openmpi-bin -y
-apt purge openmpi-bin libopenmpi-dev -y
-apt install mpich libmpich-dev -y
-export CPATH=/usr/lib/aarch64-linux-gnu/mpich/include/:$CPATH
-export CPATH=/usr/lib/aarch64-linux-gnu/openmpi/lib:$CPATH
+apt-get install mpich libmpich-dev -y
+```
+
+Install the relevant dependencies. The installation of Go is not required.
+
+```shell
+bash dependencies.sh -y
 ```
 
 Compile and install
@@ -93,15 +96,13 @@ cd build
 cmake ..
 make -j
 make install
-cp mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/libascend_transport_mem.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
-cp mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
 ```
 
-## Prefiller / Decoder Deployment
+## Prefiller/Decoder Deployment
 
-We can run the following scripts to launch a server on the prefiller/decoder node respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
+We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
-### layerwise
+### Layerwise
 
 :::::{tab-set}
 
@@ -119,10 +120,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1  # enable aggregated transmission
-export ASCEND_TRANSPORT_PRINT=0  # print ascend transport logs
-export ACL_OP_INIT_MODE=1  # acl op initialization mode to prevent device id acquisition failure
-export ASCEND_A3_ENABLE=1  # enable hccs transmission for A3; set to 0 for A2
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -178,10 +175,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -237,10 +230,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -284,7 +273,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 ::::
 
-::::{tab-item} Decoder node 2 (primary Node)
+::::{tab-item} Decoder node 2 (primary node)
 
 ```shell
 unset ftp_proxy
@@ -298,10 +287,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -348,7 +333,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 :::::
 
-### non-layerwise
+### Non-layerwise
 
 :::::{tab-set}
 
@@ -366,10 +351,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -425,10 +406,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -470,7 +447,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 ::::
 
-::::{tab-item} Decoder node 1 (master Node)
+::::{tab-item} Decoder node 1 (master node)
 
 ```shell
 unset ftp_proxy
@@ -484,10 +461,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -545,10 +518,6 @@ export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -595,13 +564,13 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 
 :::::
 
-## Example proxy for Deployment
+## Example Proxy for Deployment
 
-Run a proxy server on the same node with prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py) or [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
+Run a proxy server on the same node with the prefiller service instance. You can get the proxy program in the repository's examples: [load\_balance\_proxy\_layerwise\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py) or [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py)
 
 :::::{tab-set}
 
-::::{tab-item} layerwise
+::::{tab-item} Layerwise
 
 ```shell
 python load_balance_proxy_layerwise_server_example.py \
@@ -615,7 +584,7 @@ python load_balance_proxy_layerwise_server_example.py \
 
 ::::
 
-::::{tab-item} non-layerwise
+::::{tab-item} Non-layerwise
 
 ```shell
 python load_balance_proxy_server_example.py \

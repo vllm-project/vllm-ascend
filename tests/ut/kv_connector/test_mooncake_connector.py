@@ -12,7 +12,13 @@ from unittest.mock import MagicMock, patch
 
 import msgspec
 import zmq
-from vllm.utils import make_zmq_path
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import make_zmq_path
+else:
+    from vllm.utils.network_utils import make_zmq_path
 
 fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
@@ -666,10 +672,6 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
         self.assertEqual(meta.requests["req1"].local_block_ids, [4, 5, 6])
         self.assertEqual(meta.requests["req1"].remote_block_ids, [1, 2, 3])
         self.assertEqual(len(self.scheduler._reqs_need_recv), 0)
-
-    def test_get_finished_count(self):
-        count = self.scheduler.get_finished_count()
-        self.assertEqual(count, 2)
 
 
 class TestHelperFunctions(unittest.TestCase):
