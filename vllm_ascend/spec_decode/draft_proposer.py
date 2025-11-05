@@ -254,7 +254,6 @@ def merge_next_token_ids_into_token_ids(
     new_token_ids = extend_flat_seqs(
         seqs=input_token_ids, end_locs=query_end_locs, new_vals=next_token_ids
     )
-    logger.warning("new_token_ids: {}".format(new_token_ids))
 
     # append new positions
     positions_to_append = input_positions[query_end_locs] + 1
