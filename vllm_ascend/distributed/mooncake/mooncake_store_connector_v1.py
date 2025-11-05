@@ -168,6 +168,8 @@ class MooncakeStoreConnectorV1Scheduler:
             "consumer_is_to_load", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
+        self.save_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "save_async", False)
         # request_id -> (vllm cached tokes, mooncake cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self._block_size = vllm_config.cache_config.block_size
@@ -420,7 +422,7 @@ class MooncakeStoreConnectorV1Scheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_load:
+        if self.consumer_is_to_load and not self.save_async:
             return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:
