@@ -64,7 +64,7 @@ def run_with_dp(model, dp_size, local_dp_rank, global_dp_rank, dp_master_ip,
     # Record the start of the current process
     current_start = start(global_dp_rank)
 
-    prompts = prompts[start(global_dp_rank) : start(global_dp_rank + 1)]
+    prompts = prompts[start(global_dp_rank): start(global_dp_rank + 1)]
     if len(prompts) == 0:
         # if any rank has no prompts to process,
         # we need to set a placeholder prompt
@@ -192,7 +192,7 @@ def check_precision(ref_outputs: List[Tuple],
     for ref_output, spec_output in zip(ref_outputs, spec_outputs):
         ref_token_ids = ref_output[0][0]
         spec_token_ids = spec_output[0][0]
-        if ref_token_ids == spec_token_ids[: len(ref_token_ids)]:
+        if ref_token_ids == spec_token_ids[:len(ref_token_ids)]:
             matches += 1
         else:
             misses += 1
