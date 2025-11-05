@@ -1,4 +1,4 @@
-# Multi-Node (DeepSeek V3.2)
+# Multi-Node (DeepSeek-V3.2)
 
 :::{note}
 Only machines with AArch64 are supported currently. x86 will be supported soon. This guide takes A3 as the example.
