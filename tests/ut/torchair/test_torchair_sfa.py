@@ -59,7 +59,7 @@ class TestAscendSFATorchairPrefillMetadata(TestBase):
             block_table=block_table,
             max_query_len=max_query_len,
             sin=None,
-            cos=None
+            cos=None,
             max_seq_lens=max_seq_lens)
         self.assertIs(metadata.attn_mask, attn_mask)
         self.assertEqual(metadata.query_lens, query_lens)
