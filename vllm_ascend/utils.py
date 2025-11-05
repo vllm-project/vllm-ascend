@@ -664,7 +664,7 @@ def enable_sp(vllm_config=None) -> bool:
 
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
-    return get_ascend_config().enable_shared_expert_dp and enable_sp()
+    return get_ascend_config().enable_shared_expert_dp or enable_sp()
 
 
 def prefill_context_parallel_enable() -> bool:

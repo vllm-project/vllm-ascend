@@ -74,7 +74,7 @@ class AscendConfig:
                 self.enable_shared_expert_dp = False
                 logger.info(
                     f"enable_shared_expert_dp is {self.enable_shared_expert_dp}"
-                    "Enable enable_shared_expert_dp must enable_sp")
+                    "Enable enable_shared_expert_dp must enable sp")
         self.multistream_overlap_shared_expert = additional_config.get(
             "multistream_overlap_shared_expert", False)
         self.recompute_scheduler_enable = additional_config.get(
