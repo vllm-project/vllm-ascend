@@ -133,6 +133,7 @@ from vllm_ascend.sample.logits_processor import build_logitsprocs
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
+from vllm_ascend.spec_decode.draft_proposer import DraftModelProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
@@ -591,7 +592,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
-                                     TorchairMtpProposer]] = None
+                                     TorchairMtpProposer, DraftModelProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -1941,7 +1942,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
             if self.drafter and (self.drafter.name == SpecDcodeType.EAGLE
-                                 or self.drafter.name == SpecDcodeType.EAGLE3):
+                                 or self.drafter.name == SpecDcodeType.EAGLE3
+                                 or self.drafter.name == SpecDcodeType.DRAFT_MODEL):
                 attn_state = AscendAttentionState.ChunkedPrefill
             else:
                 attn_state = AscendAttentionState.SpecDecoding
