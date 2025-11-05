@@ -1,16 +1,13 @@
 from unittest.mock import MagicMock, patch
 
 import torch
-from torch import nn
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.torchair.torchair_sfa import (
     AscendSFATorchairBackend, AscendSFATorchairDecodeMetadata,
     AscendSFATorchairImpl, AscendSFATorchairMetadata,
     AscendSFATorchairMetadataBuilder, AscendSFATorchairPrefillMetadata)
-from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
 
 
 class TestAscendSFATorchairBackend(TestBase):
