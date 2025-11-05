@@ -1705,7 +1705,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Update out&lse
         attn_out_lse_list = self._process_attn_out_lse(attn_output,
                                                        softmax_lse,
-                                                       attn_metadata)
+                                                       decode_meta)
         attn_output = self._npu_attention_update(attn_out_lse_list)
         return self._v_up_proj(attn_output)
 
@@ -1735,12 +1735,11 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _process_attn_out_lse(
         self,
-        attn_output: List[torch.Tensor],
-        softmax_lse: List[torch.Tensor],
-        attn_metadata: AscendMLAMetadata,
+        attn_output: torch.Tensor,
+        softmax_lse: torch.Tensor,
+        decode_meta: AscendMLADecodeMetadata,
     ) -> List[torch.Tensor]:
         attn_out_lse_list = []
-        decode_meta = attn_metadata.decode
         out_mask = decode_meta.batch_seq_mask[:, None,
                                               None].expand_as(attn_output)
         attn_output = torch.where(out_mask, 0, attn_output)
