@@ -45,6 +45,8 @@ class MooncakeEngine:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
+        self.save_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "save_async", False)
         self.register_buffer = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "register_buffer", False)
         self.block_size = vllm_config.cache_config.block_size
@@ -351,16 +353,8 @@ class MooncakeEngine:
                 skip_leading_tokens,
                 request.req_id,
             )
-            if self.kv_role == 'kv_consumer':
-                req = ({
-                    "req_id": req_id,
-                    "tokens": token_ids,
-                    "block_ids": request.block_ids,
-                    "mask": store_mask,
-                })
-                self.kv_send_thread._handle_request(
-                    req)  # type: ignore[union-attr]
-            else:
+
+            if self.save_async:
                 self.kv_send_thread.add_request(  # type: ignore[union-attr]
                     req_id,
                     token_ids,
@@ -368,6 +362,14 @@ class MooncakeEngine:
                     store_mask,
                     request.is_last_chunk,
                 )
+            else:
+                req = ({
+                    "req_id": req_id,
+                    "tokens": token_ids,
+                    "block_ids": request.block_ids,
+                    "mask": store_mask,
+                })
+                self.kv_send_thread.handle_request(req)  # type: ignore[union-attr]
 
     def retrieve_layer(
         self,

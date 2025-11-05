@@ -171,6 +171,34 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.stored_requests[req_id] -= 1
         self.request_queue.task_done()
 
+    def handle_request(self, req_meta: dict[str, Any]):
+        tokens = req_meta["tokens"]
+        mask = req_meta["mask"]
+        block_ids = req_meta["block_ids"]
+        req_id = req_meta["req_id"]
+        if self.m_store.config.use_ascend_direct:
+            addr_list = []
+            size_list = []
+            key_list = []
+            blockIds = []
+            for start, end, key in self.token_database.process_tokens(
+                    tokens, mask):
+                addr, size, block_id = self.prepare_value(
+                    start, end, block_ids)
+                key_list.append(key.to_string())
+                addr_list.append(addr)
+                size_list.append(size)
+                blockIds.append(block_id)
+            torch.npu.current_stream().synchronize()
+            self.m_store.put_batch(key_list, addr_list, size_list, blockIds)
+        else:
+            torch.npu.current_stream().synchronize()
+            for start, end, key in self.token_database.process_tokens(
+                    tokens, mask):
+                addr, size, _ = self.prepare_value(start, end, block_ids)
+                self.m_store.put(key, addr, size)
+        self.stored_requests[req_id] -= 1
+
 
 class KVCacheStoreRecvingThread(KVTransferThread):
 

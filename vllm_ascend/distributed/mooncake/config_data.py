@@ -291,7 +291,6 @@ class RequestTracker:
         scheduled again
         """
 
-        # self.token_ids.extend(new_token_ids)
 
         if len(new_block_ids) == 0:
             new_block_ids = []
@@ -362,13 +361,11 @@ class ReqMeta:
 
         if is_consumer:
             if first_scheduled:
-                prefill_saved_tokens = (
-                    input_token_len - 1
-                ) if envs.fisrt_token_generation_in_prefill else input_token_len
+                # If prefill generates the first token, it may be need
+                # to save the last block during PD separation.
+                prefill_saved_tokens = input_token_len - 1
                 skip_leading_tokens = prefill_saved_tokens // block_size * block_size
                 tracker.num_saved_tokens = skip_leading_tokens
-                if not envs.fisrt_token_generation_in_prefill:
-                    return None
             if num_tokens_to_save <= skip_leading_tokens:
                 return None
             skip_save = False
