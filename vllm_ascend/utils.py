@@ -56,6 +56,7 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
 
 def is_310p():
+    return False
     global _IS_310P
     if _IS_310P is None:
         from vllm_ascend import _build_info  # type: ignore
@@ -64,6 +65,7 @@ def is_310p():
 
 
 def sleep_mode_enabled():
+    return True
     global _SLEEP_MODE_ENABLED
     if _SLEEP_MODE_ENABLED is None:
         from vllm_ascend import _build_info  # type: ignore

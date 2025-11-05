@@ -47,7 +47,8 @@ class NPUFFNModelRunner(NPUModelRunner):
             raise ValueError(
                 "AFD config must be provided with afd_role='ffn' for FFN server"
             )
-
+        self.connector_name = self.afd_config.afd_connector
+        
         self._counter = 0
 
         # Initialize CUDA graph support
@@ -97,11 +98,9 @@ class NPUFFNModelRunner(NPUModelRunner):
         current_layer_idx = self._get_current_layer_idx()
         try:
             # AFDConnectorMetadata
-            # if current_layer_idx < 1:
-            #     return
-            self.is_m2n = False
-            self.is_cam = True
-            if self.is_m2n:
+            if current_layer_idx < 1:
+                return
+            if self.connector_name == "m2nconnector":
                 # TODO metadata
                 m2n_afdconnector_data = M2NAFDConnectorMetadata()
                 m2n_afdconnector_data.quant_mode = 0
@@ -117,7 +116,7 @@ class NPUFFNModelRunner(NPUModelRunner):
                 print(f'recv_attn_output success ,layer id is {current_layer_idx}')
                 m2n_afdconnector_data.handle = handle
                 m2n_afdconnector_data.topk_weights = topk_weights
-            elif self.is_cam:
+            elif self.connector_name == "camconnector":
                 output1,afdConnectorMetadata = self.connector.recv_attn_output()
                 current_layer_idx = afdConnectorMetadata.layer_idx
                 hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
@@ -145,10 +144,6 @@ class NPUFFNModelRunner(NPUModelRunner):
                 moe_comm_type = ffn_need_forward_data.moe_comm_type
                 num_input_tokens = ffn_need_forward_data.num_input_tokens
                 total_num_scheduled_tokens = ffn_need_forward_data.total_num_scheduled_tokens
-                # topk_weights = afdConnectorMetadata.topk_weights
-                # topk_ids = afdConnectorMetadata.m2n_afdconnector_data.topk_ids
-                # row_idx = afdConnectorMetadata.row_idx
-                print('execute_model')
                 with set_ascend_forward_context(
                         attn_metadata=None,
                         vllm_config=self.vllm_config,
@@ -159,7 +154,7 @@ class NPUFFNModelRunner(NPUModelRunner):
                         prefetch_stream=self.prefetch_stream,
                         num_actual_tokens=total_num_scheduled_tokens,
                         model_instance=self.model):
-                    if self.is_m2n:
+                    if self.connector_name == "m2nconnector":
                         # 未combine hidden
                         rank_ffn_output = self._execute_eager_mode(
                             hidden_states=hidden_states,
@@ -167,7 +162,7 @@ class NPUFFNModelRunner(NPUModelRunner):
                             dynamic_scales=dynamic_scales,
                             topk_weights=topk_weights,
                             current_layer_idx=current_layer_idx)
-                    elif self.is_cam:
+                    elif self.connector_name == "camconnector":
                         # 未combine hidden
                         rank_ffn_output = self._execute_eager_mode(
                             hidden_states=hidden_states,
@@ -177,14 +172,22 @@ class NPUFFNModelRunner(NPUModelRunner):
                             current_layer_idx=current_layer_idx)
                     else:
                         rank_ffn_output = self._execute_eager_mode(
-                            hidden_states,router_logits,current_layer_idx,topk_weights, topk_ids)
+                            hidden_states = hidden_states,
+                            router_logits = router_logits,
+                            current_layer_idx = current_layer_idx,
+                            topk_weights = topk_weights, 
+                            topk_ids = topk_ids,
+                            row_idx = row_idx,
+                            )
 
-            if self.is_cam:
+            if self.connector_name == "camconnector":
                 handle = [simulateExpertIds, simulateExpertScales, expandIdx, epRecvCounts, attenBatchSize]
                 afdConnectorMetadata.cam_afdconnector_data.handle = handle
                 self.connector.send_ffn_output(rank_ffn_output, afdConnectorMetadata)
-            else :
+            elif self.connector_name == "m2nconnector":
                 self.connector.send_ffn_output(rank_ffn_output, m2n_afdconnector_data)
+            else :
+                self.connector.send_ffn_output(rank_ffn_output, afdConnectorMetadata)
         except Exception as e:
             raise ValueError(
                 f"Error computing FFN for layer {current_layer_idx}: {e}"
@@ -250,7 +253,7 @@ class NPUFFNModelRunner(NPUModelRunner):
         #     rank_ffn_output = ffn_output[start_idx:end_idx, :]
         # else:
         # Single TP case
-        if self.is_m2n:
+        if self.connector_name == "m2nconnector":
             rank_ffn_output = self.model.compute_ffn_output(
                 layer_idx=current_layer_idx, 
                 hidden_states=hidden_states,
@@ -258,7 +261,7 @@ class NPUFFNModelRunner(NPUModelRunner):
                 dynamic_scales=dynamic_scales,
                 topk_weights=topk_weights, 
                 topk_ids=topk_ids)
-        if self.is_cam:
+        elif self.connector_name == "camconnector":
             rank_ffn_output = self.model.compute_ffn_output(
                 layer_idx=current_layer_idx, 
                 hidden_states=hidden_states,
@@ -269,7 +272,12 @@ class NPUFFNModelRunner(NPUModelRunner):
                 row_idx=row_idx)
         else:
             rank_ffn_output = self.model.compute_ffn_output(
-                current_layer_idx, hidden_states,router_logits,topk_weights, topk_ids, row_idx)
+                layer_idx=current_layer_idx, 
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                topk_weights=topk_weights, 
+                topk_ids=topk_ids,
+                row_idx=row_idx)
 
         return rank_ffn_output
 

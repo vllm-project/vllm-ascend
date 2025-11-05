@@ -449,8 +449,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         afd_config = vllm_config.afd_config
         if afd_config:
             self.role = afd_config.afd_role
+            self.connector_name = afd_config.afd_connector
         else:
             self.role = None
+            self.connector_name = None
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
@@ -608,8 +610,10 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.afd_config = vllm_config.afd_config
         if self.afd_config:
             self.role = self.afd_config.afd_role
+            self.connector_name = self.afd_config.afd_connector
         else:
             self.role = None
+            self.connector_name = None
 
         # `packed_modules_mapping` needs to be modified before
         # initializing DeepseekV2Model, as it is passed inplace to

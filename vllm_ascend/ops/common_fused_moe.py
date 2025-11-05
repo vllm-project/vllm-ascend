@@ -631,27 +631,16 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
             topk_weights: Optional[torch.Tensor] = None,
             topk_ids: Optional[torch.Tensor] = None,
             row_idx: Optional[torch.Tensor] = None,
+            connector_name: Optional[str] = "",
         ):
-        # TODO(yxj): M2N算子接入需要拆分fused_experts
+        #TODO(yxj):move to p2p
         shared_out = self._shared_experts(hidden_states)
-        
-        # forward_context = get_forward_context()
-        # moe_comm_type = forward_context.moe_comm_type
-        # if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2}:
-        #     shared_out = tensor_model_parallel_all_reduce(shared_out)
-            
-        # dispatch --> m2n
-
-        # gmm
         from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
+        if connector_name:
+            group_list_type = 1
+        else:
+            group_list_type = 0
         
-        # "group_list_type": group_list_type,
-        # "hidden_states": sorted_hidden_states,
-        # "group_list": group_list,
-        # "topk_scales": topk_scales,
-        # expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales
-        # just for cam
-        group_list_type = 1
         permuted_hidden_states, expert_tokens = hidden_states, group_list
         
         mlp_output = unified_apply_mlp(hidden_states=permuted_hidden_states,
