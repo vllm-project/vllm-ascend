@@ -44,6 +44,7 @@ def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_vllm_config.kv_transfer_config.is_kv_producer = True
     mock_envs_ascend = MagicMock()
     mock_envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE = 2
+    mock_envs_ascend.VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL = 0
     with patch('vllm_ascend.distributed.parallel_state.model_parallel_initialized', return_value=False), \
          patch('vllm_ascend.distributed.parallel_state.init_model_parallel_group'), \
          patch('vllm_ascend.distributed.parallel_state.get_current_vllm_config', return_value=mock_vllm_config), \
