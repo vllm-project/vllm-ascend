@@ -1713,10 +1713,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             spec_decode_metadata = None
-            logits_indices = torch.from_numpy(
-                cu_num_tokens
-            ) * self.pcp_size - self.num_pcp_pads[:num_reqs] - 1
-            logits_indices = logits_indices.to(self.device, non_blocking=True)
+            if self.pcp_size * self.dcp_size > 1:
+                logits_indices = torch.from_numpy(
+                    cu_num_tokens
+                ) * self.pcp_size - self.num_pcp_pads[:num_reqs] - 1
+                logits_indices = logits_indices.to(self.device, non_blocking=True)
+            else:
+                logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
+                    self.device, non_blocking=True)
         else:
             # pcp not supported now
             assert self.pcp_size == 1
