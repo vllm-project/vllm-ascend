@@ -1,5 +1,7 @@
 # Standard
 import math
+import random
+import re
 import threading
 import time
 from typing import Generator, List, Optional, Union
@@ -15,6 +17,7 @@ from vllm_ascend.distributed.mooncake.config_data import (
 from vllm_ascend.distributed.mooncake.kv_transfer import (
     KVCacheStoreLayerRecvingThread, KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
+from vllm_ascend.distributed.mooncake_connector import string_to_int64_hash
 from vllm_ascend.distributed.mooncake.mooncake_store import Mooncakestore
 from vllm_ascend.utils import vllm_version_is
 
@@ -73,7 +76,8 @@ class MooncakeEngine:
             self.use_mla,
         )
 
-        self.token_database = ChunkedTokenDatabase(self.metadata)
+        self.use_mla = vllm_config.model_config.is_deepseek_mla
+        self.token_database = ChunkedTokenDatabase(self.metadata, self.use_mla)
 
         self.m_store = Mooncakestore(parallel_config)
 
@@ -320,8 +324,13 @@ class MooncakeEngine:
             if save_spec is None or not save_spec.can_save:
                 continue
 
-            token_ids = request.token_ids
             req_id = request.req_id
+            if self.kv_role == "kv_producer" and self.tp_rank not in self.get_save_tp_ranks(
+                    req_id):
+                self.kv_send_thread.set_finished_request(
+                    req_id)  # type: ignore[union-attr]
+                continue
+            token_ids = request.token_ids
             assert isinstance(token_ids, torch.Tensor)
             assert token_ids.is_cpu
 
@@ -621,6 +630,15 @@ class MooncakeEngine:
                        if val != 1)
         except ValueError:
             return -1
+
+    def get_save_tp_ranks(self, req_id) -> List[int]:
+        seed = string_to_int64_hash(req_id)
+        rand = random.Random(seed)
+        all_ranks = list(range(self.tp_size))
+        if self.use_mla:
+            return rand.sample(all_ranks, k=1)
+        else:
+            return all_ranks
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""

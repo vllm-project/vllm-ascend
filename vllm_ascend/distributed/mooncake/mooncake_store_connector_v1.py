@@ -475,12 +475,16 @@ class MooncakeLookupServer:
         self.mooncake_engine = mooncake_engine
         self.running = True
 
+        if vllm_config.model_config.is_deepseek_mla:
+            self.lookup = self.mooncake_engine.lookup
+        else:
+            self.lookup = self.mooncake_engine.lookup_scheduler
+
         def process_request():
             while self.running:
                 frames = self.socket.recv_multipart(copy=False)
                 token_ids = self.decoder.decode(frames)
-                result = self.mooncake_engine.lookup_scheduler(
-                    token_ids, use_layerwise)
+                result = self.lookup(token_ids, use_layerwise)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 
