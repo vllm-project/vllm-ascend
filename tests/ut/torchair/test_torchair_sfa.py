@@ -58,6 +58,8 @@ class TestAscendSFATorchairPrefillMetadata(TestBase):
             query_start_loc=query_start_loc,
             block_table=block_table,
             max_query_len=max_query_len,
+            sin=None,
+            cos=None
             max_seq_lens=max_seq_lens)
         self.assertIs(metadata.attn_mask, attn_mask)
         self.assertEqual(metadata.query_lens, query_lens)
@@ -96,6 +98,8 @@ class TestAscendSFATorchairPrefillMetadata(TestBase):
             block_table=torch.tensor([[0, 1], [2, 3]]),
             max_query_len=2,
             max_seq_lens=2,
+            sin=None,
+            cos=None,
             chunked_context=chunked_context)
 
         self.assertIsNotNone(metadata.chunked_context)
