@@ -36,3 +36,21 @@ def test_models_distributed_Qwen3_NEXT_TP4():
                     distributed_executor_backend="mp",
                     enforce_eager=True) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
+    example_prompts = [
+        "Hello, my name is",
+    ] * 4
+    max_tokens = 5
+    with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
+                    tensor_parallel_size=4,
+                    max_model_len=4096,
+                    gpu_memory_utilization=0.8,
+                    distributed_executor_backend="mp",
+                    enforce_eager=False,
+                    compilation_config={
+                        "cudagraph_mode": "FULL_DECODE_ONLY",
+                        "cudagraph_capture_sizes": [1, 8, 24, 48, 60]
+                    }) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
