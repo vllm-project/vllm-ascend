@@ -899,7 +899,7 @@ class MooncakeConnectorWorker:
         self.device_id = device_ids[self.tp_rank]  # type: ignore
 
         if vllm_config.kv_transfer_config.get_from_extra_config(
-                'use_ascend_direct', False):
+                'use_ascend_direct', True):
             hostname = self.side_channel_host
         else:
             hostname = f"{self.side_channel_host}:0:npu_{self.device_id}"
