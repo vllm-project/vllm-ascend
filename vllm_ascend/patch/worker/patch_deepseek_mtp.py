@@ -52,50 +52,31 @@ def predictor_init(self, vllm_config: VllmConfig, prefix: str) -> None:
                                             topk_indices_buffer)
 
 
-def predictor_forward(
-    self,
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    previous_hidden_states: torch.Tensor,
-    inputs_embeds: torch.Tensor,
-    spec_step_index: int = 0,
-) -> torch.Tensor:
-    assert inputs_embeds is not None
-    inputs_embeds = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-        inputs_embeds, True)
-    # masking inputs at position 0, as not needed by MTP
-    inputs_embeds[positions == 0] = 0
-    inputs_embeds = self.enorm(inputs_embeds)
-    previous_hidden_states = self.hnorm(previous_hidden_states)
+# def predictor_forward(
+#     self,
+#     input_ids: torch.Tensor,
+#     positions: torch.Tensor,
+#     previous_hidden_states: torch.Tensor,
+#     inputs_embeds: torch.Tensor,
+#     spec_step_index: int = 0,
+# ) -> torch.Tensor:
+#     assert inputs_embeds is not None
+#     inputs_embeds = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+#         inputs_embeds, True)
+#     # masking inputs at position 0, as not needed by MTP
+#     inputs_embeds[positions == 0] = 0
+#     inputs_embeds = self.enorm(inputs_embeds)
+#     previous_hidden_states = self.hnorm(previous_hidden_states)
 
-    hidden_states = self.eh_proj(
-        torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
+#     hidden_states = self.eh_proj(
+#         torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
 
-    hidden_states, residual = self.mtp_block(positions=positions,
-                                             hidden_states=hidden_states,
-                                             residual=None)
-    hidden_states = residual + hidden_states
-    return hidden_states
+#     hidden_states, residual = self.mtp_block(positions=positions,
+#                                              hidden_states=hidden_states,
+#                                              residual=None)
+#     hidden_states = residual + hidden_states
+#     return hidden_states
 
 
 DeepSeekMultiTokenPredictorLayer.__init__ = predictor_init
-DeepSeekMultiTokenPredictorLayer.forward = predictor_forward
-
-
-def mtp_forward(
-    self,
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    hidden_states: torch.Tensor,
-    intermediate_tensors: IntermediateTensors,
-    inputs_embeds: torch.Tensor,
-    spec_step_idx: int = 0,
-) -> torch.Tensor:
-    hidden_states = self.model(input_ids, positions, hidden_states,
-                               inputs_embeds, spec_step_idx)
-    hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-        hidden_states, True)
-    return hidden_states
-
-
-DeepSeekMTP.forward = mtp_forward
+# DeepSeekMultiTokenPredictorLayer.forward = predictor_forward

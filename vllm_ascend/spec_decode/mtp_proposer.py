@@ -211,6 +211,8 @@ class MtpProposer(Proposer):
                     num_actual_tokens=0,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor):
+                positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
+                previous_hidden_states = torch.ops.vllm.maybe_pad_and_reduce(previous_hidden_states)
                 self.model(input_ids=input_ids,
                            positions=positions,
                            hidden_states=previous_hidden_states)
@@ -528,11 +530,21 @@ class MtpProposer(Proposer):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata
-
+                    input_ids=self.input_ids[:num_input_tokens]
+                    positions=self.positions[:num_input_tokens]
+                    hidden_states=self.hidden_states[:num_input_tokens]
+                        
+                    positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
+                    previous_hidden_states = torch.ops.vllm.maybe_pad_and_reduce(previous_hidden_states)
                     hidden_states = self.model(
-                        input_ids=self.input_ids[:num_input_tokens],
-                        positions=self.positions[:num_input_tokens],
-                        hidden_states=self.hidden_states[:num_input_tokens])
+                        input_ids=input_ids,
+                        positions=positions,
+                        hidden_states=hidden_states
+                    )
+                    hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                        hidden_states.contiguous(), True
+                    )
+
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
