@@ -2,26 +2,26 @@
 import math
 import threading
 import time
-from typing import Generator, List, Optional, Union
+from typing import Dict, Generator, List, Optional, Type, Union
 
 # Third Party
 import torch
 from vllm.config import VllmConfig
-from vllm.utils import logger
+from vllm.utils import get_kv_cache_torch_dtype, logger
 
+from vllm_ascend.distributed.mooncake.backend.backend import Backend
+from vllm_ascend.distributed.mooncake.backend.mooncake_backend import \
+    MooncakeBackend
 from vllm_ascend.distributed.mooncake.config_data import (
     ChunkedTokenDatabase, LasyerMultiBlockReqMeta, MooncakeConnectorMetadata,
     MooncakeEngineMetadata)
 from vllm_ascend.distributed.mooncake.kv_transfer import (
     KVCacheStoreLayerRecvingThread, KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
-from vllm_ascend.distributed.mooncake.mooncake_store import Mooncakestore
-from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_kv_cache_torch_dtype
-else:
-    from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+backend_map: Dict[str, Type[Backend]] = {
+    "mooncake": MooncakeBackend,
+}
 
 
 class MooncakeEngine:
@@ -45,8 +45,8 @@ class MooncakeEngine:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
-        self.register_buffer = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "register_buffer", False)
+        self.backend = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "backend", "mooncake")
         self.block_size = vllm_config.cache_config.block_size
         self.current_layer = 0
         # self.use_mla = first_kv_cache_tuple[0].size(
@@ -75,7 +75,8 @@ class MooncakeEngine:
 
         self.token_database = ChunkedTokenDatabase(self.metadata)
 
-        self.m_store = Mooncakestore(parallel_config)
+        real_backend = backend_map.get(self.backend.lower())
+        self.m_store = real_backend(parallel_config)
 
         self.kv_send_thread: Optional[KVTransferThread] = None
         self.kv_recv_thread: Optional[KVTransferThread] = None
@@ -113,25 +114,31 @@ class MooncakeEngine:
 
         self.kv_caches = kv_caches
         self.kv_caches_base_addr = []
+        ptrs = []
+        lengths = []
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
             if self.use_mla:
                 for i, cache in enumerate(cache_or_caches, 0):
                     base_addr = cache.data_ptr()
                     self.kv_caches_base_addr.append(base_addr)
-                    if self.register_buffer:
-                        region_len = self.num_blocks * self.block_len[i % 2]
-                        self._register(base_addr, region_len)
+                    # if self.register_buffer:
+                    region_len = self.num_blocks * self.block_len[i % 2]
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
+                    # self._register(base_addr, region_len)
             else:
                 cache_list = [cache_or_caches
                               ] if self.use_mla else cache_or_caches
                 for cache in cache_list:
                     base_addr = cache.data_ptr()
                     self.kv_caches_base_addr.append(base_addr)
-                    if self.register_buffer:
-                        region_len = self.num_blocks * self.block_len[0]
-                        self._register(base_addr, region_len)
-
+                    # if self.register_buffer:
+                    region_len = self.num_blocks * self.block_len[0]
+                    ptrs.append(base_addr)
+                    lengths.append(region_len)
+                    # self._register(base_addr, region_len)
+        self.m_store.register_buffer(ptrs, lengths)
         if self.use_layerwise:
             self.get_event = threading.Event()
             if self.kv_role in ['kv_producer', 'kv_both']:
@@ -165,16 +172,6 @@ class MooncakeEngine:
                     self.block_len, self.block_size, ready_event)
                 self.kv_recv_thread.start()
                 ready_event.wait()
-
-    def _register(self, ptr, length):
-        logger.debug(
-            "Registering KV cache: ptr=0x%x, length=%d, num_blocks=%d, "
-            "block_lens=%s", ptr, length, self.num_blocks, self.block_len)
-        try:
-            self.m_store.register_buffer(ptr, length)
-        except Exception as e:
-            raise RuntimeError(
-                f"Mooncake memory registration failed. Error is: {e}")
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         self.current_layer = 0
@@ -213,27 +210,17 @@ class MooncakeEngine:
                         token_mask,
                     )
                 else:
-                    if self.m_store.config.use_ascend_direct:
-                        addr_list = []
-                        size_list = []
-                        key_list = []
-                        blockIds = []
-                        for start, end, key in self.token_database.process_tokens(
-                                tokens, token_mask):
-                            addr, size, block_id = self.prepare_value(
-                                start, end, request.block_ids)
-                            key_list.append(key.to_string())
-                            addr_list.append(addr)
-                            size_list.append(size)
-                            blockIds.append(block_id)
-                        self.m_store.get_batch(key_list, addr_list, size_list,
-                                               blockIds)
-                    else:
-                        for start, end, key in self.token_database.process_tokens(
-                                tokens, token_mask):
-                            addr, size, _ = self.prepare_value(
-                                start, end, request.block_ids)
-                            self.m_store.get(key, addr, size)
+                    addr_list = []
+                    size_list = []
+                    key_list = []
+                    for start, end, key in self.token_database.process_tokens(
+                            tokens, token_mask):
+                        addr, size, _ = self.prepare_value(
+                            start, end, request.block_ids)
+                        key_list.append(key.to_string())
+                        addr_list.append(addr)
+                        size_list.append(size)
+                    self.m_store.get(key_list, addr_list, size_list)
 
     def prepare_value(self, start: int, end: int, block_ids: list[int]):
         addr_list = []
@@ -529,7 +516,7 @@ class MooncakeEngine:
                     for item in keys_multi_layer:
                         keys.append(item.to_string())
                     # batch is_exists
-                    ress = self.m_store.batch_exists(keys)
+                    ress = self.m_store.exists(keys)
                     res = 1
                     for value in ress:
                         if value != 1:
@@ -545,8 +532,7 @@ class MooncakeEngine:
                         tokens):
                     keys.append(key.to_string())
                     starts.append(start)
-                res = self.m_store.batch_exists(
-                    keys)  # type: ignore[assignment]
+                res = self.m_store.exists(keys)  # type: ignore[assignment]
                 for index, value in enumerate(res):  # type: ignore[arg-type]
                     if value != 1:
                         return starts[index]
@@ -576,7 +562,7 @@ class MooncakeEngine:
                     for item in keys_multi_layer:
                         keys.append(item.to_string())
                     # batch is_exists
-                    ress = self.m_store.batch_exists(keys)
+                    ress = self.m_store.exists(keys)
                     res = 1
                     for value in ress:
                         if value != 1:
@@ -598,7 +584,7 @@ class MooncakeEngine:
                         new_str = item.replace(  # type: ignore[attr-defined]
                             "@0", f"@{i}", 1)
                         multi_tp_keys.append(new_str)
-                res = self.m_store.batch_exists(
+                res = self.m_store.exists(
                     multi_tp_keys)  # type: ignore[assignment]
                 num_block = len(keys)
                 multi_tp_values = [
@@ -621,7 +607,3 @@ class MooncakeEngine:
                        if val != 1)
         except ValueError:
             return -1
-
-    def close(self) -> None:
-        """Close the cache engine and free all the resources"""
-        self.m_store.close()
