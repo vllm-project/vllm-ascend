@@ -1104,7 +1104,7 @@ class MooncakeConnectorWorker:
         assert "dp_size" in decode_parallel_config.keys()
         self._decode_dp_size = decode_parallel_config["dp_size"]
          # get prefill pp size from extra config
-        self._decode_pp_size = prefill_parallel_config.get("pp_size", 1)
+        self._decode_pp_size = decode_parallel_config.get("pp_size", 1)
         assert self._decode_pp_size == 1, "decode pp size must be 1"
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
