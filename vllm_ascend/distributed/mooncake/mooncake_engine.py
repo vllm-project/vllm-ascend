@@ -17,8 +17,8 @@ from vllm_ascend.distributed.mooncake.config_data import (
 from vllm_ascend.distributed.mooncake.kv_transfer import (
     KVCacheStoreLayerRecvingThread, KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
-from vllm_ascend.distributed.mooncake_connector import string_to_int64_hash
 from vllm_ascend.distributed.mooncake.mooncake_store import Mooncakestore
+from vllm_ascend.distributed.mooncake_connector import string_to_int64_hash
 from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.11.0"):
@@ -327,8 +327,8 @@ class MooncakeEngine:
             req_id = request.req_id
             if self.kv_role == "kv_producer" and self.tp_rank not in self.get_save_tp_ranks(
                     req_id):
-                self.kv_send_thread.set_finished_request(
-                    req_id)  # type: ignore[union-attr]
+                self.kv_send_thread.set_finished_request(  # type: ignore[union-attr]
+                    req_id)
                 continue
             token_ids = request.token_ids
             assert isinstance(token_ids, torch.Tensor)
