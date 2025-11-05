@@ -28,6 +28,7 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
 # isort: off
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata, extract_req_dcp_by_chunk_pcp,
