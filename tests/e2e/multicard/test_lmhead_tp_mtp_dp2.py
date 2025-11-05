@@ -244,4 +244,3 @@ def test_lmhead_tp_mtp_dp2(model):
     tp1_res, tp2_res = [global_result_queue.get() for _ in range(2)]
     check_precision(ref_outputs=tp1_res["results"],
                     spec_outputs=tp2_res["results"])
-    
