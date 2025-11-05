@@ -11,7 +11,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
 from vllm.utils import cdiv, logger
 from vllm.v1.core.sched.output import NewRequestData
-from vllm_ascend import envs
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
