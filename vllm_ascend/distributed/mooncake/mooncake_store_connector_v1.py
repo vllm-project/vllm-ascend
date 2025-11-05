@@ -325,7 +325,8 @@ class MooncakeStoreConnectorV1Scheduler:
         if isinstance(cached_reqs, list) and not is_consumer:
             for i, req in enumerate(cached_reqs):
                 request_tracker = self._request_trackers[req.req_id]
-                request_tracker.update(req.new_token_ids, req.new_block_ids)
+                request_tracker.token_ids.extend(req.new_token_ids)
+                request_tracker.update(req.new_block_ids)
                 last_chunk_tokens_num = ((len(req.prompt_token_ids) //
                                           self._block_size * self._block_size)
                                          if self._discard_partial_chunks else
