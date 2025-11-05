@@ -322,7 +322,9 @@ class TorchairAscendW4A8DynamicFusedMoEMethod:
         assert router_logits.shape[
             1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
-        if global_num_experts == 256:
+        # NOTE: now npu_moe_gating_top_k can support `group_count=256` pattern, and `group_count=384` pattern in cann8.3
+        if global_num_experts == 256 or (global_num_experts == 384 and
+                                         torch.version.cann.startswith("8.3")):
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
                 router_logits,
                 k=top_k,  # topk currently is 8

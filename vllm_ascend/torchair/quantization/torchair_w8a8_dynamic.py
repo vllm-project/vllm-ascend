@@ -939,6 +939,7 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
             1] == global_num_experts - global_redundant_expert_num, "Number of global experts mismatch (excluding redundancy)"
 
         is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256
+        is_kimi = global_num_experts - global_redundant_expert_num == 384
 
         fused_moe_state = get_forward_context().fused_moe_state
         if self.enable_shared_expert_dp and fused_moe_state == FusedMoEState.MC2:
@@ -948,8 +949,9 @@ class TorchairAscendW8A8DynamicFusedMoEMethod:
         with super_kernel(prefix,
                           "stream-fusion=1",
                           enabled=running_in_super_kernel):
-            # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-            if is_deepseek_v3_r1:
+            # NOTE: now npu_moe_gating_top_k can support `group_count=256` pattern, and `group_count=384` pattern in cann8.3
+            if is_deepseek_v3_r1 or (is_kimi
+                                     and torch.version.cann.startswith("8.3")):
                 topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
                     router_logits,
                     k=top_k,  # topk currently is 8
