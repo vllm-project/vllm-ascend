@@ -763,7 +763,7 @@ class TestSelectExperts(TestBase):
         self.addCleanup(patcher.stop)
         patcher.start()
 
-    @patch('torch_npu.npu_moe_gating_top_k_softmax')
+    @patch('torch_npu.npu_moe_gating_top_k')
     def test_softmax_scoring(self, mock_topk):
         """Test softmax scoring function"""
         mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
@@ -874,7 +874,7 @@ class TestSelectExperts(TestBase):
         self.assertEqual(ids.shape, (self.num_tokens, self.top_k))
         self.assertEqual(ids.dtype, torch.int32)
 
-    @patch('torch_npu.npu_moe_gating_top_k_softmax')
+    @patch('torch_npu.npu_moe_gating_top_k')
     def test_renormalize(self, mock_topk):
         """Test renormalization"""
         mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
@@ -900,7 +900,7 @@ class TestSelectExperts(TestBase):
         sums = weights.sum(dim=-1)
         self.assertTrue(torch.allclose(sums, torch.ones_like(sums)))
 
-    @patch('torch_npu.npu_moe_gating_top_k_softmax')
+    @patch('torch_npu.npu_moe_gating_top_k')
     def test_output_dtypes(self, mock_topk):
         """Test output dtypes"""
         mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
