@@ -67,6 +67,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_vllm_config = MagicMock()
         self.mock_vllm_config.model_config.max_model_len = 640
         self.mock_vllm_config.cache_config.block_size = 64
+        self.mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
         self.mock_device = 'cpu:0'
         self.builder = AscendAttentionMetadataBuilder(None, None,
                                                       self.mock_vllm_config,
