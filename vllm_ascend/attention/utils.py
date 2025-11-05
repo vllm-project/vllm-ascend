@@ -117,10 +117,10 @@ class AscendCommonAttentionMetadata:
 
 
 def extract_req_dcp_by_chunk_pcp(lst,
-                                chunk_idx,
-                                dcp_size,
-                                pcp_rank,
-                                fill_value=0):
+                                 chunk_idx,
+                                 dcp_size,
+                                 pcp_rank,
+                                 fill_value=0):
     num_reqs = len(lst)
     results: List[List[int]] = []
     for i in range(num_reqs):

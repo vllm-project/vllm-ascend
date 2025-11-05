@@ -28,13 +28,11 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
-                                         extract_req_dcp_by_chunk_pcp,
-                                         filter_chunked_req_indices,
-                                         maybe_save_kv_layer_to_connector,
-                                         split_decodes_and_prefills,
-                                         trans_rope_weight, transdata,
-                                         wait_for_kv_layer_from_connector)
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata, extract_req_dcp_by_chunk_pcp,
+    filter_chunked_req_indices, maybe_save_kv_layer_to_connector,
+    split_decodes_and_prefills, trans_rope_weight, transdata,
+    wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
@@ -1087,23 +1085,30 @@ class AscendMLAImpl(MLAAttentionImpl):
                     dim=-1)  # [local_toks, latent_dim + rope_dim]
 
                 # Step 2: use all_gather_into_tensor_uneven (gather + cat)
-                output_split_sizes = extract_req_dcp_by_chunk_pcp(
+                req_dcp_sizes = extract_req_dcp_by_chunk_pcp(
                     local_chunked_kv_lens, i, self.dcp_size, self.pcp_rank
                 )  # need to know num tokens of each rank in dcp group before all_gather     # [reqs, dcp]
                 assert len(req_dcp_sizes) == num_requests and all(
-                    len(dcp_arr) == self.dcp_size
-                    for dcp_arr in req_dcp_sizes)
+                    len(dcp_arr) == self.dcp_size for dcp_arr in req_dcp_sizes)
                 total_toks = np.sum(np.array(req_dcp_sizes))
                 latent_rope_dim = kv_c_k_pe_local.size(-1)
                 kv_c_k_pe_full = torch.empty((total_toks, latent_rope_dim),
                                              device=kv_c_k_pe_local.device,
                                              dtype=kv_c_k_pe_local.dtype)
-                
+
                 kv_c_k_pe_full_list = [None for _ in range(self.dcp_size)]
-                dist.all_gather_object(kv_c_k_pe_full_list, kv_c_k_pe_local, group=self.dcp_group)
-                kv_c_k_pe_full_list = [kv_c_k_pe for kv_c_k_pe in kv_c_k_pe_full_list if kv_c_k_pe is not None and kv_c_k_pe.numel() > 0]
+                dist.all_gather_object(kv_c_k_pe_full_list,
+                                       kv_c_k_pe_local,
+                                       group=self.dcp_group)
+                kv_c_k_pe_full_list = [
+                    kv_c_k_pe for kv_c_k_pe in kv_c_k_pe_full_list
+                    if kv_c_k_pe is not None and kv_c_k_pe.numel() > 0
+                ]
                 if len(kv_c_k_pe_full_list) > 0:
                     kv_c_k_pe_full = torch.cat(kv_c_k_pe_full_list, dim=0)
+                assert kv_c_k_pe_full.shape[
+                    0] == total_toks and kv_c_k_pe_full.shape[
+                        1] == latent_rope_dim
                 kv_c_normed_full, k_pe_full = torch.split(
                     kv_c_k_pe_full, [latent_kv_dim, rope_dim], dim=-1)
 
@@ -1236,8 +1241,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                     lse_r, token_mask)
             # convert lse back to [heads, bs]
             assert prefix_output_filtered is not None and prefix_lse_filtered_bt is not None
-            prefix_lse_filtered = prefix_lse_filtered_bt.squeeze(
-                -1).permute(1, 0).contiguous()
+            prefix_lse_filtered = prefix_lse_filtered_bt.squeeze(-1).permute(
+                1, 0).contiguous()
 
             prefix_output[filtered_indices, :, :] = prefix_output_filtered.to(
                 prefix_output.dtype)
