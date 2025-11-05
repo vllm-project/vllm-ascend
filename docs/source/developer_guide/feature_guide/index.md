@@ -9,4 +9,5 @@ patch
 ModelRunner_prepare_inputs
 Multi_Token_Prediction
 ACL_Graph
+KV_Cache_Pool_Guide
 :::
