@@ -87,6 +87,8 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ACL_OP_INIT_MODE=1
 export ASCEND_BUFFER_POOL=4:8
 # ASCEND_BUFFER_POOL is the environment variable for configuring the number and size of buffer on NPU Device for aggregation and KV transfer，the value 4:8 means we allocate 4 buffers of size 8MB.
+export ASCEND_CONNECT_TIMEOUT=10000
+export ASCEND_TRANSFER_TIMEOUT=10000
 
 python3 -m vllm.entrypoints.openai.api_server \
     --model /xxxxx/Qwen2.5-7B-Instruct \
@@ -147,6 +149,8 @@ export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
 export ACL_OP_INIT_MODE=1
 export ASCEND_BUFFER_POOL=4:8
+export ASCEND_CONNECT_TIMEOUT=10000
+export ASCEND_TRANSFER_TIMEOUT=10000
 
 python3 -m vllm.entrypoints.openai.api_server \
     --model /xxxxx/Qwen2.5-7B-Instruct \
@@ -246,6 +250,8 @@ export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ACL_OP_INIT_MODE=1
 export ASCEND_BUFFER_POOL=4:8
+export ASCEND_CONNECT_TIMEOUT=10000
+export ASCEND_TRANSFER_TIMEOUT=10000
 
 python3 -m vllm.entrypoints.openai.api_server \
     --model /xxxxx/Qwen2.5-7B-Instruct \
