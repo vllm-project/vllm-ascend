@@ -4415,7 +4415,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         ).world_size if prefill_context_parallel_enable() else 1
         self.dcp_world_size = get_dcp_group().world_size
         num_requests = len(num_computed_tokens)
-        assert request_ids is not None and len(request_ids) == num_requests
+        assert request_start_rank_dict is not None and request_ids is not None and len(
+            request_ids) == num_requests
         local_chunked_kv_lens = [[[0] * self.dcp_world_size
                                   for _ in range(self.pcp_world_size)]
                                  for _ in range(num_requests)]
@@ -4437,29 +4438,33 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 consumed_tokens = min(tokens_blank, total_tokens)
                 total_tokens -= consumed_tokens
                 tokens_blank -= consumed_tokens
+                pcp_idx = start_rank // self.dcp_world_size
+                dcp_idx = start_rank % self.dcp_world_size
+                local_chunked_kv_lens[req_idx][pcp_idx][
+                    dcp_idx] += consumed_tokens
                 if tokens_blank == 0:
                     start_rank = (start_rank + 1) % total_ranks
-                else:
-                    pcp_idx = start_rank // self.dcp_world_size
-                    dcp_idx = start_rank % self.dcp_world_size
-                    local_chunked_kv_lens[req_idx][pcp_idx][
-                        dcp_idx] += consumed_tokens
+                if total_tokens == 0:
                     request_start_rank_dict[req_id] = (start_rank,
                                                        tokens_blank)
-                    return cast(List[Optional[List[Optional[List[int]]]]],
-                                local_chunked_kv_lens)
+                    continue
 
             virtual_size = total_ranks * cp_kv_cache_interleave_size
             base = int(total_tokens) // virtual_size
-            remainder = int(total_tokens) % virtual_size
-            remain_blocks = cdiv(remainder, cp_kv_cache_interleave_size)
 
             # Distribute base tokens to all ranks
             for rank_idx in range(total_ranks):
                 pcp_idx = rank_idx // self.dcp_world_size
                 dcp_idx = rank_idx % self.dcp_world_size
                 local_chunked_kv_lens[req_idx][pcp_idx][
-                    dcp_idx] = base * cp_kv_cache_interleave_size
+                    dcp_idx] += base * cp_kv_cache_interleave_size
+
+            remainder = int(total_tokens) % virtual_size
+            if remainder == 0:
+                request_start_rank_dict[req_id] = (start_rank, tokens_blank)
+                continue
+            remain_blocks = cdiv(remainder, cp_kv_cache_interleave_size)
+            assert remain_blocks > 0
 
             # Distribute remainder tokens starting from start_rank
             for i in range(remain_blocks):
@@ -4475,13 +4480,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         dcp_idx] += remainder % cp_kv_cache_interleave_size
                     tokens_blank = cp_kv_cache_interleave_size - (
                         remainder % cp_kv_cache_interleave_size)
-            start_rank = (start_rank + remain_blocks) % total_ranks
+            start_rank = (start_rank + remain_blocks - 1) % total_ranks
             if tokens_blank == 0:
                 start_rank = (start_rank + 1) % total_ranks
 
             # Update next starting rank for this request
-            if request_start_rank_dict is not None:
-                request_start_rank_dict[req_id] = (start_rank, tokens_blank)
+            request_start_rank_dict[req_id] = (start_rank, tokens_blank)
 
         return cast(List[Optional[List[Optional[List[int]]]]],
                     local_chunked_kv_lens)
