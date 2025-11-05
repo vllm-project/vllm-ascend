@@ -188,7 +188,7 @@ class SpecDecodeBaseProposer(Proposer):
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
-        eagle_attn_metadata = attn_metadata[self.attn_layer_name]
+        draft_attn_metadata = attn_metadata[self.attn_layer_name]
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
             target_token_ids = self.runner.input_ids[:num_scheduled_tokens]
@@ -199,8 +199,8 @@ class SpecDecodeBaseProposer(Proposer):
                     dim=-1)
             else:
                 target_hidden_states = hidden_states[:num_scheduled_tokens]
-            target_slot_mapping = eagle_attn_metadata.slot_mapping
-            cu_num_tokens = eagle_attn_metadata.query_start_loc
+            target_slot_mapping = draft_attn_metadata.slot_mapping
+            cu_num_tokens = draft_attn_metadata.query_start_loc
         else:
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
             num_rejected_tokens = [
@@ -213,7 +213,7 @@ class SpecDecodeBaseProposer(Proposer):
                 device=self.device,
             )
             cu_num_tokens, token_indices =\
-                    self._prepare_inputs(eagle_attn_metadata, num_rejected_tokens)
+                    self._prepare_inputs(draft_attn_metadata, num_rejected_tokens)
             target_token_ids = self.runner.input_ids[token_indices]
             target_positions = positions[token_indices]
             if self.name == SpecDcodeType.EAGLE3:
@@ -221,7 +221,7 @@ class SpecDecodeBaseProposer(Proposer):
                     [h[token_indices] for h in aux_hidden_states], dim=-1)
             else:
                 target_hidden_states = hidden_states[token_indices]
-            target_slot_mapping = eagle_attn_metadata.slot_mapping[
+            target_slot_mapping = draft_attn_metadata.slot_mapping[
                 token_indices]
 
         draft_token_ids = self._propose(
@@ -231,7 +231,7 @@ class SpecDecodeBaseProposer(Proposer):
             target_slot_mapping=target_slot_mapping,
             next_token_ids=next_token_ids,
             cu_num_tokens=cu_num_tokens,
-            block_table=eagle_attn_metadata.block_tables,
+            block_table=draft_attn_metadata.block_tables,
             sampling_metadata=sampling_metadata,
         )
         spec_token_ids = draft_token_ids.tolist()

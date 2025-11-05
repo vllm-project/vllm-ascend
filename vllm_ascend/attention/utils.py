@@ -16,8 +16,9 @@ class AscendPrefillContextParallelMetadata:
 
     num_actual_tokens_pcp_padded: Optional[int] = None
 
-    num_computed_tokens_of_pcp_dcp: Optional[list[Optional[list[Optional[
-        list[int]]]]]] = None
+    num_computed_tokens_of_pcp_dcp: Optional[
+        list[Optional[list[Optional[list[int]]]]]
+    ] = None
 
     q_head_idx_tensor: torch.Tensor = None
 
@@ -47,7 +48,7 @@ class AscendCommonAttentionMetadata:
     """
     Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
-    
+
     For many of the tensors we keep both GPU and CPU versions.
     """
 
@@ -104,15 +105,17 @@ class AscendCommonAttentionMetadata:
     sin: torch.Tensor = None
 
     prefill_context_parallel_metadata: Optional[
-        AscendPrefillContextParallelMetadata] = None
+        AscendPrefillContextParallelMetadata
+    ] = None
 
     max_seq_len: int = -1
-    
-    def batch_size(self) -> int:        
+
+    def batch_size(self) -> int:
         return self.seq_lens_cpu.shape[0]
 
-    def query_lens(self) -> torch.Tensor:        
+    def query_lens(self) -> torch.Tensor:
         return self.query_start_loc[1:] - self.query_start_loc[:-1]
+
 
 def split_decodes_and_prefills(
     common_attn_metadata: AscendCommonAttentionMetadata,
@@ -197,7 +200,8 @@ def trans_rope_weight(weight, rope_dim):
     nope_part = weight[..., :-rope_dim, :]
     rope_part = weight[..., -rope_dim:, :]
     reordered_rope_part = torch.cat(
-        (rope_part[..., ::2, :], rope_part[..., 1::2, :]), dim=-2)
+        (rope_part[..., ::2, :], rope_part[..., 1::2, :]), dim=-2
+    )
     return torch.cat((nope_part, reordered_rope_part), dim=-2).contiguous()
 
 
@@ -210,36 +214,34 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
     nz_mat = torch.permute(
         torch.reshape(
             nd_mat,
-            (r // block_size[0], block_size[0], c // block_size[1],
-             block_size[1]),
+            (r // block_size[0], block_size[0], c // block_size[1], block_size[1]),
         ),
         [2, 0, 1, 3],
     )
     nz_mat = torch.reshape(
-        nz_mat,
-        (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3]))
+        nz_mat, (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3])
+    )
     return nz_mat
 
-def extend_flat_seqs(    
-        seqs: torch.Tensor, 
-        end_locs: torch.Tensor, 
-        new_vals: torch.Tensor
-        ) -> torch.Tensor:    
-    """    
-    This function appends a single new value into multiple sequences    
-    that are stored in a flat format. E.g.        
-    [x1, x2, y1] and [x3, y2] become [x1, x2, x3, y1, y2]    
-    """    
-    new_len = seqs.shape[0] + new_vals.shape[0]    
-    new_seqs = torch.zeros(new_len, device=seqs.device, dtype=seqs.dtype)    
-    # indices for previous seqs    
-    start_locs = end_locs[:-1] + 1    
-    seqs_new_idxs = torch.ones_like(seqs)    
-    seqs_new_idxs[start_locs] += 1    
-    seqs_new_idxs = seqs_new_idxs.cumsum(0) - 1    
-    # indices for new values    
-    new_val_idxs = end_locs + 1 + torch.arange(new_vals.shape[0], device=seqs.device)    
-    # assign seqs and new vals    
-    new_seqs[seqs_new_idxs] = seqs    
-    new_seqs[new_val_idxs] = new_vals    
+
+def extend_flat_seqs(
+    seqs: torch.Tensor, end_locs: torch.Tensor, new_vals: torch.Tensor
+) -> torch.Tensor:
+    """
+    This function appends a single new value into multiple sequences
+    that are stored in a flat format. E.g.
+    [x1, x2, y1] and [x3, y2] become [x1, x2, x3, y1, y2]
+    """
+    new_len = seqs.shape[0] + new_vals.shape[0]
+    new_seqs = torch.zeros(new_len, device=seqs.device, dtype=seqs.dtype)
+    # indices for previous seqs
+    start_locs = end_locs[:-1] + 1
+    seqs_new_idxs = torch.ones_like(seqs)
+    seqs_new_idxs[start_locs] += 1
+    seqs_new_idxs = seqs_new_idxs.cumsum(0) - 1
+    # indices for new values
+    new_val_idxs = end_locs + 1 + torch.arange(new_vals.shape[0], device=seqs.device)
+    # assign seqs and new vals
+    new_seqs[seqs_new_idxs] = seqs
+    new_seqs[new_val_idxs] = new_vals
     return new_seqs

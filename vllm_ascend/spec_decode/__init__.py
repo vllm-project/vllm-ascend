@@ -23,21 +23,18 @@ from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from vllm_ascend.spec_decode.draft_proposer import DraftModelProposer
 
 
-def get_spec_decode_method(method,
-                           vllm_config,
-                           device,
-                           runner,
-                           is_torchair_graph=False):
+def get_spec_decode_method(
+    method, vllm_config, device, runner, is_torchair_graph=False
+):
     if method == "ngram":
         return NgramProposer(vllm_config, device, runner)
     elif method in ["eagle", "eagle3"]:
         return EagleProposer(vllm_config, device, runner)
-    elif method == 'deepseek_mtp':
+    elif method == "deepseek_mtp":
         if is_torchair_graph:
             return TorchairMtpProposer(vllm_config, device, runner)
         return MtpProposer(vllm_config, device, runner)
-    elif method == 'draft_model':        
+    elif method == "draft_model":
         return DraftModelProposer(vllm_config, device, runner)
     else:
-        raise ValueError("Unknown speculative decoding method: "
-                         f"{method}")
+        raise ValueError(f"Unknown speculative decoding method: {method}")
