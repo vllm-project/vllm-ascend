@@ -1,7 +1,6 @@
 # Standard
 import math
 import random
-import re
 import threading
 import time
 from typing import Generator, List, Optional, Union
