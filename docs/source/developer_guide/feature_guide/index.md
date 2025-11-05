@@ -7,4 +7,5 @@ This section provides an overview of the features implemented in vLLM Ascend. De
 :maxdepth: 1
 patch
 ModelRunner_prepare_inputs
+ACL_Graph
 :::
