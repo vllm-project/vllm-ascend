@@ -24,6 +24,15 @@ fake_engine = types.ModuleType("mooncake.engine")
 fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
 
+envs_mod = types.ModuleType("vllm_ascend.envs")
+envs_mod.PHYSICAL_DEVICES = "10,11"
+envs_mod.HCCL_RDMA_TIMEOUT = "20"
+envs_mod.HCCL_RDMA_RETRY_CNT = "7"
+pkg_mod = types.ModuleType("vllm_ascend")
+pkg_mod.envs = envs_mod
+sys.modules["vllm_ascend"] = pkg_mod
+sys.modules["vllm_ascend.envs"] = envs_mod
+
 from vllm_ascend.distributed.mooncake_connector import (  # noqa: E402
     KVCacheRecvingThread, KVCacheSendingThread, KVCacheTaskTracker,
     KVConnectorRole, MooncakeAgentMetadata, MooncakeConnector,
@@ -978,8 +987,6 @@ class MockTensor:
         self.data_ptr = MagicMock(return_value=0x1000)
 
 
-mock_envs_ascend = MagicMock()
-mock_envs_ascend.MOONCAKE_CONNECTOR_PROTOCOL = "mock_protocol"
 
 mock_logger = MagicMock()
 
@@ -1017,14 +1024,12 @@ def mock_string_to_int64_hash(s):
 class TestMooncakeConnectorWorker(unittest.TestCase):
 
     def setUp(self):
-        self.envs_ascend_mock = MockEnvsAscend()
         self.mock_transfer_engine = MagicMock()
         self.mock_transfer_engine.get_rpc_port.return_value = 9090
         self.mock_transfer_engine.initialize.return_value = 0
         self.mock_transfer_engine.register_memory.return_value = 0
 
         self.patches = [
-            patch('os.getenv', return_value="10,11"),
             patch('torch.Tensor.size', return_value=(10, 16, 8, 16)),
             patch('torch.Tensor.element_size', return_value=4),
             patch('torch.Tensor.data_ptr', return_value=0x1000),
@@ -1053,8 +1058,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                   MagicMock()),
             patch('vllm_ascend.distributed.mooncake_connector.threading.Event',
                   MagicMock()),
-            patch.dict('sys.modules',
-                       {'vllm_ascend.envs': self.envs_ascend_mock}),
         ]
 
         for p in self.patches:
