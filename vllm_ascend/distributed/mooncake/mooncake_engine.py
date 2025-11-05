@@ -369,7 +369,8 @@ class MooncakeEngine:
                     "block_ids": request.block_ids,
                     "mask": store_mask,
                 })
-                self.kv_send_thread.handle_request(req)  # type: ignore[union-attr]
+                self.kv_send_thread.handle_request(  # type: ignore[union-attr]
+                    req)
 
     def retrieve_layer(
         self,

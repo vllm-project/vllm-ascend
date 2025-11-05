@@ -290,7 +290,6 @@ class RequestTracker:
         scheduled again
         """
 
-
         if len(new_block_ids) == 0:
             new_block_ids = []
         elif isinstance(new_block_ids, tuple):
