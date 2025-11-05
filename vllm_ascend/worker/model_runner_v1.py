@@ -1717,7 +1717,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logits_indices = torch.from_numpy(
                     cu_num_tokens
                 ) * self.pcp_size - self.num_pcp_pads[:num_reqs] - 1
-                logits_indices = logits_indices.to(self.device, non_blocking=True)
+                logits_indices = logits_indices.to(self.device,
+                                                   non_blocking=True)
             else:
                 logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
                     self.device, non_blocking=True)

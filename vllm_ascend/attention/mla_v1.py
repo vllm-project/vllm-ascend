@@ -1,11 +1,10 @@
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, ClassVar, List, NamedTuple, Optional, Tuple, Type,
-                    TypeVar)
+from typing import (TYPE_CHECKING, ClassVar, List, NamedTuple, Optional, Tuple,
+                    Type, TypeVar)
 
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 import torch_npu
 from torch import nn
 from vllm.attention.backends.abstract import (AttentionBackend,
@@ -500,7 +499,7 @@ class AscendMLAMetadataBuilder:
                 self.batch_seq_mask_buf[:batch_seq_mask.shape[0]].copy_(
                     batch_seq_mask, non_blocking=True)
                 batch_seq_mask = self.batch_seq_mask_buf[:batch_seq_mask.
-                                                           shape[0]]
+                                                         shape[0]]
                 cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
             else:
                 cp_seq_len, batch_seq_mask = None, None
@@ -527,8 +526,7 @@ class AscendMLAMetadataBuilder:
                     sin=sin,
                     cos=cos,
                     cp_seq_len=cp_seq_len,
-                    batch_seq_mask=batch_seq_mask
-                )
+                    batch_seq_mask=batch_seq_mask)
             else:
                 cos[:num_decode_tokens,
                     ...] = self.cos_cache[input_positions].unsqueeze(
@@ -548,8 +546,7 @@ class AscendMLAMetadataBuilder:
                     sin=sin[:num_decode_tokens, ...],
                     cos=cos[:num_decode_tokens, ...],
                     cp_seq_len=cp_seq_len,
-                    batch_seq_mask=batch_seq_mask
-                )
+                    batch_seq_mask=batch_seq_mask)
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens_pcp_padded=num_actual_tokens_pcp_padded,
@@ -1546,11 +1543,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         return output
 
     def _attention_with_mask_and_nomask(
-        self, q_nope: torch.Tensor, q_pe: torch.Tensor,
-        k_nope: torch.Tensor, k_pe: torch.Tensor, value: torch.Tensor,
-        kv_mask_idx: torch.Tensor, kv_nomask_idx: torch.Tensor,
-        attn_mask_seqlens: torch.Tensor, attn_nomask_seqlens: torch.Tensor,
-        mask: torch.Tensor):
+            self, q_nope: torch.Tensor, q_pe: torch.Tensor,
+            k_nope: torch.Tensor, k_pe: torch.Tensor, value: torch.Tensor,
+            kv_mask_idx: torch.Tensor, kv_nomask_idx: torch.Tensor,
+            attn_mask_seqlens: torch.Tensor, attn_nomask_seqlens: torch.Tensor,
+            mask: torch.Tensor):
         attn_output = torch.empty(q_nope.shape[0],
                                   self.num_heads,
                                   self.v_head_dim,
@@ -1706,14 +1703,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                 lse=softmax_lse)
 
         # Update out&lse
-        attn_out_lse_list = self._process_attn_out_lse(attn_output, softmax_lse, attn_metadata)
+        attn_out_lse_list = self._process_attn_out_lse(attn_output,
+                                                       softmax_lse,
+                                                       attn_metadata)
         attn_output = self._npu_attention_update(attn_out_lse_list)
         return self._v_up_proj(attn_output)
 
     def _npu_attention_update(
-        self, 
-        attn_out_lse_list: List[torch.Tensor]
-    ) -> torch.Tensor:
+            self, attn_out_lse_list: List[torch.Tensor]) -> torch.Tensor:
         attn_out_split_cp = []
         attn_lse_split_cp = []
 
@@ -1722,16 +1719,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                 *torch.split(attn_out_lse, [self.kv_lora_rank, 1], dim=-1))
             attn_out_split_cp.append(attn_out_allgather)
             attn_lse_split_cp.append(attn_lse_allgather)
-        attn_out, _ = torch_npu.npu_attention_update(
-            attn_lse_split_cp, attn_out_split_cp, 0)
-        attn_out = attn_out.view(-1, attn_out_lse_list[0].shape[1], self.kv_lora_rank)
+        attn_out, _ = torch_npu.npu_attention_update(attn_lse_split_cp,
+                                                     attn_out_split_cp, 0)
+        attn_out = attn_out.view(-1, attn_out_lse_list[0].shape[1],
+                                 self.kv_lora_rank)
         return attn_out
 
-    def _out_lse_reshape(
-        self, 
-        attn_out: torch.Tensor,
-        attn_lse: torch.Tensor
-    ) -> torch.Tensor:
+    def _out_lse_reshape(self, attn_out: torch.Tensor,
+                         attn_lse: torch.Tensor) -> torch.Tensor:
         attn_out = attn_out.contiguous().view(
             attn_out.shape[0] * attn_out.shape[1], attn_out.shape[2])
         attn_lse = attn_lse.contiguous().view(
@@ -1739,16 +1734,18 @@ class AscendMLAImpl(MLAAttentionImpl):
         return attn_out, attn_lse
 
     def _process_attn_out_lse(
-        self, 
+        self,
         attn_output: List[torch.Tensor],
         softmax_lse: List[torch.Tensor],
         attn_metadata: AscendMLAMetadata,
     ) -> List[torch.Tensor]:
         attn_out_lse_list = []
         decode_meta = attn_metadata.decode
-        out_mask = decode_meta.batch_seq_mask[:, None, None].expand_as(attn_output)
+        out_mask = decode_meta.batch_seq_mask[:, None,
+                                              None].expand_as(attn_output)
         attn_output = torch.where(out_mask, 0, attn_output)
-        lse_mask = decode_meta.batch_seq_mask[:, None, None].expand_as(softmax_lse)
+        lse_mask = decode_meta.batch_seq_mask[:, None,
+                                              None].expand_as(softmax_lse)
         softmax_lse = torch.where(lse_mask, -torch.inf, softmax_lse)
 
         softmax_lse = softmax_lse.to(torch.float32)
