@@ -88,9 +88,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 dtype=torch.int32,
                 device=self.device,
             )
-            num_tokens = num_scheduled_tokens - sum(num_rejected_tokens)
             cu_num_tokens, token_indices = self._prepare_inputs(
-                attn_metadata.query_start_loc, num_rejected_tokens, num_tokens
+                attn_metadata, num_rejected_tokens
             )
             target_token_ids = self.runner.input_ids[token_indices]
             target_positions = positions[token_indices]
