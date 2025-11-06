@@ -349,6 +349,9 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
+            ("attn.qkv.", "attn.q.", "q"),
+            ("attn.qkv.", "attn.k.", "k"),
+            ("attn.qkv.", "attn.v.", "v"),
             ("mlp.gate_up_proj.", "mlp.gate_proj.", 0),
             ("mlp.gate_up_proj.", "mlp.up_proj.", 1),
         ]
@@ -363,6 +366,11 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                if self.enable_pad and shard_id == "v":
+                    if "attn.qkv.weight" in name:
+                        param.data = self.pad_qkv_weight(param.data)
+                    if "attn.qkv.bias" in name:
+                        param.data = self.pad_qkv_bias(param.data)
                 break
             else:
                 param = params_dict[name]
