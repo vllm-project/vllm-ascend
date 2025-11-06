@@ -57,23 +57,14 @@ for i in {0..15}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
-git clone https://github.com/kvcache-ai/Mooncake.git
+git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 ```
 
-Update and install Python
-
-```shell
-apt-get update
-apt-get install python3
-```
-
-Modify Mooncake compilation option
+(Optional) Replace go install url if the network is poor
 
 ```shell
 cd Mooncake
-vi mooncake-common/common.cmake
-# find this row and set USE_ASCEND_DIRECT ON.
-option(USE_ASCEND_DIRECT "option for using ascend npu with adxl engine" ON)
+sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
 ```
 
 Install mpi
@@ -93,7 +84,7 @@ Compile and install
 ```shell
 mkdir build
 cd build
-cmake ..
+cmake .. -USE_ASCEND_DIRECT=ON
 make -j
 make install
 ```
