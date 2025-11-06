@@ -5,7 +5,8 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.models.deepseek_mtp import DeepSeekMultiTokenPredictorLayer
+from vllm.model_executor.models.deepseek_mtp import \
+    DeepSeekMultiTokenPredictorLayer
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2DecoderLayer
 from vllm.model_executor.models.utils import maybe_prefix
 
@@ -74,6 +75,7 @@ def predictor_forward(
                                              residual=None)
     hidden_states = residual + hidden_states
     return hidden_states
+
 
 DeepSeekMultiTokenPredictorLayer.__init__ = predictor_init
 DeepSeekMultiTokenPredictorLayer.forward = predictor_forward
