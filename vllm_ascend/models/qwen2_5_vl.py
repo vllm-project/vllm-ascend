@@ -76,19 +76,6 @@ class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
         if self.hidden_size_per_attention_head > MIN_PAD_SIZE and self.hidden_size_per_attention_head < MAX_PAD_SIZE:
             self.hidden_size_per_attention_head = MAX_PAD_SIZE
 
-    def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
-        # [s, b, 3 * head * head_dim]
-        seq_len, bs, _ = qkv.shape
-
-        # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
-        q, k, v = qkv.chunk(3, dim=2)
-
-        # 3 * [s, b, head * head_dim] -> 3 * [s, b, head, head_dim]
-        new_shape = (seq_len, bs, self.num_attention_heads_per_partition,
-                     self.hidden_size_per_attention_head)
-        q, k, v = (x.view(*new_shape) for x in (q, k, v))
-        return q, k, v
-
     def forward(
         self,
         x: torch.Tensor,
