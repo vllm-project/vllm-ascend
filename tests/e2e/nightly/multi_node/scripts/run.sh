@@ -9,7 +9,6 @@ RED="\033[0;31m"
 NC="\033[0m" # No Color
 
 # Configuration
-GOVER=1.23.8
 LOG_DIR="/root/.cache/tests/logs"
 OVERWRITE_LOGS=true
 SRC_DIR="$WORKSPACE/source_code"
@@ -97,34 +96,6 @@ install_vllm() {
     pip install -r "$SRC_DIR/vllm-ascend/requirements-dev.txt"
 }
 
-download_go() {
-    ARCH=$(uname -m)
-    GOVER=1.23.8
-    if [ "$ARCH" = "aarch64" ]; then
-        ARCH="arm64"
-    elif [ "$ARCH" = "x86_64" ]; then
-        ARCH="amd64"
-    else
-        echo "Unsupported architecture: $ARCH"
-        exit 1
-    fi
-    # Download Go
-    echo "Downloading Go $GOVER..."
-    wget -q --show-progress https://golang.google.cn/dl/go$GOVER.linux-$ARCH.tar.gz
-    check_success "Failed to download Go $GOVER"
-
-    # Install Go
-    echo "Installing Go $GOVER..."
-    tar -C /usr/local -xzf go$GOVER.linux-$ARCH.tar.gz
-    check_success "Failed to install Go $GOVER"
-
-    # Clean up downloaded file
-    rm -f go$GOVER.linux-$ARCH.tar.gz
-    check_success "Failed to clean up Go installation file"
-
-    print_success "Go $GOVER installed successfully"
-}
-
 install_ais_bench() {
     local AIS_BENCH="$SRC_DIR/vllm-ascend/benchmark"
     git clone https://gitee.com/aisbench/benchmark.git $AIS_BENCH
@@ -134,29 +105,6 @@ install_ais_bench() {
     pip3 install -r requirements/api.txt
     pip3 install -r requirements/extra.txt
     cd -
-}
-
-install_go() {
-    # Check if Go is already installed
-    if command -v go &> /dev/null; then
-        GO_VERSION=$(go version | awk '{print $3}')
-        if [[ "$GO_VERSION" == "go$GOVER" ]]; then
-            echo -e "${YELLOW}Go $GOVER is already installed. Skipping...${NC}"
-        else
-            echo -e "${YELLOW}Found Go $GO_VERSION. Will install Go $GOVER...${NC}"
-            download_go
-        fi
-    else
-        download_go
-    fi
-
-    # Add Go to PATH if not already there
-    if ! grep -q "export PATH=\$PATH:/usr/local/go/bin" ~/.bashrc; then
-        echo -e "${YELLOW}Adding Go to your PATH in ~/.bashrc${NC}"
-        echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
-        echo -e "${YELLOW}Please run 'source ~/.bashrc' or start a new terminal to use Go${NC}"
-    fi
-    export PATH=$PATH:/usr/local/go/bin
 }
 
 kill_npu_processes() {
@@ -193,11 +141,8 @@ main() {
     install_sys_dependencies
     install_vllm
     install_ais_bench
-    # to speed up mooncake build process, install Go here
-    install_go
     cd "$WORKSPACE/source_code"
-    . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh \
-    "pooling_async_memecpy_v1" "8fce1ffab3930fec2a8b8d3be282564dfa1bb186"
+    . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh
     cd "$WORKSPACE/source_code/vllm-ascend"
     run_tests_with_log
 }
