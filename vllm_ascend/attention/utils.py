@@ -16,8 +16,7 @@ class AscendPrefillContextParallelMetadata:
 
     num_actual_tokens_pcp_padded: Optional[int] = None
 
-    num_computed_tokens_of_pcp_dcp: Optional[list[Optional[list[Optional[
-        list[int]]]]]] = None
+    num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
 
     q_head_idx_tensor: torch.Tensor = None
 
