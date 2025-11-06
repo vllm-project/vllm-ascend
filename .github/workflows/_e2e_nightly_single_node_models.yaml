@@ -1,4 +1,21 @@
-name: 'accuracy test'
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'e2e nightly models test'
 
 on:
   workflow_call:
@@ -16,7 +33,7 @@ on:
       image:
         required: true
         type: string
-      model_name:
+      model_list:
         required: true
         type: string
       upload:
@@ -24,38 +41,44 @@ on:
         type: boolean
         default: false
 
-jobs:
-  accuracy_tests:
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
 
+# only cancel in-progress runs of the same workflow
+# and ignore the lint / 1 card / 2 cards / 4 cards test type
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.runner }}-${{inputs.model_list}}
+  cancel-in-progress: true
+
+jobs:
+  e2e-nightly:
+    name: ${{inputs.model_list}} accuracy test
     runs-on: ${{ inputs.runner }}
-    name: ${{ inputs.model_name }} accuracy
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
       env:
         VLLM_USE_MODELSCOPE: True
-        # 1. If version specified (work_dispatch), do specified branch accuracy test
-        # 2. If no version (labeled PR), do accuracy test by default ref:
-        # The branch, tag or SHA to checkout. When checking out the repository that
-        # triggered a workflow, this defaults to the reference or SHA for that event.
-        # Otherwise, uses the default branch.
         GHA_VLLM_ASCEND_VERSION: ${{ inputs.vllm-ascend }}
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set model name as output
-        id: set_output
+      - name: Check npu and CANN info
         run: |
-          echo "model_name=${{ inputs.model_name }}" >> $GITHUB_OUTPUT
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
       - name: Config mirrors
         run: |
-          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
-          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
           apt-get update -y
           apt install git -y
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
 
       - name: Install system dependencies
         run: |
@@ -73,9 +96,16 @@ jobs:
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
-        
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
       - name: Install Ascend toolkit & triton_ascend (for Qwen3-Next-80B-A3B-Instruct)
-        if: ${{ inputs.model_name == 'Qwen3-Next-80B-A3B-Instruct' }}
+        if: ${{ inputs.runner == 'linux-aarch64-a2-4' && contains(inputs.model_list, 'Qwen3-Next-80B-A3B-Instruct') }}
         shell: bash -l {0}
         run: |
           wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/Ascend-BiSheng-toolkit_aarch64.run -O /tmp/Ascend-BiSheng-toolkit_aarch64.run
@@ -107,14 +137,6 @@ jobs:
           repository: vllm-project/vllm-ascend
           path: ./vllm-ascend
           ref: ${{ env.GHA_VLLM_ASCEND_VERSION }}
-
-      - name: Install vllm-project/vllm-ascend
-        working-directory: ./vllm-ascend
-        env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
 
       - name: Get vLLM commit hash and URL
         working-directory: ./vllm-empty
@@ -149,11 +171,12 @@ jobs:
             pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
           } >> "$GITHUB_ENV"
 
-      - name: Run accuracy test
+      - name: Run vllm-project/vllm-ascend accuracy test
         id: report
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
+          VLLM_CI_RUNNER: ${{ inputs.runner }}
           VLLM_VERSION: ${{ env.GHA_VLLM_VERSION }}
           VLLM_COMMIT: ${{ env.VLLM_COMMIT }}
           VLLM_ASCEND_VERSION: ${{ env.GHA_VLLM_ASCEND_VERSION || github.ref }}
@@ -162,24 +185,44 @@ jobs:
           TORCH_VERSION: ${{ env.GHA_TORCH_VERSION }}
           TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
         run: |
-          model_base_name=$(basename ${{ inputs.model_name }})
-          markdown_name="${model_base_name}"
-          echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
           mkdir -p ./benchmarks/accuracy
-          pytest -sv ./tests/e2e/models/test_lm_eval_correctness.py \
-          --config ./tests/e2e/models/configs/${{ inputs.model_name }}.yaml
+          echo "Received model_list: ${{ inputs.model_list }}"
+          models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+          any_failure=0
+          for model in $models; do
+            echo "Running test for model: $model"
+            pytest -sv ./tests/e2e/models/test_lm_eval_correctness.py \
+              --config "./tests/e2e/models/configs/${model}.yaml" || {
+              echo "Test failed for model: $model"
+              any_failure=1
+            }
+          done
+
+          if [ $any_failure -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Generate step summary
         if: ${{ always() }}
         run: |
-          cat ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md >> $GITHUB_STEP_SUMMARY
+          models=$(echo '${{ inputs.model_list }}' | jq -r '.[]')
+          for model in $models; do
+            echo "Processing model: $model"
+            model_base_name=$(basename "$model")
+            cat ./benchmarks/accuracy/${model_base_name}.md >> $GITHUB_STEP_SUMMARY
+          done
+
+      - name: Set artifact timestamp
+        id: ts
+        run: |
+          echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
 
       - name: Upload Report
         if: ${{ inputs.upload == true }}
         uses: actions/upload-artifact@v5
         with:
-          name: "report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}"
-          path: ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md
+          name: report-${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.ts.outputs.artifact_ts }}
+          path: ./benchmarks/accuracy/
           if-no-files-found: warn
           retention-days: 90
           overwrite: true
