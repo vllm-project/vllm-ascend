@@ -6,14 +6,14 @@ from typing import Any, Optional
 import torch
 from vllm.utils import logger
 
+from vllm_ascend.distributed.mooncake.backend.backend import Backend
 from vllm_ascend.distributed.mooncake.config_data import (
     ChunkedTokenDatabase, LasyerMultiBlockReqMeta)
-from vllm_ascend.distributed.mooncake.mooncake_store import Mooncakestore
 
 
 class KVTransferThread(threading.Thread):
 
-    def __init__(self, tp_rank: int, tp_size: int, m_store: Mooncakestore,
+    def __init__(self, tp_rank: int, tp_size: int, m_store: Backend,
                  local_kv_caches_base_addr: list[int],
                  token_database: ChunkedTokenDatabase, block_len: list[int],
                  block_size: int, ready_event: threading.Event, name: str):
@@ -122,7 +122,7 @@ class KVTransferThread(threading.Thread):
 
 class KVCacheStoreSendingThread(KVTransferThread):
 
-    def __init__(self, tp_rank: int, tp_size: int, m_store: Mooncakestore,
+    def __init__(self, tp_rank: int, tp_size: int, m_store: Backend,
                  local_kv_caches_base_addr: list[int],
                  token_database: ChunkedTokenDatabase, block_len: list[int],
                  block_size: int, ready_event: threading.Event):
@@ -142,27 +142,17 @@ class KVCacheStoreSendingThread(KVTransferThread):
         block_ids = req_meta["block_ids"]
         req_id = req_meta["req_id"]
         is_last_chunk = req_meta["is_last_chunk"]
-        if self.m_store.config.use_ascend_direct:
-            addr_list = []
-            size_list = []
-            key_list = []
-            blockIds = []
-            for start, end, key in self.token_database.process_tokens(
-                    tokens, mask):
-                addr, size, block_id = self.prepare_value(
-                    start, end, block_ids)
-                key_list.append(key.to_string())
-                addr_list.append(addr)
-                size_list.append(size)
-                blockIds.append(block_id)
-            torch.npu.current_stream().synchronize()
-            self.m_store.put_batch(key_list, addr_list, size_list, blockIds)
-        else:
-            torch.npu.current_stream().synchronize()
-            for start, end, key in self.token_database.process_tokens(
-                    tokens, mask):
-                addr, size, _ = self.prepare_value(start, end, block_ids)
-                self.m_store.put(key, addr, size)
+        addr_list = []
+        size_list = []
+        key_list = []
+        for start, end, key in self.token_database.process_tokens(
+                tokens, mask):
+            addr, size, _ = self.prepare_value(start, end, block_ids)
+            key_list.append(key.to_string())
+            addr_list.append(addr)
+            size_list.append(size)
+        torch.npu.current_stream().synchronize()
+        self.m_store.put(key_list, addr_list, size_list)
         if is_last_chunk:
             self.set_finished_request(req_id)
         self.request_queue.task_done()
@@ -170,7 +160,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
 class KVCacheStoreRecvingThread(KVTransferThread):
 
-    def __init__(self, tp_rank: int, tp_size: int, m_store: Mooncakestore,
+    def __init__(self, tp_rank: int, tp_size: int, m_store: Backend,
                  local_kv_caches_base_addr: list[int],
                  token_database: ChunkedTokenDatabase, block_len: list[int],
                  block_size: int, ready_event: threading.Event):
@@ -189,32 +179,23 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         mask = req_meta["mask"]
         block_ids = req_meta["block_ids"]
         req_id = req_meta["req_id"]
-        if self.m_store.config.use_ascend_direct:
-            addr_list = []
-            size_list = []
-            key_list = []
-            blockIds = []
-            for start, end, key in self.token_database.process_tokens(
-                    tokens, mask):
-                addr, size, block_id = self.prepare_value(
-                    start, end, block_ids)
-                key_list.append(key.to_string())
-                addr_list.append(addr)
-                size_list.append(size)
-                blockIds.append(block_id)
-            self.m_store.get_batch(key_list, addr_list, size_list, blockIds)
-        else:
-            for start, end, key in self.token_database.process_tokens(
-                    tokens, mask):
-                addr, size, _ = self.prepare_value(start, end, block_ids)
-                self.m_store.get(key, addr, size)
+        addr_list = []
+        size_list = []
+        key_list = []
+        for start, end, key in self.token_database.process_tokens(
+                tokens, mask):
+            addr, size, _ = self.prepare_value(start, end, block_ids)
+            key_list.append(key.to_string())
+            addr_list.append(addr)
+            size_list.append(size)
+        self.m_store.get(key_list, addr_list, size_list)
         self.set_finished_request(req_id)
         self.request_queue.task_done()
 
 
 class KVCacheStoreLayerSendingThread(KVTransferThread):
 
-    def __init__(self, tp_rank: int, tp_size: int, m_store: Mooncakestore,
+    def __init__(self, tp_rank: int, tp_size: int, m_store: Backend,
                  local_kv_caches_base_addr: list[int],
                  token_database: ChunkedTokenDatabase, block_len: list[int],
                  block_size: int, ready_event: threading.Event,
@@ -250,7 +231,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
 
 class KVCacheStoreLayerRecvingThread(KVTransferThread):
 
-    def __init__(self, tp_rank: int, tp_size: int, m_store: Mooncakestore,
+    def __init__(self, tp_rank: int, tp_size: int, m_store: Backend,
                  local_kv_caches_base_addr: list[int],
                  token_database: ChunkedTokenDatabase, block_len: list[int],
                  block_size: int, ready_event: threading.Event,
