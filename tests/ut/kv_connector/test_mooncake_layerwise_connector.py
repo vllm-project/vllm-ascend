@@ -792,15 +792,15 @@ class TestMooncakeLayerwiseConnector(unittest.TestCase):
 class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
 
     def setUp(self):
-        self.envs_ascend_mock = type("MockEnvsAscend", (),
-                                     {"PHYSICAL_DEVICES": "10,11"})()
         self.mock_transfer_engine = MagicMock()
         self.mock_transfer_engine.get_rpc_port.return_value = 9090
         self.mock_transfer_engine.initialize.return_value = 0
         self.mock_transfer_engine.register_memory.return_value = 0
 
         self.patches = [
-            patch('os.getenv', return_value="10,11"),
+            patch(
+                'vllm_ascend.distributed.mooncake_layerwise_connector.envs_ascend.PHYSICAL_DEVICES',
+                '10,11'),
             patch('torch.Tensor.size', return_value=(10, 16, 8, 16)),
             patch('torch.Tensor.element_size', return_value=4),
             patch('torch.Tensor.data_ptr', return_value=0x1000),
@@ -833,8 +833,6 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
             patch(
                 'vllm_ascend.distributed.mooncake_layerwise_connector.threading.Event',
                 MagicMock()),
-            patch.dict('sys.modules',
-                       {'vllm_ascend.envs': self.envs_ascend_mock}),
             patch(
                 'vllm_ascend.distributed.mooncake_layerwise_connector.get_ascend_config',
                 return_value=SimpleNamespace(pd_tp_ratio=1,
