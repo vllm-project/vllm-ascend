@@ -762,7 +762,8 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         q_pe = query[..., self.qk_nope_head_dim:]
         q_nope = query[..., :self.qk_nope_head_dim]
 
-        seq_len_base = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
+        seq_len_base = torch.tensor(prefill_metadata.query_lens,
+                                    dtype=torch.int32)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
         num_heads = cache_k_pe.size(2)
@@ -771,7 +772,8 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
             seq_len_chunk = prefill_metadata.chunked_context.chunk_seq_lens[i]
-            seq_len_chunk_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[i]
+            seq_len_chunk_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[
+                i]
             seq_len = torch.stack([seq_len_base, seq_len_chunk])
             kv_c_normed = torch.empty(toks,
                                       num_heads,

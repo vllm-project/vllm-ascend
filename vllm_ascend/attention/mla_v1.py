@@ -921,7 +921,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         iters = len(prefill_metadata.chunked_context.seq_tot)
 
-        seq_len_base = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
+        seq_len_base = torch.tensor(prefill_metadata.query_lens,
+                                    dtype=torch.int32)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
         num_heads = cache_k_pe.size(2)
@@ -930,7 +931,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
             seq_len_chunk = prefill_metadata.chunked_context.chunk_seq_lens[i]
-            seq_len_chunk_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[i]
+            seq_len_chunk_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[
+                i]
             seq_len = torch.stack([seq_len_base, seq_len_chunk])
             kv_c_normed = torch.empty(toks,
                                       num_heads,
