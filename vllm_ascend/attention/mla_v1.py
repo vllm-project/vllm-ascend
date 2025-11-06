@@ -1109,6 +1109,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 ]
                 if len(kv_c_k_pe_full_list) > 0:
                     kv_c_k_pe_full = torch.cat(kv_c_k_pe_full_list, dim=0)
+                if len(kv_c_k_pe_full.shape) == 1:
+                    assert total_toks == 1
+                    kv_c_k_pe_full = kv_c_k_pe_full.unsqueeze(0)
                 assert kv_c_k_pe_full.shape[
                     0] == total_toks and kv_c_k_pe_full.shape[
                         1] == latent_rope_dim
