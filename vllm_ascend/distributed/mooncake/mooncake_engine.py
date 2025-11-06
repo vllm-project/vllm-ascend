@@ -520,8 +520,10 @@ class MooncakeEngine:
 
     def decode_get_finished(self, finished_req_ids: set[str]) -> set[str]:
         finished_sending = set()
-        for req_id in self.kv_send_thread.stored_requests.copy():
-            if self.kv_send_thread.stored_requests[req_id] == 0:
+        for req_id in self.kv_send_thread.stored_requests.copy(  # type: ignore[union-attr]
+        ):
+            if self.kv_send_thread.stored_requests[  # type: ignore[union-attr]
+                    req_id] == 0:
                 self.finished_store_req.add(req_id)
             else:
                 continue
@@ -529,14 +531,16 @@ class MooncakeEngine:
             if req_id in self.finished_store_req:
                 self.finished_store_req.remove(req_id)
                 finished_sending.add(req_id)
-                del self.kv_send_thread.stored_requests[req_id]
+                del self.kv_send_thread.stored_requests[  # type: ignore[union-attr]
+                    req_id]
 
         for req_id in finished_req_ids:
-            req_remain_jobs = self.kv_send_thread.stored_requests.get(
+            req_remain_jobs = self.kv_send_thread.stored_requests.get(  # type: ignore[union-attr]
                 req_id, 0)
             if req_remain_jobs == 0:
                 finished_sending.add(req_id)
-                self.kv_send_thread.stored_requests.pop(req_id)
+                self.kv_send_thread.stored_requests.pop(  # type: ignore[union-attr]
+                    req_id)
             elif req_remain_jobs is not None:
                 self.finished_store_req.add(req_id)
 
