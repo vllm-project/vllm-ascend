@@ -225,7 +225,6 @@ class MooncakeStoreConnectorV1Scheduler:
             need_to_allocate,
         )
 
-        # decode
         if need_to_allocate <= 0:
             return 0, False
 
@@ -257,7 +256,6 @@ class MooncakeStoreConnectorV1Scheduler:
             # No KV tokens from external KV cache, return
             return
 
-        # decode
         if num_external_tokens == 0:
             # No need to load anything
             self.load_specs[request.request_id].can_load = False

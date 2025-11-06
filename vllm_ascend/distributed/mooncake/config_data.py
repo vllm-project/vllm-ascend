@@ -388,8 +388,6 @@ class ReqMeta:
                 load_spec.mooncake_cached_tokens,
                 tracker.req_id,
             )
-        elif is_consumer:
-            load_spec = None
         else:
             # Do not load if not in `can_load` state
             load_spec = None
