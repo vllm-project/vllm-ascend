@@ -2,6 +2,7 @@ import array
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple, Union
 
@@ -10,6 +11,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
 from vllm.utils import cdiv, logger
 from vllm.v1.core.sched.output import NewRequestData
+
+DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
+DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 
 
 @dataclass
@@ -419,7 +423,7 @@ class LasyerMultiBlockReqMeta:
 class MooncakeStoreConfig:
     local_hostname: str
     metadata_server: str
-    global_segment_size: int
+    global_segment_size: Union[int, str]
     local_buffer_size: int
     protocol: str
     device_name: str
@@ -433,8 +437,11 @@ class MooncakeStoreConfig:
         return MooncakeStoreConfig(
             local_hostname=config.get("local_hostname"),
             metadata_server=config.get("metadata_server"),
-            global_segment_size=config.get("global_segment_size", 3355443200),
-            local_buffer_size=config.get("local_buffer_size", 1073741824),
+            global_segment_size=_parse_global_segment_size(
+                config.get("global_segment_size",
+                           DEFAULT_GLOBAL_SEGMENT_SIZE)),
+            local_buffer_size=(config.get("local_buffer_size",
+                                          DEFAULT_LOCAL_BUFFER_SIZE)),
             protocol=config.get("protocol", "tcp"),
             device_name=config.get("device_name", ""),
             master_server_address=config.get("master_server_address"),
@@ -447,3 +454,80 @@ class MooncakeStoreConfig:
             raise ValueError(
                 "The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
         return MooncakeStoreConfig.from_file(config_path)
+
+
+def _parse_global_segment_size(value) -> int:
+    """
+    Parse storage size strings with support for units: GB, MB, KB, B
+    
+    Args:
+        value: Input value (int, str, or other convertible types)
+        
+    Returns:
+        int: Size in bytes
+        
+    Raises:
+        ValueError: For invalid format, missing number, or negative values
+        TypeError: For unsupported input types
+    """
+
+    if isinstance(value, int):
+        return value
+    elif not isinstance(value, str):
+        try:
+            return int(value)
+        except (TypeError, ValueError) as e:
+            raise TypeError(
+                f"Unsupported type for global_segment_size: {type(value)}"
+            ) from e
+
+    cleaned_input = value.strip().lower()
+    if not cleaned_input:
+        raise ValueError("global segment size cannot be empty.")
+
+    UNIT_MULTIPLIERS = {
+        'gb': 1024**3,  # 1 GB = 1024^3 bytes
+        'mb': 1024**2,  # 1 MB = 1024^2 bytes
+        'kb': 1024,  # 1 KB = 1024 bytes
+        'b': 1  # 1 B = 1 byte
+    }
+    pattern = r'^\s*([\d.]+)\s*(gb|mb|kb|b)?\s*$'
+    match = re.match(pattern, cleaned_input)
+
+    if not match:
+        raise ValueError(f"Invalid format: '{value}'")
+
+    number_str = match.group(1)
+    unit = match.group(2) or 'b'
+
+    multiplier = UNIT_MULTIPLIERS[unit]
+    return _convert_to_bytes(number_str, multiplier, value)
+
+
+def _convert_to_bytes(number_str: str, multiplier: int,
+                      original_input: str) -> int:
+    """
+    Convert numeric string to byte count
+    
+    Args:
+        number_str: Numeric portion of input
+        multiplier: Unit conversion factor
+        original_input: Original input string (for error messages)
+        
+    Returns:
+        int: Byte count
+        
+    Raises:
+        ValueError: For invalid numbers or negative results
+    """
+    try:
+        numeric_value = float(number_str)
+    except ValueError:
+        raise ValueError(
+            f"Invalid numeric value '{number_str}' in: '{original_input}'")
+    # Calculate byte count
+    try:
+        byte_count = int(numeric_value * multiplier)
+    except OverflowError:
+        raise ValueError(f"Storage size too large: '{original_input}'")
+    return byte_count
