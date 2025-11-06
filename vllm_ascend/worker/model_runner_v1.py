@@ -1535,11 +1535,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
-        tokens, position_pcp, pcp_unpad_mask = self._update_tokens_for_pcp(
-            tokens)
-        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
-        # update total_num_scheduled_tokens
-        total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
+        if self.pcp_size > 1:
+            tokens, position_pcp, pcp_unpad_mask = self._update_tokens_for_pcp(
+                tokens)
+            num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+            total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
+        else:
+            position_pcp, pcp_unpad_mask = None, None
+            self.num_pcp_pads = self.num_pcp_pads[:num_reqs]
+
         total_num_pcp_pads = sum(self.num_pcp_pads)
         max_num_scheduled_tokens = max(tokens)
         num_valid_tokens = np.array([
@@ -4312,8 +4316,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _update_tokens_for_pcp(self, tokens):
         num_reqs = self.input_batch.num_reqs
         self.num_pcp_pads = self.num_pcp_pads[:num_reqs]
-        if not self.pcp_size > 1:
-            return tokens, None, None
         tokens = np.array(tokens, dtype=np.int32)
         num_decode_reqs = sum(
             self.input_batch.num_computed_tokens_cpu[:num_reqs] >=
