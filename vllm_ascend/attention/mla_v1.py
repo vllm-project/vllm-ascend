@@ -140,8 +140,7 @@ class AscendMLADecodeMetadata:
     attn_mask: Optional[torch.Tensor] = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
-    num_computed_tokens_of_pcp_dcp: Optional[list[Optional[list[Optional[
-        list[int]]]]]] = None
+    num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
     seq_mask_pcp: torch.Tensor = None
     seq_mask_dcp: torch.Tensor = None
     cp_seq_len: torch.Tensor = None
