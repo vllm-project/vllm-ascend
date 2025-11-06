@@ -651,15 +651,24 @@ def enable_sp(vllm_config=None) -> bool:
         if vllm_config is None:
             from vllm.config import get_current_vllm_config
             vllm_config = get_current_vllm_config()
-        _ENABLE_SP = ((
+        _ENABLE_SP = (
             vllm_config.compilation_config.pass_config.
             enable_sequence_parallelism
             or envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1
             # Flash comm 1 should be enabled by env VLLM_ASCEND_ENABLE_FLASHCOMM1
             # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
             or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
-            and vllm_config.parallel_config.tensor_parallel_size > 1) \
-            and (not is_moe_model(vllm_config) or vllm_config.parallel_config.enable_expert_parallel)
+
+        if not _ENABLE_SP:
+            return _ENABLE_SP
+
+        assert vllm_config.parallel_config.tensor_parallel_size > 1, \
+            "Flash Comm v1 (Sequence Parallelism) is only supported when tp_size > 1."
+
+        assert (
+            not is_moe_model(vllm_config)
+            or vllm_config.parallel_config.enable_expert_parallel
+        ), "Flash Comm v1 (Sequence Parallelism) requires enable_expert_parallel=True for MoE models."
 
     return _ENABLE_SP
 
