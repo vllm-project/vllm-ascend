@@ -535,7 +535,6 @@ class MtpProposer(Proposer):
                     hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                         hidden_states.contiguous(), True)
 
-
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
                 if not self.runner.with_prefill:
