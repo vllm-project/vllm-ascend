@@ -5,7 +5,7 @@
 * Software:
   * Python >= 3.9, < 3.12
   * CANN >= 8.3.rc1
-  * PyTorch == 2.7.1, torch-npu == 2.7.1
+  * PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
   * vLLM：main branch
   * vLLM-Ascend：main branch
   * Mooncake：main branch
