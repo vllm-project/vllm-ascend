@@ -1467,7 +1467,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for i, req_id in enumerate(self.input_batch.req_ids):
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
-            is_prefill = num_scheduled_tokens > 1
+            is_prefill = self.input_batch.num_computed_tokens_cpu[
+                i] < self.input_batch.num_prompt_tokens[i]
             if is_prefill:
                 num_cp_padded_scheduled_tokens = cdiv(
                     num_scheduled_tokens,
