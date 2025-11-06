@@ -1,8 +1,6 @@
 import pytest
-import torch
 from pytest_mock import MockerFixture
 from transformers import PretrainedConfig
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
 from tests.ut.base import PytestBase
 from vllm_ascend.torchair.models.qwen3_moe import CustomSparseMoeBlock
@@ -29,10 +27,10 @@ class TestCustomSparseMoeBlock(PytestBase):
         ascend_config.max_model_len = 1024
         mocker.patch("vllm_ascend.utils.get_ascend_config",
                      return_value=ascend_config)
-        
+
         custom_moe_block = CustomSparseMoeBlock(config, None, "")
         return custom_moe_block
-    
+
     def test_init(self, mocker: MockerFixture, setup_csmb):
         custom_moe_block = setup_csmb
         assert isinstance(custom_moe_block, CustomSparseMoeBlock)
