@@ -519,31 +519,28 @@ class MooncakeEngine:
         return done_sending, done_recving
 
     def decode_get_finished(self, finished_req_ids: set[str]) -> set[str]:
-        # decode save与prefill save逻辑不相同
-        if self.kv_role == 'kv_consumer' and self.kv_send_thread is not None:
-            finished_sending = set()
-            for req_id in self.kv_send_thread.stored_requests.copy():
-                if self.kv_send_thread.stored_requests[req_id] == 0:
-                    self.finished_store_req.add(req_id)
-                else:
-                    continue
+        finished_sending = set()
+        for req_id in self.kv_send_thread.stored_requests.copy():
+            if self.kv_send_thread.stored_requests[req_id] == 0:
+                self.finished_store_req.add(req_id)
+            else:
+                continue
 
-                if req_id in self.finished_store_req:
-                    self.finished_store_req.remove(req_id)
-                    finished_sending.add(req_id)
-                    del self.kv_send_thread.stored_requests[req_id]
+            if req_id in self.finished_store_req:
+                self.finished_store_req.remove(req_id)
+                finished_sending.add(req_id)
+                del self.kv_send_thread.stored_requests[req_id]
 
-            for req_id in finished_req_ids:
-                req_remain_jobs = self.kv_send_thread.stored_requests.get(
-                    req_id, 0)
-                if req_remain_jobs == 0:
-                    finished_sending.add(req_id)
-                    # decode可能存在request没有save的情况
-                    self.kv_send_thread.stored_requests.pop(req_id)
-                else:
-                    self.finished_store_req.add(req_id)
+        for req_id in finished_req_ids:
+            req_remain_jobs = self.kv_send_thread.stored_requests.get(
+                req_id, 0)
+            if req_remain_jobs == 0:
+                finished_sending.add(req_id)
+                self.kv_send_thread.stored_requests.pop(req_id)
+            elif req_remain_jobs is not None:
+                self.finished_store_req.add(req_id)
 
-            return finished_sending
+        return finished_sending
 
     def wait_layer_transfer_finish(self):
         time.sleep(10)
