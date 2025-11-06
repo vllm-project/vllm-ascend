@@ -12,7 +12,7 @@ NC="\033[0m" # No Color
 branch=${1:-v0.3.7.post2}
 
 repo_url="https://github.com/kvcache-ai/Mooncake"
-repo_name="/vllm-workspace/Mooncake"
+repo_name="Mooncake"
 state_file=".build_state"
 
 echo "[INFO] Branch: $branch"
@@ -50,7 +50,7 @@ init_ascend_env() {
     fi
 }
 
-init_ascend_en
+init_ascend_env
 
 if ! is_done "deps"; then
   cd "$repo_name"
