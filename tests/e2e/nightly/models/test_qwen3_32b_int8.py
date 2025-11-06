@@ -58,7 +58,7 @@ aisbench_cases = [{
     "max_out_len": 32768,
     "batch_size": 32,
     "baseline": 83.33,
-    "threshold": 17
+    "threshold": 7
 }, {
     "case_type": "performance",
     "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
