@@ -115,12 +115,10 @@ def set_ascend_forward_context(
         # the performance may degrade due to the switching of communication methods.
         mmrs_fusion = True
         if is_moe_model(vllm_config):
-            sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and num_tokens is not None
+            sp_enabled = enable_sp(vllm_config) and num_tokens is not None
             mmrs_fusion = False
         else:
             sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and \
                 num_tokens is not None and num_tokens > 1000
         forward_context.mmrs_fusion = mmrs_fusion
 
