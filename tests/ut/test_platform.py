@@ -9,6 +9,7 @@ from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
 from vllm.config import CompilationLevel
 from vllm.config.compilation import CUDAGraphMode
+from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import PlatformEnum
 
 from tests.ut.base import TestBase
@@ -738,4 +739,27 @@ class TestNPUPlatform(TestBase):
                 group_rank=0,
                 group_size=4,
                 timeout=timedelta(seconds=30),
+            )
+
+    def test_aclgraph_enable(self):
+        config = EngineArgs()
+        VllmConfig = config.create_engine_config()
+        self.assertEqual(VllmConfig.compilation_config.cudagraph_mode,
+                         CUDAGraphMode.PIECEWISE)
+
+        with self.assertLogs(logger="vllm", level="INFO") as cm:
+            from vllm_ascend import platform
+
+            importlib.reload(platform)
+            self.platform.check_and_update_config(VllmConfig)
+            self.assertTrue(
+                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
+                "using only ACL Graph mode" in cm.output[1])
+            self.assertEqual(
+                VllmConfig.compilation_config.level,
+                CompilationLevel.PIECEWISE,
+            )
+            self.assertEqual(
+                VllmConfig.compilation_config.cudagraph_mode,
+                CUDAGraphMode.PIECEWISE,
             )
