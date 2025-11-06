@@ -48,7 +48,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (init_ascend_soc_version,
+from vllm_ascend.utils import (init_ascend_soc_version, is_enable_nz,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -178,6 +178,11 @@ class NPUWorker(WorkerBase):
             raise ValueError(
                 "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
             )
+
+        if is_enable_nz():
+            raise ValueError(
+                "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
+                "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0.")
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 

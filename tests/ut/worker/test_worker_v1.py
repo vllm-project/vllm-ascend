@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -246,6 +247,7 @@ class TestNPUWorker(TestBase):
 
     @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
     @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_wake_up_mode_enabled(self, mock_allocator_class,
                                   mock_sleep_mode_enabled):
         """Test wake_up method when sleep mode is enabled"""
@@ -268,6 +270,7 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
 
     @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_wake_up_mode_disabled_raises_error(self, mock_sleep_mode_enabled):
         """Test wake_up method raises exception when sleep mode is disabled"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
