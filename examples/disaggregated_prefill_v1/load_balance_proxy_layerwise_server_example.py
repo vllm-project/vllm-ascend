@@ -561,9 +561,12 @@ async def metaserver(request: Request):
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay)
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+        proxy_state.release_prefiller_kv(prefiller_idx,prefiller_score)
 
     except Exception as e:
         logger.error(f"Post metaserver failed with: {str(e)}")
+        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
 
 if __name__ == '__main__':
