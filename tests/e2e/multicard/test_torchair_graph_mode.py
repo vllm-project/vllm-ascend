@@ -289,6 +289,7 @@ def test_e2e_deepseekv2lite_with_torchair_v1scheduler():
     _deepseek_v2_lite_torchair_test_fixure(additional_config,
                                            use_v1_schduler=True)
 
+
 def test_e2e_deepseekv2lite_with_mla():
     additional_config = {
         "torchair_graph_config": {
@@ -297,6 +298,7 @@ def test_e2e_deepseekv2lite_with_mla():
         },
     }
     _deepseek_v2_lite_torchair_test_fixure(additional_config)
+
 
 def test_e2e_deepseekv2lite_with_nz():
     additional_config = {
