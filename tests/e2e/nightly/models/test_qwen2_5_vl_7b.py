@@ -45,7 +45,7 @@ aisbench_cases = [{
     "dataset_conf": "textvqa/textvqa_gen_base64",
     "max_out_len": 2048,
     "batch_size": 128,
-    "baseline": 81,
+    "baseline": 82.05,
     "threshold": 5
 }, {
     "case_type": "performance",
