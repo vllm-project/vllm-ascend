@@ -255,13 +255,10 @@ class AscendAttentionMetadataBuilder:
         self.max_num_blocks_per_req = cdiv(
             self.model_config.max_model_len,
             AscendAttentionBackend.get_supported_block_size()[0])
-        decode_max_num_seqs = getattr(vllm_config.scheduler_config,
-                                      'decode_max_num_seqs', 0)
-        max_num_seqs = max(vllm_config.scheduler_config.max_num_seqs,
-                           decode_max_num_seqs)
-        self.batch_seq_mask_buf = torch.empty(max_num_seqs,
-                                              dtype=torch.uint8,
-                                              device=device)
+        self.batch_seq_mask_buf = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.uint8,
+            device=device)
         self.pcp_size = get_prefill_context_model_parallel_world_size(
         ) if prefill_context_parallel_enable() else 1
         self.pcp_rank = get_prefill_context_model_parallel_rank(
