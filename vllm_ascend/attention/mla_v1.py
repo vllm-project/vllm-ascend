@@ -2140,3 +2140,33 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_out_lse_list = attn_out_lse_list_pcp_dcp
 
         return attn_out_lse_list
+
+    # TODO use update op to replace this
+    def _update_out_and_lse(
+        self,
+        out: torch.Tensor,
+        lse: torch.Tensor,
+        block_out: torch.Tensor,
+        block_lse: torch.Tensor,
+        mask: torch.Tensor = None,
+    ):
+        if out is None:
+            out = block_out.to(torch.float32)
+            lse = block_lse
+        else:
+            if mask is None:
+                mask = torch.ones([block_out.size(0)],
+                                  dtype=torch.uint8,
+                                  device=block_out.device)
+            out_mask = mask[:, None, None].expand_as(block_out)
+            lse_mask = mask[:, None, None].expand_as(block_lse)
+            block_out = block_out.to(torch.float32)
+            out_without_update = out.clone()
+            lse_without_update = lse.clone()
+
+            out = out - F.sigmoid(block_lse - lse) * (out - block_out)
+            lse = lse - F.logsigmoid(lse - block_lse)
+            # mask
+            out = torch.where(out_mask, out, out_without_update)
+            lse = torch.where(lse_mask, lse, lse_without_update)
+        return out, lse
