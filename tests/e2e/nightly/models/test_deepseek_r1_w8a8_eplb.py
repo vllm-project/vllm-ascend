@@ -50,9 +50,7 @@ aisbench_gsm8k = [{
     "threshold": 5
 }]
 
-mode_aisbench = {
-    "eplb": aisbench_gsm8k
-}
+mode_aisbench = {"eplb": aisbench_gsm8k}
 
 
 @pytest.mark.asyncio

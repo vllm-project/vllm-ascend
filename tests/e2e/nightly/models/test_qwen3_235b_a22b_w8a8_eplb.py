@@ -51,9 +51,7 @@ aisbench_gsm8k = [{
     "topk": 20
 }]
 
-mode_aisbench = {
-    "eplb": aisbench_gsm8k
-}
+mode_aisbench = {"eplb": aisbench_gsm8k}
 
 
 @pytest.mark.asyncio
