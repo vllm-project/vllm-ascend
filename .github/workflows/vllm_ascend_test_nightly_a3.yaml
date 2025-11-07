@@ -78,6 +78,12 @@ jobs:
           - name: qwq-32b-a3
             os: linux-aarch64-a3-4
             tests: tests/e2e/nightly/models/test_qwq_32b.py
+          - name: qwen3-30b-w8a8
+            os: linux-aarch64-a3-2
+            tests: tests/e2e/nightly/models/test_qwen3_30b_w8a8.py
+          - name: qwen3-235b-w8a8
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/models/test_qwen3_235b_w8a8.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       vllm: v0.11.0
