@@ -49,6 +49,8 @@ if TYPE_CHECKING:
 
 GET_META_MSG = b"get_meta_msg"
 DONE_SENDING_MSG = b"done_sending_msg"
+HEARTBEAT_MSG = b"hb_ping"
+HEARTBEAT_ACK = b"hb_pong"
 
 
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
@@ -72,18 +74,21 @@ class ReqMeta:
 
 class KVCacheSendingLayerThread(threading.Thread):
 
-    def __init__(self,
-                 engine: TransferEngine,
-                 total_layers: int,
-                 ready_event: threading.Event,
-                 tp_rank: int,
-                 pd_head_ratio: int,
-                 num_head_replica: int,
-                 kv_cache_base_addr: list[int],
-                 use_mla: bool,
-                 block_len: list[int],
-                 first_kv_cache: torch.Tensor,
-                 callback_func: Callable[..., None] = lambda x: None):
+    def __init__(
+        self,
+        engine: TransferEngine,
+        total_layers: int,
+        ready_event: threading.Event,
+        tp_rank: int,
+        pd_head_ratio: int,
+        num_head_replica: int,
+        kv_cache_base_addr: list[int],
+        use_mla: bool,
+        block_len: list[int],
+        first_kv_cache: torch.Tensor,
+        callback_func: Callable[..., None] = lambda *args, **kwargs: None,
+        # heartbeat query: returns True if peer(host, port) is alive
+        is_peer_alive: Callable[[str, int], bool] = lambda _h, _p: True):
         super().__init__(daemon=True, name="KVCacheSendingLayerThread")
         self.engine = engine
         self.tp_rank = tp_rank
@@ -126,6 +131,7 @@ class KVCacheSendingLayerThread(threading.Thread):
 
         self.ready_event = ready_event
         self.callback_func = callback_func
+        self.is_peer_alive = is_peer_alive
 
     def run(self):
         local_rank = get_world_group().local_rank
@@ -134,7 +140,48 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.ready_event.set()
         while True:
             req_id, req_meta, layer_index, key, value = self.send_queue.get()
+            host = req_meta.remote_host
+            port = req_meta.remote_port
+
+            if host is None or port is None:
+                logger.warning(
+                    f"[HB] remote_host/remote_port is None for req={req_id}, skip heartbeat check and continue"
+                )
+            else:
+                logger.info(
+                    f"[HB] checking peer connectivity before transfer: {host}:{port} (req={req_id})"
+                )
+                alive = False
+                # small retry to tolerate transient blips
+                for attempt in range(3):
+                    try:
+                        if self.is_peer_alive(host, port):
+                            alive = True
+                            break
+                    except Exception as _hb_e:
+                        logger.warning(
+                            f"[HB] is_peer_alive raised on {host}:{port}, attempt={attempt+1}: {_hb_e}"
+                        )
+                    time.sleep(0.2 * (2**attempt))  # backoff: 0.2s, 0.4s, 0.8s
+
+                logger.info(
+                    f"[HB] peer {host}:{port} alive={alive} (req={req_id})")
+                if not alive:
+                    # 这里选择“丢弃本次发送并继续循环”；如果你更想延后重试，也可以改成 requeue：
+                    # self.send_queue.put((req_id, req_meta, layer_index, key, value))
+                    logger.error(
+                        f"[HB] peer not alive, skip transfer for req={req_id}, layer={layer_index}"
+                    )
+                    continue
             self._handle_request(req_id, req_meta, layer_index, key, value)
+            #         # --- Heartbeat check on side-channel (handshake) port before transfer ---
+            # try:
+            #     if not self.is_peer_alive(req_meta.remote_host, req_meta.remote_port):
+            #         raise RuntimeError(f"Peer {remote_host}:{req_meta.remote_port} is not alive (heartbeat failed)")
+            #     else:
+            #         print("[======]alive")
+            # except Exception as _hb_e:
+            #     pass
 
     def _handle_request(self, req_id, req_meta, layer_index, key, value):
         try:
@@ -318,6 +365,12 @@ class KVCacheRecvingLayerThread(threading.Thread):
                     if msg[0] == GET_META_MSG:
                         logger.info("Got GET META INFO for request %s", msg[0])
                         sock.send_multipart((identity, b"", encoded_data))
+                    elif msg[0] == HEARTBEAT_MSG:
+                        # Heartbeat: reply immediately
+                        try:
+                            sock.send_multipart((identity, b"", HEARTBEAT_ACK))
+                        except Exception:
+                            pass
                     elif msg[0] == DONE_SENDING_MSG:
                         logger.debug("Got DONE_RECVING_MSG for request %s",
                                      msg[1])
@@ -330,6 +383,125 @@ class KVCacheRecvingLayerThread(threading.Thread):
                             msg)
                 except Exception as e:
                     logger.error("Failed to decode message: %s", e)
+
+
+class HeartbeatMonitor(threading.Thread):
+    """
+    Maintain heartbeat to multiple remote (host, port) REQ endpoints.
+    Non-blocking API: add_target(), is_alive().
+    """
+
+    def __init__(self, poll_interval: float = 1.0, timeout: float = 1.0):
+        super().__init__(daemon=True, name="HeartbeatMonitor")
+        self.poll_interval = poll_interval
+        self.timeout = timeout
+        self._targets_lock = threading.Lock()
+        self._targets: dict[tuple[str, int], zmq.Socket] = {}
+        self._alive: dict[tuple[str, int], float] = {}
+        # 记录最近一次看到对端存活的时间戳（同 _alive），以及上一次判定状态（True/False）
+        self._status: dict[tuple[str, int], bool] = {}
+        # 方便调试：统计收/发次数与丢包（超时）次数
+        self._counters: dict[tuple[str, int], dict[str, int]] = {}
+        # 判定宕机的阈值（和 is_alive 一致），用于打印 UP/DOWN 转换
+        self._down_threshold = (3 * self.poll_interval + self.timeout)
+        self._stop = threading.Event()
+        self._poller = zmq.Poller()  # type: ignore
+        self._ctx = zmq.Context()  # type: ignore
+
+    def add_target(self, host: str, port: int):
+        key = (host, port)
+        with self._targets_lock:
+            if key in self._targets:
+                return
+            path = make_zmq_path("tcp", host, port)
+            sock = make_zmq_socket(
+                ctx=self._ctx,
+                path=path,
+                socket_type=zmq.REQ,  # type: ignore
+                bind=False)
+            # avoid blocking forever
+            sock.setsockopt(zmq.SNDTIMEO,
+                            int(self.timeout * 1000))  # type: ignore
+            sock.setsockopt(zmq.RCVTIMEO,
+                            int(self.timeout * 1000))  # type: ignore
+            # optional: TCP keepalive (helps at OS layer, not required)
+            # sock.setsockopt(zmq.TCP_KEEPALIVE, 1)
+            self._targets[key] = sock
+            self._poller.register(sock, zmq.POLLIN)  # type: ignore
+            # pessimistic init
+            self._alive[key] = 0.0
+            self._status[key] = False
+            self._counters[key] = {"sent": 0, "recv": 0, "timeout": 0}
+            logger.info(f"[HB] add_target host={host} port={port}")
+            logger.debug(
+                f"[HB] counters init for {host}:{port} -> {self._counters[key]}"
+            )
+
+    def is_alive(self, host: str, port: int) -> bool:
+        key = (host, port)
+        with self._targets_lock:
+            last_ok = self._alive.get(key, 0.0)
+        # consider alive if seen within ~3 intervals
+        return (time.time() - last_ok) < (3 * self.poll_interval +
+                                          self.timeout)
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        encoder = msgspec.msgpack.Encoder()
+        while not self._stop.is_set():
+            with self._targets_lock:
+                items = list(self._targets.items())
+            # send pings
+            for key, sock in items:
+                try:
+                    data = encoder.encode((HEARTBEAT_MSG, b""))
+                    sock.send(data, flags=zmq.DONTWAIT)  # type: ignore
+                    try:
+                        self._counters[key]["sent"] += 1
+                    except KeyError:
+                        self._counters[key] = {
+                            "sent": 1,
+                            "recv": 0,
+                            "timeout": 0
+                        }
+                    host, port = key
+                    logger.debug(
+                        f"[HB->] ping {host}:{port} sent={self._counters[key]['sent']}"
+                    )
+                except Exception:
+                    # send error: keep _alive as is; next round will try again
+                    pass
+            # collect replies
+            t_end = time.time() + self.timeout
+            while time.time() < t_end:
+                try:
+                    events = dict(self._poller.poll(50))  # 50ms slice
+                except Exception:
+                    break
+                for key, sock in items:
+                    if sock in events:
+                        try:
+                            reply = sock.recv(
+                                flags=zmq.DONTWAIT)  # type: ignore
+                            if reply == HEARTBEAT_ACK:
+                                with self._targets_lock:
+                                    self._alive[key] = time.time()
+                        except Exception:
+                            pass
+            time.sleep(self.poll_interval)
+        # cleanup
+        with self._targets_lock:
+            for sock in self._targets.values():
+                try:
+                    sock.close(linger=0)  # type: ignore
+                except Exception:
+                    pass
+            try:
+                self._ctx.term()  # type: ignore
+            except Exception:
+                pass
 
 
 class MooncakeLayerwiseConnectorMetadata(KVConnectorMetadata):
@@ -700,6 +872,36 @@ class MooncakeLayerwiseConnectorWorker:
                 deque)
         self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0  # seconds
+        # --- Heartbeat monitor ---
+        self.heartbeat = HeartbeatMonitor(poll_interval=1.0,
+                                          timeout=self.timeout)
+        self.heartbeat.start()
+        # Track current peer (host, port) per remote_engine_id to detect switches
+        self._peer_lock = threading.Lock()
+        self.current_peer: dict[str, tuple[str, int]] = {}
+        # Background watcher: print alive status every 5s
+        self._watch_stop = threading.Event()
+        self._watch_interval = 5.0  # seconds
+        self._watch_thread = threading.Thread(target=self._peer_watch_loop,
+                                              name="PeerWatcher",
+                                              daemon=True)
+        self._watch_thread.start()
+        logger.info(
+            f"[WATCH] Peer watcher started, interval={self._watch_interval}s")
+
+    def _register_peer(self, eng: Optional[str], host: Optional[str],
+                       port: Optional[int]) -> None:
+        if eng is None or host is None or port is None:
+            return
+        with self._peer_lock:
+            self.current_peer[eng] = (host, port)
+        try:
+            self.heartbeat.add_target(host, port)  # type: ignore[arg-type]
+        except Exception as _e:
+            logger.warning(
+                f"[WATCH] add_target failed for {host}:{port}: {_e}")
+        else:
+            logger.info(f"[WATCH] registered peer engine={eng} {host}:{port}")
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -809,7 +1011,9 @@ class MooncakeLayerwiseConnectorWorker:
                 use_mla=self.use_mla,
                 block_len=self.block_len,
                 first_kv_cache=first_kv_cache,
-                callback_func=self.send_done_send_signal)
+                callback_func=self.send_done_send_signal,
+                is_peer_alive=lambda host, port: self.heartbeat.is_alive(
+                    host, port))
             self.kv_send_layer_thread.start()
             ready_event.wait()
 
@@ -961,6 +1165,7 @@ class MooncakeLayerwiseConnectorWorker:
                 assert self.kv_send_layer_thread is not None
                 self.kv_send_layer_thread.send_queue.put(
                     (req_id, req_meta_update, self.current_layer, key, value))
+                # print("[enqueue] req=%s layer=%d key=%s value=%s",req_id, self.current_layer,getattr(key, "shape", None), getattr(value, "shape", None))
             self.current_layer += 1
 
     def _get_remote_socket(
@@ -984,8 +1189,36 @@ class MooncakeLayerwiseConnectorWorker:
             self.remote_poller.register(sock, zmq.POLLIN)  # type: ignore
             return sock
 
+    def _peer_watch_loop(self):
+        """
+        每隔 _watch_interval（默认 5s）打印一次：
+        [WATCH] engine=<eng> peer <host>:<port> alive=<True/False>
+        只负责打印，不做清理；用于快速观察心跳状态。
+        """
+        while not self._watch_stop.is_set():
+            try:
+                with self._peer_lock:
+                    snapshot = list(self.current_peer.items())
+                if not snapshot:
+                    logger.info("[WATCH] no peers registered yet")
+                for eng, (host, port) in snapshot:
+                    try:
+                        alive = self.heartbeat.is_alive(host, port)
+                    except Exception as _e:
+                        logger.warning(
+                            f"[WATCH] is_alive exception for {host}:{port}: {_e}"
+                        )
+                        alive = False
+                    logger.info(
+                        f"[WATCH] engine={eng} peer {host}:{port} alive={alive}"
+                    )
+            except Exception as _e:
+                logger.warning(f"[WATCH] loop exception: {_e}")
+            time.sleep(self._watch_interval)
+
     def update_decoder_info(self, req_id, req_meta):
         req_meta_update = copy.deepcopy(req_meta)
+        # print(f"before update{req_meta_update}")
         if self.pd_tp_ratio > 1:
             req_meta_update.remote_port = req_meta_update.remote_port + self.tp_rank // self.pd_tp_ratio
         else:
@@ -1013,10 +1246,15 @@ class MooncakeLayerwiseConnectorWorker:
             logger.info(
                 f"Query to port and kv base addr for request {req_id} from {req_meta_update.remote_host}:{req_meta_update.remote_port} success {agent_meta.kv_caches_base_addr=} {agent_meta.te_rpc_port=}"
             )
+            # 注册/更新当前活跃 peer，交由 watcher 持续监听
+            self._register_peer(req_meta_update.remote_engine_id,
+                                req_meta_update.remote_host,
+                                req_meta_update.remote_port)
         req_meta_update.remote_te_rpc_port = self.remote_te_port[
             req_meta_update.remote_engine_id][req_meta_update.remote_port]
         req_meta_update.remote_kv_caches_base_addr = self.remote_kv_caches_base_addr[
             req_meta_update.remote_engine_id][req_meta_update.remote_port]
+        # print(f"after update{req_meta_update}")
         return req_meta_update
 
     def send_done_send_signal(self, req_id, req_meta):
