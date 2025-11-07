@@ -1,7 +1,9 @@
 import pytest
 from pytest_mock import MockerFixture
 from transformers import PretrainedConfig
-
+from vllm.distributed.parallel_state import(get_dp_group, get_ep_group,
+                                            get_tp_group)
+from vllm.distributed.parallel_state import GroupCoordinator
 from tests.ut.base import PytestBase
 from vllm_ascend.torchair.models.qwen3_moe import CustomSparseMoeBlock
 
@@ -24,6 +26,29 @@ class TestCustomSparseMoeBlock(PytestBase):
         mocker.patch(
             'vllm_ascend.torchair.ops.torchair_fused_moe.TorchairAscendFusedMoE.__init__',
             return_value=None)
+
+        tp_group = Mock(spec=GroupCoordinator)
+        tp_group.rank_in_group = 0
+        tp_group.world_size = 1
+        tp_group.device_group = Mock()
+
+        dp_group = Mock(spec=GroupCoordinator)
+        dp_group.rank_in_group = 0
+        dp_group.world_size = 1
+
+        ep_group = Mock(spec=GroupCoordinator)
+        ep_group.rank_in_group = 0
+        ep_group.world_size = 1
+
+        mocker.patch(
+            'vllm_ascend.torchair.models.qwen3_moe.get_tp_group', 
+            return_value=tp_group)
+        mocker.patch(
+            'vllm_ascend.torchair.models.qwen3_moe.get_dp_group', 
+            return_value=dp_group)
+        mocker.patch(
+            'vllm_ascend.torchair.models.qwen3_moe.get_ep_group', 
+            return_value=ep_group)
         ascend_config = mocker.MagicMock()
         ascend_config.max_num_batched_tokens = 2048
         ascend_config.max_model_len = 1024
