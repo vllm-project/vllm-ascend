@@ -19,19 +19,32 @@ FROM quay.io/ascend/cann:8.3.rc1-910b-ubuntu22.04-py3.11
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
+ARG MOONCAKE_TAG="v0.3.7.post2"
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
+
+WORKDIR /workspace
+
+COPY . /vllm-workspace/vllm-ascend/
+
+# Install Mooncake dependencies
+RUN git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
+    cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
+    cd /vllm-workspace/Mooncake && bash mooncake_installer.sh -y && \
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/lib64 && \
+    mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \
+    make -j2 && make install && \
+    rm -rf /var/cache/apt/* && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN apt-get update -y && \
     apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /workspace
 
-COPY . /vllm-workspace/vllm-ascend/
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
