@@ -42,6 +42,7 @@ RUN git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/M
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/lib64 && \
     mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \
     make -j2 && make install && \
+    rm -fr /vllm-workspace/Mooncake/build && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
