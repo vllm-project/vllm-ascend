@@ -1734,15 +1734,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         ]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
         num_reqs = self.input_batch.num_reqs
-        if self.pcp_size == 1:
-            discard_requests_mask = self.seq_lens_np[:num_reqs] < num_tokens_np
-        else:
+        if self.pcp_size > 1:
             # while pcp > 1, we need the original num_scheduled_tokens before split
             # to calculate discard_requests_mask
+            tokens_original = [
+                scheduler_output.num_scheduled_tokens[i] for i in req_ids
+            ]
             original_seq_lens_np = (
                 self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-                np.array(list(scheduler_output.num_scheduled_tokens.values())))
+                np.array(tokens_original, dtype=np.int32))
             discard_requests_mask = original_seq_lens_np < num_tokens_np
+        else:
+            discard_requests_mask = self.seq_lens_np[:num_reqs] < num_tokens_np
+
         discard_request_indices = np.nonzero(discard_requests_mask)[0]
         self.num_discarded_requests = len(discard_request_indices)
         self.discard_request_indices.np[:self.num_discarded_requests] = (
