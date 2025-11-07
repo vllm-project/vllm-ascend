@@ -10,12 +10,14 @@ class TestCustomSparseMoeBlock(PytestBase):
 
     @pytest.fixture
     def setup_csmb(self, mocker: MockerFixture):
-        config = PretrainedConfig(vocab_size=1000,
-                                  hidden_size=768,
-                                  rms_norm_eps=1e-5)
+        config = PretrainedConfig(num_experts=64,
+                                  hidden_size=2048,
+                                  num_experts_per_tok=2,
+                                  moe_intermediate_size=1408,
+                                  norm_topk_prob=True)
         mocker.patch(
             'vllm_ascend.torchair.models.qwen3_moe.get_tensor_model_parallel_world_size',
-            return_value=1)
+            return_value=10)
         mocker.patch(
             'vllm.model_executor.layers.linear.ReplicatedLinear.__init__',
             return_value=None)
