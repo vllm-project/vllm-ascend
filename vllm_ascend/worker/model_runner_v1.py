@@ -1784,26 +1784,16 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
             # The copy_ operation does not allow this kind of dimension-mismatched copy.
             # On non-first PP ranks, the buffer is initialized as a fixed large size,
             # but the actual incoming num_tokens does not always equal this buffer size.
-            src_token_count = None
+            tp_size = get_tensor_model_parallel_world_size()
+            num_input_tokens_with_flashcomm1 = num_input_tokens
+            if enable_sp():
+                num_input_tokens_with_flashcomm1 = (num_input_tokens + tp_size - 1) // tp_size
             for k, v in intermediate_tensors.items():
-                if isinstance(v, torch.Tensor):
-                    src_token_count = v.shape[0]
-                    break
-            if src_token_count is None:
-                raise ValueError("IntermediateTensors contains no valid tensor.")
-            for k, v in intermediate_tensors.items():
-                dst_tensor = self.intermediate_tensors.tensors[k]
-                src_slice = v[:src_token_count]
-                dst_slice = dst_tensor[:src_token_count]
-
-                if dst_slice.shape != src_slice.shape:
-                    raise RuntimeError(
-                        f"Shape mismatch when copying '{k}': dst={dst_slice.shape}, src={src_slice.shape}")
-                src_slice = src_slice.to(dst_slice.device, non_blocking=True)
-                dst_slice.copy_(src_slice, non_blocking=True)
+                self.intermediate_tensors[k][:num_input_tokens_with_flashcomm1].copy_(
+                        v[:num_input_tokens_with_flashcomm1], non_blocking=True)
             intermediate_tensors = IntermediateTensors({
-                k: self.intermediate_tensors.tensors[k][:src_token_count]
-                for k in self.intermediate_tensors.tensors.keys()
+                k: v[:num_input_tokens_with_flashcomm1]
+                for k, v in self.intermediate_tensors.items()
             })
 
         use_spec_decode = len(
@@ -3090,7 +3080,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                 # When PP and flashcomm1 are enabled, during dummy_run the estimated space should divide num_tokens by tp_size; 
                 # otherwise, on non-first PP ranks it would effectively perform an extra all-gather, leading to incorrect memory estimation and potentially causing OOM.
                 actual_tokens = num_tokens
-                if enable_sp(self.vllm_config):
+                if enable_sp():
                     tp_size = get_tensor_model_parallel_world_size()
                     actual_tokens = num_tokens // tp_size
                 if self.intermediate_tensors is None:
