@@ -1781,9 +1781,9 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
         else:
             assert intermediate_tensors is not None
             assert self.intermediate_tensors is not None
-            # The copy_ operation does not allow this kind of dimension-mismatched copy.
-            # On non-first PP ranks, the buffer is initialized as a fixed large size,
-            # but the actual incoming num_tokens does not always equal this buffer size.
+            # If both flashcomm1 and pp are used simultaneously,
+            # the shape of the received data and the shape of the space to be copied to will not match,
+            # requiring a recalculation of the incoming data's shape.
             tp_size = get_tensor_model_parallel_world_size()
             num_input_tokens_with_flashcomm1 = num_input_tokens
             if enable_sp():
