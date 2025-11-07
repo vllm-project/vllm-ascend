@@ -109,6 +109,11 @@ async def test_models(model: str, mode: str) -> None:
     ]
     if mode == "piecewise":
         compilation_config["cudagraph_mode"] = "PIECEWISE"
+    if mode == "eplb":
+        env_dict["DYNAMIC_EPLB"] = "true"
+        additional_config["dynamic_eplb"] = True
+        additional_config["num_iterations_eplb_update"] = 2048
+        additional_config["num_wait_worker_iterations"] = 200
     server_args.extend(
         ["--compilation-config",
          json.dumps(compilation_config)])
