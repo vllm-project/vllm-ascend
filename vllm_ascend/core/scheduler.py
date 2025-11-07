@@ -57,7 +57,7 @@ class AscendScheduler(Scheduler):
         decode_max_num_seqs = getattr(self.scheduler_config,
                                       'decode_max_num_seqs', 0)
         self.phase = "" if not enable_pd_transfer else "prefill"
-        self.max_num_running_reqs = self.scheduler_config.max_num_seqs * vllm_config.parallel_config.pipeline_parallel_size
+        self.max_num_running_reqs = self.scheduler_config.max_num_seqs * self.vllm_config.parallel_config.pipeline_parallel_size
         self.max_num_per_batch = self.scheduler_config.max_num_seqs
         self.decode_max_num_running_reqs = max(self.max_num_running_reqs,
                                                decode_max_num_seqs)
