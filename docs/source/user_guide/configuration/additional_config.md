@@ -1,6 +1,6 @@
 # Additional Configuration
 
-Additional configuration is a mechanism provided by vLLM to allow plugins to control inner behavior by their own. vLLM Ascend uses this mechanism to make the project more flexible.
+Additional configuration is a mechanism provided by vLLM to allow plugins to control inner behavior by themselves. VLLM Ascend uses this mechanism to make the project more flexible.
 
 ## How to use
 
@@ -35,7 +35,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_shared_expert_dp`           | bool | `False` | When the expert is shared in DP, it delivers better performance but consumes more memory. Currently only DeepSeek series models are supported. |
 | `lmhead_tensor_parallel_size`       | int  | `None`  | The custom tensor parallel size of lmhead.                                                                                                    |
 | `oproj_tensor_parallel_size`        | int  | `None`  | The custom tensor parallel size of oproj.                                                                                                     |
-| `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effects on MoE models with shared experts.                                |
+| `multistream_overlap_shared_expert` | bool | `False` | Whether to enable multistream shared expert. This option only takes effect on MoE models with shared experts.                                |
 | `dynamic_eplb`                      | bool | `False` | Whether to enable dynamic EPLB.                                                                                                                |
 | `num_iterations_eplb_update`        | int  | `400`   | Forward iterations when EPLB begins.                                                                                                      |
 | `gate_eplb`                         | bool | `False` | Whether to enable EPLB only once.                                                                                                              |
@@ -70,14 +70,14 @@ The details of each configuration option are as follows:
 | `max_long_partial_prefills` | Union[int, float] | `float('inf')` | The maximum number of prompts longer than long_prefill_token_threshold that will be prefilled concurrently. |
 | `long_prefill_token_threshold` | Union[int, float] | `float('inf')` | a request is considered long if the prompt is longer than this number of tokens. |
 
-ascend_scheduler_config also support the options from [vllm scheduler config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig). For example, you can add `enable_chunked_prefill: True` to ascend_scheduler_config as well.
+ascend_scheduler_config also supports the options from [vllm scheduler config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig). For example, you can add `enable_chunked_prefill: True` to ascend_scheduler_config as well.
 
 **weight_prefetch_config**
 
 | Name             | Type | Default                                                     | Description                        |
 |------------------|------|-------------------------------------------------------------|------------------------------------|
 | `enabled`        | bool | `False`                                                     | Whether to enable weight prefetch. |
-| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}}` | Prefetch ratio of each weights.    |
+| `prefetch_ratio` | dict | `{"attn": {"qkv": 1.0, "o": 1.0}, "moe": {"gate_up": 0.8}}` | Prefetch ratio of each weight.    |
 
 ### Example
 

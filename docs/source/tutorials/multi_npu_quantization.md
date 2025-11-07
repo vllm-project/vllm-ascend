@@ -1,4 +1,4 @@
-# Multi-NPU (QwQ 32B W8A8)
+# Multi-NPU (QwQ-32B-W8A8)
 
 ## Run Docker Container
 :::{note}

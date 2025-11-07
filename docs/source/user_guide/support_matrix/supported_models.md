@@ -11,7 +11,7 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | DeepSeek V3/3.1               | ✅        |                                                                      |
 | DeepSeek V3.2 EXP             | ✅        |                                                                      |
 | DeepSeek R1                   | ✅        |                                                                      |
-| DeepSeek Distill (Qwen/LLama) | ✅        |                                                                      |
+| DeepSeek Distill (Qwen/Llama) | ✅        |                                                                      |
 | Qwen3                         | ✅        |                                                                      |
 | Qwen3-based                   | ✅        |                                                                      |
 | Qwen3-Coder                   | ✅        |                                                                      |
@@ -21,7 +21,7 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | Qwen2                         | ✅        |                                                                      |
 | Qwen2-based                   | ✅        |                                                                      |
 | QwQ-32B                       | ✅        |                                                                      |
-| LLama2/3/3.1                  | ✅        |                                                                      |
+| Llama2/3/3.1                  | ✅        |                                                                      |
 | Internlm                      | ✅        | [#1962](https://github.com/vllm-project/vllm-ascend/issues/1962)     |
 | Baichuan                      | ✅        |                                                                      |
 | Baichuan2                     | ✅        |                                                                      |
@@ -71,10 +71,10 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | LLaVA-Next-Video               | ✅            |                                                                      |
 | MiniCPM-V                      | ✅            |                                                                      |
 | Mistral3                       | ✅            |                                                                      |
-| Phi-3-Vison/Phi-3.5-Vison      | ✅            |                                                                      |
+| Phi-3-Vision/Phi-3.5-Vision      | ✅            |                                                                      |
 | Gemma3                         | ✅            |                                                                      |
-| LLama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |
-| LLama3.2                       | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |
+| Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |
+| Llama3.2                       | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |
 | Keye-VL-8B-Preview             | ❌            | [1963](https://github.com/vllm-project/vllm-ascend/issues/1963)      |
 | Florence-2                     | ❌            | [2259](https://github.com/vllm-project/vllm-ascend/issues/2259)      |
 | GLM-4V                         | ❌            | [2260](https://github.com/vllm-project/vllm-ascend/issues/2260)      |
