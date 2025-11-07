@@ -318,9 +318,8 @@ class AscendAttentionMetadataBuilder:
                                                                        num_reqs
                                                                        + 1]
 
-        decode_threshold = 1
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata, decode_threshold=decode_threshold)
+            split_decodes_and_prefills(common_attn_metadata, decode_threshold=self.decode_threshold)
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_actual_tokens
 
