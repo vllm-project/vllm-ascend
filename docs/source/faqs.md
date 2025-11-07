@@ -21,7 +21,7 @@ Below series are NOT supported yet:
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet
 - Ascend 910, Ascend 910 Pro B (Ascend-cann-kernels-910) unplanned yet
 
-From a technical view, vllm-ascend support would be possible if the torch-npu is supported. Otherwise, we have to implement it by using custom operators. You are also welcome to join us to improve together.
+From a technical view, vllm-ascend support would be possible if the torch-npu is supported. Otherwise, we have to implement it by using custom operators. We also welcome you to join us to improve together.
 
 ### 2. How to get our Docker containers?
 
@@ -144,7 +144,7 @@ In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynam
 - **Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to optimize NPU memory management. For example, you can use `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory feature to mitigate memory fragmentation caused by frequent dynamic memory size adjustments during runtime. See details in: [PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html).
 
 ### 16. Failed to enable NPU graph mode when running DeepSeek.
-You may encounter the following error if running DeepSeek with NPU graph mode is enabled. The allowed number of queries per KV when enabling both MLA and Graph mode is {32, 64, 128}. **Thus this is not supported for DeepSeek-V2-Lite**, as it only has 16 attention heads. The NPU graph mode support on DeepSeek-V2-Lite will be implemented in the future.
+Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
 
 And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, num_heads/num_kv_heads is {32, 64, 128}.
 

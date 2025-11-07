@@ -1,4 +1,4 @@
-# Multi-NPU (Pangu Pro MoE)
+# Multi-NPU (Pangu-Pro-MoE)
 
 ## Run vllm-ascend on Multi-NPU
 

@@ -69,7 +69,7 @@ Make sure your vLLM and vllm-ascend are installed after your python configuratio
 
 #### 1.1. Install optimized `python`
 
-Python supports **LTO** and **PGO** optimization starting from version `3.6` and above, which can be enabled at compile time. And we have offered optimized `python` packages directly to users for the sake of convenience. You can also reproduce the `python` built following this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) according to your specific scenarios.
+Python supports **LTO** and **PGO** optimization starting from version `3.6` and above, which can be enabled at compile time. And we have offered optimized `python` packages directly to users for the sake of convenience. You can also reproduce the `python` build following this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) according to your specific scenarios.
 
 ```{code-block} bash
    :substitutions:
@@ -115,7 +115,7 @@ export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2 $LD_PRELOAD
 
 #### 2.2. Tcmalloc
 
-**Tcmalloc (Thread Counting Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex competition and optimizing large object processing flow. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
+**Tcmalloc (Thread Caching Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex competition and optimizing large object processing flow. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 
 ```{code-block} bash
    :substitutions:

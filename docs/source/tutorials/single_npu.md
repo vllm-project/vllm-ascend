@@ -1,4 +1,4 @@
-# Single NPU (Qwen3 8B)
+# Single NPU (Qwen3-8B)
 
 ## Run vllm-ascend on Single NPU
 
