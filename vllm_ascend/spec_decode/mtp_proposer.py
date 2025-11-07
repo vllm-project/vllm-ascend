@@ -185,6 +185,11 @@ class MtpProposer(Proposer):
                         kv_caches=self.runner.kv_caches[-1:],
                         spec_step_idx=0)
                 else:
+                    positions = positions.unsqueeze(-1)
+                    positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
+                    positions = positions.squeeze(-1)
+                    previous_hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
+                        previous_hidden_states)
                     self.model(input_ids=input_ids,
                                positions=positions,
                                hidden_states=previous_hidden_states)
@@ -470,11 +475,20 @@ class MtpProposer(Proposer):
                             spec_step_idx=0,
                             **model_kwargs)
                     else:
-                        hidden_states = self.model(
-                            input_ids=self.input_ids[:num_input_tokens],
-                            positions=self.positions[:num_input_tokens],
-                            hidden_states=self.hidden_states[:num_input_tokens]
-                        )
+                        input_ids = self.input_ids[:num_input_tokens]
+                        positions = self.positions[:num_input_tokens]
+                        hidden_states = self.hidden_states[:num_input_tokens]
+
+                        # positions [N] -> [N, 1] for padding
+                        positions = positions.unsqueeze(-1)
+                        positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
+                        positions = positions.squeeze(-1)
+
+                        hidden_states = self.model(input_ids=input_ids,
+                                                positions=positions,
+                                                hidden_states=hidden_states)
+                        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                            hidden_states.contiguous(), True)
 
             num_indices = last_token_indices.shape[0]
             if lmhead_tp_enable():
