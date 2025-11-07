@@ -9,15 +9,13 @@ YELLOW="\033[0;33m"
 RED="\033[0;31m"
 NC="\033[0m" # No Color
 
-branch=${1:-pooling_async_memecpy_v1}
-point=${2:-8fce1ffab3930fec2a8b8d3be282564dfa1bb186}
+branch=${1:-v0.3.7.post2}
 
-repo_url="https://github.com/AscendTransport/Mooncake"
+repo_url="https://github.com/kvcache-ai/Mooncake"
 repo_name="Mooncake"
 state_file=".build_state"
 
 echo "[INFO] Branch: $branch"
-echo "[INFO] Commit: $point"
 echo "-------------------------------------------"
 
 
@@ -29,22 +27,36 @@ if ! is_done "clone"; then
   if [ -d "$repo_name" ]; then
     echo "[WARN] Directory $repo_name already exists, skipping clone."
   else
-    git clone -b "$branch" "$repo_url" "$repo_name"
+    git clone --branch "$branch" --depth 1 "$repo_url" "$repo_name"
   fi
-  cd "$repo_name"
-  git fetch --all
-  git checkout "$point" || { echo "[ERROR] Checkout failed."; exit 1; }
-  cd ..
   mark_done "clone"
 else
   echo "[SKIP] Clone step already done."
 fi
 
+init_ascend_env() {
+    cann_in_sys_path=/usr/local/Ascend/ascend-toolkit; \
+    cann_in_user_path=$HOME/Ascend/ascend-toolkit; \
+    uname_m=$(uname -m) && \
+    if [ -f "${cann_in_sys_path}/set_env.sh" ]; then \
+        source ${cann_in_sys_path}/set_env.sh; \
+        export LD_LIBRARY_PATH=${cann_in_sys_path}/latest/lib64:${cann_in_sys_path}/latest/${uname_m}-linux/devlib:${LD_LIBRARY_PATH} ; \
+    elif [ -f "${cann_in_user_path}/set_env.sh" ]; then \
+        source "$HOME/Ascend/ascend-toolkit/set_env.sh"; \
+        export LD_LIBRARY_PATH=${cann_in_user_path}/latest/lib64:${cann_in_user_path}/latest/${uname_m}-linux/devlib:${LD_LIBRARY_PATH}; \ 
+    else \
+        echo "No Ascend Toolkit found"; \
+        exit 1; \
+    fi
+}
+
+init_ascend_env
 
 if ! is_done "deps"; then
   cd "$repo_name"
-  echo "[STEP]Installing dependencies (ignore Go failure)..."
-  yes | bash dependencies.sh || echo "⚠️ dependencies.sh failed (Go install likely failed), continuing..."
+  echo "[STEP]Installing dependencies..."
+  sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
+  bash dependencies.sh -y
   cd ..
   mark_done "deps"
 else
@@ -74,25 +86,12 @@ if ! is_done "build"; then
   fi
 
   mkdir build && cd build
-  cmake .. || { echo "[ERROR] cmake failed."; exit 1; }
+  cmake .. -USE_ASCEND_DIRECT=ON || { echo "[ERROR] cmake failed."; exit 1; }
   make -j || { echo "[ERROR] make failed."; exit 1; }
   make install || { echo "[ERROR] make install failed."; exit 1; }
   mark_done "build"
 else
   echo "[SKIP] Build already done."
-fi
-
-
-if ! is_done "copy_lib"; then
-  echo "[STEP] Copy library files..."
-  cp mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/libascend_transport_mem.so \
-     /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
-  cp mooncake-transfer-engine/src/libtransfer_engine.so \
-     /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
-  cd ..
-  mark_done "copy_lib"
-else
-  echo "[SKIP] Library copy already done."
 fi
 
 
