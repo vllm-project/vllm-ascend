@@ -20,10 +20,17 @@
 
 Run `pytest tests/e2e/multicard/test_qwen3_next.py`.
 """
+import os
+from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
 
+# NZ will cause precision error in Qwen3-Next
+# When it is fixed, this set-up can be removed
+_IS_ENABLE_NZ = "VLLM_ASCEND_ENABLE_NZ"
 
+
+@patch.dict(os.environ, {_IS_ENABLE_NZ: "0"})
 def test_models_distributed_Qwen3_NEXT_TP4():
     example_prompts = [
         "Hello, my name is",
@@ -36,8 +43,10 @@ def test_models_distributed_Qwen3_NEXT_TP4():
                     distributed_executor_backend="mp",
                     enforce_eager=True) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+        del vllm_model
 
 
+@patch.dict(os.environ, {_IS_ENABLE_NZ: "0"})
 def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
     example_prompts = [
         "Hello, my name is",
@@ -54,3 +63,50 @@ def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
                         "cudagraph_capture_sizes": [1, 8, 24, 48, 60]
                     }) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+        del vllm_model
+
+
+@patch.dict(os.environ, {_IS_ENABLE_NZ: "0"})
+def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    max_tokens = 20
+
+    with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
+                    tensor_parallel_size=4,
+                    max_model_len=4096,
+                    gpu_memory_utilization=0.8,
+                    distributed_executor_backend="mp") as vllm_model:
+        ref_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+    del vllm_model
+
+    with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
+                    tensor_parallel_size=4,
+                    max_model_len=4096,
+                    gpu_memory_utilization=0.8,
+                    distributed_executor_backend="mp",
+                    speculative_config={
+                        "method": "qwen3_next_mtp",
+                        "num_speculative_tokens": 1
+                    }) as spec_vllm_model:
+        spec_outputs = spec_vllm_model.generate_greedy(example_prompts,
+                                                       max_tokens)
+    del spec_vllm_model
+
+    matches = 0
+    misses = 0
+    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+        ref_token_ids = ref_output[0]
+        spec_token_ids = spec_output[0]
+        if ref_token_ids == spec_token_ids[:len(ref_token_ids)]:
+            matches += 1
+        else:
+            misses += 1
+            print(f"ref_output: {ref_output[1]}")
+            print(f"spec_output: {spec_output[1]}")
+
+    assert matches > int(0.66 * len(ref_outputs))
