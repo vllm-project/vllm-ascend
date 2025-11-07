@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import Optional
 
 import torch
+import torch_npu
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
@@ -266,7 +267,8 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
-                conv_weights,
+                # qwen3-next not support nz
+                torch_npu.npu_format_cast(conv_weights, 2),
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=non_spec_state_indices_tensor[:attn_metadata
