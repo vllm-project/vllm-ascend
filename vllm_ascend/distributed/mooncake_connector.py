@@ -43,6 +43,14 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
+from vllm_ascend.utils import prefill_context_parallel_enable
+
+# isort: off
+if prefill_context_parallel_enable():
+    from vllm.distributed import (get_prefill_context_model_parallel_rank,
+                                  get_prefill_context_model_parallel_world_size
+                                  )
+# isort: on
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -466,116 +474,98 @@ class KVCacheRecvingThread(threading.Thread):
         # Determine if the current position is the offset position at the end of the KV transmission.
         is_kv_transfer_end = (global_offset == tp_num_need_pulls * self._prefill_pp_size - 1)
         need_cat_cache = tp_num_need_pulls > 1 and is_kv_transfer_end
-        need_nz_cache = get_ascend_config().torchair_graph_config.enable_kv_nz and is_kv_transfer_end
         # need_nz_cache maybe caused error in non-MLA models
-        if need_nz_cache or need_cat_cache: 
-            self.reformat_kv_cache(grouped_local_block_ids, tp_num_need_pulls,
-                                   need_cat_cache, need_nz_cache)
+        if need_cat_cache: 
+            self._cat_kv_cache(grouped_local_block_ids, tp_num_need_pulls)
 
-    def reformat_kv_cache(self,
-                          block_ids: list[list[int]],
-                          tp_num_need_pulls: int,
-                          need_cat_cache: bool = False,
-                          need_nz_cache: bool = False):
+    def _cat_kv_cache(self, block_ids: list[list[int]], tp_num_need_pulls: int):
         # Get necessary parameters
         k_cache = list(self.kv_caches.values())[0][0]
         kv_shape = k_cache.shape
         dtype = k_cache.dtype
         device = k_cache.device
+        head_dim = self.model_config.hf_config.head_dim
+        block_size = self.vllm_config.cache_config.block_size
+        num_kv_head = max(
+            self.model_config.hf_config.num_key_value_heads // self.tp_size, 1)
 
         flat_block_ids = [item for sublist in block_ids for item in sublist]
-        block_ids_tensor = torch.tensor(flat_block_ids,
-                                        dtype=torch.int32,
-                                        device=device)
+        block_ids_tensor = torch.tensor(flat_block_ids, dtype=torch.int32)
         num_blocks = len(flat_block_ids)
-        block_len = num_blocks * self.block_size
+        block_len = num_blocks * block_size
 
         # Create device tensors for copy operations
-        block_table = block_ids_tensor.view(1, -1)
+        block_table = block_ids_tensor.view(1, -1).to(device=device)
         block_len_tensor = torch.tensor([block_len],
-                                        dtype=torch.int32,
-                                        device=device)
-        seq_start_tensor = torch.tensor([0], dtype=torch.int32, device=device)
+                                        dtype=torch.int32).to(device=device)
+        seq_start_tensor = torch.tensor([0],
+                                        dtype=torch.int32).to(device=device)
 
         # Initialize buffers
-        k_buffer = torch.empty((block_len, self.num_kv_heads, self.k_head_dim),
+        k_buffer = torch.empty(block_len,
+                               num_kv_head,
+                               head_dim,
                                dtype=dtype,
                                device=device)
-        v_buffer = torch.empty((block_len, self.num_kv_heads, self.v_head_dim),
+        v_buffer = torch.empty(block_len,
+                               num_kv_head,
+                               head_dim,
                                dtype=dtype,
                                device=device)
 
         # Create slot mapping for reshape operations
-        block_offsets = torch.arange(0,
-                                     self.block_size,
-                                     dtype=torch.int32,
-                                     device=device)
+        block_offsets = torch.arange(0, block_size, dtype=torch.int32)
         slot_mapping = (block_offsets.reshape(
-            (1, self.block_size)) + block_ids_tensor.reshape(
-                (num_blocks, 1)) * self.block_size).flatten()
+            (1, block_size)) + block_ids_tensor.reshape(
+                (num_blocks, 1)) * block_size)
+        slot_mapping = slot_mapping.flatten().to(device=device)
 
         # Process each layer in the KV cache
         for _, (k_cache_layer, v_cache_layer) in self.kv_caches.items():
-            if len(k_cache_layer.shape) == 3:
-                # kv shape in torchair model is [num_block, block_size, num_kv_head*head_dim]
+            if len(
+                    k_cache_layer.shape
+            ) == 3:  # kv shape in torchair model is [num_block, block_size, num_kv_head*head_dim]
                 k_cache_layer = k_cache_layer.view(kv_shape[0], kv_shape[1],
-                                                   self.num_kv_heads,
-                                                   self.k_head_dim)
+                                                   num_kv_head, head_dim)
                 v_cache_layer = v_cache_layer.view(kv_shape[0], kv_shape[1],
-                                                   self.num_kv_heads,
-                                                   self.v_head_dim)
+                                                   num_kv_head, head_dim)
             # Load cache data into buffers
-            torch_npu.atb.npu_paged_cache_load(k_cache_layer,
-                                               v_cache_layer,
-                                               block_table,
-                                               block_len_tensor,
-                                               seq_starts=seq_start_tensor,
-                                               key=k_buffer,
-                                               value=v_buffer)
+            torch_npu.atb.npu_paged_cache_load(
+                k_cache_layer,
+                v_cache_layer,
+                block_table,
+                block_len_tensor,
+                seq_starts=seq_start_tensor,
+                key=k_buffer,
+                value=v_buffer,
+            )
 
-            if need_cat_cache:
-                self._cat_kv_cache(k_cache_layer, v_cache_layer, k_buffer,
-                                   v_buffer, tp_num_need_pulls, num_blocks,
-                                   block_len, slot_mapping)
-            if need_nz_cache:
-                self._nz_kv_cache(k_cache_layer, v_cache_layer, k_buffer,
-                                  v_buffer, kv_shape, slot_mapping)
+            # Transpose KV cache
+            k_buffer = self._transpose_kv_cache_between_head(
+                k_buffer, num_blocks, block_size, block_len, num_kv_head, tp_num_need_pulls)
+            v_buffer = self._transpose_kv_cache_between_head(
+                v_buffer, num_blocks, block_size, block_len, num_kv_head, tp_num_need_pulls)
+
+            # Reshape and cache the processed buffers
+            torch_npu._npu_reshape_and_cache(
+                key=k_buffer,
+                value=v_buffer,
+                key_cache=k_cache_layer,
+                value_cache=v_cache_layer,
+                slot_indices=slot_mapping,
+            )
 
         # Clean up buffers
         del k_buffer, v_buffer
 
-    def _cat_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer,
-                      tp_num_need_pulls, num_blocks, block_len, slot_mapping):
-        def transpose_kv_cache_between_head(buffer: torch.Tensor):
-            buffer = buffer.view(num_blocks, tp_num_need_pulls, self.block_size,
-                                 -1)
-            buffer.transpose_(1, 2)
-            return buffer.contiguous().view(block_len, self.num_kv_heads, -1)
+    def _transpose_kv_cache_between_head(self, buffer: torch.Tensor,
+                                         num_blocks: int, block_size: int,
+                                         block_len: int,
+                                         num_kv_head: int, tp_num_need_pulls: int) -> torch.Tensor:
+        buffer = buffer.view(num_blocks, tp_num_need_pulls, block_size, -1)
+        buffer.transpose_(1, 2)
+        return buffer.contiguous().view(block_len, num_kv_head, -1)
 
-        # Transpose KV cache
-        k_buffer = transpose_kv_cache_between_head(k_buffer)
-        v_buffer = transpose_kv_cache_between_head(v_buffer)
-
-        # Reshape and cache the processed buffers
-        torch_npu._npu_reshape_and_cache(key=k_buffer,
-                                         value=v_buffer,
-                                         key_cache=k_cache_layer,
-                                         value_cache=v_cache_layer,
-                                         slot_indices=slot_mapping)
-
-    def _nz_kv_cache(self, k_cache_layer, v_cache_layer, k_buffer, v_buffer,
-                     kv_shape, slot_mapping):
-        nz_fmt_last_dim = 16
-        k_cache_layer = k_cache_layer.view(
-            kv_shape[0],
-            self.k_head_dim * self.num_kv_heads // nz_fmt_last_dim,
-            self.block_size, nz_fmt_last_dim)
-        v_cache_layer = v_cache_layer.view(
-            kv_shape[0],
-            self.v_head_dim * self.num_kv_heads // nz_fmt_last_dim,
-            self.block_size, nz_fmt_last_dim)
-        torch_npu.npu_scatter_pa_kv_cache(k_buffer, v_buffer, k_cache_layer,
-                                          v_cache_layer, slot_mapping)
 
     def _get_remote_metadata(self, remote_host: str,
                              remote_handshake_port: int) -> None:
