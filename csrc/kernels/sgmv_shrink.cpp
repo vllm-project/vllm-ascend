@@ -260,13 +260,11 @@ extern void sgmv_shrink_impl(AscendType type, void* stream, void* x, void* weigh
                                                         numTokensPerCore, inputHiddenDim, maxLoRARank,
                                                         scale);
     } else if (type == AscendType::BF16) {
-        #if (__CCE_AICORE__ >= 220)
-            sgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, 
-                                                                  seqLen, seqLenSize, 
-                                                                  y, batchSize,
-                                                                  numTokensPerCore, inputHiddenDim, maxLoRARank,
-                                                                  scale);
-        #endif
+        sgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize,
+                                                              seqLen, seqLenSize,
+                                                              y, batchSize,
+                                                              numTokensPerCore, inputHiddenDim, maxLoRARank,
+                                                              scale);
     } else {
         return;
     }
