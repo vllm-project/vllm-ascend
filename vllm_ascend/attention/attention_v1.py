@@ -270,6 +270,17 @@ class AscendAttentionMetadataBuilder:
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
 
+        self.speculative_config = vllm_config.speculative_config
+        self.decode_threshold = 1
+        if self.speculative_config:
+            spec_token_num = self.speculative_config.num_speculative_tokens
+            self.decode_threshold += spec_token_num
+            assert self.decode_threshold <= 16, f"decode_threshold exceeded \
+                npu_fused_infer_attention_score TND layout's limit of 16, \
+                got {self.decode_threshold}"
+
+        AscendAttentionMetadataBuilder.reorder_batch_threshold = self.decode_threshold
+
         scheduler_config = vllm_config.scheduler_config
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len +
@@ -324,6 +335,7 @@ class AscendAttentionMetadataBuilder:
 
         slot_mapping = common_attn_metadata.slot_mapping[:
                                                          num_actual_tokens_pcp_padded]
+        # slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
         attn_state = common_attn_metadata.attn_state
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
@@ -810,8 +822,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                         k_mask: torch.Tensor,
                                         v_mask: torch.Tensor,
                                         kv_seqlens_mask: List[int],
-                                        mask: torch.Tensor,
-                                        attn_metadata) -> torch.Tensor:
+                                        mask: torch.Tensor) -> torch.Tensor:
         # nomask Attention
         if k_nomask is not None:
             attn_out_nomask, attn_lse_nomask = torch.ops.npu.npu_fused_infer_attention_score(
