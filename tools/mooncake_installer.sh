@@ -1,5 +1,8 @@
 #!/bin/bash
-# Copyright 2024 KVCache.AI
+
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,6 +15,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
+# This is script is inspired from https://github.com/kvcache-ai/Mooncake/blob/main/dependencies.sh
+#
 
 # Color definitions
 GREEN="\033[0;32m"
