@@ -69,6 +69,9 @@ class AscendConfig:
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp", False
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
+        if self.enable_shared_expert_dp:
+            from vllm_ascend.utils import enable_sp
+            assert enable_sp(vllm_config), "shared_expert_dp requires enable_sp=True."
         self.multistream_overlap_shared_expert = additional_config.get(
             "multistream_overlap_shared_expert", False)
         self.recompute_scheduler_enable = additional_config.get(
