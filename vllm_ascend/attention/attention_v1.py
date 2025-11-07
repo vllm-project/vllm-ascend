@@ -822,7 +822,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                         k_mask: torch.Tensor,
                                         v_mask: torch.Tensor,
                                         kv_seqlens_mask: List[int],
-                                        mask: torch.Tensor) -> torch.Tensor:
+                                        mask: torch.Tensor,
+                                        attn_metadata) -> torch.Tensor:
         # nomask Attention
         if k_nomask is not None:
             attn_out_nomask, attn_lse_nomask = torch.ops.npu.npu_fused_infer_attention_score(

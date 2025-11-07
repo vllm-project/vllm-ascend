@@ -108,8 +108,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (MoECommType,
                                                 set_ascend_forward_context)
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
-from vllm_ascend.attention.attention_v1 import (AscendAttentionMetadataBuilder,
-                                                AscendAttentionState)
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          AscendPrefillContextParallelMetadata)
 # yapf: disable
@@ -1844,15 +1843,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             spec_decode_metadata = None
-            if self.pcp_size * self.dcp_size > 1:
-                logits_indices = torch.from_numpy(
-                    cu_num_tokens
-                ) * self.pcp_size - self.num_pcp_pads[:num_reqs] - 1
-                logits_indices = logits_indices.to(self.device,
-                                                   non_blocking=True)
-            else:
-                logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
-                    self.device, non_blocking=True)
+            logits_indices = torch.from_numpy(
+                cu_num_tokens
+            ) * self.pcp_size - self.num_pcp_pads[:num_reqs] - 1
+            logits_indices = logits_indices.to(self.device, non_blocking=True)
         else:
             # pcp not supported now
             assert self.pcp_size == 1
@@ -1989,7 +1983,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         extra_attn_metadata_args = dict(
                             num_accepted_tokens=self.num_accepted_tokens.
                             gpu[:num_reqs],
-                            num_decode_draft_tokens_cpu=self.num_draft_tokens.
+                            num_draft_tokens=self.num_draft_tokens.
                             gpu[:num_reqs],
                         )
                     attn_metadata_i = builder.build(
@@ -2085,10 +2079,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
-                attn_state = AscendAttentionState.SpecDecoding
-            else:
+            if self.drafter and (self.drafter.name == SpecDcodeType.EAGLE
+                                 or self.drafter.name == SpecDcodeType.EAGLE3):
                 attn_state = AscendAttentionState.ChunkedPrefill
+            else:
+                attn_state = AscendAttentionState.SpecDecoding
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
@@ -2684,7 +2679,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with ProfileExecuteDuration().capture_async("Draft"):
             if self.speculative_config:
                 use_padded_batch_for_eagle = self.speculative_config and \
-                    self.speculative_config.method in ("deepseek_mtp", "qwen3_next_mtp") and \
+                    self.speculative_config.method == "deepseek_mtp" and \
                     not self.speculative_config.disable_padded_drafter_batch
                 if use_padded_batch_for_eagle:
                     # EAGLE speculative decoding can use the GPU sampled tokens
@@ -2886,12 +2881,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     builder = attn_group.get_metadata_builder()
-                    if isinstance(builder, AscendAttentionMetadataBuilder):
-                        attn_metadata_full_attention = builder.build_for_graph_capture(
-                            common_attn_metadata, attn_state, self.get_model())
-                    elif isinstance(builder, GDNAttentionMetadataBuilder):
+                    if isinstance(builder, GDNAttentionMetadataBuilder):
                         attn_metadata_gdn_attention = builder.build_for_cudagraph_capture(
                             common_metadata)
+                    else:
+                        attn_metadata_full_attention = builder.build_for_graph_capture(
+                            common_attn_metadata, attn_state, self.get_model())
                     for layer_name in kv_cache_group_spec.layer_names:
                         if "linear_attn" in layer_name:
                             attn_metadata[
