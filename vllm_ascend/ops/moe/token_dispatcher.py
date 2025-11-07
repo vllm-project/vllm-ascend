@@ -212,7 +212,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             if shared_experts is not None:
                 shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)
                 self.shared_act = shared_experts.act_fn(shared_gate_up)
-        group_list_type = 1 if dynamic_eplb else 0
+        group_list_type = 0
         return {
             "group_list_type": group_list_type,
             "hidden_states": expand_x,
