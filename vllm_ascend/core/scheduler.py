@@ -48,6 +48,8 @@ class AscendScheduler(Scheduler):
         decode_max_num_seqs = getattr(self.scheduler_config,
                                       'decode_max_num_seqs', 0)
         self.phase = "" if not enable_pd_transfer else "prefill"
+        self.max_num_running_reqs = self.scheduler_config.max_num_seqs * vllm_config.parallel_config.pipeline_parallel_size
+        self.max_num_per_batch = self.scheduler_config.max_num_seqs
         self.decode_max_num_running_reqs = max(self.max_num_running_reqs,
                                                decode_max_num_seqs)
 
@@ -121,9 +123,10 @@ class AscendScheduler(Scheduler):
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
+            current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
             if len(self.running) == (self.decode_max_num_running_reqs
                                      if self.phase == "decode" else
-                                     self.max_num_running_reqs):
+                                     self.max_num_running_reqs) or current_batch_size == self.max_num_per_batch:
 
                 break
 
@@ -324,6 +327,9 @@ class AscendScheduler(Scheduler):
         if len(self.scheduled_req_ids) == 0:
             req_index = 0
             while req_index < len(self.running) and token_budget > 0:
+                current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+                if current_batch_size == self.max_num_per_batch:
+                    break
                 request = self.running[req_index]
                 if request.request_id in self.scheduled_req_ids:
                     # This request has already been scheduled.
