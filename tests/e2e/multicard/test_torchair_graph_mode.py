@@ -295,6 +295,8 @@ def test_e2e_deepseekv2lite_with_mla():
         "torchair_graph_config": {
             "enabled": True,
             "enable_multistream_mla": True,
+            "q_lora_rank": 1536,
+            "kv_lora_rank": 512,
         },
     }
     _deepseek_v2_lite_torchair_test_fixure(additional_config)
