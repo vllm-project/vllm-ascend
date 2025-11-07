@@ -15,7 +15,7 @@ _MLP_TP: Optional[GroupCoordinator] = None
 _OTP: Optional[GroupCoordinator] = None
 _LMTP: Optional[GroupCoordinator] = None
 _P_TP: Optional[GroupCoordinator] = None
-
+_FC3_QUANT_X: Optional[GroupCoordinator] = None
 
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, ("mc2 group is not initialized")
@@ -44,6 +44,10 @@ def get_p_tp_group() -> GroupCoordinator:
         "distributed prefill tensor parallel group is not initialized")
     return _P_TP
 
+def get_fc3_quant_x_group() -> GroupCoordinator:
+    assert _FC3_QUANT_X is not None, (
+        "fc3 quant x group is not initialized")
+    return _FC3_QUANT_X
 
 def model_parallel_initialized():
     return (_MC2 is not None)
@@ -164,6 +168,14 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                           get_world_group().local_rank,
                                           backend,
                                           group_name="lmheadtp")
+    if get_ascend_config().multistream_overlap_gate:
+        global _FC3_QUANT_X
+        group_ranks = all_ranks.unbind(0)
+        group_ranks = [x.tolist() for x in group_ranks]
+        _FC3_QUANT_X = init_model_parallel_group(group_ranks,
+                                     get_world_group().local_rank,
+                                     backend,
+                                     group_name="fc3_quant_x")
 
 
 def get_mlp_tensor_model_parallel_world_size():
@@ -201,3 +213,8 @@ def destroy_ascend_model_parallel():
     if _P_TP:
         _P_TP.destroy()
     _P_TP = None
+
+    global _FC3_QUANT_X
+    if _FC3_QUANT_X:
+        _FC3_QUANT_X.destroy()
+    _FC3_QUANT_X = None
