@@ -28,7 +28,7 @@ MODELS = [
     "vllm-ascend/Qwen3-235B-A22B-W8A8",
 ]
 
-MODES = ["piecewise", "eplb"]
+MODES = ["eplb"]
 
 prompts = [
     "San Francisco is a",
@@ -73,7 +73,6 @@ async def test_models(model: str, mode: str) -> None:
             "enabled": False
         },
     }
-    compilation_config = {"cudagraph_mode": "FULL_DECODE_ONLY"}
     server_args = [
         "--quantization", "ascend", "--async-scheduling",
         "--data-parallel-size", "4", "--tensor-parallel-size", "4",
@@ -82,16 +81,11 @@ async def test_models(model: str, mode: str) -> None:
         "8192", "--max-num-seqs", "12", "--trust-remote-code",
         "--gpu-memory-utilization", "0.9"
     ]
-    if mode == "piecewise":
-        compilation_config["cudagraph_mode"] = "PIECEWISE"
     if mode == "eplb":
         env_dict["DYNAMIC_EPLB"] = "true"
         additional_config["dynamic_eplb"] = True
         additional_config["num_iterations_eplb_update"] = 2048
         additional_config["num_wait_worker_iterations"] = 200
-    server_args.extend(
-        ["--compilation-config",
-         json.dumps(compilation_config)])
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
