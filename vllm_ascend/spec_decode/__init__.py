@@ -26,7 +26,7 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return NgramProposer(vllm_config, device, runner)
     elif method in ["eagle", "eagle3"]:
         return EagleProposer(vllm_config, device, runner)
-    elif method == 'deepseek_mtp':
+    elif method in ('deepseek_mtp', 'qwen3_next_mtp', 'glm4_moe_mtp'):
         return MtpProposer(vllm_config, device, runner)
     else:
         raise ValueError("Unknown speculative decoding method: "

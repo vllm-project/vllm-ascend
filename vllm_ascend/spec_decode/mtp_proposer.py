@@ -89,7 +89,8 @@ class MtpProposer(Proposer):
                 self.model = TorchairDeepSeekMTP(
                     vllm_config=self.vllm_config).to(target_device)
             else:
-                self.model = DeepSeekMTP(
+                from vllm.model_executor.models.glm4_moe_mtp import Glm4MoeMTP
+                self.model = Glm4MoeMTP(
                     vllm_config=self.vllm_config).to(target_device)
 
         draft_attn_layer_names = (
