@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
                               get_decode_context_model_parallel_world_size)
@@ -387,16 +387,6 @@ class AscendAttentionMetadataBuilder:
                     num_computed_tokens_of_pcp_dcp)
                 num_computed_tokens_array = num_computed_tokens_array[:
                                                                       num_decodes]
-                pad_length = common_attn_metadata.num_input_tokens - num_actual_tokens_pcp_padded // self.pcp_size
-                if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY and pad_length > 0:
-                    pad_tensor = np.zeros(
-                        (pad_length, num_computed_tokens_array.shape[1],
-                         num_computed_tokens_array.shape[2]),
-                        dtype=num_computed_tokens_array.dtype)
-
-                    num_computed_tokens_array = np.concatenate(
-                        [num_computed_tokens_array, pad_tensor], axis=0)
-
                 batch_seq_mask = (
                     num_computed_tokens_array[:, self.pcp_rank,
                                               self.dcp_rank] == 0)
