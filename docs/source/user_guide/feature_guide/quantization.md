@@ -28,7 +28,7 @@ See https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8.
 This conversion process requires a larger CPU memory, ensure that the RAM size is greater than 2 TB.
 :::
 
-### Adapt to changes
+### Adapts and changes
 1. Ascend does not support the `flash_attn` library. To run the model, you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and comment out certain parts of the code in `modeling_deepseek.py` located in the weights folder.
 2. The current version of transformers does not support loading weights in FP8 quantization format. you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and delete the quantization related fields from `config.json` in the weights folder.
 

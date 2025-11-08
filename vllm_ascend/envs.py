@@ -63,7 +63,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "ASCEND_HOME_PATH":
     lambda: os.getenv("ASCEND_HOME_PATH", None),
     # The path for HCCL library, it's used by pyhccl communicator backend. If
-    # not set, the default value is libhccl.so。
+    # not set, the default value is libhccl.so.
     "HCCL_SO_PATH":
     lambda: os.environ.get("HCCL_SO_PATH", None),
     # The version of vllm is installed. This value is used for developers who
