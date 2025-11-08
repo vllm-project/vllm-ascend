@@ -69,7 +69,8 @@ class TestAscendMLAPrefillMetadata(TestBase):
         self.assertIsNone(metadata.chunked_context)
 
     @patch("torch_npu.npu._lazy_init")
-    def test_ascend_mla_prefill_metadata_with_chunked_context(self):
+    def test_ascend_mla_prefill_metadata_with_chunked_context(
+            self, mock_lazy_init):
         cu_seq_lens = torch.tensor([0, 2, 4])
         starts = torch.tensor([0, 2])
         seq_tot = [2, 2]
