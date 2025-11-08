@@ -1120,7 +1120,6 @@ class MooncakeLayerwiseConnectorWorker:
                 assert self.kv_send_layer_thread is not None
                 self.kv_send_layer_thread.send_queue.put(
                     (req_id, req_meta_update, self.current_layer, key, value))
-                # print("[enqueue] req=%s layer=%d key=%s value=%s",req_id, self.current_layer,getattr(key, "shape", None), getattr(value, "shape", None))
             self.current_layer += 1
 
     def _get_remote_socket(
@@ -1168,7 +1167,6 @@ class MooncakeLayerwiseConnectorWorker:
 
     def update_decoder_info(self, req_id, req_meta):
         req_meta_update = copy.deepcopy(req_meta)
-        # print(f"before update{req_meta_update}")
         if self.pd_tp_ratio > 1:
             req_meta_update.remote_port = req_meta_update.remote_port + self.tp_rank // self.pd_tp_ratio
         else:
@@ -1204,7 +1202,6 @@ class MooncakeLayerwiseConnectorWorker:
             req_meta_update.remote_engine_id][req_meta_update.remote_port]
         req_meta_update.remote_kv_caches_base_addr = self.remote_kv_caches_base_addr[
             req_meta_update.remote_engine_id][req_meta_update.remote_port]
-        # print(f"after update{req_meta_update}")
         return req_meta_update
 
     def send_done_send_signal(self, req_id, req_meta):
