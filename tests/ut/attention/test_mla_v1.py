@@ -68,6 +68,7 @@ class TestAscendMLAPrefillMetadata(TestBase):
         self.assertEqual(metadata.max_seq_lens, max_seq_lens)
         self.assertIsNone(metadata.chunked_context)
 
+    @patch("torch_npu.npu._lazy_init")
     def test_ascend_mla_prefill_metadata_with_chunked_context(self):
         cu_seq_lens = torch.tensor([0, 2, 4])
         starts = torch.tensor([0, 2])
@@ -83,7 +84,7 @@ class TestAscendMLAPrefillMetadata(TestBase):
             max_seq_lens=max_seq_lens,
             workspace=workspace,
             chunk_seq_lens=chunk_seq_lens,
-            chunk_seq_lens_npu=chunk_seq_lens.npu())
+            chunk_seq_lens_npu=chunk_seq_lens.to("npu:0"))
 
         metadata = AscendMLAPrefillMetadata(
             attn_mask=torch.tensor([[1, 0], [1, 1]], dtype=torch.bool),
