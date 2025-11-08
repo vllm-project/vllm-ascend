@@ -65,7 +65,9 @@ if vllm_version_is("0.11.0"):
 _MTP_MODELS = {
     "DeepseekV3ForCausalLM": (_deepseek_mtp_path, _deepseek_mtp_model),
     "Qwen3NextForCausalLM":
-    ("vllm_ascend.models.qwen3_next_mtp", "CustomQwen3NextMTP")
+    ("vllm_ascend.models.qwen3_next_mtp", "CustomQwen3NextMTP"),
+    "Glm4MoeForCausalLM":
+    ("vllm.model_executor.models.glm4_moe_mtp", "Glm4MoeMTP")
 }
 
 _DEFAULT_FIRST_LAYER = 'model.layers.0.self_attn.attn'
