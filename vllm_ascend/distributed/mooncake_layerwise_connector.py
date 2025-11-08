@@ -140,48 +140,7 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.ready_event.set()
         while True:
             req_id, req_meta, layer_index, key, value = self.send_queue.get()
-            host = req_meta.remote_host
-            port = req_meta.remote_port
-
-            if host is None or port is None:
-                logger.warning(
-                    f"[HB] remote_host/remote_port is None for req={req_id}, skip heartbeat check and continue"
-                )
-            else:
-                logger.info(
-                    f"[HB] checking peer connectivity before transfer: {host}:{port} (req={req_id})"
-                )
-                alive = False
-                # small retry to tolerate transient blips
-                for attempt in range(3):
-                    try:
-                        if self.is_peer_alive(host, port):
-                            alive = True
-                            break
-                    except Exception as _hb_e:
-                        logger.warning(
-                            f"[HB] is_peer_alive raised on {host}:{port}, attempt={attempt+1}: {_hb_e}"
-                        )
-                    time.sleep(0.2 * (2**attempt))  # backoff: 0.2s, 0.4s, 0.8s
-
-                logger.info(
-                    f"[HB] peer {host}:{port} alive={alive} (req={req_id})")
-                if not alive:
-                    # 这里选择“丢弃本次发送并继续循环”；如果你更想延后重试，也可以改成 requeue：
-                    # self.send_queue.put((req_id, req_meta, layer_index, key, value))
-                    logger.error(
-                        f"[HB] peer not alive, skip transfer for req={req_id}, layer={layer_index}"
-                    )
-                    continue
             self._handle_request(req_id, req_meta, layer_index, key, value)
-            #         # --- Heartbeat check on side-channel (handshake) port before transfer ---
-            # try:
-            #     if not self.is_peer_alive(req_meta.remote_host, req_meta.remote_port):
-            #         raise RuntimeError(f"Peer {remote_host}:{req_meta.remote_port} is not alive (heartbeat failed)")
-            #     else:
-            #         print("[======]alive")
-            # except Exception as _hb_e:
-            #     pass
 
     def _handle_request(self, req_id, req_meta, layer_index, key, value):
         try:
@@ -391,18 +350,15 @@ class HeartbeatMonitor(threading.Thread):
     Non-blocking API: add_target(), is_alive().
     """
 
-    def __init__(self, poll_interval: float = 1.0, timeout: float = 1.0):
+    def __init__(self, poll_interval: float = 360, timeout: float = 1.0):
         super().__init__(daemon=True, name="HeartbeatMonitor")
         self.poll_interval = poll_interval
         self.timeout = timeout
         self._targets_lock = threading.Lock()
         self._targets: dict[tuple[str, int], zmq.Socket] = {}
         self._alive: dict[tuple[str, int], float] = {}
-        # 记录最近一次看到对端存活的时间戳（同 _alive），以及上一次判定状态（True/False）
         self._status: dict[tuple[str, int], bool] = {}
-        # 方便调试：统计收/发次数与丢包（超时）次数
         self._counters: dict[tuple[str, int], dict[str, int]] = {}
-        # 判定宕机的阈值（和 is_alive 一致），用于打印 UP/DOWN 转换
         self._down_threshold = (3 * self.poll_interval + self.timeout)
         self._stop = threading.Event()
         self._poller = zmq.Poller()  # type: ignore
@@ -473,23 +429,22 @@ class HeartbeatMonitor(threading.Thread):
                 except Exception:
                     # send error: keep _alive as is; next round will try again
                     pass
-            # collect replies
-            t_end = time.time() + self.timeout
-            while time.time() < t_end:
-                try:
-                    events = dict(self._poller.poll(50))  # 50ms slice
-                except Exception:
-                    break
-                for key, sock in items:
-                    if sock in events:
-                        try:
-                            reply = sock.recv(
-                                flags=zmq.DONTWAIT)  # type: ignore
-                            if reply == HEARTBEAT_ACK:
-                                with self._targets_lock:
-                                    self._alive[key] = time.time()
-                        except Exception:
-                            pass
+            try:
+                events = dict(self._poller.poll(int(self.timeout * 1000)))
+            except Exception:
+                events = {}
+            now = time.time()
+            for key, sock in items:
+                if sock in events:
+                    try:
+                        reply = sock.recv(flags=zmq.DONTWAIT)  # type: ignore
+                        if reply == HEARTBEAT_ACK:
+                            with self._targets_lock:
+                                self._alive[key] = now
+                            self._counters[key]["recv"] = self._counters.get(
+                                key, {}).get("recv", 0) + 1
+                    except Exception:
+                        pass
             time.sleep(self.poll_interval)
         # cleanup
         with self._targets_lock:
@@ -881,7 +836,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.current_peer: dict[str, tuple[str, int]] = {}
         # Background watcher: print alive status every 5s
         self._watch_stop = threading.Event()
-        self._watch_interval = 5.0  # seconds
+        self._watch_interval = 360.0  # seconds
         self._watch_thread = threading.Thread(target=self._peer_watch_loop,
                                               name="PeerWatcher",
                                               daemon=True)
@@ -1190,11 +1145,6 @@ class MooncakeLayerwiseConnectorWorker:
             return sock
 
     def _peer_watch_loop(self):
-        """
-        每隔 _watch_interval（默认 5s）打印一次：
-        [WATCH] engine=<eng> peer <host>:<port> alive=<True/False>
-        只负责打印，不做清理；用于快速观察心跳状态。
-        """
         while not self._watch_stop.is_set():
             try:
                 with self._peer_lock:
