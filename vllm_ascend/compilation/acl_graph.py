@@ -330,7 +330,7 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
             pad_length = runtime_shape - len(actual_seq_lengths_kv)
             if pad_length > 0:
                 pad_tensor = np.zeros(pad_length,
-                                    dtype=actual_seq_lengths_kv.dtype)
+                                      dtype=actual_seq_lengths_kv.dtype)
                 actual_seq_lengths_kv = np.concatenate(
                     [actual_seq_lengths_kv, pad_tensor])
 
