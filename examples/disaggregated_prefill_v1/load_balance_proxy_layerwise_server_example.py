@@ -447,7 +447,7 @@ def get_api_request_id(api, req_id):
 
 def get_origin_request_id(api, req_id):
     if api == "/completions":
-        return req_id.replace("cmpl-", "").replace("-0", "")
+        return req_id.replace("cmpl-", "")[:-2]
     elif api == "/chat/completions":
         return req_id.replace("chatcmpl-", "")
 
