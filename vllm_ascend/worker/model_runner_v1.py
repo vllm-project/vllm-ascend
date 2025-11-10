@@ -762,6 +762,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             )
 
             # Compute CP/DCP tracking fields for chunked prefill
+            self.input_batch.local_chunked_kv_lens = [None] * self.max_num_reqs
             if self.pcp_size * self.dcp_size > 1:
                 num_computed_tokens = new_req_data.num_computed_tokens
                 if num_computed_tokens > 0:

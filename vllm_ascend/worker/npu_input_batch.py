@@ -693,6 +693,8 @@ class InputBatch:
                 last_req_index]
             self.num_computed_tokens_cpu[
                 empty_index] = self.num_computed_tokens_cpu[last_req_index]
+            self.local_chunked_kv_lens[
+                empty_index] = self.local_chunked_kv_lens[last_req_index]
             self.block_table.move_row(last_req_index, empty_index)
             self.temperature_cpu[empty_index] = self.temperature_cpu[
                 last_req_index]
