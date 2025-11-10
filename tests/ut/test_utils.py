@@ -40,8 +40,6 @@ class TestUtils(TestBase):
             self.assertFalse(utils.is_310p())
 
     def test_is_enable_nz(self):
-        from vllm.config import ModelConfig, VllmConfig
-
         # Case when _ENABLE_NZ is already set
         utils._ENABLE_NZ = True
         self.assertTrue(utils.is_enable_nz())
