@@ -297,8 +297,7 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
-                # qwen3-next enable nz has accuracy problems, so disable it here
-                torch_npu.npu_format_cast(conv_weights, 2),
+                conv_weights,
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=non_spec_state_indices_tensor[:attn_metadata
