@@ -18,7 +18,7 @@
 #include "../../catlass/act/epilogue/tile/tile_swizzle.hpp"
 #include "../../catlass/act/epilogue/tile/tile_copy.hpp"
 
-#include "../../../../../op_kernel/fused_deep_moe_base.h"
+#include "../../../fused_deep_moe_base.h"
 
 constexpr uint32_t STATE_OFFSET = 512;
 constexpr uint64_t WIN_STATE_OFFSET = 512 * 1024;

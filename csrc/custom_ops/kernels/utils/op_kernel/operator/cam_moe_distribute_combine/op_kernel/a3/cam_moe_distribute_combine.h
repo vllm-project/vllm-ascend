@@ -12,8 +12,8 @@
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
-#include "../../../../../../op_kernel/fused_deep_moe_base.h"
-#include "../../../../../../op_kernel/fused_deep_moe_tiling.h"
+#include "../../../../fused_deep_moe_base.h"
+#include "../../../../fused_deep_moe_tiling.h"
 
 namespace MoeDistributeCombineImpl {
 constexpr uint8_t BUFFER_NUM = 2;  // multi-buf

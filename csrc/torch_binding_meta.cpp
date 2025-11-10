@@ -78,7 +78,7 @@ std::tuple<at::Tensor, at::Tensor> fused_deep_moe_meta(const at::Tensor &x, cons
                                             int64_t num_ranks, int64_t rank,
                                             int64_t shared_expert_num, int64_t shared_expert_rank_num,
                                             int64_t num_experts, int64_t global_bs,
-                                            int quant_mode)
+                                            int64_t quant_mode)
 {
     auto x_shape = x.sizes();
     auto experts_shape = expert_ids.sizes();
