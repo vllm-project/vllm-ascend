@@ -94,8 +94,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             target_token_ids = self.runner.input_ids[token_indices]
             target_positions = positions[token_indices]
 
-        (target_token_ids, target_positions, target_slot_mapping, cu_num_tokens) = (
-            merge_next_token_ids_into_token_ids(
+        num_reqs = self.runner.input_batch.num_reqs
+        (target_token_ids, target_positions, target_slot_mapping, cu_num_tokens) = merge_next_token_ids_into_token_ids(
                 input_token_ids=target_token_ids,
                 input_positions=target_positions,
                 cad=attn_metadata,
@@ -104,8 +104,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 max_model_len=self.vllm_config.model_config.max_model_len,
                 arange=self.arange,
                 cu_num_tokens=cu_num_tokens,
+                num_reqs=num_reqs
             )
-        )
 
         draft_token_ids = self._propose(
             target_token_ids=target_token_ids,
@@ -243,6 +243,7 @@ def merge_next_token_ids_into_token_ids(
     max_model_len: int,
     arange: torch.Tensor,
     cu_num_tokens,
+    num_reqs
 ):
     """
     Merges the next token ids with the existing token ids into a flat sequence.
@@ -261,7 +262,7 @@ def merge_next_token_ids_into_token_ids(
     )
     # recompute slot mapping
     batch_size, n_blocks_per_req = cad.block_tables.shape
-    req_indices = torch.arange(batch_size, device=cad.query_start_loc.device)
+    req_indices = torch.arange(num_reqs, device=cad.query_start_loc.device)
 
     query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
     req_indices = torch.repeat_interleave(
