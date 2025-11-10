@@ -31,7 +31,6 @@ REPO_ROOT=`pwd`
 GITHUB_PROXY=${GITHUB_PROXY:-"https://github.com"}
 GOVER=1.23.8
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TARGET_DIR="$SCRIPT_DIR/../../.."
 
 # Define a function to handle the git clone operation
 clone_repo_if_not_exists() {
