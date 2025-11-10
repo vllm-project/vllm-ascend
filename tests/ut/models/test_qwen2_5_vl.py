@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -365,6 +367,7 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         res = attention.pad_qkv_bias(torch.rand((300)))
         assert res.shape[0] == 384
 
+    @patch('vllm_ascend.utils._ENABLE_NZ', True)
     def test_pad_qkv_weight(self, mocker: MockerFixture):
         attention = self.init_vision_transformer(mocker)
         mocker.patch("torch.nn.Module.__setattr__")
@@ -377,6 +380,7 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         res = attention.pad_qkv_weight(torch.rand((300, 300)))
         assert res.shape == (384, 300)
 
+    @patch('vllm_ascend.utils._ENABLE_NZ', True)
     def test_pad_proj_weight(self, mocker: MockerFixture):
         attention = self.init_vision_transformer(mocker)
         mocker.patch("torch.nn.Module.__setattr__")
