@@ -350,7 +350,7 @@ class TestAscendSFATorchairImpl(TestBase):
         kwargs = {
             "q_lora_rank": 64,
             "kv_lora_rank": 32,
-            "qk_rope_head_dim": 64,
+            "qk_nope_head_dim": 64,
             "qk_rope_head_dim": 32,
             "qk_head_dim": 96,
             "v_head_dim": 128,
