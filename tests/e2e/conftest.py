@@ -755,6 +755,10 @@ class HfRunner:
 def ilama_lora_files():
     return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
 
+@pytest.fixture(scope="session")
+def sql_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/llama-2-7b-sql-lora-test")
+
 
 def qwen_prompt(questions: list[str]) -> list[str]:
     placeholder = "<|image_pad|>"
