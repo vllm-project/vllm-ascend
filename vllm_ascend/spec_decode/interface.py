@@ -13,7 +13,7 @@ class SpecDcodeType(enum.Enum):
     EAGLE = 1
     EAGLE3 = 2
     MTP = 4
-
+    DRAFT_MODEL = 5
 
 class Proposer:
 
