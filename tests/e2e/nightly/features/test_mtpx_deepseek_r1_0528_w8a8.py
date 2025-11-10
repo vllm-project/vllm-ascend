@@ -25,8 +25,10 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
-    "vllm-ascend/DeepSeek-R1-W8A8",
+    "vllm-ascend/DeepSeek-R1-0528-W8A8",
 ]
+
+MODES = ["mtp2", "mtp3"]
 
 prompts = [
     "San Francisco is a",
@@ -38,45 +40,57 @@ api_keyword_args = {
 
 aisbench_cases = [{
     "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/gsm8k-lite",
+    "dataset_path": "vllm-ascend/aime2024",
     "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+    "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
     "max_out_len": 32768,
     "batch_size": 32,
-    "top_k": 20,
-    "baseline": 95,
-    "threshold": 5
+    "baseline": 80,
+    "threshold": 7
 }]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
-async def test_models(model: str) -> None:
+@pytest.mark.parametrize("mode", MODES)
+async def test_models(model: str, mode: str) -> None:
     port = get_open_port()
     env_dict = {
         "OMP_NUM_THREADS": "100",
         "OMP_PROC_BIND": "false",
-        "HCCL_BUFFSIZE": "200",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "DISABLE_L2_CACHE": "1"
+        "HCCL_BUFFSIZE": "1024",
+        "VLLM_RPC_TIMEOUT": "3600000",
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000"
     }
     additional_config: dict[str, Any] = {
         "ascend_scheduler_config": {
             "enabled": False
         },
     }
+    speculative_config = {
+        "num_speculative_tokens": 2,
+        "method": "deepseek_mtp"
+    }
+    compilation_config = {"cudagraph_capture_sizes":[56], "cudagraph_mode": "FULL_DECODE_ONLY"}
     server_args = [
         "--quantization", "ascend", "--seed", "1024", "--no-enable-prefix-caching",
-        "--data-parallel-size", "4", "--tensor-parallel-size", "4",
+        "--data-parallel-size", "2", "--tensor-parallel-size", "8",
         "--enable-expert-parallel", "--port",
-        str(port), "--max-model-len", "40000", "--max-num-batched-tokens",
-        "4096", "--max-num-seqs", "12", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.92"
+        str(port), "--max-model-len", "40960", "--max-num-seqs", "14", "--trust-remote-code",
     ]
-    env_dict["DYNAMIC_EPLB"] = "true"
-    additional_config["dynamic_eplb"] = True
-    additional_config["num_iterations_eplb_update"] = 2048
-    additional_config["num_wait_worker_iterations"] = 200
+    if mode == "mtp2":
+        server_args.extend(["--max-num-batched-tokens", "4096"])
+        server_args.extend(["--speculative-config", json.dumps(speculative_config)])
+        server_args.extend(["--gpu-memory-utilization", "0.92"])
+        additional_config["torchair_graph_config"] = {"enabled": True}
+    if mode == "mtp3":
+        env_dict["HCCL_OP_EXPANSION_MODE"] = "AIV"
+        server_args.extend(["--max-num-batched-tokens", "2048"])
+        speculative_config["num_speculative_tokens"] = 3
+        server_args.extend(["--speculative-config", json.dumps(speculative_config)])
+        server_args.extend(["--gpu-memory-utilization", "0.9"])
+        server_args.extend(["--compilation-config", json.dumps(speculative_config)])
+        additional_config["torchair_graph_config"] = {"enabled": False}
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
@@ -96,7 +110,6 @@ async def test_models(model: str) -> None:
         assert choices[0].text, "empty response"
         print(choices)
         # aisbench test
-        aisbench_cases = mode_aisbench[mode]
         run_aisbench_cases(model,
                            port,
                            aisbench_cases,

@@ -30,11 +30,11 @@ MODELS = [
 TENSOR_PARALLELS = [4]
 
 prompts = [
-    "San Francisco is a",
+    "9.11 and 9.8, which is greater?",
 ]
 
 api_keyword_args = {
-    "max_tokens": 10,
+    "chat_template_kwargs": {"enable_thinking": True},
 }
 
 aisbench_cases = [{
