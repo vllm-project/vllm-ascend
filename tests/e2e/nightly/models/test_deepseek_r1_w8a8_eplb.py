@@ -43,7 +43,6 @@ aisbench_cases = [{
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
     "max_out_len": 32768,
     "batch_size": 32,
-    "top_k": 20,
     "baseline": 95,
     "threshold": 5
 }]
@@ -57,13 +56,31 @@ async def test_models(model: str) -> None:
         "OMP_NUM_THREADS": "100",
         "OMP_PROC_BIND": "false",
         "HCCL_BUFFSIZE": "200",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "DISABLE_L2_CACHE": "1"
+        "VLLM_ASCEND_ENABLE_MLAPO": "1",
+        "VLLM_RPC_TIMEOUT": "3600000",
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000",
+        "DISABLE_L2_CACHE": "1",
+        "DYNAMIC_EPLB": "true",
     }
+    speculative_config = {
+        "num_speculative_tokens": 1,
+        "method": "deepseek_mtp"
+    }
+    compilation_config = {"cudagraph_capture_sizes":[24], "cudagraph_mode": "FULL_DECODE_ONLY"}
     additional_config: dict[str, Any] = {
         "ascend_scheduler_config": {
             "enabled": False
         },
+        "torchair_graph_config": {
+            "enabled": True
+        },
+        "enable_shared_expert_dp": False,
+        "multistream_overlap_shared_expert": False,
+        "dynamic_eplb":True, 
+        "num_iterations_eplb_update":14000,
+        "num_wait_worker_iterations":30,
+        "init_redundancy_expert":0,
+        "gate_eplb": False
     }
     server_args = [
         "--quantization", "ascend", "--seed", "1024", "--no-enable-prefix-caching",
@@ -73,10 +90,8 @@ async def test_models(model: str) -> None:
         "4096", "--max-num-seqs", "12", "--trust-remote-code",
         "--gpu-memory-utilization", "0.92"
     ]
-    env_dict["DYNAMIC_EPLB"] = "true"
-    additional_config["dynamic_eplb"] = True
-    additional_config["num_iterations_eplb_update"] = 2048
-    additional_config["num_wait_worker_iterations"] = 200
+    server_args.extend(["--speculative-config", json.dumps(speculative_config)])
+    server_args.extend(["--compilation-config", json.dumps(compilation_config)])
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
@@ -96,7 +111,6 @@ async def test_models(model: str) -> None:
         assert choices[0].text, "empty response"
         print(choices)
         # aisbench test
-        aisbench_cases = mode_aisbench[mode]
         run_aisbench_cases(model,
                            port,
                            aisbench_cases,
