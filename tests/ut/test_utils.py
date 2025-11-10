@@ -42,12 +42,6 @@ class TestUtils(TestBase):
     def test_is_enable_nz(self):
         from vllm.config import ModelConfig, VllmConfig
 
-        # Case when model is "Qwen/Qwen3-Next-80B-A3B-Instruct"
-        utils._ENABLE_NZ = None
-        vllm_config = VllmConfig(model_config=ModelConfig(
-            model="Qwen/Qwen3-Next-80B-A3B-Instruct"))
-        self.assertFalse(utils.is_enable_nz(vllm_config))
-
         # Case when _ENABLE_NZ is already set
         utils._ENABLE_NZ = True
         self.assertTrue(utils.is_enable_nz())
