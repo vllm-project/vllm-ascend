@@ -19,6 +19,7 @@ logger = init_logger(__name__)
 
 
 class DraftModelProposer(SpecDecodeBaseProposer):
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -61,16 +62,14 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 # Get the next token id from the request state.
                 req_id = self.runner.input_batch.req_ids[i]
                 req_state = self.runner.requests[req_id]
-                seq_len = (
-                    req_state.num_computed_tokens
-                    + scheduler_output.num_scheduled_tokens[req_id]
-                )
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
 
                 next_token_id = req_state.get_token_id(seq_len)
             next_token_ids.append(next_token_id)
-        next_token_ids = torch.tensor(
-            next_token_ids, dtype=torch.int32, device=self.device
-        )
+        next_token_ids = torch.tensor(next_token_ids,
+                                      dtype=torch.int32,
+                                      device=self.device)
 
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
@@ -89,23 +88,22 @@ class DraftModelProposer(SpecDecodeBaseProposer):
                 device=self.device,
             )
             cu_num_tokens, token_indices = self._prepare_inputs(
-                attn_metadata, num_rejected_tokens
-            )
+                attn_metadata, num_rejected_tokens)
             target_token_ids = self.runner.input_ids[token_indices]
             target_positions = positions[token_indices]
 
         num_reqs = self.runner.input_batch.num_reqs
-        (target_token_ids, target_positions, target_slot_mapping, cu_num_tokens) = merge_next_token_ids_into_token_ids(
-                input_token_ids=target_token_ids,
-                input_positions=target_positions,
-                cad=attn_metadata,
-                next_token_ids=next_token_ids,
-                block_size=self.block_size,
-                max_model_len=self.vllm_config.model_config.max_model_len,
-                arange=self.arange,
-                cu_num_tokens=cu_num_tokens,
-                num_reqs=num_reqs
-            )
+        (target_token_ids, target_positions, target_slot_mapping,
+         cu_num_tokens) = merge_next_token_ids_into_token_ids(
+             input_token_ids=target_token_ids,
+             input_positions=target_positions,
+             cad=attn_metadata,
+             next_token_ids=next_token_ids,
+             block_size=self.block_size,
+             max_model_len=self.vllm_config.model_config.max_model_len,
+             arange=self.arange,
+             cu_num_tokens=cu_num_tokens,
+             num_reqs=num_reqs)
 
         draft_token_ids = self._propose(
             target_token_ids=target_token_ids,
@@ -132,26 +130,24 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             raise NotImplementedError(
                 "Speculative Decoding with draft models does not support "
                 "padded drafter batch yet. Please pass --disable-padded-drafter-batch "
-                "in the speculative_config."
-            )
+                "in the speculative_config.")
 
     def _raise_if_vocab_size_mismatch(self):
         speculative_config = self.vllm_config.speculative_config
-        if (
-            speculative_config.method == "draft_model"
-            and speculative_config.target_model_config is not None
-            and speculative_config.draft_model_config is not None
-        ):
-            target_vocab_size = speculative_config.target_model_config.get_vocab_size()
-            draft_vocab_size = speculative_config.draft_model_config.get_vocab_size()
+        if (speculative_config.method == "draft_model"
+                and speculative_config.target_model_config is not None
+                and speculative_config.draft_model_config is not None):
+            target_vocab_size = speculative_config.target_model_config.get_vocab_size(
+            )
+            draft_vocab_size = speculative_config.draft_model_config.get_vocab_size(
+            )
             if target_vocab_size != draft_vocab_size:
                 raise ValueError(
                     f"Target and draft model should have the same vocabulary size. "
                     f"Target model vocab_size={target_vocab_size}. "
                     f"Draft model vocab_size={draft_vocab_size}. "
                     f"Using models with different tokenizers can cause out-of-bounds "
-                    f"errors during speculative decoding."
-                )
+                    f"errors during speculative decoding.")
 
     def _raise_if_draft_tp_mismatch(self):
         # Note(Tomas Ruiz) If we run the target model with TP > 1 and
@@ -185,14 +181,12 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         # This must be computed before loading the draft model
         # because that mutates the forward_context of the vllm_config
         target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys()
-        )
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
 
         from vllm.compilation.backends import set_model_tag
 
         draft_vllm_config: VllmConfig = create_vllm_config_for_draft_model(
-            target_model_vllm_config=self.vllm_config
-        )
+            target_model_vllm_config=self.vllm_config)
         logger.info(
             "Starting to load draft model %s. TP=%d, rank=%d",
             draft_vllm_config.model_config.model,
@@ -200,20 +194,19 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             draft_vllm_config.parallel_config.rank,
         )
         with set_model_tag("draft_model"):
-            self.model = get_model(vllm_config=draft_vllm_config, prefix="draft_model")
+            self.model = get_model(vllm_config=draft_vllm_config,
+                                   prefix="draft_model")
 
         # This must be computed after loading the draft model
         # because that mutates the forward_context of the vllm_config
         draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys()
-            - target_attn_layer_names
-        )
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
+            target_attn_layer_names)
         self.attn_layer_name = next(iter(draft_attn_layer_names))
 
 
 def create_vllm_config_for_draft_model(
-    target_model_vllm_config: VllmConfig,
-) -> VllmConfig:
+    target_model_vllm_config: VllmConfig, ) -> VllmConfig:
     """The vllm_config is configured for the target model, e.g.
     its quant_config and parallel_config. But the draft model is potentially
     quantized differently, and has potentially different tensor_parallel_size.
@@ -221,9 +214,8 @@ def create_vllm_config_for_draft_model(
     The vllm_config is useful when loading the draft model with get_model().
     """
     old = target_model_vllm_config
-    new_parallel_config = replace(
-        old.speculative_config.draft_parallel_config, rank=old.parallel_config.rank
-    )
+    new_parallel_config = replace(old.speculative_config.draft_parallel_config,
+                                  rank=old.parallel_config.rank)
 
     new: VllmConfig = replace(
         old,
@@ -235,39 +227,32 @@ def create_vllm_config_for_draft_model(
 
 
 def merge_next_token_ids_into_token_ids(
-    input_token_ids: torch.Tensor,
-    input_positions: torch.Tensor,
-    cad: AscendMetadata,
-    next_token_ids: torch.Tensor,
-    block_size: int,
-    max_model_len: int,
-    arange: torch.Tensor,
-    cu_num_tokens,
-    num_reqs
-):
+        input_token_ids: torch.Tensor, input_positions: torch.Tensor,
+        cad: AscendMetadata, next_token_ids: torch.Tensor, block_size: int,
+        max_model_len: int, arange: torch.Tensor, cu_num_tokens, num_reqs):
     """
     Merges the next token ids with the existing token ids into a flat sequence.
     Does the same for the positions, computes new slot mapping,
     and updates the common_attn_metadata. The inputs are not modified in-place.
     """
     query_end_locs = cu_num_tokens[1:] - 1
-    new_token_ids = extend_flat_seqs(
-        seqs=input_token_ids, end_locs=query_end_locs, new_vals=next_token_ids
-    )
+    new_token_ids = extend_flat_seqs(seqs=input_token_ids,
+                                     end_locs=query_end_locs,
+                                     new_vals=next_token_ids)
 
     # append new positions
     positions_to_append = input_positions[query_end_locs] + 1
-    new_positions = extend_flat_seqs(
-        seqs=input_positions, end_locs=query_end_locs, new_vals=positions_to_append
-    )
+    new_positions = extend_flat_seqs(seqs=input_positions,
+                                     end_locs=query_end_locs,
+                                     new_vals=positions_to_append)
     # recompute slot mapping
     batch_size, n_blocks_per_req = cad.block_tables.shape
     req_indices = torch.arange(num_reqs, device=cad.query_start_loc.device)
 
     query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
     req_indices = torch.repeat_interleave(
-        req_indices, query_lens.to(cad.query_start_loc.device) + 1
-    )
+        req_indices,
+        query_lens.to(cad.query_start_loc.device) + 1)
     block_table_indices = req_indices * n_blocks_per_req + new_positions // block_size
     block_nums = cad.block_tables.view(-1)[block_table_indices]
     block_offsets = new_positions % block_size
@@ -276,5 +261,5 @@ def merge_next_token_ids_into_token_ids(
     exceeds_max_model_len = new_positions >= max_model_len
     new_slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
 
-    cu_num_tokens = cu_num_tokens + arange[: len(cu_num_tokens)]
+    cu_num_tokens = cu_num_tokens + arange[:len(cu_num_tokens)]
     return (new_token_ids, new_positions, new_slot_mapping, cu_num_tokens)

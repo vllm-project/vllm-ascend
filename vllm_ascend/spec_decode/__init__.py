@@ -16,11 +16,12 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
+from vllm_ascend.spec_decode.draft_proposer import DraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.spec_decode.ngram_proposer import NgramProposer
 from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
-from vllm_ascend.spec_decode.draft_proposer import DraftModelProposer
+
 
 def get_spec_decode_method(method,
                            vllm_config,
