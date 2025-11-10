@@ -28,9 +28,9 @@ def get_spec_decode_method(
 ):
     if method == "ngram":
         return NgramProposer(vllm_config, device, runner)
-    elif method in ["eagle", "eagle3"]:
+    elif method in ("eagle", "eagle3"):
         return EagleProposer(vllm_config, device, runner)
-    elif method == "deepseek_mtp":
+    elif method in ('deepseek_mtp', 'qwen3_next_mtp'):
         if is_torchair_graph:
             return TorchairMtpProposer(vllm_config, device, runner)
         return MtpProposer(vllm_config, device, runner)

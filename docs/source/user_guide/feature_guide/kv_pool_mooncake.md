@@ -5,17 +5,26 @@
 * Software:
   * Python >= 3.9, < 3.12
   * CANN >= 8.3.rc1
-  * PyTorch == 2.7.1, torch-npu == 2.7.1
+  * PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
   * vLLM：main branch
   * vLLM-Ascend：main branch
-  * Mooncake：[AscendTransport/Mooncake at pooling-async-memcpy](https://github.com/AscendTransport/Mooncake/tree/pooling-async-memcpy)(Currently available branch code, continuously updated.)
-    Installation and Compilation Guide：https://github.com/AscendTransport/Mooncake/tree/pooling-async-memcpy?tab=readme-ov-file#build-and-use-binaries
+  * Mooncake：main branch
+
+    Installation and Compilation Guide：https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries
+  
+    Make sure to build with `-DUSE_ASCEND_DIRECT` to enable ADXL engine.
+  
+    An example command for compiling ADXL：
+
+    `rm -rf build && mkdir -p build && cd build \ && cmake .. -DCMAKE_INSTALL_PREFIX=/opt/transfer-engine/ -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DUSE_ASCEND_DIRECT=ON -DBUILD_SHARED_LIBS=ON -DBUILD_UNIT_TESTS=OFF \ && make -j \ && make install`
+
+    Also, you need to set environment variables to point to them `export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib64/python3.11/site-packages/mooncake`, or copy the .so files to the `/usr/local/lib64` directory after compilation
 
 ### KV Pooling Parameter Description
-**kv_connector_extra_config**:Additional Configurable Parameters for Pooling
-    **mooncake_rpc_port**:Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.
-    **load_async**:Whether to Enable Asynchronous Loading. The default value is false.
-    **register_buffer**:Whether to Register Video Memory with the Backend. Registration is Not Required When Used with MooncakeConnectorV1; It is Required in All Other Cases. The Default Value is false.
+**kv_connector_extra_config**:Additional Configurable Parameters for Pooling.  
+**mooncake_rpc_port**:Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration.  
+**load_async**:Whether to Enable Asynchronous Loading. The default value is false.  
+**register_buffer**:Whether to Register Video Memory with the Backend. Registration is Not Required When Used with MooncakeConnectorV1; It is Required in All Other Cases. The Default Value is false.
 
 ## run mooncake master
 
@@ -29,25 +38,31 @@ The environment variable **MOONCAKE_CONFIG_PATH** is configured to the full path
     "metadata_server": "P2PHANDSHAKE",
     "protocol": "ascend",
     "device_name": "",
+    "use_ascend_direct": true,
+    "alloc_in_same_node": true,
     "master_server_address": "xx.xx.xx.xx:50088",
-    "global_segment_size": 30000000000
+    "global_segment_size": "1GB" (1024MB/1048576KB/1073741824B/1073741824)
 }
 ```
 
-**local_hostname**: Configured as the IP address of the current master node,
-**metadata_server**: Configured as **P2PHANDSHAKE**,
-**protocol:** Configured for Ascend to use Mooncake's HCCL communication,
-**device_name**: ""
-**master_server_address**: Configured with the IP and port of the master service
-**global_segment_size**: Expands the kvcache size registered by the PD node to the master
+**local_hostname**: Configured as the IP address of the current master node.  
+**metadata_server**: Configured as **P2PHANDSHAKE**.  
+**protocol:** Configured for Ascend to use Mooncake's HCCL communication.  
+**device_name**: ""  
+**use_ascend_direct**: Indicator for using ADXL engine.  
+**alloc_in_same_node**: Indicator for preferring local buffer allocation strategy.  
+**master_server_address**: Configured with the IP and port of the master service.  
+**global_segment_size**: Expands the kvcache size registered by the PD node to the master.
 
 ### 2. Start mooncake_master
 
 Under the mooncake folder:
 
 ```
-mooncake_master --port 50088
+mooncake_master --port 50088 --eviction_high_watermark_ratio 0.95 --eviction_ratio 0.05
 ```
+
+`eviction_high_watermark_ratio` determines the watermark where Mooncake Store will perform eviction，and `eviction_ratio` determines the portion of stored objects that would be evicted.
 
 ## Pooling and Prefill Decode Disaggregate Scenario
 
@@ -69,11 +84,11 @@ export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export ASCEND_TRANSPORT_PRINT=1
 export ACL_OP_INIT_MODE=1
-# The upper boundary environment variable for memory swap logging is set to mooncake, where 1 indicates enabled and 0 indicates disabled.
-export ASCEND_AGGREGATE_ENABLE=1
-# The upper-level environment variable is the switch for enabling the mooncake aggregation function, where 1 means on and 0 means off.
+export ASCEND_BUFFER_POOL=4:8
+# ASCEND_BUFFER_POOL is the environment variable for configuring the number and size of buffer on NPU Device for aggregation and KV transfer，the value 4:8 means we allocate 4 buffers of size 8MB.
+export ASCEND_CONNECT_TIMEOUT=10000
+export ASCEND_TRANSFER_TIMEOUT=10000
 
 python3 -m vllm.entrypoints.openai.api_server \
     --model /xxxxx/Qwen2.5-7B-Instruct \
@@ -88,34 +103,34 @@ python3 -m vllm.entrypoints.openai.api_server \
     --max-num-batched-tokens 4096 \
     --kv-transfer-config \
     '{
-	"kv_connector": "MultiConnector",
-	"kv_role": "kv_producer",
-	"kv_connector_extra_config": {
-		"use_layerwise": false,
-		"connectors": [
-			{
-				"kv_connector": "MooncakeConnectorV1",
-				"kv_role": "kv_producer",
-				"kv_port": "20001",
-				"kv_connector_extra_config": {
-					"prefill": {
-						"dp_size": 1,
-						"tp_size": 1
-					},
-					"decode": {
-						"dp_size": 1,
-						"tp_size": 1
-					}
-				}
-			},
-            		{
-				"kv_connector": "MooncakeConnectorStoreV1",
-				"kv_role": "kv_producer",
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_producer",
+    "kv_connector_extra_config": {
+        "use_layerwise": false,
+        "connectors": [
+            {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_producer",
+                "kv_port": "20001",
+                "kv_connector_extra_config": {
+                    "prefill": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                    },
+                    "decode": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                    }
+                }
+            },
+                    {
+                "kv_connector": "MooncakeConnectorStoreV1",
+                "kv_role": "kv_producer",
                 "mooncake_rpc_port":"0"
-			}  
-		]
-	}
-}' > p.log 2>&1
+                    }  
+        ]
+    }
+    }' > p.log 2>&1
 ```
 
 `decode` Node：
@@ -133,10 +148,9 @@ export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
 export ACL_OP_INIT_MODE=1
-export ASCEND_TRANSPORT_PRINT=1
-# The upper boundary environment variable for memory swap logging is set to mooncake, where 1 indicates enabled and 0 indicates disabled.
-export ASCEND_AGGREGATE_ENABLE=1
-# The upper-level environment variable is the switch for enabling the mooncake aggregation function, where 1 means on and 0 means off.
+export ASCEND_BUFFER_POOL=4:8
+export ASCEND_CONNECT_TIMEOUT=10000
+export ASCEND_TRANSFER_TIMEOUT=10000
 
 python3 -m vllm.entrypoints.openai.api_server \
     --model /xxxxx/Qwen2.5-7B-Instruct \
@@ -151,33 +165,34 @@ python3 -m vllm.entrypoints.openai.api_server \
     --max-num-batched-tokens 4096 \
     --kv-transfer-config \
     '{
-	"kv_connector": "MultiConnector",
-	"kv_role": "kv_consumer",
-	"kv_connector_extra_config": {
-		"use_layerwise": false,
-		"connectors": [
-		{
-				"kv_connector": "MooncakeConnectorV1",
-				"kv_role": "kv_consumer",
-				"kv_port": "20002",
-				"kv_connector_extra_config": {
-					"prefill": {
-						"dp_size": 1,
-						"tp_size": 1
-					},
-					"decode": {
-						"dp_size": 1,
-						"tp_size": 1
-					}
-				}
-			}, 
-			{
-				"kv_connector": "MooncakeConnectorStoreV1",
-				"kv_role": "kv_consumer",
+    "kv_connector": "MultiConnector",
+    "kv_role": "kv_consumer",
+    "kv_connector_extra_config": {
+        "use_layerwise": false,
+        "connectors": [
+        {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_consumer",
+                "kv_port": "20002",
+                "kv_connector_extra_config": {
+                    "use_ascend_direct": true,
+                    "prefill": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                    },
+                    "decode": {
+                        "dp_size": 1,
+                        "tp_size": 1
+                    }
+                }
+            },
+            {
+                "kv_connector": "MooncakeConnectorStoreV1",
+                "kv_role": "kv_consumer",
                 "mooncake_rpc_port":"1"
-			}
-		]
-	}
+            }
+        ]
+    }
     }' > d.log 2>&1
 ```
 
@@ -234,10 +249,9 @@ export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
 export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ACL_OP_INIT_MODE=1
-export ASCEND_TRANSPORT_PRINT=1
-# The upper boundary environment variable for memory swap logging is set to mooncake, where 1 indicates enabled and 0 indicates disabled.
-export ASCEND_AGGREGATE_ENABLE=1
-# The upper-level environment variable is the switch for enabling the mooncake aggregation function, where 1 means on and 0 means off.
+export ASCEND_BUFFER_POOL=4:8
+export ASCEND_CONNECT_TIMEOUT=10000
+export ASCEND_TRANSFER_TIMEOUT=10000
 
 python3 -m vllm.entrypoints.openai.api_server \
     --model /xxxxx/Qwen2.5-7B-Instruct \
@@ -252,12 +266,12 @@ python3 -m vllm.entrypoints.openai.api_server \
     --max-num-batched-tokens 4096 \
     --kv-transfer-config \
     '{
-	"kv_connector": "MooncakeConnectorStoreV1",
-	"kv_role": "kv_both",
-	"kv_connector_extra_config": {
-		"use_layerwise": false,
+    "kv_connector": "MooncakeConnectorStoreV1",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "use_layerwise": false,
         "mooncake_rpc_port":"0"
-	}
+    }
 }' > mix.log 2>&1
 ```
 

@@ -18,7 +18,7 @@ For example:
 
 ## Release compatibility matrix
 
-The table below is the release compatibility matrix for vLLM Ascend Plugin.
+The table below is the release compatibility matrix for vLLM Ascend release.
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | MindIE Turbo |
 |-------------|--------------|------------------|-------------|--------------------|--------------|
@@ -37,6 +37,11 @@ The table below is the release compatibility matrix for vLLM Ascend Plugin.
 | v0.8.4rc2   | v0.8.4       | >= 3.9, < 3.12   | 8.0.0       | 2.5.1 / 2.5.1      |              |
 | v0.7.3.post1| v0.7.3       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |   2.0rc1     |
 | v0.7.3      | v0.7.3       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |   2.0rc1     |
+
+For main branch of vLLM Ascend, we usually make it compatible with the latest vLLM release and a newer commit hash of vLLM. Please note that this table is usually updated. Please check it regularly.
+| vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  |
+|-------------|--------------|------------------|-------------|--------------------|
+|     main    | v0.11.0/83f478bb19489b41e9d208b47b4bb5a95ac171ac | >= 3.10, < 3.12   | 8.3.RC1 | 2.7.1 / 2.7.1 |
 
 ## Release cadence
 

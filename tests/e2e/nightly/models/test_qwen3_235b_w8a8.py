@@ -25,10 +25,10 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
-    "vllm-ascend/DeepSeek-R1-W8A8",
+    "vllm-ascend/Qwen3-235B-A22B-W8A8",
 ]
 
-MODES = ["eplb"]
+MODES = ["full_graph", "piecewise"]
 
 prompts = [
     "San Francisco is a",
@@ -38,7 +38,7 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-aisbench_gsm8k = [{
+aisbench_cases = [{
     "case_type": "accuracy",
     "dataset_path": "vllm-ascend/gsm8k-lite",
     "request_conf": "vllm_api_general_chat",
@@ -49,8 +49,6 @@ aisbench_gsm8k = [{
     "baseline": 95,
     "threshold": 5
 }]
-
-mode_aisbench = {"eplb": aisbench_gsm8k}
 
 
 @pytest.mark.asyncio
@@ -70,6 +68,7 @@ async def test_models(model: str, mode: str) -> None:
             "enabled": False
         },
     }
+    compilation_config = {"cudagraph_mode": "FULL_DECODE_ONLY"}
     server_args = [
         "--quantization", "ascend", "--async-scheduling",
         "--data-parallel-size", "4", "--tensor-parallel-size", "4",
@@ -78,11 +77,11 @@ async def test_models(model: str, mode: str) -> None:
         "8192", "--max-num-seqs", "12", "--trust-remote-code",
         "--gpu-memory-utilization", "0.9"
     ]
-    if mode == "eplb":
-        env_dict["DYNAMIC_EPLB"] = "true"
-        additional_config["dynamic_eplb"] = True
-        additional_config["num_iterations_eplb_update"] = 2048
-        additional_config["num_wait_worker_iterations"] = 200
+    if mode == "piecewise":
+        compilation_config["cudagraph_mode"] = "PIECEWISE"
+    server_args.extend(
+        ["--compilation-config",
+         json.dumps(compilation_config)])
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
@@ -102,7 +101,6 @@ async def test_models(model: str, mode: str) -> None:
         assert choices[0].text, "empty response"
         print(choices)
         # aisbench test
-        aisbench_cases = mode_aisbench[mode]
         run_aisbench_cases(model,
                            port,
                            aisbench_cases,

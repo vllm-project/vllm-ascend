@@ -1471,12 +1471,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             arange,
         )
 
+<<<<<<< HEAD
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
         tokens, position_pcp, pcp_unpad_mask = self._update_tokens_for_pcp(tokens)
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         # update total_num_scheduled_tokens
         total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
+=======
+        self.input_batch.block_table.compute_slot_mapping(
+            req_indices, positions_np)
+        self.input_batch.block_table.commit_slot_mapping(
+            total_num_scheduled_tokens)
+        if self.pcp_size > 1:
+            tokens, position_pcp, pcp_unpad_mask = self._update_tokens_for_pcp(
+                tokens)
+            num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+            total_num_scheduled_tokens = sum(num_scheduled_tokens[:num_reqs])
+        else:
+            position_pcp, pcp_unpad_mask = None, None
+            self.num_pcp_pads = self.num_pcp_pads[:num_reqs]
+>>>>>>> main
 
         total_num_pcp_pads = sum(self.num_pcp_pads)
         max_num_scheduled_tokens = max(tokens)
@@ -1789,12 +1804,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             spec_decode_metadata = None
+<<<<<<< HEAD
             logits_indices = (
                 torch.from_numpy(cu_num_tokens) * self.pcp_size
                 - self.num_pcp_pads[:num_reqs]
                 - 1
             )
             logits_indices = logits_indices.to(self.device, non_blocking=True)
+=======
+            if self.pcp_size * self.dcp_size > 1:
+                logits_indices = torch.from_numpy(
+                    cu_num_tokens
+                ) * self.pcp_size - self.num_pcp_pads[:num_reqs] - 1
+                logits_indices = logits_indices.to(self.device,
+                                                   non_blocking=True)
+            else:
+                logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
+                    self.device, non_blocking=True)
+>>>>>>> main
         else:
             # pcp not supported now
             assert self.pcp_size == 1
@@ -1931,8 +1958,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 ):
                     if use_spec_decode:
                         extra_attn_metadata_args = dict(
+<<<<<<< HEAD
                             num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs],
                             num_draft_tokens=self.num_draft_tokens.gpu[:num_reqs],
+=======
+                            num_accepted_tokens=self.num_accepted_tokens.
+                            gpu[:num_reqs],
+                            num_decode_draft_tokens_cpu=self.num_draft_tokens.
+                            gpu[:num_reqs],
+>>>>>>> main
                         )
                     attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
@@ -2057,6 +2091,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
+<<<<<<< HEAD
             if self.drafter and (
                 self.drafter.name == SpecDcodeType.EAGLE
                 or self.drafter.name == SpecDcodeType.EAGLE3
@@ -2064,7 +2099,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             ):
                 attn_state = AscendAttentionState.ChunkedPrefill
             else:
+=======
+            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+>>>>>>> main
                 attn_state = AscendAttentionState.SpecDecoding
+            else:
+                attn_state = AscendAttentionState.ChunkedPrefill
         # splitfuse
         elif (
             not ascend_config.ascend_scheduler_config.enabled
@@ -2715,11 +2755,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         with ProfileExecuteDuration().capture_async("Draft"):
             if self.speculative_config:
+<<<<<<< HEAD
                 use_padded_batch_for_eagle = (
                     self.speculative_config
                     and self.speculative_config.method == "deepseek_mtp"
                     and not self.speculative_config.disable_padded_drafter_batch
                 )
+=======
+                use_padded_batch_for_eagle = self.speculative_config and \
+                    self.speculative_config.method in ("deepseek_mtp", "qwen3_next_mtp") and \
+                    not self.speculative_config.disable_padded_drafter_batch
+>>>>>>> main
                 if use_padded_batch_for_eagle:
                     # EAGLE speculative decoding can use the GPU sampled tokens
                     # as inputs, and does not need to wait for bookkeeping to finish.
@@ -4549,8 +4595,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _update_tokens_for_pcp(self, tokens):
         num_reqs = self.input_batch.num_reqs
         self.num_pcp_pads = self.num_pcp_pads[:num_reqs]
-        if not self.pcp_size > 1:
-            return tokens, None, None
         tokens = np.array(tokens, dtype=np.int32)
         num_decode_reqs = sum(
             self.input_batch.num_computed_tokens_cpu[:num_reqs]

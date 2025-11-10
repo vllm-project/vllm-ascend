@@ -7,5 +7,9 @@ This section provides an overview of the features implemented in vLLM Ascend. De
 :maxdepth: 1
 patch
 ModelRunner_prepare_inputs
+disaggregated_prefill
+eplb_swift_balancer.md
+Multi_Token_Prediction
 ACL_Graph
+KV_Cache_Pool_Guide
 :::
