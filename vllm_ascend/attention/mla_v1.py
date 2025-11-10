@@ -1166,7 +1166,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     softmax_lse=prefix_lse)
 
             else:
-                assert torch.all(context_seq_len == 0).item() == False
+                assert not torch.all(context_seq_len == 0).item()
                 # compute this chunk block then update prefix tensors to keep shapes consistent
                 torch_npu.atb.npu_ring_mla(
                     q_nope=q_nope,
