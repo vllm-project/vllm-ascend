@@ -40,12 +40,26 @@ class TestUtils(TestBase):
             self.assertFalse(utils.is_310p())
 
     def test_is_enable_nz(self):
-        with mock.patch("vllm_ascend.utils.envs_ascend.VLLM_ASCEND_ENABLE_NZ",
-                        1):
-            self.assertTrue(utils.is_enable_nz())
-        with mock.patch("vllm_ascend.utils.envs_ascend.VLLM_ASCEND_ENABLE_NZ",
-                        0):
-            self.assertFalse(utils.is_enable_nz())
+        from vllm.config import ModelConfig, VllmConfig
+
+        # Case when model is "Qwen/Qwen3-Next-80B-A3B-Instruct"
+        utils._ENABLE_NZ = None
+        vllm_config = VllmConfig(model_config=ModelConfig(
+            model="Qwen/Qwen3-Next-80B-A3B-Instruct"))
+        self.assertFalse(utils.is_enable_nz(vllm_config))
+
+        # Case when _ENABLE_NZ is already set
+        utils._ENABLE_NZ = True
+        self.assertTrue(utils.is_enable_nz())
+
+        utils._ENABLE_NZ = False
+        self.assertFalse(utils.is_enable_nz())
+
+        # Case when _ENABLE_NZ is None and vllm_config is not provided
+        utils._ENABLE_NZ = None
+        with self.assertRaises(ValueError) as context:
+            utils.is_enable_nz()
+        self.assertIn("vllm_config must be provided", str(context.exception))
 
     def test_sleep_mode_enabled(self):
         utils._SLEEP_MODE_ENABLED = None

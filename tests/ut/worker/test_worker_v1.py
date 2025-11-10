@@ -244,6 +244,7 @@ class TestNPUWorker(TestBase):
 
             self.assertIn("Sleep mode is not enabled", str(cm.exception))
 
+    @patch('vllm_ascend.utils._ENABLE_NZ', False)
     @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
     @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
     def test_wake_up_mode_enabled(self, mock_allocator_class,

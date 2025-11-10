@@ -60,6 +60,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(params["scale_bias"].dtype, torch.float32)
         self.assertEqual(params["scale_bias"].shape, (32, 16))
 
+    @patch('vllm_ascend.utils._ENABLE_NZ', True)
     @patch('torch_npu.npu_convert_weight_to_int4pack')
     @patch('torch.Tensor.npu')
     def test_process_weights_after_loading(self, mock_npu,
@@ -260,6 +261,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
                 requires_grad=False)
         return layer
 
+    @patch('vllm_ascend.utils._ENABLE_NZ', True)
     @patch('torch_npu.npu_format_cast')
     @patch('torch_npu.npu_quantize')
     @patch('torch.Tensor.npu')
