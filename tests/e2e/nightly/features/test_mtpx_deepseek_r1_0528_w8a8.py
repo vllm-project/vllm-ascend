@@ -89,7 +89,7 @@ async def test_models(model: str, mode: str) -> None:
         speculative_config["num_speculative_tokens"] = 3
         server_args.extend(["--speculative-config", json.dumps(speculative_config)])
         server_args.extend(["--gpu-memory-utilization", "0.9"])
-        server_args.extend(["--compilation-config", json.dumps(speculative_config)])
+        server_args.extend(["--compilation-config", json.dumps(compilation_config)])
         additional_config["torchair_graph_config"] = {"enabled": False}
     server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
