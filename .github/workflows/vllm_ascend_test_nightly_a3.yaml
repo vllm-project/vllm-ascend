@@ -91,6 +91,19 @@ jobs:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-a3-ubuntu22.04-py3.11
       tests: ${{ matrix.test_config.tests }}
 
+  single-node-tests3:
+    name: single-node
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          - name: deepseek-mtpx
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/features/test_mtpx_deepseek_r1_0528_w8a8.py
+          - name: qwen3-32b-int8-a3-feature-stack3
+            os: linux-aarch64-a3-4
+            tests: tests/e2e/nightly/features/test_qwen3_32b_int8_a3_feature_stack3.py
+
   multi-node-tests:
     name: multi-node
     needs: single-node-tests
@@ -125,3 +138,4 @@ jobs:
       config_file_path: ${{ matrix.test_config.config_file_path }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+  
