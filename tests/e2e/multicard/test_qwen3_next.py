@@ -20,9 +20,6 @@
 
 Run `pytest tests/e2e/multicard/test_qwen3_next.py`.
 """
-import os
-from unittest.mock import patch
-
 from tests.e2e.conftest import VllmRunner
 
 

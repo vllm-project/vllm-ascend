@@ -75,8 +75,7 @@ def is_enable_nz(vllm_config: Optional[VllmConfig] = None) -> bool:
     if _ENABLE_NZ is None:
         if not vllm_config:
             raise ValueError(
-                "vllm_config must be provided when _ENABLE_NZ is None or False"
-            )
+                "vllm_config must be provided when _ENABLE_NZ is None")
         _ENABLE_NZ = vllm_config.model_config.model != "Qwen/Qwen3-Next-80B-A3B-Instruct"
     return _ENABLE_NZ
 
