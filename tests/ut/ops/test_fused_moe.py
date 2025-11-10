@@ -458,7 +458,6 @@ class TestUnifiedApplyMLP(TestBase):
                                                           dtype=torch.float32))
 
         hidden_states = torch.randn(10, 20, dtype=torch.bfloat16)
-        hidden_states_shape = hidden_states.shape
         w1 = torch.randn(5, 20, 40, dtype=torch.bfloat16)
         w1_scale = torch.randn(5, 40, dtype=torch.bfloat16)
         w2 = torch.randn(5, 40, 20, dtype=torch.bfloat16)
@@ -487,7 +486,7 @@ class TestUnifiedApplyMLP(TestBase):
         mock_npu_swiglu.assert_called_once()
         mock_npu_dynamic_quant.assert_called_once()
 
-        self.assertEqual(result.shape, hidden_states_shape)
+        self.assertEqual(result.shape, hidden_states.shape)
         self.assertEqual(result.dtype, torch.bfloat16)
 
     @patch('vllm_ascend.ops.fused_moe.moe_mlp.is_310p')
@@ -569,7 +568,6 @@ class TestUnifiedApplyMLP(TestBase):
                                                           dtype=torch.float32))
 
         hidden_states = torch.randn(10, 20, dtype=torch.bfloat16)
-        hidden_states_shape = hidden_states.shape
         w1 = torch.randn(5, 20, 40, dtype=torch.bfloat16)
         w1_scale = torch.randn(5, 40, dtype=torch.bfloat16)
         w2 = torch.randn(5, 40, 20, dtype=torch.bfloat16)
@@ -598,7 +596,7 @@ class TestUnifiedApplyMLP(TestBase):
         mock_npu_grouped_matmul_swiglu_quant.assert_called_once()
 
         self.assertTrue(mock_forward_context.with_quant)
-        self.assertEqual(result.shape, hidden_states_shape)
+        self.assertEqual(result.shape, hidden_states.shape)
         self.assertEqual(result.dtype, torch.bfloat16)
 
 

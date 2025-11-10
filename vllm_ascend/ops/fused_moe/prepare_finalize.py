@@ -15,13 +15,11 @@
 # This file is a part of the vllm-ascend project.
 
 from abc import ABC, abstractmethod
-from enum import Enum
 from typing import Optional
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch_npu
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_dp_group, get_tensor_model_parallel_rank,
@@ -33,12 +31,6 @@ from vllm_ascend.utils import enable_sp, prefill_context_parallel_enable
 
 if prefill_context_parallel_enable():
     from vllm.distributed import get_pcp_group
-
-
-class QuantType(Enum):
-    NONE = 0
-    W8A8 = 1
-    W4A8 = 2
 
 
 class PrepareAndFinalize(ABC):
@@ -53,11 +45,8 @@ class PrepareAndFinalize(ABC):
                                      sizes, ranks, and communication settings.
     """
 
-    def __init__(self,
-                 moe_config: FusedMoEConfig,
-                 quant_type: QuantType = QuantType.NONE):
+    def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
-        self.quant_type = quant_type
 
     @abstractmethod
     def prepare(
@@ -117,10 +106,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
     Will be used when num_tokens exceed mc2's limitation (512 tokens/rank).
     """
 
-    def __init__(self,
-                 moe_config: FusedMoEConfig,
-                 quant_type: QuantType = QuantType.NONE):
-        super().__init__(moe_config, quant_type)
+    def __init__(self, moe_config: FusedMoEConfig):
+        super().__init__(moe_config)
         self._restore_tp_across_dp()
 
     def _restore_tp_across_dp(self):
@@ -211,10 +198,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     Relies on `mc2_mask` and `padded_num_tokens` from forward_context for alignment.
     """
 
-    def __init__(self,
-                 moe_config: FusedMoEConfig,
-                 quant_type: QuantType = QuantType.NONE):
-        super().__init__(moe_config, quant_type)
+    def __init__(self, moe_config: FusedMoEConfig):
+        super().__init__(moe_config)
         self._restore_tp_across_dp()
 
     def _restore_tp_across_dp(self):
@@ -334,19 +319,10 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
-        pertoken_scale = None
-        if self.quant_type == QuantType.W8A8:
-            hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
-                hidden_states)
-            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-                pertoken_scale, True, True)
         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             hidden_states, True, True)
         router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             router_logits, True, True)
-
-        if pertoken_scale is not None:
-            return (hidden_states, pertoken_scale), router_logits, None, None
 
         return hidden_states, router_logits, None, None
 
