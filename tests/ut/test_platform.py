@@ -754,7 +754,7 @@ class TestNPUPlatform(TestBase):
             self.platform.check_and_update_config(VllmConfig)
             self.assertTrue(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
-                "using only ACL Graph mode" in cm.output[1])
+                "using only ACL Graph mode" in cm.output[0])
             self.assertEqual(
                 VllmConfig.compilation_config.level,
                 CompilationLevel.PIECEWISE,
