@@ -114,6 +114,7 @@ class AscendMLAPrefillMetadata:
         max_seq_lens: list[int]
         workspace: torch.Tensor
         chunk_seq_lens: torch.Tensor
+        chunk_seq_lens_npu: torch.Tensor
         mask_for_non_zero_chunk: Optional[list[bool]] = None
         max_chunk_num: int = 0
         local_chunked_kv_lens: Optional[list[Optional[list[Optional[list[
@@ -464,6 +465,7 @@ class AscendMLAMetadataBuilder:
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     chunk_seq_lens=chunk_seq_lens,
+                    chunk_seq_lens_npu=chunk_seq_lens.npu(),
                     workspace=self.chunked_prefill_workspace,
                     local_chunked_kv_lens=local_chunked_kv_lens,
                     mask_for_non_zero_chunk=mask_for_non_zero_chunk,
@@ -924,6 +926,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         if self.pcp_size * self.dcp_size > 1:
             iters = max_chunk_num
 
+        current_seq_len = torch.tensor(prefill_metadata.query_lens,
+                                       dtype=torch.int32)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
         num_heads = cache_k_pe.size(2)
@@ -1013,7 +1017,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     seq_len2 = torch.zeros((len(seq_len1), ),
                                            dtype=torch.int32,
                                            device=q_nope.device)
-
+                seq_len = torch.stack([seq_len1.cpu(), seq_len2.cpu()])
                 for req_idx in range(num_requests):
                     # Before dealing with a new chunk, set to zero, and accumulate the start positions as chunk prefill step increases
                     if i >= len(local_chunked_kv_lens[req_idx]):
@@ -1021,13 +1025,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                     context_starts_rank[req_idx] += local_chunked_kv_lens[
                         req_idx][i][self.pcp_rank][self.dcp_rank]
             else:
-                # Original logic: CP-only mode
+                # Original logic: ChunkPrefill-only mode
                 toks = prefill_metadata.chunked_context.seq_tot[i]
-                seq_len2_all = prefill_metadata.chunked_context.chunk_seq_lens[
+                context_seq_len = prefill_metadata.chunked_context.chunk_seq_lens[
                     i]
-                total_toks = toks
-                seq_len2 = seq_len2_all.to(q_nope.device,
-                                           dtype=torch.int32).contiguous()
+                context_seq_len_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[
+                    i]
+                seq_len = torch.stack([current_seq_len, context_seq_len])
 
                 kv_c_normed = torch.empty(toks,
                                           num_heads,
@@ -1044,7 +1048,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     cache_kv_c,
                     cache_k_pe,
                     prefill_metadata.block_table,
-                    seq_len2,
+                    context_seq_len_npu,
                     seq_starts=prefill_metadata.chunked_context.starts[i],
                     key=kv_c_normed,
                     value=k_pe,
@@ -1104,6 +1108,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                axis=1),
                                         dtype=torch.int32,
                                         device=q_nope.device)  # [reqs]
+                seq_len = torch.stack([seq_len1.cpu(), seq_len2.cpu()])
             else:
                 # Non-DCP mode: use TP-split projection
                 kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -1113,7 +1118,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                     [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
                 k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
-            seq_len = torch.stack([seq_len1.cpu(), seq_len2.cpu()])
             # Case that no kv_cache has been stored on this CP rank, no need to do following computation.
             if torch.all(seq_len2 == 0).item():
                 continue
