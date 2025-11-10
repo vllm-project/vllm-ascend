@@ -22,6 +22,8 @@ from vllm.utils import get_open_port
 
 from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
+from tools.send_request import send_text_request
+
 
 MODELS = [
     "vllm-ascend/Qwen3-32B-W8A8",
@@ -86,21 +88,11 @@ async def test_models(model: str, tp_size: int) -> None:
         "--compilation-config",
         '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[1,8,24,48,60]}'
     ]
-    request_keyword_args: dict[str, Any] = {
-        **api_keyword_args,
-    }
     with RemoteOpenAIServer(model,
                             server_args,
                             server_port=port,
                             env_dict=env_dict,
                             auto_port=False) as server:
-        client = server.get_async_client()
-        batch = await client.completions.create(
-            model=model,
-            prompt=prompts,
-            **request_keyword_args,
-        )
-        choices: list[openai.types.CompletionChoice] = batch.choices
-        assert choices[0].text, "empty response"
+        send_text_request(prompts[0], model, server, request_args=api_keyword_args)
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)
