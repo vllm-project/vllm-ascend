@@ -29,6 +29,8 @@ def __post_init__(self):
                 self.quantization = self.target_model_config.quantization
         elif self.method in ("ngram", "[ngram]"):
             self.model = "ngram"
+        elif self.method in ("suffix", "[suffix]"):
+            self.model = "suffix"
         else:
             raise ValueError("num_speculative_tokens was provided but without "
                              "speculative model.")
@@ -69,6 +71,9 @@ def __post_init__(self):
         # TODO: current we still need extract vocab_size from target model
         # config, in future, we may try refactor it out, and set
         # draft related config as None here.
+        self.draft_model_config = self.target_model_config
+        self.draft_parallel_config = self.target_parallel_config
+    elif self.method == "suffix":
         self.draft_model_config = self.target_model_config
         self.draft_parallel_config = self.target_parallel_config
     else:
