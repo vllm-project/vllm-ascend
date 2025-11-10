@@ -130,6 +130,10 @@ class AscendConfig:
                     "Only support P node tp size lagger then D node tp size")
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
+        from vllm_ascend.utils import \
+            get_flashcomm2_oproj_tp_size_and_validate_config
+        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
+            self, vllm_config)
 
 
 class TorchairGraphConfig:
