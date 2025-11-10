@@ -1512,7 +1512,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         extra_attn_metadata_args = dict(
                             num_accepted_tokens=self.num_accepted_tokens.
                             gpu[:num_reqs],
-                            num_draft_tokens_cpu=self.num_draft_tokens.
+                            num_decode_draft_tokens_cpu=self.num_draft_tokens.
                             gpu[:num_reqs],
                         )
                     attn_metadata_i = builder.build(
