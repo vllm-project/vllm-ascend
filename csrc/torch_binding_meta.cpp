@@ -73,12 +73,12 @@ std::tuple<at::Tensor, at::Tensor> fused_deep_moe_meta(const at::Tensor &x, cons
                                             const at::Tensor &gmm1_permuted_weight,
                                             const at::Tensor &gmm1_permuted_weight_scale,
                                             const at::Tensor &gmm2_weight, const at::Tensor &gmm2_weight_scale,
+                                            const at::Tensor &expert_smooth_scales_optional,
                                             const at::Tensor &expert_scales_optional,
-                                            c10::optional<c10::string_view> hcom_ep_name,
-                                            int64_t num_ranks, int64_t rank,
+                                            c10::string_view hcom_ep_name,
+                                            int64_t num_ranks, int64_t rank, int64_t moe_expert_num,
                                             int64_t shared_expert_num, int64_t shared_expert_rank_num,
-                                            int64_t num_experts, int64_t global_bs,
-                                            int64_t quant_mode)
+                                            int64_t quant_mode, int64_t global_bs)
 {
     auto x_shape = x.sizes();
     auto experts_shape = expert_ids.sizes();
@@ -88,7 +88,7 @@ std::tuple<at::Tensor, at::Tensor> fused_deep_moe_meta(const at::Tensor &x, cons
     at::Tensor output = at::empty({bs, h}, x.options().device(at::kMeta));
 
     bool is_shared_expert = (rank < shared_expert_rank_num);
-    int64_t num_local_experts = is_shared_expert ? 1 : num_experts / (num_ranks - shared_expert_rank_num);
+    int64_t num_local_experts = is_shared_expert ? 1 : moe_expert_num / (num_ranks - shared_expert_rank_num);
     at::Tensor ep_recv_count = at::empty({num_local_experts * num_ranks}, expert_ids.options().device(at::kMeta));
 
     return {output, ep_recv_count};
