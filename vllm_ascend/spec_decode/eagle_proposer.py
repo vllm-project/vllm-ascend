@@ -446,7 +446,8 @@ class SpecDecodeBaseProposer(Proposer):
         # # Replace the last token with the next token.
         # # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         # self.input_ids[last_token_indices] = next_token_ids
-        self.set_input_ids_first_pass(target_token_ids, next_token_ids, num_tokens, last_token_indices)
+        self.set_input_ids_first_pass(target_token_ids, next_token_ids, 
+                                      num_tokens, last_token_indices)
         seq_lens = (target_positions[last_token_indices] + 1).int()
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
@@ -498,7 +499,8 @@ class SpecDecodeBaseProposer(Proposer):
         }
         if self.pass_hidden_states_to_model:
             self.hidden_states[:num_tokens] = target_hidden_states
-            model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
+            model_kwargs[
+                "hidden_states"] = self.hidden_states[:num_input_tokens]
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
                                         moe_comm_type=moe_comm_type,
@@ -608,7 +610,8 @@ class SpecDecodeBaseProposer(Proposer):
             }
             if self.pass_hidden_states_to_model:
                 self.hidden_states[:batch_size] = hidden_states
-                model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
+                model_kwargs[
+                    "hidden_states"] = self.hidden_states[:input_batch_size]
             with set_ascend_forward_context(attn_metadata,
                                             self.vllm_config,
                                             moe_comm_type=moe_comm_type,
@@ -720,21 +723,25 @@ class SpecDecodeBaseProposer(Proposer):
         return cu_num_tokens, token_indices
     
     def set_input_ids_first_pass(
-            self,
-            target_token_ids: torch.Tensor,
-            next_token_ids: torch.Tensor,
-            num_tokens: int,
-            last_token_indices: torch.Tensor,
+        self,
+        target_token_ids: torch.Tensor,
+        next_token_ids: torch.Tensor,
+        num_tokens: int,
+        last_token_indices: torch.Tensor,
     ) -> None:
-        self.input_ids[: num_tokens - 1] = target_token_ids[1:]
+        self.input_ids[:num_tokens - 1] = target_token_ids[1:]
         self.input_ids[last_token_indices] = next_token_ids
 
     def model_returns_tuple(self) -> bool:
         return self.name != SpecDcodeType.DRAFT_MODEL
 
 class EagleProposer(SpecDecodeBaseProposer):
+
     def __init__(self,                
                  vllm_config: VllmConfig,
                  device: torch.device,
                  runner=None):
-        super().__init__(vllm_config, device, pass_hidden_states_to_model=True, runner=runner)
+        super().__init__(vllm_config, 
+                         device, 
+                         pass_hidden_states_to_model=True, 
+                         runner=runner)

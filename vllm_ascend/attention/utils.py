@@ -212,8 +212,8 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
     return nz_mat
 
 def extend_flat_seqs(
-    seqs: torch.Tensor, end_locs: torch.Tensor, new_vals: torch.Tensor
-) -> torch.Tensor:
+    seqs: torch.Tensor, end_locs: torch.Tensor, 
+    new_vals: torch.Tensor) -> torch.Tensor:
     """
     This function appends a single new value into multiple sequences
     that are stored in a flat format. E.g.
@@ -227,8 +227,10 @@ def extend_flat_seqs(
     seqs_new_idxs[start_locs] += 1
     seqs_new_idxs = seqs_new_idxs.cumsum(0) - 1
     # indices for new values
-    new_val_idxs = end_locs + 1 + torch.arange(new_vals.shape[0], device=seqs.device)
+    new_val_idxs = end_locs + 1 + torch.arange(new_vals.shape[0], 
+                                               device=seqs.device)
     # assign seqs and new vals
     new_seqs[seqs_new_idxs] = seqs
     new_seqs[new_val_idxs] = new_vals
+    
     return new_seqs

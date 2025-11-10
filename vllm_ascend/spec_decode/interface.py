@@ -15,6 +15,7 @@ class SpecDcodeType(enum.Enum):
     MTP = 4
     DRAFT_MODEL = 5
 
+
 class Proposer:
 
     def __init__(self,
