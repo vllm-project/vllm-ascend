@@ -21,6 +21,9 @@ class TestNPUWorker(TestBase):
 
         self.hf_config_mock = MagicMock()
         self.hf_config_mock.model_type = "test_model"
+        if hasattr(self.hf_config_mock, 'index_topk'):
+            delattr(self.hf_config_mock, 'index_topk')
+
         self.model_config_mock.hf_config = self.hf_config_mock
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
