@@ -481,12 +481,13 @@ class MtpProposer(Proposer):
 
                         # positions [N] -> [N, 1] for padding
                         positions = positions.unsqueeze(-1)
-                        positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
+                        positions = torch.ops.vllm.maybe_pad_and_reduce(
+                            positions)
                         positions = positions.squeeze(-1)
 
                         hidden_states = self.model(input_ids=input_ids,
-                                                positions=positions,
-                                                hidden_states=hidden_states)
+                                                   positions=positions,
+                                                   hidden_states=hidden_states)
                         hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                             hidden_states.contiguous(), True)
 
