@@ -326,7 +326,7 @@ class TestAscendSFATorchairImpl(TestBase):
 
     @patch('vllm.distributed.parallel_state._TP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
-    @patch('vllm.distributed.get_tensor_model_model_parallel_world_size',
+    @patch('vllm.distributed.get_tensor_model_parallel_world_size',
            return_value=2)
     @patch('vllm.config.get_current_vllm_config')
     @patch('vllm_ascend.torchair.torchair_sfa.get_ascend_config')
