@@ -3,9 +3,11 @@ from typing import Any, List, Optional
 
 import torch
 import torch.nn.functional as F
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group,
-                                          is_v1_kv_transfer_group)
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+    is_v1_kv_transfer_group,
+)
 from vllm.forward_context import ForwardContext, get_forward_context
 
 
@@ -40,12 +42,13 @@ class AscendPrefillContextParallelMetadata:
 
     pcp_prefill_mask: torch.Tensor = None
 
+
 @dataclass
 class AscendCommonAttentionMetadata:
     """
     Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
-    
+
     For many of the tensors we keep both GPU and CPU versions.
     """
 
@@ -211,9 +214,9 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
         (nz_mat.shape[0], nz_mat.shape[1] * nz_mat.shape[2], nz_mat.shape[3]))
     return nz_mat
 
-def extend_flat_seqs(
-    seqs: torch.Tensor, end_locs: torch.Tensor, 
-    new_vals: torch.Tensor) -> torch.Tensor:
+
+def extend_flat_seqs(seqs: torch.Tensor, end_locs: torch.Tensor,
+                     new_vals: torch.Tensor) -> torch.Tensor:
     """
     This function appends a single new value into multiple sequences
     that are stored in a flat format. E.g.
@@ -227,10 +230,10 @@ def extend_flat_seqs(
     seqs_new_idxs[start_locs] += 1
     seqs_new_idxs = seqs_new_idxs.cumsum(0) - 1
     # indices for new values
-    new_val_idxs = end_locs + 1 + torch.arange(new_vals.shape[0], 
+    new_val_idxs = end_locs + 1 + torch.arange(new_vals.shape[0],
                                                device=seqs.device)
     # assign seqs and new vals
     new_seqs[seqs_new_idxs] = seqs
     new_seqs[new_val_idxs] = new_vals
-    
+
     return new_seqs

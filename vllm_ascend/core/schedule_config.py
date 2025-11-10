@@ -31,7 +31,8 @@ class AscendSchedulerConfig(SchedulerConfig):
     long_prefill_token_threshold: int = MAX_INT
     policy: str = "fcfs"
     scheduler_cls: Union[str, Type[object]] = (
-        "vllm_ascend.core.scheduler.AscendScheduler")
+        "vllm_ascend.core.scheduler.AscendScheduler"
+    )
     enable_pd_transfer: bool = False
     decode_max_num_seqs: int = 0
 
@@ -43,7 +44,8 @@ class AscendSchedulerConfig(SchedulerConfig):
     ):
         scheduler_config = {
             field.name: getattr(vllm_scheduler_config, field.name)
-            for field in fields(vllm_scheduler_config) if field.init
+            for field in fields(vllm_scheduler_config)
+            if field.init
         }
         # Override default values into original SchedulerConfig
         scheduler_config["enable_chunked_prefill"] = False
@@ -51,8 +53,7 @@ class AscendSchedulerConfig(SchedulerConfig):
         scheduler_config["max_num_partial_prefills"] = None
         scheduler_config["long_prefill_token_threshold"] = None
         scheduler_config["policy"] = "fcfs"
-        scheduler_config["scheduler_cls"] = (
-            "vllm_ascend.core.scheduler.AscendScheduler")
+        scheduler_config["scheduler_cls"] = "vllm_ascend.core.scheduler.AscendScheduler"
         scheduler_config["enable_pd_transfer"] = False
         scheduler_config["decode_max_num_seqs"] = 0
         # Override params in original SchedulerConfig with params in ascend_scheduler_config
@@ -65,8 +66,10 @@ class AscendSchedulerConfig(SchedulerConfig):
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
         self.chunked_prefill_enabled = self.enable_chunked_prefill
-        if (self.max_num_batched_tokens < self.max_model_len
-                and not self.chunked_prefill_enabled):
+        if (
+            self.max_num_batched_tokens < self.max_model_len
+            and not self.chunked_prefill_enabled
+        ):
             raise ValueError(
                 "Ascend scheduler is enabled without chunked prefill feature. "
                 f"Argument max_num_batched_tokens ({self.max_num_batched_tokens}) is "
@@ -74,31 +77,37 @@ class AscendSchedulerConfig(SchedulerConfig):
                 "This effectively limits the maximum sequence length to "
                 "max_num_batched_tokens and makes vLLM reject longer "
                 "sequences. Please increase max_num_batched_tokens or "
-                "decrease max_model_len.")
+                "decrease max_model_len."
+            )
         # concurrent partial prefills. Default is 1 meaning not enabled.
         if self.max_long_partial_prefills is None:
             self.max_long_partial_prefills = 1
             self.long_prefill_token_threshold = MAX_INT
-        
+
         if self.max_num_partial_prefills is None:
             self.max_num_partial_prefills = 1
 
-        if self.long_prefill_token_threshold is None or \
-            self.long_prefill_token_threshold <= 0:
+        if (
+            self.long_prefill_token_threshold is None
+            or self.long_prefill_token_threshold <= 0
+        ):
             if self.max_model_len is None:
                 self.long_prefill_token_threshold = MAX_INT
             else:
-                self.long_prefill_token_threshold = \
-                    max(1, int(self.max_model_len * 0.04))
+                self.long_prefill_token_threshold = max(
+                    1, int(self.max_model_len * 0.04)
+                )
 
         if self.max_long_partial_prefills < 0:
             raise ValueError(
                 f"max_long_partial_prefills must be non-negative, but got "
-                f"{self.max_long_partial_prefills}")
+                f"{self.max_long_partial_prefills}"
+            )
         if self.long_prefill_token_threshold < 0:
             raise ValueError(
                 f"long_prefill_token_threshold must be non-negative, but got "
-                f"{self.long_prefill_token_threshold}")
+                f"{self.long_prefill_token_threshold}"
+            )
 
         if self.policy != "fcfs":
             raise NotImplementedError(

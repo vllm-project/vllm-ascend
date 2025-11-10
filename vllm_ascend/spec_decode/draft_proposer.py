@@ -11,6 +11,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.eagle import PADDING_SLOT_ID
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+
 from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.attention.utils import extend_flat_seqs
 from vllm_ascend.spec_decode.eagle_proposer import SpecDecodeBaseProposer
@@ -94,7 +95,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
 
         num_reqs = self.runner.input_batch.num_reqs
         (target_token_ids, target_positions, target_slot_mapping,
-         cu_num_tokens) = merge_next_token_ids_into_token_ids(
+         cu_num_tokens) = (merge_next_token_ids_into_token_ids(
              input_token_ids=target_token_ids,
              input_positions=target_positions,
              cad=attn_metadata,
@@ -103,7 +104,8 @@ class DraftModelProposer(SpecDecodeBaseProposer):
              max_model_len=self.vllm_config.model_config.max_model_len,
              arange=self.arange,
              cu_num_tokens=cu_num_tokens,
-             num_reqs=num_reqs)
+             num_reqs=num_reqs,
+         ))
 
         draft_token_ids = self._propose(
             target_token_ids=target_token_ids,
@@ -227,9 +229,16 @@ def create_vllm_config_for_draft_model(
 
 
 def merge_next_token_ids_into_token_ids(
-        input_token_ids: torch.Tensor, input_positions: torch.Tensor,
-        cad: AscendMetadata, next_token_ids: torch.Tensor, block_size: int,
-        max_model_len: int, arange: torch.Tensor, cu_num_tokens, num_reqs):
+    input_token_ids: torch.Tensor,
+    input_positions: torch.Tensor,
+    cad: AscendMetadata,
+    next_token_ids: torch.Tensor,
+    block_size: int,
+    max_model_len: int,
+    arange: torch.Tensor,
+    cu_num_tokens,
+    num_reqs,
+):
     """
     Merges the next token ids with the existing token ids into a flat sequence.
     Does the same for the positions, computes new slot mapping,
