@@ -103,6 +103,7 @@ class KVTransferThread(threading.Thread):
 
     def set_finished_request(self, req_id):
         with self.done_task_lock:
+            self.stored_requests.pop(req_id, None)
             self.finished_requests.add(req_id)
 
     def run(self):
