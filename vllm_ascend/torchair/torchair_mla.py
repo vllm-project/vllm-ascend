@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
-                                              AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
@@ -36,10 +35,6 @@ class AscendMLATorchairBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_MLA_TORCHAIR"
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return AscendMLATorchairMetadata
 
     @staticmethod
     def get_builder_cls():
