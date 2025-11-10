@@ -16,8 +16,6 @@ LORA_NAME_PATH_MAP = {
     "Cat": "vllm-ascend/self_cognition_Bob",  # same as Bob
 }
 
-LORA_NAME_ID_MAP = {}
-INCREASE_LORA_ID = 0
 LORA_RANK = 8
 
 LORA_TEST_PROMPTS = ["What is GitHub?", "Hi, tell me about you"]
@@ -40,21 +38,21 @@ def format_chatml_messages(prompt: str):
     ]
 
 
-def make_add_lora_request(name: str, path: str):
-    global INCREASE_LORA_ID, LORA_NAME_ID_MAP
-
-    INCREASE_LORA_ID += 1
-    LORA_NAME_ID_MAP[name] = INCREASE_LORA_ID
-
-    return LoRARequest(
-        lora_name=name,
-        lora_int_id=INCREASE_LORA_ID,
-        lora_path=snapshot_download(path),
-    )
-
-
-# @multi_gpu_test(num_gpus=2)
 def test_multi_loras_with_tp_sync():
+
+    lora_name_id_map = {}
+    increase_lora_id = 0
+
+    def make_add_loraq_request(name: str, path: str):
+        nonlocal increase_lora_id
+        increase_lora_id += 1
+        lora_name_id_map[name] = increase_lora_id
+
+        return LoRARequest(
+            lora_name=name,
+            lora_int_id=increase_lora_id,
+            lora_path=snapshot_download(path),
+        )
 
     vllm_model = VllmRunner(
         MODEL_PATH,
@@ -98,7 +96,7 @@ def test_multi_loras_with_tp_sync():
     def call_llm_get_outputs(prompt: str, lora_name: str):
         lora_request = LoRARequest(
             lora_name=lora_name,
-            lora_int_id=LORA_NAME_ID_MAP[lora_name],
+            lora_int_id=lora_name_id_map[lora_name],
             lora_path=LORA_NAME_PATH_MAP[lora_name],
         )
         messages = format_chatml_messages(prompt)
@@ -121,22 +119,22 @@ def test_multi_loras_with_tp_sync():
         for dynamic lora loading and unloading
         """
         remove_lora_response = llm.llm_engine.remove_lora(
-            lora_id=LORA_NAME_ID_MAP[name])
+            lora_id=lora_name_id_map[name])
 
         add_lora_response = llm.llm_engine.add_lora(
             make_add_lora_request(name, LORA_NAME_PATH_MAP[name]))
 
         print(f"{remove_lora_response=}, {add_lora_response=}")
 
-    def check_outputs(outputs: str, expected: str):
-        print(f"{prompt=}.\n{expected_output=}\n{output_text=}")
+    def check_outputs(outputs: str, expected: str, prompt: str):
+        print(f"{prompt=}.\n{expected=}\n{outputs=}")
         print("\n----------------------------\n")
         assert outputs == expected
 
     for prompt, expected_output in zip(LORA_TEST_PROMPTS, LORA_TEST_EXPECTED):
 
         output_text = call_llm_get_outputs(prompt, "Alice")
-        check_outputs(output_text, expected_output)
+        check_outputs(output_text, expected_output, prompt)
 
         # call Bob, ignore what it is output
         call_llm_get_outputs(prompt, "Bob")
@@ -144,7 +142,7 @@ def test_multi_loras_with_tp_sync():
 
         # call Alice
         output_text = call_llm_get_outputs(prompt, "Alice")
-        check_outputs(output_text, expected_output)
+        check_outputs(output_text, expected_output, prompt)
 
         # reload Bob Lora
         reload_lora("Bob")
@@ -152,11 +150,11 @@ def test_multi_loras_with_tp_sync():
 
         # call Alice
         output_text = call_llm_get_outputs(prompt, "Alice")
-        check_outputs(output_text, expected_output)
+        check_outputs(output_text, expected_output, prompt)
 
         # reload Alice Lora
         reload_lora("Alice")
         print("After reload Alice:")
 
         output_text = call_llm_get_outputs(prompt, "Alice")
-        check_outputs(output_text, expected_output)
+        check_outputs(output_text, expected_output, prompt)
