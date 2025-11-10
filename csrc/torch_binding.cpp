@@ -621,10 +621,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     "                Tensor gmm2_weight, Tensor gmm2_weight_scale,"
     "                Tensor expert_scales_optional,"
     "                str? hcom_ep_name,"
-    "                int64_t num_ranks, int64_t rank,"
-    "                int64_t shared_expert_num, int64_t shared_expert_rank_num,"
-    "                int64_t num_experts, int64_t global_bs,"
-    "                int64_t quant_mode) -> (Tensor output, Tensor ep_recv_count)"
+    "                int num_ranks, int rank,"
+    "                int shared_expert_num, int shared_expert_rank_num,"
+    "                int num_experts, int global_bs,"
+    "                int quant_mode) -> (Tensor output, Tensor ep_recv_count)"
     );
 
     ops.impl("fused_deep_moe", torch::kPrivateUse1, &vllm_ascend::fused_deep_moe);
