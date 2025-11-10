@@ -469,7 +469,3 @@ docker run --rm \
 
 ::::
 :::::
-
-### Verify installation
-
-TODO
