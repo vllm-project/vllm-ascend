@@ -100,7 +100,7 @@ print(response)
 ```python
 from vllm import LLM
 
-model_name = "Qwen/Qwen3-Reranker-0.6B"
+model_name = "Qwen/Qwen3-Reranker-8B"
 
 # What is the difference between the official original version and one
 # that has been converted into a sequence classification model?
