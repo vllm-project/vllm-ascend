@@ -40,7 +40,7 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 ### Online Inference
 
 ```bash
-vllm serve Qwen/Qwen3-Reranker-0.6B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
+vllm serve Qwen/Qwen3-Reranker-8B --hf_overrides '{"architectures": ["Qwen3ForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
 ```
 
 Once your server is started, you can send request with follow examples.
@@ -113,7 +113,7 @@ model_name = "Qwen/Qwen3-Reranker-8B"
 # Models converted offline using this method can not only be more efficient
 # and support the vllm score API, but also make the init parameters more
 # concise, for example.
-# model = LLM(model="tomaarsen/Qwen3-Reranker-0.6B-seq-cls", task="score")
+# model = LLM(model="Qwen/Qwen3-Reranker-8B", task="score")
 
 # If you want to load the official original version, the init parameters are
 # as follows.
@@ -176,7 +176,7 @@ if __name__ == "__main__":
 If you run this script successfully, you can see the info shown below:
 
 ```bash
-{'id': 'score-14f698f021b9434482ec3d94a5757e11', 'object': 'list', 'created': 1749786173, 'model': 'tomaarsen/Qwen3-Reranker-0.6B-seq-cls', 'data': [{'index': 0, 'object': 'score', 'score': 0.99951171875}, {'index': 1, 'object': 'score', 'score': 0.99951171875}], 'usage': {'prompt_tokens': 189, 'total_tokens': 189, 'completion_tokens': 0, 'prompt_tokens_details': None}}
+{'id': 'score-14f698f021b9434482ec3d94a5757e11', 'object': 'list', 'created': 1749786173, 'model': 'Qwen/Qwen3-Reranker-8B', 'data': [{'index': 0, 'object': 'score', 'score': 0.99951171875}, {'index': 1, 'object': 'score', 'score': 0.99951171875}], 'usage': {'prompt_tokens': 189, 'total_tokens': 189, 'completion_tokens': 0, 'prompt_tokens_details': None}}
 ```
 
 ### reference by [this](https://github.com/vllm-project/vllm/pull/19260)
