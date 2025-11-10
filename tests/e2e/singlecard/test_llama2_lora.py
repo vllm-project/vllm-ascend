@@ -29,7 +29,10 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_60 (pick INTEGER, former_wnba_team VARCHAR)\n\n question: What pick was a player that previously played for the Minnesota Lynx? [/user] [assistant]",  # noqa: E501
         "[user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_28138035_4 (womens_doubles VARCHAR, mens_singles VARCHAR)\n\n question: Name the women's doubles for werner schlager [/user] [assistant]"  # noqa: E501
     ]
-    sampling_params = vllm.SamplingParams(temperature=0, max_tokens=256, skip_special_tokens=False, stop=["[/assistant]"])
+    sampling_params = vllm.SamplingParams(temperature=0,
+                                          max_tokens=256,
+                                          skip_special_tokens=False,
+                                          stop=["[/assistant]"])
     outputs = llm.generate(
         prompts,
         sampling_params,
@@ -46,15 +49,16 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 
 
 def test_llama2_lora(sql_lora_files):
-    with VllmRunner(snapshot_download(MODEL_PATH),
-                    enable_lora=True,
-                    # dtype="half",
-                    max_loras=4,
-                    max_model_len=1024,
-                    max_num_seqs=13,
-                    gpu_memory_utilization=0.8,
-                    tokenizer_name=sql_lora_files,
-                    enforce_eager=True) as vllm_model:
+    with VllmRunner(
+            snapshot_download(MODEL_PATH),
+            enable_lora=True,
+            # dtype="half",
+            max_loras=4,
+            max_model_len=1024,
+            max_num_seqs=13,
+            gpu_memory_utilization=0.8,
+            tokenizer_name=sql_lora_files,
+            enforce_eager=True) as vllm_model:
 
         output1 = do_sample(vllm_model.model, sql_lora_files, lora_id=1)
         for i in range(len(EXPECTED_LORA_OUTPUT)):
