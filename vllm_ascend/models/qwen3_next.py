@@ -6,7 +6,6 @@ from collections.abc import Iterable
 from typing import Optional
 
 import torch
-import torch_npu
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN

@@ -25,12 +25,7 @@ from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
 
-# NZ will cause precision error in Qwen3-Next
-# When it is fixed, this set-up can be removed
-_IS_ENABLE_NZ = "VLLM_ASCEND_ENABLE_NZ"
 
-
-@patch.dict(os.environ, {_IS_ENABLE_NZ: "0"})
 def test_models_distributed_Qwen3_NEXT_TP4():
     example_prompts = [
         "Hello, my name is",
@@ -46,7 +41,6 @@ def test_models_distributed_Qwen3_NEXT_TP4():
         del vllm_model
 
 
-@patch.dict(os.environ, {_IS_ENABLE_NZ: "0"})
 def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
     example_prompts = [
         "Hello, my name is",
@@ -66,7 +60,6 @@ def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
         del vllm_model
 
 
-@patch.dict(os.environ, {_IS_ENABLE_NZ: "0"})
 def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
     example_prompts = [
         "Hello, my name is",
