@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from modelscope import snapshot_download  # type: ignore
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 from vllm.lora.request import LoRARequest
 
 from tests.e2e.conftest import VllmRunner
@@ -43,7 +43,7 @@ def test_multi_loras_with_tp_sync():
     lora_name_id_map = {}
     increase_lora_id = 0
 
-    def make_add_loraq_request(name: str, path: str):
+    def make_add_lora_request(name: str, path: str):
         nonlocal increase_lora_id
         increase_lora_id += 1
         lora_name_id_map[name] = increase_lora_id
