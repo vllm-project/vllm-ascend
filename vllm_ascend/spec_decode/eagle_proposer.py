@@ -169,7 +169,7 @@ class SpecDecodeBaseProposer(Proposer):
                            attn_metadata=None,
                            aux_hidden_states: torch.Tensor = None):
 
-        attn_metadata = self._get_eagle_atten_dict(scheduler_output)
+        attn_metadata = self._get_atten_dict(scheduler_output)
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
             if token_ids:
@@ -237,7 +237,7 @@ class SpecDecodeBaseProposer(Proposer):
         spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
 
-    def _get_eagle_atten_dict(
+    def _get_atten_dict(
         self,
         scheduler_output: "SchedulerOutput",
     ):
