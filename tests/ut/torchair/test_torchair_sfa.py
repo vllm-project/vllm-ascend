@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.distributed.parallel_state import GroupCoordinator
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -415,8 +416,9 @@ class TestAscendSFATorchairImpl(TestBase):
 
     def test_q_proj_and_k_up_proj(self):
         batch_size = 4
-        x = torch.randn(batch_size, self.impl.num_heads,
-                        self.impl.qk_head_dim)
+        x = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
+        q_proj_output = torch.randn(batch_size, self.impl.num_heads,
+                                    self.impl.qk_head_dim)
         self.impl.q_proj.return_value = (q_proj_output, )
         if not hasattr(self.impl, 'W_UK_T') or self.impl.W_UK_T is None:
             self.impl.W_UK_T = torch.randn(self.impl.num_heads,
@@ -457,7 +459,7 @@ class TestAscendSFATorchairImpl(TestBase):
     def test_compute_prefill_context_none(self):
         batch_size = 4
         kv_cache = torch.randn(10, 1, 1, 192)
-        query = torch.randn(batch_siz, self.impl.num_heads,
+        query = torch.randn(batch_size, self.impl.num_heads,
                             self.impl.qk_head_dim)
         metadata = MagicMock()
         metadata.prefill = None
