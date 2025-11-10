@@ -29,7 +29,9 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.utils import enable_sp, prefill_context_parallel_enable
+from vllm_ascend.utils import enable_sp, prefill_context_parallel_enable, npu_stream_switch
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
 
 if prefill_context_parallel_enable():
     from vllm.distributed import get_pcp_group
@@ -52,12 +54,17 @@ class PrepareAndFinalize(ABC):
         moe_config (FusedMoEConfig): Configuration object containing TP/DP/EP group info,
                                      sizes, ranks, and communication settings.
     """
+    quant_stream: Optional[torch.npu.Stream] = None
 
     def __init__(self,
                  moe_config: FusedMoEConfig,
                  quant_type: QuantType = QuantType.NONE):
         self.moe_config = moe_config
         self.quant_type = quant_type
+        ascend_config = get_ascend_config()
+        self.multistream_overlap_gate = ascend_config.multistream_overlap_gate
+        if self.multistream_overlap_gate and FusedMoEPrepareAndFinalize.quant_stream is None:
+            FusedMoEPrepareAndFinalize.quant_stream = torch.npu.Stream()
 
     @abstractmethod
     def prepare(
@@ -338,12 +345,24 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self.quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
                 hidden_states)
+
+        if self.multistream_overlap_gate:
+            FusedMoEPrepareAndFinalize.quant_stream.wait_stream(torch.npu.current_stream())
+            with npu_stream_switch(FusedMoEPrepareAndFinalize.quant_stream,
+                               enabled=self.multistream_overlap_gate):
+                hidden_states  = fc3_all_gather_and_maybe_unpad_impl(hidden_states)
+        else:
+            hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                hidden_states, True, True)
+            router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                router_logits, True, True)
+    
+        if pertoken_scale is not None:
             pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
                 pertoken_scale, True, True)
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            hidden_states, True, True)
-        router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
-            router_logits, True, True)
+
+        if self.multistream_overlap_gate:
+            torch.npu.current_stream().wait_stream(FusedMoEPrepareAndFinalize.quant_stream)
 
         if pertoken_scale is not None:
             return (hidden_states, pertoken_scale), router_logits, None, None
