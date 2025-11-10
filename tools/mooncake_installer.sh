@@ -39,7 +39,7 @@ clone_repo_if_not_exists() {
     local repo_url=$2
 
     if [ ! -d "$repo_dir" ]; then
-        git clone "$repo_url"
+        git clone --depth 1 "$repo_url"
     else
         echo "Directory $repo_dir already exists, skipping clone."
     fi
@@ -69,7 +69,7 @@ check_success() {
 }
 
 if [ $(id -u) -ne 0 ]; then
-	print_error "Require root permission, try sudo ./dependencies.sh"
+        print_error "Require root permission, try sudo ./dependencies.sh"
 fi
 
 # Parse command line arguments
@@ -151,22 +151,31 @@ if command -v apt-get &> /dev/null; then
 elif command -v yum &> /dev/null; then
     echo "Detected yum. Using Red Hat-based package manager."
     yum makecache
-    yum install -y cmake \
-            gflags-devel \
-            glog-devel \
-            libibverbs-devel \
-            numactl-devel \
-            gtest \
-            gtest-devel \
-            boost-devel \
-            openssl-devel \
-            hiredis-devel \
-            libcurl-devel \
-            jsoncpp-devel \
-            mpich \
-            mpich-devel
-    # Install yaml-cpp
-    cd "$TARGET_DIR"
+    yum install -y \
+        gcc \
+        gcc-c++ \
+        make \
+        cmake \
+        git \
+        wget \
+        libibverbs-devel \
+        numactl-devel \
+        gflags-devel \
+        glog-devel \
+        gtest \
+        gtest-devel \
+        jsoncpp-devel \
+        mpich \
+        mpich-devel \
+        boost-devel \
+        openssl-devel \
+        hiredis-devel \
+        python3-devel \
+        curl-devel \
+        patchelf
+
+    # install yaml-cpp
+    cd "${REPO_ROOT}/thirdparties"
     clone_repo_if_not_exists "yaml-cpp" https://github.com/jbeder/yaml-cpp.git
     cd yaml-cpp || exit
     rm -rf build
@@ -174,7 +183,7 @@ elif command -v yum &> /dev/null; then
     cmake ..
     make -j$(nproc)
     make install
-    cd ../..
+    cd "${REPO_ROOT}"
 else
     echo "Unsupported package manager. Please install the dependencies manually."
     exit 1
@@ -205,17 +214,12 @@ fi
 
 # Clone yalantinglibs
 echo "Cloning yalantinglibs from ${GITHUB_PROXY}/alibaba/yalantinglibs.git"
-git clone ${GITHUB_PROXY}/alibaba/yalantinglibs.git
+git clone -b 0.5.5 --depth 1 ${GITHUB_PROXY}/alibaba/yalantinglibs.git
 check_success "Failed to clone yalantinglibs"
 
 # Build and install yalantinglibs
 cd yalantinglibs
 check_success "Failed to change to yalantinglibs directory"
-
-# Checkout version 0.5.5
-echo "Checking out yalantinglibs version 0.5.5..."
-git checkout 0.5.5
-check_success "Failed to checkout yalantinglibs version 0.5.5"
 
 mkdir -p build
 check_success "Failed to create build directory"

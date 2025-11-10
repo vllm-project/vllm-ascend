@@ -29,13 +29,10 @@ WORKDIR /workspace
 
 COPY . /vllm-workspace/vllm-ascend/
 
+# Install Mooncake dependencies
 RUN apt-get update -y && \
     apt-get install -y git vim wget net-tools gcc g++ cmake libnuma-dev && \
-    rm -rf /var/cache/apt/* && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install Mooncake dependencies
-RUN git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
+    git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
     cd /vllm-workspace/Mooncake && bash mooncake_installer.sh -y && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/lib64 && \
