@@ -32,13 +32,13 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 :::::{tab-set}
 ::::{tab-item} Use deepseek-v3.2 docker image
 
-Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp`(for Atlas 800 A3).
+In `vllm-ascend:v0.11.0rc0` release, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp`(for Atlas 800 A3).
 
 Refer to [using docker](../installation.md#set-up-using-docker) to set up environment using Docker, remember to replace the image with deepseek-v3.2 docker image.
 
 :::{note}
-The image is based on a specific version and will not continue to release new version.
-Only AArch64 architecture are supported currently due to extra operator's installation limitations.
+- The image is based on a specific version `vllm-ascend:v0.11.0rc0` and will not continue to release new version. Move to another tab `Use vllm-ascend docker image` for latest support of deepseek-v3.2 on vllm-ascend.
+- Only AArch64 architecture are supported currently due to extra operator's installation limitations.
 :::
 
 ::::
@@ -66,23 +66,7 @@ wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_
 pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 ```
 
-3. Download and install `MLAPO`.
-
-```shell
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-mlapo-linux.aarch64.run
-# please set a custom install-path, here take `/`vllm-workspace/CANN` as example.
-chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run 
-./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/torch_npu-2.7.1%2Bgitb7c90d0-cp311-cp311-linux_aarch64.whl
-pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/libopsproto_rt2.0.so
-cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
-# Don't forget to replace `/vllm-workspace/CANN/` to the custom path you set before.
-source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
-export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
-```
-
-For `A2` image, you should change all `wget` commands as above, and replace `A3` with `A2` release file.
+For `A2` image:
 
 1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -96,22 +80,6 @@ export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendor
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
 wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-```
-
-3. Download and install `MLAPO`.
-
-```shell
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/CANN-custom_ops-mlapo-linux.aarch64.run
-# please set a custom install-path, here take `/`vllm-workspace/CANN` as example.
-chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run 
-./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/torch_npu-2.7.1%2Bgitb7c90d0-cp311-cp311-linux_aarch64.whl
-pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/libopsproto_rt2.0.so
-cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
-# Don't forget to replace `/vllm-workspace/CANN/` to the custom path you set before.
-source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
-export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
 ```
 
 ::::
