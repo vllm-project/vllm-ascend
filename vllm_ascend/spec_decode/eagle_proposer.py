@@ -491,13 +491,13 @@ class SpecDecodeBaseProposer(Proposer):
 
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions.to(device)
-        self.hidden_states[:num_tokens] = target_hidden_states
         attn_metadata.block_tables = block_table.to(device)
         model_kwargs = {
             "input_ids": self.input_ids[:num_input_tokens],
             "positions": self.positions[:num_input_tokens]
         }
         if self.pass_hidden_states_to_model:
+            self.hidden_states[:num_tokens] = target_hidden_states
             model_kwargs["hidden_states"] = self.hidden_states[:num_input_tokens]
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
@@ -595,7 +595,6 @@ class SpecDecodeBaseProposer(Proposer):
             # copy inputs to buffer for cudagraph
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
-            self.hidden_states[:batch_size] = hidden_states
             attn_mask = self.attn_mask_builder.get_splitfuse_attn_mask(
                 attn_metadata.seq_lens, positions_cpu,
                 self.vllm_config.model_config.dtype, self.device)
@@ -608,6 +607,7 @@ class SpecDecodeBaseProposer(Proposer):
                 "positions": self.positions[:input_batch_size]
             }
             if self.pass_hidden_states_to_model:
+                self.hidden_states[:batch_size] = hidden_states
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
             with set_ascend_forward_context(attn_metadata,
                                             self.vllm_config,
