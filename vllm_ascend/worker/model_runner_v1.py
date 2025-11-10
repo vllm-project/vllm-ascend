@@ -745,7 +745,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             backward_kwargs = {}
             backward_kwargs["mm_features"] = new_req_data.mm_features
 
-            # Create request state - CP/DCP tracking will be computed below
+            # Create request state - PCP/DCP tracking will be computed below
             req_state = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=new_req_data.prompt_token_ids,
@@ -761,7 +761,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 **backward_kwargs,
             )
 
-            # Compute CP/DCP tracking fields for chunked prefill
+            # Compute PCP/DCP tracking fields for chunked prefill
             self.input_batch.local_chunked_kv_lens = [None] * self.max_num_reqs
             if self.pcp_size * self.dcp_size > 1:
                 num_computed_tokens = new_req_data.num_computed_tokens
@@ -778,8 +778,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         cp_kv_cache_interleave_size,
                     )[0]
 
-                    # Update next_cp_dcp_start_rank
-                    req_state.next_cp_dcp_start_rank = temp_start_rank_dict[
+                    # Update next_pcp_dcp_start_rank
+                    req_state.next_pcp_dcp_start_rank = temp_start_rank_dict[
                         req_id][0]
                     req_state.token_blank_in_last_blk = temp_start_rank_dict[
                         req_id][1]
@@ -812,7 +812,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             prev_num_computed_tokens = req_state.num_computed_tokens
             req_state.num_computed_tokens = num_computed_tokens
 
-            # Compute CP/DCP tracking fields for chunked prefill
+            # Compute PCP/DCP tracking fields for chunked prefill
             if self.pcp_size * self.dcp_size > 1:
                 # If this is the first chunk, initialize tracking fields
                 if req_state.local_chunked_kv_lens is None:
@@ -824,7 +824,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if chunk_tokens > 0:
                     # Create a temporary dict with this request's starting rank
                     temp_start_rank_dict = {
-                        req_id: (req_state.next_cp_dcp_start_rank,
+                        req_id: (req_state.next_pcp_dcp_start_rank,
                                  req_state.token_blank_in_last_blk)
                     }
 
@@ -837,8 +837,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         cp_kv_cache_interleave_size,
                     )[0]
 
-                    # Update next_cp_dcp_start_rank for this request
-                    req_state.next_cp_dcp_start_rank = temp_start_rank_dict[
+                    # Update next_pcp_dcp_start_rank for this request
+                    req_state.next_pcp_dcp_start_rank = temp_start_rank_dict[
                         req_id][0]
                     req_state.token_blank_in_last_blk = temp_start_rank_dict[
                         req_id][1]

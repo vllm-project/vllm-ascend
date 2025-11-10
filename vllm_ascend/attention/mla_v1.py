@@ -1118,11 +1118,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                     [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
                 k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
-            # Case that no kv_cache has been stored on this CP rank, no need to do following computation.
-            if torch.all(seq_len2 == 0).item():
-                continue
             if self.pcp_size > 1:
-                # CP+DCP mode: first compute this rank's contribution to the chunk
+                # Case that no kv_cache has been stored on this CP rank, no need to do following computation.
+                if torch.all(seq_len2 == 0).item():
+                    continue
+                # PCP mode: first compute this rank's contribution to the chunk
                 if i == 0:
                     torch_npu.atb.npu_ring_mla(
                         q_nope=q_nope,
@@ -1166,6 +1166,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     softmax_lse=prefix_lse)
 
             else:
+                assert torch.all(context_seq_len == 0).item() == False
                 # compute this chunk block then update prefix tensors to keep shapes consistent
                 torch_npu.atb.npu_ring_mla(
                     q_nope=q_nope,

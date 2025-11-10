@@ -76,7 +76,7 @@ class CachedRequestState:
     # pcp/dcp param
     local_chunked_kv_lens: Optional[list[Optional[list[Optional[
         list[int]]]]]] = None  # Records computed tokens for each chunk
-    next_cp_dcp_start_rank: int = 0  # Tracks next starting rank for round-robin distribution
+    next_pcp_dcp_start_rank: int = 0  # Tracks next starting rank for round-robin distribution
     token_blank_in_last_blk: int = 0  # if the last block is not full, how many future tokens can be stored
 
     def __post_init__(self):
