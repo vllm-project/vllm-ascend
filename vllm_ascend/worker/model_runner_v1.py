@@ -2258,12 +2258,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             attn_metadata = {}
 
-            # When force_attention == True, the model runs in capturing so we
-            # need seq_lens as max_model_len to get max workspace for attention op.
-            # However, when force_attention == False, the model might be running
-            # normal inference. If dp_size > 1, we only need dummy_run
-            # to execute a short attention with seq_lens as 1.
-            seq_lens = self.model_config.max_model_len if force_attention else 1
+            seq_lens = max_query_len
             self.seq_lens_np[:num_reqs] = seq_lens
             self.seq_lens_np[num_reqs:] = 0
 
