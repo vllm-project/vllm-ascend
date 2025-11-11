@@ -359,4 +359,7 @@ class TestAscendConfig(TestBase):
             }
             test_vllm_config.parallel_config = ParallelConfig(
                 data_parallel_size=4, tensor_parallel_size=1)
+            model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
+            test_vllm_config.model_config = ModelConfig(model=model_path,
+                                                        enforce_eager=True)
             init_ascend_config(test_vllm_config)
