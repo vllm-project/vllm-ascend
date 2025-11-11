@@ -2,7 +2,7 @@
 -r requirements.txt
 modelscope
 openai
-pytest >= 6.0
+pytest >= 6.0,<9.0.0
 pytest-asyncio
 pytest-mock
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d 
