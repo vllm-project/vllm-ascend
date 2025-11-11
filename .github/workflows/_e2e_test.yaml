@@ -202,4 +202,5 @@ jobs:
           pytest -sv tests/e2e/multicard/test_pipeline_parallel.py
           pytest -sv tests/e2e/multicard/test_prefix_caching.py
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py
+          pytest -sv tests/e2e/multicard/test_lmhead_tp_mtp_dp2.py
           
