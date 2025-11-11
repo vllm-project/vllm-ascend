@@ -29,30 +29,26 @@ WORKDIR /workspace
 
 COPY . /vllm-workspace/vllm-ascend/
 
-ARG ARCH=$(uname -i)
+SHELL ["/bin/bash", "-c"]
 
-# Build Mooncake
-RUN git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
+RUN yum update -y && \
+    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
+    git clone --depth 1 --branch ${MOONCAKE_TAG} https://github.com/kvcache-ai/Mooncake /vllm-workspace/Mooncake && \
     cp /vllm-workspace/vllm-ascend/tools/mooncake_installer.sh /vllm-workspace/Mooncake/ && \
+    ARCH=$(uname -m) && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
-    source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64 && \
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/devlib:/usr/local/Ascend/ascend-toolkit/latest/${ARCH}-linux/lib64:$LD_LIBRARY_PATH && \
     export CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/usr/include/c++/12:/usr/include/c++/12/${ARCH}-openEuler-linux && \
-    cd /vllm-workspace/Mooncake && bash mooncake_installer.sh -y && \
+    cd /vllm-workspace/Mooncake && \
+    bash mooncake_installer.sh -y && \
     mkdir -p build && cd build && cmake .. -DUSE_ASCEND_DIRECT=ON && \
     make -j$(nproc) && make install && \
     rm -fr /vllm-workspace/Mooncake/build && \
-    yum clean all && \
     rm -rf /var/cache/yum/*
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.11.0
-
-RUN yum update -y && \
-    yum install -y git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
-    yum clean all && \
-    rm -rf /var/cache/yum/*
 
 RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /vllm-workspace/vllm
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
