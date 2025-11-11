@@ -158,8 +158,6 @@ else:
     from vllm.utils.mem_utils import DeviceMemoryProfiler
     from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
-# yapf: enable
-
 if vllm_version_is("0.11.0"):
     from vllm.attention.layer import Attention
     from vllm.config import CompilationLevel
