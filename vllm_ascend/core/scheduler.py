@@ -130,10 +130,12 @@ class AscendScheduler(Scheduler):
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
-            current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
-            if len(self.running) == (self.decode_max_num_running_reqs
-                                     if self.phase == "decode" else
-                                     self.max_num_running_reqs) or current_batch_size == self.max_num_per_batch:
+            current_batch_size = len(scheduled_new_reqs) + len(
+                scheduled_resumed_reqs) + len(scheduled_running_reqs)
+            if len(self.running) == (
+                    self.decode_max_num_running_reqs
+                    if self.phase == "decode" else self.max_num_running_reqs
+            ) or current_batch_size == self.max_num_per_batch:
 
                 break
 
@@ -333,7 +335,8 @@ class AscendScheduler(Scheduler):
         if len(self.scheduled_req_ids) == 0:
             req_index = 0
             while req_index < len(self.running) and token_budget > 0:
-                current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+                current_batch_size = len(scheduled_new_reqs) + len(
+                    scheduled_resumed_reqs) + len(scheduled_running_reqs)
                 if current_batch_size == self.max_num_per_batch:
                     break
                 request = self.running[req_index]
