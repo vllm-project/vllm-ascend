@@ -20,7 +20,6 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -117,8 +116,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        if not envs_vllm.VLLM_USE_V1:
-            raise ValueError("vLLM Ascend does not support V0 engine.")
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 

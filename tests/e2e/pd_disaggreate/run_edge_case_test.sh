@@ -2,7 +2,6 @@
 export LCCL_DETERMINISTIC=1
 export HCCL_DETERMINISTIC=true
 export CLOSE_MATMUL_K_SHIFT=1
-export VLLM_USE_V1=1
 
 set -xe
 

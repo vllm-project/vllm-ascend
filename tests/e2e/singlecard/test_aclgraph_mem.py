@@ -30,8 +30,6 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="aclgraph only support on v1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4])
 @patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "0"})
