@@ -1,7 +1,7 @@
 #include <map>
 #include "tiling_data.h"
-#include "batch_matmul_transpose/op_host/common.h"
-#include "batch_matmul_transpose/op_host/common_tiling.h"
+#include "common.h"
+#include "common_tiling.h"
 
 namespace pp_matmul {
 

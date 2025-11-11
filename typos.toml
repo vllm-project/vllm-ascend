@@ -1,6 +1,6 @@
 [files]
 # these files may be written in non english words
-extend-exclude = []
+extend-exclude = ['csrc/batch_matmul_transpose/**']
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
