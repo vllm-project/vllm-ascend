@@ -93,7 +93,8 @@ An example of additional configuration is as follows:
         "embedding_tensor_parallel_size": 8,
         "mlp_tensor_parallel_size": 8,
     },
+    "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
-    "refresh": False,
+    "refresh": False
 }
 ```
