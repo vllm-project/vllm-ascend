@@ -20,6 +20,7 @@
 import copy
 from typing import Optional, Union
 
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 import torch
 import torch.nn as nn
 import torch_npu
@@ -410,6 +411,9 @@ class NPUWorker(WorkerBase):
         init_ascend_model_parallel(self.parallel_config)
         ensure_kv_transfer_initialized(self.vllm_config)
 
+        # Init ec connector here before KV caches caches init
+        # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
+        ensure_ec_transfer_initialized(self.vllm_config)
     def _init_profiler(self):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace

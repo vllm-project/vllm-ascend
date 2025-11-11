@@ -45,6 +45,7 @@ from vllm.attention.layer import Attention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -89,13 +90,14 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         UniformTypeKVCacheSpecs)
 # yapf: enable
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
-                             DraftTokenIds, LogprobsTensors, ModelRunnerOutput,
-                             PoolerOutput)
+                             DraftTokenIds,ECConnectorOutput, LogprobsTensors, ModelRunnerOutput,
+                             PoolerOutput,make_empty_encoder_model_runner_output)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (AttentionGroup, bind_kv_cache,
@@ -273,7 +275,7 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
         return output
 
 
-class NPUModelRunner(LoRAModelRunnerMixin):
+class NPUModelRunner(LoRAModelRunnerMixin,ECConnectorModelRunnerMixin):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
@@ -1184,6 +1186,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 output,
                 is_embed=pos_info.is_embed,
             )
+            logger.debug("Finish execute for mm hash %s", mm_hash)
+            self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
     def _batch_mm_kwargs_from_scheduler(
         self,
@@ -1756,15 +1760,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # _prepare_inputs may reorder the batch, so we must gather
         # multi-modal outputs after that to ensure the correct order
+        ec_connector_output = None
         if self.is_multimodal_model:
             # Run the multimodal encoder if any.
-            self._execute_mm_encoder(scheduler_output)
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             input_ids = self.input_ids[:total_num_scheduled_tokens]
             if vllm_version_is("0.11.0"):
+                self._execute_mm_encoder(scheduler_output)
                 mm_embeds = self._gather_mm_embeddings_0110(scheduler_output)
                 if mm_embeds:
                     inputs_embeds = self.model.get_input_embeddings(
@@ -1772,8 +1777,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     inputs_embeds = self.model.get_input_embeddings(input_ids)
             else:
-                mm_embeds, is_mm_embed = self._gather_mm_embeddings(
-                    scheduler_output)
+                with self.maybe_get_ec_connector_output(
+                    scheduler_output,
+                    encoder_cache=self.encoder_cache,
+                ) as ec_connector_output:
+                    self._execute_mm_encoder(scheduler_output)
+                    mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
 
                 inputs_embeds = self.model.get_input_embeddings(
                     input_ids,
@@ -2017,7 +2026,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_input_tokens, num_tokens_across_dp,
                 maybe_padded_num_tokens, logits_indices, spec_decode_metadata,
                 input_ids, inputs_embeds, intermediate_tensors,
-                max_num_scheduled_tokens)
+                max_num_scheduled_tokens, ec_connector_output)
 
     def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill,
                                              maybe_padded_num_tokens,
@@ -2416,10 +2425,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
+    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors, None]:
+        if self.execute_model_state is not None:
+            raise RuntimeError(
+                "State error: sample_tokens() must be called "
+                "after execute_model() returns None."
+            )
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with ProfileExecuteDuration().capture_async("prepare input"):
             self._update_states(scheduler_output)
-            if not scheduler_output.total_num_scheduled_tokens:
+
+            if has_ec_transfer() and get_ec_transfer().is_producer:
+                with self.maybe_get_ec_connector_output(
+                    scheduler_output,
+                    encoder_cache=self.encoder_cache,
+                ) as ec_connector_output:
+                    self._execute_mm_encoder(scheduler_output)
+                    return make_empty_encoder_model_runner_output(scheduler_output)
+            if not num_scheduled_tokens:
                 if not has_kv_transfer_group():
                     logger.debug(
                         "skip this step for we receive the data from remote disaggregate prefill node"
@@ -2435,7 +2458,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              num_input_tokens, num_tokens_across_dp, maybe_padded_num_tokens,
              logits_indices, spec_decode_metadata, input_ids, inputs_embeds,
              intermediate_tensors,
-             max_query_len) = (self._prepare_inputs(scheduler_output,
+             max_query_len,ec_connector_output) = (self._prepare_inputs(scheduler_output,
                                                     intermediate_tensors))
 
             if self.dynamic_eplb:
@@ -3936,7 +3959,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         if vllm_version_is("0.11.0"):
             return self.get_kv_cache_spec_v0110()
-
+        if has_ec_transfer() and get_ec_transfer().is_producer:
+            return {}
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
         kv_cache_spec: dict[str, KVCacheSpec] = {}
