@@ -200,6 +200,9 @@ class KVCacheSendingThread(threading.Thread):
         """
         return self.task_tracker.get_and_clear_finished_requests()
 
+    def add_not_transfer_request(self, request_id: str):
+        self.task_tracker.add_not_transfer_request(request_id)
+
     def add_delayed_request(self, request_id: str, delay_start_time: float):
         return self.task_tracker.add_delayed_request(request_id,
                                                      delay_start_time)
