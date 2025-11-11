@@ -148,7 +148,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                enable_sp, get_ascend_soc_version, is_310p,
                                is_enable_nz, is_moe_model, lmhead_tp_enable,
                                prefill_context_parallel_enable,
-                               vllm_version_is)
+                               vllm_version_is, is_mc2_models)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if prefill_context_parallel_enable():
@@ -1020,9 +1020,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
-            max_seq_len = max(seq_lens.max().item(), 0)
-            return self.attn_mask_builder.get_attn_mask(
-                max_seq_len, self.dtype, self.device)
+            if is_A5():
+                max_seq_len = max(seq_lens, default=0)
+                max_seq_len = (max_seq_len + self.block_size - 1) // self.block_size * self.block_size
+                new_element = torch.tensor([max_seq_len])
+                seq_lens = torch.cat([seq_lens, new_element], dim =0)
+                return self.attn_mask_builder.get_attn_mask(max_seq_len, self.dtype, self.device).to(torch.bool)
+            else:
+                max_seq_len = max(seq_lens.max().item(), 0)
+                return self.attn_mask_builder.get_attn_mask(
+                    max_seq_len, self.dtype, self.device)
         # Prefill with cache hit.
         elif attn_state == AscendAttentionState.PrefillCacheHit:
             return self.attn_mask_builder.get_attn_mask(
@@ -2348,6 +2355,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             moe_comm_type = (MoECommType.MC2
                              if num_tokens <= self.mc2_tokens_capacity else
                              MoECommType.ALLTOALL)
+        elif soc_version in {AscendSocVersion.A5}:
+            if (num_tokens <= self.mc2_tokens_capacity and self.parallel_config.world_size_cross_dp >= 8 and is_mc2_models(model_type)) :
+                moe_comm_type = MoECommType.MC2
+            else:
+                moe_comm_type = MoECommType.ALLTOALL
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 

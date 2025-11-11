@@ -10,7 +10,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple, List, Dict
 
 import llm_datadist  # type: ignore
 import msgspec
@@ -70,6 +70,11 @@ class LLMDataDistCMgrAgentMetadata(msgspec.Struct):
     super_device_id: str
     cluster_id: int
 
+class LLMDataDistCMgrAgentMetaDataA5(msgspec.Struct):
+    server_id: str
+    device_id: str
+    cluster_id: int
+    level_list: List[Dict]
 
 @dataclass
 class ReqMeta:
@@ -351,8 +356,10 @@ class LLMDataDistCMgrConnectorWorker():
         self.dcp_size = get_dcp_group().world_size
         self.local_ip = get_ip()
         self.kv_transfer_config: KVTransferConfig = vllm_config.kv_transfer_config
-        self.local_agent_metadata: Optional[
-            LLMDataDistCMgrAgentMetadata] = None
+        if is_A5():
+            self.local_agent_metadata: Optional[LLMDataDistCMgrAgentMetaDataA5] = None
+        else:
+            self.local_agent_metadata: Optional[LLMDataDistCMgrAgentMetadata] = None
         self.vllm_config = vllm_config
         self.executor = ThreadPoolExecutor(1)
         self.thread_lock = threading.Lock()
@@ -409,12 +416,18 @@ class LLMDataDistCMgrConnectorWorker():
                 event_msg = LLMDataDistCMgrEvent(event_msg)
                 if event_msg == LLMDataDistCMgrEvent.ReqForMetadata:
                     if "cluster_id" in decode_msg:
-                        decode_msg = LLMDataDistCMgrAgentMetadata(**decode_msg)
+                        if is_A5():
+                            decode_msg = LLMDataDistCMgrAgentMetadataA5(**decode_msg)
+                        else :
+                            decode_msg = LLMDataDistCMgrAgentMetadata(**decode_msg)
                         logger.info(
                             f"LLMDataDistCMgrConnectorWorker: Receive message from cluster {decode_msg.cluster_id}"
                         )
                         sock.send_multipart((identity, b"", msg_to_send))
-                        self.add_remote_agent(decode_msg)
+                        if is_A5():
+                            self.add_remote_agentA5(decode_msg)
+                        else :
+                            self.add_remote_agent(decode_msg)
                     else:
                         logger.warning(
                             f"LLMDataDistCMgrConnectorWorker: receiving unrecognized data {decode_msg}"
@@ -483,6 +496,17 @@ class LLMDataDistCMgrConnectorWorker():
         visible_device_list = visible_devices.split(",")
         return lambda device_id: device_id in visible_device_list
 
+    def get_device_info(self, global_rank_table, device_filter, device_type):
+        device_list = global_rank_table[device_type]
+        device_list = [
+            d for d in device_list if d.get("server_id") == self.local_ip
+            and device_filter(d.get("device_id", ""))
+        ]
+        if len(device_list) <= self.pcp_rank * self.tp_size + self.tp_rank:
+            return None
+        device_info = device_list[self.pcp_rank * self.tp_size + self.tp_rank]
+        return device_info
+
     def read_agent_metadata(self, global_rank_table):
         device_filter = LLMDataDistCMgrConnectorWorker._get_visible_devices()
         devices_type_list = []
@@ -494,30 +518,40 @@ class LLMDataDistCMgrConnectorWorker():
         else:
             devices_type_list.append("prefill_device_list")
             devices_type_list.append("decode_device_list")
-        for device_type in devices_type_list:
-            device_list = global_rank_table[device_type]
-            device_list = [
-                d for d in device_list if d.get("server_id") == self.local_ip
-                and device_filter(d.get("device_id", ""))
-            ]
-            if len(device_list) <= self.pcp_rank * self.tp_size + self.tp_rank:
-                continue
-            device_info = device_list[self.pcp_rank * self.tp_size +
-                                      self.tp_rank]
-            super_pod_id_ = device_info.get("super_pod_id", None)
-            server_id_ = device_info["server_id"]
-            device_id_ = device_info["device_id"]
-            device_ip_ = device_info["device_ip"]
-            super_device_id_ = device_info.get("super_device_id", None)
-            cluster_id_ = int(device_info["cluster_id"])
-            agent_metadata = LLMDataDistCMgrAgentMetadata(
-                super_pod_id=super_pod_id_,
-                server_id=server_id_,
-                device_id=device_id_,
-                device_ip=device_ip_,
-                super_device_id=super_device_id_,
-                cluster_id=cluster_id_,
-            )
+
+        if is_A5():
+            for device_type in devices_type_list:
+                device_info = self.get_device_info(global_rank_table, device_filter, device_type)
+                if not device_info:
+                    continue
+                server_id_ = device_info["server_id"]
+                device_id_ = device_info["device_id"]
+                cluster_id_ = int(device_info["cluster_id"])
+                level_list_ = device_info["level_list"]
+                agent_metadata = LLMDataDistCMgrAgentMetadataA5(
+                    server_id=server_id_,
+                    device_id=device_id_,
+                    device_ip=device_id_,
+                    cluster_id=cluster_id_,
+                    level_list = level_list_,
+                )
+        else :
+            for device_type in devices_type_list:
+                device_info = self.get_device_info(global_rank_table, device_filter, device_type)
+                super_pod_id_ = device_info.get("super_pod_id", None)
+                server_id_ = device_info["server_id"]
+                device_id_ = device_info["device_id"]
+                device_ip_ = device_info["device_ip"]
+                super_device_id_ = device_info.get("super_device_id", None)
+                cluster_id_ = int(device_info["cluster_id"])
+                agent_metadata = LLMDataDistCMgrAgentMetadata(
+                    super_pod_id=super_pod_id_,
+                    server_id=server_id_,
+                    device_id=device_id_,
+                    device_ip=device_ip_,
+                    super_device_id=super_device_id_,
+                    cluster_id=cluster_id_,
+                )
         assert agent_metadata is not None, f"Can't read the target server_id {self.local_ip} and device_rank {self.rank} from rank table"
         return agent_metadata
 
@@ -817,6 +851,78 @@ class LLMDataDistCMgrConnectorWorker():
         )
         return remote_cluster_id
 
+    def create_ranktable(self, cluster_rank_info, prefill_metadata, decode_metadata):
+        rank_list:List[Dict] =[]
+        for cluster_id, rank_idx in cluster_rank_info.items():
+            #确定当前处理的metaData
+            if cluster_id == prefill_metadata.cluster_id:
+                current_metadata = prefill_metadata
+            else:
+                current_metadata = decode_metadata
+            #创建rank_info
+            rank_info = {
+                "rank_id":str(rank_idx),
+                "device_id":current_metadata.device_id,
+                "cluster_id": current_metadata.cluster_id,
+                "level_list":current_metadata.level_list
+            }
+            rank_list.append(rank_info)
+        rank_table = {
+            "version": "2.0",
+            "rank_count":"2",
+            "status":"completed",
+            "rank_list":rank_list
+        }
+        return rank_table
+
+    def add_remote_agentA5(self, metadata: LLMDataDistCMgrAgentMetadataA5) -> int:
+        assert self.local_agent_metadata is not None
+        remote_cluster_id = metadata.cluster_id
+        if remote_cluster_id in self.linked_cluster:
+            logger.debug(
+                f"LLMDataDistCMgrConnectorWorker: remote cluster_id: {metadata.cluster_id} already linked with this server, skip the connection"
+            )
+            return remote_cluster_id
+        if self.llm_datadist_role == LLMRole.PROMPT:
+            prefill_metadata = self.local_agent_metadata
+            decode_metadata = metadata
+        else:
+            prefill_metadata = metadata
+            decode_metadata = self.local_agent_metadata
+        comm_name = f"pd_comm_{prefill_metadata.device_id}_{decode_metadata.device_id}"
+        cluster_rank_info = {
+            prefill_metadata.cluster_id: 0,
+            decode_metadata.cluster_id: 1
+        }
+        rank_table = self.create_rank_table(cluster_rank_info, prefill_metadata, decode_metadata)
+        logger.info(
+            f"LLMDataDistCMgrConnectorWorker: try link with remote, comm id: {comm_name}"
+        )
+        logger.info(f"rank table \n{rank_table}")
+        logger.info(f"comm name: {comm_name}")
+        logger.info(f"cluster rank info: {cluster_rank_info}")
+        comm_id = self.llm_datadist.link(comm_name, cluster_rank_info,
+                                         json.dumps(rank_table))
+        while True:
+            ret = self.llm_datadist.query_register_mem_status(comm_id=comm_id)
+            if ret == llm_datadist.RegisterMemStatus.OK:
+                logger.info(
+                    f"LLMDataDistCMgrConnectorWorker: Linking success, comm id: {comm_id}"
+                )
+                break
+            elif ret == llm_datadist.RegisterMemStatus.FAILED:
+                raise RuntimeError(
+                    f"LLMDataDistCMgrConnectorWorker: Linking failed, comm id: {comm_id}"
+                )
+            time.sleep(1)
+            logger.info("Checking query_register_mem_status again")
+        self.linked_cluster.update({remote_cluster_id: comm_id})
+        logger.info(f"cached linked cluster: {self.linked_cluster}")
+        logger.info(
+            f"Successfully build link with cluster id {remote_cluster_id} with cluster name {comm_name} !"
+        )
+        return remote_cluster_id
+
     def remove_remote_agent(self, cluster_id: int):
         if cluster_id not in self.linked_cluster:
             logger.warning(
@@ -846,9 +952,13 @@ class LLMDataDistCMgrConnectorWorker():
             metadata_bytes = sock.recv()
             decoder = msgspec.msgpack.Decoder()
             metadata = decoder.decode(metadata_bytes)
-            metadata = LLMDataDistCMgrAgentMetadata(**metadata)
+            if is_A5():
+                metadata = LLMDataDistCMgrAgentMetadataA5(**metadata)
+                cluster_id = self.add_remote_agentA5(metadata)
+            else :
+                metadata = LLMDataDistCMgrAgentMetadata(**metadata)
+                cluster_id = self.add_remote_agent(metadata)
             logger.info(f"recving metadata: {metadata}")
-            cluster_id = self.add_remote_agent(metadata)
         return cluster_id
 
     def send_finish_to_remote(self, host: str, ports: list[int], request_id):

@@ -702,6 +702,24 @@ class AscendAttentionBackendImpl(AttentionImpl):
             mask = mask.repeat(attn_metadata.seq_lens.size(0), 1, 1, 1)
             mask = torch_npu.npu_format_cast(mask.contiguous(),
                                              ACL_FORMAT_FRACTAL_NZ)
+        
+        if is_A5():
+            ori_output = output
+            num_tokens = attn_metadata.query_start_loc[-1]
+            output,_ = torch_npu.npu_fused_infer_attention_score_v2(
+                query[:num_tokens],
+                key[:num_tokens],
+                atten_mask=mask.to(torch.bool),
+                actual_seq_qlen=attn_metadata.query_lens.cumsum(0),
+                actual_seq_kvlen=attn_metadata.seq_lens.cumsum(0),
+                num_query_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                input_layout="TND",
+                softmax_scale=self.scale
+            )
+            assert output is not None
+            ori_output[:num_tokens] = output[:num_tokens]
+            return ori_output
 
         torch_npu._npu_flash_attention(query=query,
                                        key=key,
@@ -728,6 +746,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
         batch_size = attn_metadata.query_lens.shape[0]
         block_table = attn_metadata.block_tables[:batch_size, :]
         num_block, block_size, _, _ = self.key_cache.shape  # type: ignore
+
+        if is_A5():
+            compress_mask = compress_mask.to(torch.bool)
+            key = self.key_cache.transpose(1,2)
+            value = self.value_cache.transpose(1,2)
+            block_size = self.block_size
+
+            output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                query=query,
+                key=key,
+                value=value,
+                block_table=block_table,
+                atten_mask=compress_mask,
+                actual_seq_qlen=attn_metadata.query_lens.cumsum(0),
+                actual_seq_kvlen=attn_metadata.seq_lens,
+                num_query_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                softmax_scale=self.scale,
+                spare_mode=2, #spare_mode=2时，代表leftupCausal模式的mask
+                block_size=block_size,
+                input_layout="TND"
+            )
+            return output
 
         if block_size == 128:
             # TODO:The npu_fused_infer_attention_score op is planned to
@@ -805,6 +846,31 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             output = output.view(batch_size, self.num_heads, self.head_size)
         else:
+            if is_A5(): 
+                batch_size = attn_metadata.query_lens.shape[0]
+                hidden_size = self.num_heads * self.head_size
+                query = query[:batch_size]
+                query = query.view(batch_size, 1, hidden_size)
+                block_size = self.key_cache.shape[1]
+                key = self.key_cache.flatten(2, 3).contiguous()
+                value = self.value_cache.flatten(2, 3).contiguous()
+                ori_output = output
+                output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                    query=query,
+                    key=key,
+                    value=value,
+                    actual_seq_kvlen=attn_metadata.seq_lens,
+                    num_query_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    block_table=attn_metadata.block_tables[:batch_size],
+                    block_size=block_size,
+                    softmax_scale=self.scale,
+                    input_layout="BSH"
+                )
+                output = output.view(-1, self.num_heads, self.head_size)
+                ori_output[:batch_size] = output[:batch_size]
+                return ori_output
+            else:
             torch_npu._npu_paged_attention(
                 query=query,
                 key_cache=self.key_cache,
@@ -815,7 +881,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_table=attn_metadata.block_tables,
                 context_lens=attn_metadata.seq_lens,
                 out=output)
-        return output
+            return output
 
     def _forward_v1_style(
         self,
@@ -863,13 +929,29 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value = self.value_cache.view(  # type: ignore
             num_block, block_size, -1)
 
+        if is_A5():
+            output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                query=query,
+                key=self.key_cache.flatten(2,3).contiguous(),
+                value=self.value_cache.flatten(2,3).contiguous(),
+                atten_mask=attn_metadata.attn_mask,
+                actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                actual_seq_kvlen=attn_metadata.seq_lens_list,
+                num_query_heads=self.num_heads,
+                num_key_value_heads=self.num_kv_heads,
+                block_table=attn_metadata.block_tables[:attn_metadata.query_lens.shape[0]],
+                block_size=self.key_cache.shape[1],
+                softmax_scale=self.scale,
+                input_layout="TND"
+            )
+            return output
         output, _ = torch_npu.npu_fused_infer_attention_score(
             query=query,
             key=key,
             value=value,
             atten_mask=attn_metadata.attn_mask,
             block_table=attn_metadata.block_tables,
-            input_layout="TND",
+            input_layout="TND",     
             block_size=block_size,
             actual_seq_lengths=attn_metadata.actual_seq_lengths_q,
             actual_seq_lengths_kv=attn_metadata.seq_lens_list,
@@ -1526,18 +1608,27 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     key, value = all_kv.split([self.head_size, self.head_size],
                                               dim=-1)
 
-                torch_npu._npu_reshape_and_cache(
-                    key=key[self.pcp_size * num_decode_tokens:attn_metadata.
-                            num_actual_tokens_pcp_padded],
-                    value=value[self.pcp_size *
-                                num_decode_tokens:attn_metadata.
+                if is_A5(): # 这里代码变动较大需要重新适配
+                    num_token = slots.shape[0]
+                    torch_npu.npu_scatter_a_kv_cache(
+                        key=key[self.pcp_size * num_decode_tokens:attn_metadata.num_actual_tokens_pcp_padded],
+                        value=value[self.pcp_size * num_decode_tokens:attn_metadata.num_actual_tokens_pcp_padded],
+                        slot_mapping=slot_mapping[self.pcp_size * num_decode_tokens:attn_metadata.num_actual_tokens_pcp_padded],
+                        out=(self.key_cache, slef.value_cache)
+                    )
+                else:
+                    torch_npu._npu_reshape_and_cache(
+                        key=key[self.pcp_size * num_decode_tokens:attn_metadata.
                                 num_actual_tokens_pcp_padded],
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_indices=attn_metadata.
-                    slot_mapping[self.pcp_size *
-                                 num_decode_tokens:attn_metadata.
-                                 num_actual_tokens_pcp_padded])
+                        value=value[self.pcp_size *
+                                    num_decode_tokens:attn_metadata.
+                                    num_actual_tokens_pcp_padded],
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        slot_indices=attn_metadata.
+                        slot_mapping[self.pcp_size *
+                                    num_decode_tokens:attn_metadata.
+                                    num_actual_tokens_pcp_padded])
 
         forward_context: ForwardContext = get_forward_context()
         if not forward_context.capturing:
