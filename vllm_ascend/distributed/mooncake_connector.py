@@ -34,22 +34,18 @@ from vllm.v1.request import RequestStatus
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
-from vllm_ascend.distributed.utils import get_transfer_timeout_value
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.distributed.utils import (DONE_RECVING_MSG, GET_META_MSG,
+                                           ensure_zmq_recv, ensure_zmq_send,
+                                           get_network_utils,
+                                           get_transfer_timeout_value)
 
-if vllm_version_is("0.11.0"):
-    from vllm.utils import get_ip, make_zmq_path, make_zmq_socket
-else:
-    from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
+get_ip, make_zmq_path, make_zmq_socket = get_network_utils()
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
-
-GET_META_MSG = b"get_meta_msg"
-DONE_RECVING_MSG = b"done_recving_msg"
 
 
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
@@ -1219,51 +1215,3 @@ def string_to_int64_hash(input_str):
     trunked_bytes = hashed_bytes[:8]
     uint64_value = struct.unpack("<Q", trunked_bytes)[0]
     return uint64_value
-
-
-def ensure_zmq_send(
-        socket: zmq.Socket,  # type: ignore
-        data: bytes,
-        max_retries: int = 3):
-    retries_left = max_retries
-    while True:
-        try:
-            socket.send(data)
-            return
-        except zmq.ZMQError as e:  # type: ignore
-            retries_left -= 1
-            if retries_left > 0:
-                logger.warning(
-                    f"Send failed: {e}, retrying... ({retries_left} "
-                    "attempts left)")
-                time.sleep(0.1)
-            else:
-                logger.error(f"Send failed after all retries: {e}")
-                raise RuntimeError(f"Failed to send data after {max_retries} "
-                                   f"retries: {e}")
-
-
-def ensure_zmq_recv(
-        socket: zmq.Socket,  # type: ignore
-        poller: zmq.Poller,  # type: ignore
-        timeout: float = 1.0,
-        max_retries: int = 3) -> bytes:
-    retries_left = max_retries
-    while True:
-        try:
-            if dict(poller.poll(int(timeout * 1000))):  # milliseconds
-                data = socket.recv()
-                return data
-            else:
-                raise zmq.ZMQError("Receive timeout")  # type: ignore
-        except zmq.ZMQError as e:  # type: ignore
-            retries_left -= 1
-            if retries_left > 0:
-                logger.warning(f"Receive failed: {e}, retrying... "
-                               f"({retries_left} attempts left)")
-                time.sleep(0.1)
-            else:
-                logger.error(f"Receive failed after all retries: {e}")
-                raise RuntimeError(
-                    f"Failed to receive data after {max_retries} "
-                    f"retries: {e}")

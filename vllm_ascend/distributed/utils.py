@@ -1,9 +1,18 @@
 import os
+import time
 
 import torch
 import torch.distributed as dist
+import zmq
+from vllm.utils import logger
 
 from vllm_ascend.distributed.parallel_state import get_p_tp_group
+from vllm_ascend.utils import vllm_version_is
+
+# ZMQ communication constants
+GET_META_MSG = b"get_meta_msg"
+DONE_RECVING_MSG = b"done_recving_msg"
+DONE_SENDING_MSG = b"done_sending_msg"
 
 
 def kv_alltoall_and_rearrange(pd_tp_ratio: int, key: torch.Tensor,
@@ -59,3 +68,88 @@ def get_transfer_timeout_value():
                                         '7'))  # type: ignore
     return int((4.096 * (2**hccl_rdma_timeout)) * hccl_rdma_retry_cnt // 1000 +
                3000)
+
+
+def ensure_zmq_send(
+        socket: zmq.Socket,  # type: ignore
+        data: bytes,
+        max_retries: int = 3):
+    """Send data over a ZMQ socket with retry logic.
+    
+    Args:
+        socket: ZMQ socket to send data through
+        data: Bytes data to send
+        max_retries: Maximum number of retry attempts (default: 3)
+        
+    Raises:
+        RuntimeError: If send fails after all retries
+    """
+    retries_left = max_retries
+    while True:
+        try:
+            socket.send(data)
+            return
+        except zmq.ZMQError as e:  # type: ignore
+            retries_left -= 1
+            if retries_left > 0:
+                logger.warning(
+                    f"Send failed: {e}, retrying... ({retries_left} "
+                    "attempts left)")
+                time.sleep(0.1)
+            else:
+                logger.error(f"Send failed after all retries: {e}")
+                raise RuntimeError(f"Failed to send data after {max_retries} "
+                                   f"retries: {e}")
+
+
+def ensure_zmq_recv(
+        socket: zmq.Socket,  # type: ignore
+        poller: zmq.Poller,  # type: ignore
+        timeout: float = 1.0,
+        max_retries: int = 3) -> bytes:
+    """Receive data from a ZMQ socket with retry logic.
+    
+    Args:
+        socket: ZMQ socket to receive data from
+        poller: ZMQ poller for timeout detection
+        timeout: Timeout in seconds for each receive attempt (default: 1.0)
+        max_retries: Maximum number of retry attempts (default: 3)
+        
+    Returns:
+        Received bytes data
+        
+    Raises:
+        RuntimeError: If receive fails after all retries
+    """
+    retries_left = max_retries
+    while True:
+        try:
+            if dict(poller.poll(int(timeout * 1000))):  # milliseconds
+                data = socket.recv()
+                return data
+            else:
+                raise zmq.ZMQError("Receive timeout")  # type: ignore
+        except zmq.ZMQError as e:  # type: ignore
+            retries_left -= 1
+            if retries_left > 0:
+                logger.warning(f"Receive failed: {e}, retrying... "
+                               f"({retries_left} attempts left)")
+                time.sleep(0.1)
+            else:
+                logger.error(f"Receive failed after all retries: {e}")
+                raise RuntimeError(f"Failed to receive data after "
+                                   f"{max_retries} retries: {e}")
+
+
+def get_network_utils():
+    """Get network utility functions based on vllm version.
+    
+    Returns:
+        Tuple of (get_ip, make_zmq_path, make_zmq_socket) functions
+    """
+    if vllm_version_is("0.11.0"):
+        from vllm.utils import get_ip, make_zmq_path, make_zmq_socket
+    else:
+        from vllm.utils.network_utils import (get_ip, make_zmq_path,
+                                              make_zmq_socket)
+    return get_ip, make_zmq_path, make_zmq_socket
