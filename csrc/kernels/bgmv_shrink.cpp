@@ -226,9 +226,6 @@ private:
 
 // declare all dtype kernel
 BGMV_SHRINK_TYPE_DECLARE(half)
-#if (__CCE_AICORE__ >= 220)
-    BGMV_SHRINK_TYPE_DECLARE(bfloat16_t)
-#endif
 
 namespace vllm_ascend {
 extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weight, void* indices, uint32_t indicesSize,
