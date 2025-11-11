@@ -241,8 +241,8 @@ private:
     }
 
 // declare all dtype kernel
-SGMV_SHRINK_TYPE_DECLARE(half)
-BGMV_SHRINK_TYPE_DECLARE(bfloat16_t)
+SGMV_SHRINK_TYPE_DECLARE(half);
+BGMV_SHRINK_TYPE_DECLARE(bfloat16_t);
 
 namespace vllm_ascend {
 extern void sgmv_shrink_impl(AscendType type, void* stream, void* x, void* weight, 
