@@ -290,16 +290,6 @@ def test_e2e_deepseekv2lite_with_torchair_v1scheduler():
                                            use_v1_schduler=True)
 
 
-# def test_e2e_deepseekv2lite_with_mla():
-#     additional_config = {
-#         "torchair_graph_config": {
-#             "enabled": True,
-#             "enable_multistream_mla": True,
-#         },
-#     }
-#     _deepseek_v2_lite_torchair_test_fixure(additional_config)
-
-
 def test_e2e_deepseekv2lite_with_nz():
     additional_config = {
         "torchair_graph_config": {
