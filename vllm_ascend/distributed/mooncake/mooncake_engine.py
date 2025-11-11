@@ -658,7 +658,7 @@ class MooncakeEngine:
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
         result = [rand.sample(group, 1) for group in self.saves_group]
-        return result
+        return sum(result, [])
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
