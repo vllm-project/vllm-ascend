@@ -162,7 +162,7 @@ class AscendConfig:
                     "enable_kv_nz is only supported for mla currently.")
             if vllm_config.kv_transfer_config is None \
                 or not vllm_config.kv_transfer_config.is_kv_consumer:
-                raise RuntimeError(
+                raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can "
                     "only be used in D node.")
         kv_cfg = vllm_config.kv_transfer_config

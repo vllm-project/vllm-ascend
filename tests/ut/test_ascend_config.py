@@ -54,7 +54,7 @@ class TestAscendConfig(TestBase):
             "multistream_overlap_shared_expert": True,
             "expert_map_path": "test_expert_map_path",
             "refresh": True,
-            "enable_kv_nz": True
+            "enable_kv_nz": False
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
@@ -63,7 +63,7 @@ class TestAscendConfig(TestBase):
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)
-        self.assertTrue(ascend_config.enable_kv_nz)
+        self.assertFalse(ascend_config.enable_kv_nz)
 
     @_clean_up_ascend_config
     def test_init_ascend_config_enable_npugraph_ex(self):
