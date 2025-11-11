@@ -113,10 +113,15 @@ class ChunkedTokenDatabase():
     def __init__(
         self,
         metadata: MooncakeEngineMetadata,
-        use_mla: bool = False,
+        need_saves: int,
+        tp_rank: int,
+        tp_size: int,
     ):
         self.metadata = metadata
-        self.use_mla = use_mla
+        self.need_saves = need_saves
+
+        save_group_size = tp_size // self.need_saves
+        self.save_num = tp_rank // save_group_size
 
     def _make_key_by_hash(self,
                           chunk_hash: str,
@@ -124,8 +129,8 @@ class ChunkedTokenDatabase():
         assert self.metadata is not None
         return MooncakeEngineKey(
             self.metadata.model_name,
-            0 if self.use_mla else self.metadata.world_size,
-            0 if self.use_mla else self.metadata.worker_id,
+            self.need_saves,
+            self.save_num,
             chunk_hash,
         )
 

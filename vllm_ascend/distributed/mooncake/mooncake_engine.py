@@ -3,9 +3,10 @@ import math
 import random
 import threading
 import time
-from typing import Generator, List, Optional, Union
+from typing import Any, Generator, List, Optional, Union
 
 # Third Party
+import numpy as np
 import torch
 from vllm.config import VllmConfig
 from vllm.utils import logger
@@ -76,7 +77,30 @@ class MooncakeEngine:
         )
 
         self.use_mla = vllm_config.model_config.is_deepseek_mla
-        self.token_database = ChunkedTokenDatabase(self.metadata, self.use_mla)
+        if self.use_mla:
+            self.need_saves = 1
+            self.saves_group = [[i for i in range(self.tp_size)]]
+        else:
+            prefill_parallel_config: dict[
+                str,
+                Any] = vllm_config.kv_transfer_config.get_from_extra_config(
+                    "prefill", {})
+
+            assert "tp_size" in prefill_parallel_config.keys()
+            self._prefill_tp_size = prefill_parallel_config["tp_size"]
+            self.num_key_value_heads = vllm_config.model_config.hf_config.num_key_value_heads
+            if self.num_key_value_heads >= self._prefill_tp_size:
+                self.need_saves = self.num_key_value_heads
+                self.saves_group = [[i] for i in range(self.tp_size)]
+            else:
+                self.need_saves = self._prefill_tp_size
+                self.saves_group = np.range(self.tp_size).reshape(
+                    -1, self._prefill_tp_size //
+                    self.num_key_value_heads).tolist()
+
+        self.token_database = ChunkedTokenDatabase(self.metadata,
+                                                   self.need_saves,
+                                                   self.tp_rank, self.tp_size)
 
         self.m_store = Mooncakestore(parallel_config)
 
@@ -633,11 +657,8 @@ class MooncakeEngine:
     def get_save_tp_ranks(self, req_id) -> List[int]:
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
-        all_ranks = list(range(self.tp_size))
-        if self.use_mla:
-            return rand.sample(all_ranks, k=1)
-        else:
-            return all_ranks
+        result = [rand.sample(group, 1) for group in self.saves_group]
+        return result
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""
