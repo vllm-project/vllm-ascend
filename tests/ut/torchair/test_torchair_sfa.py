@@ -359,10 +359,16 @@ class TestAscendSFATorchairImpl(TestBase):
             "q_b_proj": MagicMock(),
             "kv_b_proj": MagicMock(),
             "o_proj": MagicMock(),
+            "indexer": MagicMock(),
             "kv_a_proj_with_mqa": MagicMock(),
             "kv_a_layernorm": kv_a_layernorm,
+            "q_a_proj": MagicMock(),
+            "q_a_layernorm": MagicMock(),
+            "decoder_layer": MagicMock(),
         }
 
+        num_queries_per_kv = num_heads // num_kv_heads
+        num_heads_per_rank = num_heads // mock_tp.world_size
         self.impl = AscendSFATorchairImpl(num_heads=num_heads,
                                           head_size=head_size,
                                           scale=scale,
