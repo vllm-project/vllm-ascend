@@ -219,6 +219,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
+            mix_placement=getattr(layer.ascend_config, "_mix_placement", False),
+            num_logical_experts=global_num_experts - global_redundant_expert_num,
             global_num_experts=global_num_experts)
 
         # this is a naive implementation for experts load balance so as
