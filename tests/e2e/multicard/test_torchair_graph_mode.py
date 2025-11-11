@@ -303,6 +303,7 @@ def test_e2e_deepseekv2lite_with_torchair_v1scheduler():
 def test_e2e_deepseekv2lite_with_nz():
     additional_config = {
         "torchair_graph_config": {
+            "enabled": True,
             "enable_kv_nz": True,
         },
     }
