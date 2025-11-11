@@ -309,7 +309,10 @@ First, check physical layer connectivity, then verify each node, and finally ver
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
 :::::{tab-set}
+:sync-group: multi-node
+
 ::::{tab-item} A2 series
+:sync: A2
 
 ```bash
  # Check the remote switch ports
@@ -328,6 +331,7 @@ Execute the following commands on each node in sequence. The results must all be
 
 ::::
 ::::{tab-item} A3 series
+:sync: A3
 
 ```bash
  # Check the remote switch ports
@@ -350,7 +354,10 @@ Execute the following commands on each node in sequence. The results must all be
 #### Interconnect Verification:
 ##### 1. Get NPU IP Addresses
 :::::{tab-set}
+:sync-group: multi-node
+
 ::::{tab-item} A2 series
+:sync: A2
 
 ```bash
 for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
@@ -358,6 +365,7 @@ for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
 
 ::::
 ::::{tab-item} A3 series
+:sync: A3
 
 ```bash
 for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
@@ -380,7 +388,10 @@ Using vLLM-ascend official container is more efficient to run multi-node environ
 Run the following command to start the container in each node (You should download the weight to /root/.cache in advance):
 
 :::::{tab-set}
+:sync-group: multi-node
+
 ::::{tab-item} A2 series
+:sync: A2
 
 ```{code-block} bash
    :substitutions:
@@ -421,6 +432,7 @@ docker run --rm \
 
 ::::
 ::::{tab-item} A3 series
+:sync: A3
 
 ```{code-block} bash
    :substitutions:

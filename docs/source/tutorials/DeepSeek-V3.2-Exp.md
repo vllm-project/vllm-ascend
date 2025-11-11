@@ -34,7 +34,10 @@ Only AArch64 architecture are supported currently due to extra operator's instal
 :::
 
 :::::{tab-set}
+:sync-group: install
+
 ::::{tab-item} A3 series
+:sync: A3
 
 1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -52,6 +55,7 @@ pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 
 ::::
 ::::{tab-item} A2 series
+:sync: A2
 
 1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -113,7 +117,10 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 - `DeepSeek-V3.2-Exp-w8a8`: require 2 Atlas 800 A2 (64G × 8).
 
 :::::{tab-set}
+:sync-group: install
+
 ::::{tab-item} DeepSeek-V3.2-Exp A3 series
+:sync: A3
 
 Run the following scripts on two nodes respectively.
 
@@ -202,6 +209,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 
 ::::
 ::::{tab-item} DeepSeek-V3.2-Exp-W8A8 A2 series
+:sync: A2
 
 Run the following scripts on two nodes respectively.
 
