@@ -110,10 +110,11 @@ class MoECommMethod(ABC):
             global_redundant_expert_num: int = 0,
             need_trans: bool = False,
             dynamic_eplb: bool = False,
-            mc2_mask: torch.Tensor = None):
+            mc2_mask: torch.Tensor = None,
+            pertoken_scale: Optional[torch.Tensor] = None):
         # Check constraints
         assert hidden_states.dtype in [
-            torch.float32, torch.float16, torch.bfloat16
+            torch.float32, torch.float16, torch.bfloat16, torch.int8
         ]
 
         moe_comm_method = get_forward_context().moe_comm_method
@@ -132,7 +133,8 @@ class MoECommMethod(ABC):
             mc2_mask=mc2_mask,
             apply_router_weight_on_input=apply_router_weight_on_input,
             with_quant=use_int8_w8a8 or use_int4_w4a8,
-            dynamic_eplb=dynamic_eplb)
+            dynamic_eplb=dynamic_eplb,
+            pertoken_scale=pertoken_scale)
 
         permuted_hidden_states, expert_tokens, dynamic_scale, group_list_type, topk_scales, context_metadata = \
             results["hidden_states"], results["group_list"], results.get("dynamic_scale"), results["group_list_type"], results.get("topk_scales"), results.get("context_metadata")
