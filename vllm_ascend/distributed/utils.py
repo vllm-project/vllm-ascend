@@ -1,4 +1,6 @@
+import hashlib
 import os
+import struct
 import time
 
 import torch
@@ -153,3 +155,18 @@ def get_network_utils():
         from vllm.utils.network_utils import (get_ip, make_zmq_path,
                                               make_zmq_socket)
     return get_ip, make_zmq_path, make_zmq_socket
+
+
+def string_to_int64_hash(input_str: str) -> int:
+    """Hash a string using SHA-256 and convert it into an int64 integer.
+    
+    Args:
+        input_str: The string to hash
+        
+    Returns:
+        An int64 integer representation of the hash
+    """
+    hashed_bytes = hashlib.sha256(input_str.encode("utf-8")).digest()
+    trunked_bytes = hashed_bytes[:8]
+    uint64_value = struct.unpack("<Q", trunked_bytes)[0]
+    return uint64_value

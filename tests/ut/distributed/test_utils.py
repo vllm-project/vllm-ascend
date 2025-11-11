@@ -5,7 +5,8 @@ import zmq
 
 from vllm_ascend.distributed.utils import (DONE_RECVING_MSG, DONE_SENDING_MSG,
                                            GET_META_MSG, ensure_zmq_recv,
-                                           ensure_zmq_send, get_network_utils)
+                                           ensure_zmq_send, get_network_utils,
+                                           string_to_int64_hash)
 
 
 class TestDistributedUtils(unittest.TestCase):
@@ -132,6 +133,32 @@ class TestDistributedUtils(unittest.TestCase):
 
             # Verify the imports from vllm.utils.network_utils were attempted
             mock_version_is.assert_called_once_with("0.11.0")
+
+    def test_string_to_int64_hash_consistency(self):
+        """Test that string_to_int64_hash produces consistent results."""
+        test_string = "test_string"
+        hash1 = string_to_int64_hash(test_string)
+        hash2 = string_to_int64_hash(test_string)
+
+        # Same input should produce same hash
+        self.assertEqual(hash1, hash2)
+
+    def test_string_to_int64_hash_different_strings(self):
+        """Test that different strings produce different hashes."""
+        hash1 = string_to_int64_hash("string1")
+        hash2 = string_to_int64_hash("string2")
+
+        # Different inputs should produce different hashes
+        self.assertNotEqual(hash1, hash2)
+
+    def test_string_to_int64_hash_return_type(self):
+        """Test that string_to_int64_hash returns an integer."""
+        result = string_to_int64_hash("test")
+
+        self.assertIsInstance(result, int)
+        # Verify it fits in uint64
+        self.assertGreaterEqual(result, 0)
+        self.assertLessEqual(result, 2**64 - 1)
 
 
 if __name__ == '__main__':

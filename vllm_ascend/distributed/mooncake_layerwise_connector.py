@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
 import copy
-import hashlib
 import math
 import os
 import queue
-import struct
 import threading
 import time
 from collections import defaultdict, deque
@@ -36,7 +34,8 @@ from vllm_ascend.distributed.utils import (DONE_SENDING_MSG, GET_META_MSG,
                                            align_memory, ensure_zmq_recv,
                                            ensure_zmq_send, get_network_utils,
                                            get_transfer_timeout_value,
-                                           kv_alltoall_and_rearrange)
+                                           kv_alltoall_and_rearrange,
+                                           string_to_int64_hash)
 
 get_ip, make_zmq_path, make_zmq_socket = get_network_utils()
 
@@ -1094,13 +1093,3 @@ def group_concurrent_contiguous(
         dst_groups = [g.tolist() for g in dst_groups]
 
         return src_groups, dst_groups
-
-
-def string_to_int64_hash(input_str):
-    """
-    Hash the string using SHA-256 and convert it into an int64 integer.
-    """
-    hashed_bytes = hashlib.sha256(input_str.encode("utf-8")).digest()
-    trunked_bytes = hashed_bytes[:8]
-    uint64_value = struct.unpack("<Q", trunked_bytes)[0]
-    return uint64_value
