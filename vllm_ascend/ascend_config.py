@@ -13,9 +13,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from vllm.logger import logger
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 TORCHAIR_MODEL_LIST = ["deepseek", "pangu", "kimi_k2", "qwen"]
 
@@ -32,7 +35,7 @@ class AscendConfig:
     Configuration Object for additional_config from vllm.configs.
     """
 
-    def __init__(self, vllm_config):
+    def __init__(self, vllm_config: "VllmConfig"):
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
@@ -50,8 +53,6 @@ class AscendConfig:
             weight_prefetch_config)
 
         # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this config
-
-        self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.eplb_policy_type = additional_config.get("eplb_policy_type", 1)
         self.expert_map_record_path = additional_config.get(
@@ -136,6 +137,16 @@ class AscendConfig:
             get_flashcomm2_oproj_tp_size_and_validate_config
         self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
             self, vllm_config)
+        self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
+        if self.enable_kv_nz:
+            if not vllm_config.model_config.is_deepseek_mla:
+                raise RuntimeError(
+                    "enable_kv_nz is only supported for mla/sfa currently.")
+            if vllm_config.kv_transfer_config is None \
+                or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise RuntimeError(
+                    "enable_kv_nz is only supported in pd scenario and can "
+                    "only be used in D node.")
 
 
 class TorchairGraphConfig:
