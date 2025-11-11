@@ -1849,11 +1849,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logits_indices = torch.from_numpy(
                     cu_num_tokens
                 ) * self.pcp_size - self.num_pcp_pads[:num_reqs] - 1
-                logits_indices = logits_indices.to(self.device,
-                                                   non_blocking=True)
-            else:
-                logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
+                logits_indices = logits_indices.pin_memory().to(
                     self.device, non_blocking=True)
+            else:
+                logits_indices = self.query_start_loc[1:num_reqs + 1] - 1
         else:
             # pcp not supported now
             assert self.pcp_size == 1
