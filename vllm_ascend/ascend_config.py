@@ -92,7 +92,7 @@ class AscendConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in the pure DP scenario"
                 )
-            if not self.torchair_graph_config.enabled:
+            if vllm_config.model_config.enforce_eager is True:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in graph mode"
                 )
