@@ -7,7 +7,6 @@ export HCCL_SOCKET_IFNAME="eth0"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 
-export VLLM_USE_V1=1
 export VLLM_USE_MODELSCOPE=true
 
 export ASCEND_LAUNCH_BLOCKING=0

@@ -82,7 +82,6 @@ The content of the multi_producer.sh script:
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
-export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ACL_OP_INIT_MODE=1
 export ASCEND_BUFFER_POOL=4:8
@@ -145,7 +144,6 @@ The content of multi_consumer.sh:
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
-export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
 export ACL_OP_INIT_MODE=1
 export ASCEND_BUFFER_POOL=4:8
@@ -246,7 +244,6 @@ Content of mixed_department.sh:
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 export PYTHONPATH=$PYTHONPATH:/xxxxx/vllm
 export MOONCAKE_CONFIG_PATH="/xxxxxx/mooncake.json"
-export VLLM_USE_V1=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export ACL_OP_INIT_MODE=1
 export ASCEND_BUFFER_POOL=4:8

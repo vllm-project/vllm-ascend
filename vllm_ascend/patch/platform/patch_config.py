@@ -1,6 +1,5 @@
 import ast
 
-import vllm.envs as envs
 from vllm.config.speculative import SpeculativeConfig
 from vllm.logger import logger
 
@@ -163,11 +162,6 @@ def __post_init__(self):
 
             # Replace hf_config for EAGLE draft_model
             if self.method in ("eagle", "eagle3"):
-                if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
-                    raise ValueError(
-                        "Chunked prefill and EAGLE are not compatible "
-                        "when using V0.")
-
                 from vllm.transformers_utils.configs import SpeculatorsConfig
                 from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
