@@ -56,9 +56,9 @@ aisbench_cases = [{
     "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
     "request_conf": "vllm_api_stream_chat",
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 176,
+    "num_prompts": 240,
     "max_out_len": 1500,
-    "batch_size": 44,
+    "batch_size": 60,
     "baseline": 1,
     "threshold": 0.97
 }]
@@ -75,9 +75,8 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
         "OMP_PROC_BIND": "false",
         "HCCL_OP_EXPANSION_MODE": "AIV",
         "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
-        "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1",
         "VLLM_ASCEND_ENABLE_DEBSE_OPTIMIZE": "1",
-        "VLLM_ASCEND_ENABLE_PREFETCH": "1"
+        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"
     }
     server_args = [
         "--tensor-parallel-size",
