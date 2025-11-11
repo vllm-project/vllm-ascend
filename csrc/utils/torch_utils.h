@@ -1,6 +1,6 @@
 #pragma once
 
-#include "kernels/types.h"
+#include "types.h"
 #include <c10/core/ScalarType.h>
 #include <Python.h>
 
