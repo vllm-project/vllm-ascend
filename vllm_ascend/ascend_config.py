@@ -140,11 +140,11 @@ class AscendConfig:
         self.enable_kv_nz = additional_config.get("enable_kv_nz", False)
         if self.enable_kv_nz:
             if not vllm_config.model_config.is_deepseek_mla:
-                raise RuntimeError(
+                raise NotImplementedError(
                     "enable_kv_nz is only supported for mla/sfa currently.")
             if vllm_config.kv_transfer_config is None \
                 or not vllm_config.kv_transfer_config.is_kv_consumer:
-                raise RuntimeError(
+                raise NotImplementedError(
                     "enable_kv_nz is only supported in pd scenario and can "
                     "only be used in D node.")
 

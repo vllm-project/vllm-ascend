@@ -16,7 +16,8 @@
 import os
 
 from transformers import PretrainedConfig
-from vllm.config import ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import (KVTransferConfig, ModelConfig, ParallelConfig,
+                         VllmConfig)
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (_check_torchair_supported,
@@ -78,12 +79,12 @@ class TestAscendConfig(TestBase):
             },
             "expert_map_path": "test_expert_map_path",
             "refresh": True,
-            "enable_kv_nz": True
+            "enable_kv_nz": False
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
-        self.assertTrue(ascend_config.enable_kv_nz)
+        self.assertFalse(ascend_config.enable_kv_nz)
 
         torchair_graph_config = ascend_config.torchair_graph_config
         self.assertTrue(torchair_graph_config.enabled)
@@ -203,6 +204,7 @@ class TestAscendConfig(TestBase):
             init_ascend_config(test_vllm_config)
             enforce_eager = True
             check_ascend_config(test_vllm_config, enforce_eager)
+
         # torchair + non deepseek model
         with self.assertRaises(NotImplementedError):
             test_vllm_config.additional_config = {
@@ -216,6 +218,51 @@ class TestAscendConfig(TestBase):
             fake_model_config.hf_config = PretrainedConfig()
             fake_model_config.hf_config.model_type = "llama"
             test_vllm_config.model_config = fake_model_config
+            init_ascend_config(test_vllm_config)
+            check_ascend_config(test_vllm_config, False)
+
+        # kv nz + non deepseek model
+        with self.assertRaises(NotImplementedError):
+            test_vllm_config.additional_config = {
+                "enable_kv_nz": True,
+                "refresh": True
+            }
+            model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
+            fake_model_config = ModelConfig(model=model_path)
+            fake_model_config.hf_config = PretrainedConfig()
+            fake_model_config.hf_config.model_type = "llama"
+            test_vllm_config.model_config = fake_model_config
+            init_ascend_config(test_vllm_config)
+            check_ascend_config(test_vllm_config, False)
+
+        # kv nz + non pd scenario
+        with self.assertRaises(NotImplementedError):
+            test_vllm_config.additional_config = {
+                "enable_kv_nz": True,
+                "refresh": True
+            }
+            model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
+            fake_model_config = ModelConfig(model=model_path)
+            fake_model_config.hf_config = PretrainedConfig()
+            fake_model_config.hf_config.model_type = "deepseek_v2"
+            test_vllm_config.model_config = fake_model_config
+            test_vllm_config.kv_transfer_config = None  # non pd scenario
+            init_ascend_config(test_vllm_config)
+            check_ascend_config(test_vllm_config, False)
+
+        # kv nz + kv producer
+        with self.assertRaises(NotImplementedError):
+            test_vllm_config.additional_config = {
+                "enable_kv_nz": True,
+                "refresh": True
+            }
+            model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
+            fake_model_config = ModelConfig(model=model_path)
+            fake_model_config.hf_config = PretrainedConfig()
+            fake_model_config.hf_config.model_type = "deepseek_v2"
+            test_vllm_config.model_config = fake_model_config
+            test_vllm_config.kv_transfer_config = KVTransferConfig(
+                kv_role="kv_producer")  # producer role
             init_ascend_config(test_vllm_config)
             check_ascend_config(test_vllm_config, False)
 
