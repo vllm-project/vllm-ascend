@@ -94,7 +94,7 @@ class MooncakeEngine:
                 self.saves_group = [[i] for i in range(self.tp_size)]
             else:
                 self.need_saves = self._prefill_tp_size
-                self.saves_group = np.range(self.tp_size).reshape(
+                self.saves_group = np.arange(self.tp_size).reshape(
                     -1, self._prefill_tp_size //
                     self.num_key_value_heads).tolist()
 
