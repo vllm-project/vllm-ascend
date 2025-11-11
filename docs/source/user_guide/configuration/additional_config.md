@@ -89,14 +89,13 @@ An example of additional configuration is as follows:
         "enabled": True,
         "use_cached_graph": True,
         "graph_batch_sizes": [1, 2, 4, 8],
-        "graph_batch_sizes_init": False,
-        "enable_kv_nz": False
+        "graph_batch_sizes_init": False
     },
     "ascend_scheduler_config": {
         "enabled": True,
         "enable_chunked_prefill": True,
         "max_long_partial_prefills": 1,
-        "long_prefill_token_threshold": 4096,
+        "long_prefill_token_threshold": 4096
     },
     "weight_prefetch_config": {
         "enabled": True,
@@ -110,7 +109,8 @@ An example of additional configuration is as follows:
             }
         },
     },
+    "enable_kv_nz": False,
     "multistream_overlap_shared_expert": True,
-    "refresh": False,
+    "refresh": False
 }
 ```
