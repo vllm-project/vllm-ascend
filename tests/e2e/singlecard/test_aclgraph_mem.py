@@ -34,6 +34,7 @@ MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
                     reason="aclgraph only support on v1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [4])
+@patch.dict(os.environ, {"VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE": "0"})
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
 def test_aclgraph_mem_use(model: str, max_tokens: int) -> None:
     del os.environ["VLLM_WORKER_MULTIPROC_METHOD"]
