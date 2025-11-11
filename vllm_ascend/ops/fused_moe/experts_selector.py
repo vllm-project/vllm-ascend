@@ -196,9 +196,15 @@ def _select_experts_with_fusion_ops(
             routed_scaling_factor=1,
             eps=float(1e-20))
     if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax":
-        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
-            x=router_logits, finished=None, k=top_k)
-        topk_ids = topk_ids.to(torch.int32)
+        if is_A5():
+            # A5 MOCK
+            new_shape = router_logits.shape[:-1] + (topk,)
+            topk_weights = torch.ones(new_shape, dtype=router_logits.dtype, device=router_logits.device)
+            topk_ids = torch.zeros(topk_weights.shape, dtype=torch.int32, device=router_logits.device)
+        else :
+            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
+                x=router_logits, finished=None, k=top_k)
+            topk_ids = topk_ids.to(torch.int32)
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids

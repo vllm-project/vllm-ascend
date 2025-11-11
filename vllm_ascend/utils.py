@@ -61,6 +61,7 @@ _ENABLE_SP = None
 _HAS_LAYER_IDX = None
 _ENABLE_NZ = None
 
+_IS_A5 = None
 
 def is_310p():
     global _IS_310P
@@ -76,7 +77,7 @@ def is_enable_nz(vllm_config: Optional[VllmConfig] = None) -> bool:
         if not vllm_config:
             raise ValueError(
                 "vllm_config must be provided when _ENABLE_NZ is None")
-        _ENABLE_NZ = envs_ascend.VLLM_ASCEND_ENABLE_NZ and vllm_config.model_config.hf_config.model_type != "qwen3_next"
+        _ENABLE_NZ = envs_ascend.VLLM_ASCEND_ENABLE_NZ and vllm_config.model_config.hf_config.model_type != "qwen3_next" and not is_A5()
     return _ENABLE_NZ
 
 
@@ -609,7 +610,8 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
 class AscendSocVersion(Enum):
     A2 = 0
     A3 = 1
-    UNDEFINED = 2
+    A5 = 2
+    UNDEFINED = 3
 
 
 _ascend_soc_version = None
@@ -622,6 +624,8 @@ def init_ascend_soc_version():
         _ascend_soc_version = AscendSocVersion.A2
     elif 250 <= soc_version <= 255:
         _ascend_soc_version = AscendSocVersion.A3
+    elif soc_version == 260:
+        _ascend_soc_version = AscendSocVersion.A5
     else:
         _ascend_soc_version = AscendSocVersion.UNDEFINED
 
@@ -886,3 +890,18 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
         reorgnized_batch_ids.append(ranks)
 
     return reorgnized_batch_ids
+
+# models in a5 can support mc2
+A5_MC2_MODELS = ["deepseek_v3"]
+#mc2 in A5 and A3 can only support H = 7168
+def is_mc2_models(model_type) -> bool:
+    if get_ascend_soc_version() in {AscendSocVersion.A5, AscendSocVersion.A3}:
+        return model_type in A5_MC2_MODELS
+    return True
+
+def is_A5():
+    global _IS_A5
+    if _IS_A5 is None:
+        _IS_A5 = (get_ascend_soc_version() == AscendSocVersion.A5)
+    return _IS_A5
+    

@@ -419,7 +419,10 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         if self.cos_sin_cache.dtype != query.dtype:  # type: ignore
             self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
                 query.dtype)  # type: ignore
-
+        
+        if is_A5(): # A5不支持npu_mrope算子，这里需要使用小算子替换
+        return query, key
+                
         query, key = torch_npu.npu_mrope(positions,
                                          query.contiguous(),
                                          key.contiguous(),
