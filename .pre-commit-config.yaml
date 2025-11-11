@@ -12,7 +12,7 @@ repos:
     - id: codespell
       args: [
         --toml, pyproject.toml,
-        '--skip', 'tests/e2e/multicard/test_torchair_graph_mode.py,csrc/mla_preprocess/**,tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,.github/**,typos.toml',
+        '--skip', 'tests/e2e/multicard/test_torchair_graph_mode.py,csrc/**,tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,.github/**,typos.toml',
         '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND'
       ]
       additional_dependencies:
@@ -37,7 +37,7 @@ repos:
   - id: typos
     args: [
       "--force-exclude",
-      "--exclude", "csrc/mla_preprocess/**"
+      "--exclude", "csrc/**"
     ]
 - repo: https://github.com/PyCQA/isort
   rev: 6.0.1
@@ -121,6 +121,15 @@ repos:
     language: system
     always_run: true
     pass_filenames: false
+  - id: enforce-import-regex-instead-of-re
+    name: Enforce import regex as re
+    entry: python tools/enforce_regex_import.py
+    language: python
+    types: [python]
+    # Ignore csrc directory for this hook
+    exclude: ^csrc/
+    pass_filenames: false
+    additional_dependencies: [regex]
   - id: python-init
     name: Enforce __init__.py in Python packages
     entry: python tools/check_python_src_init.py
