@@ -27,7 +27,6 @@ MAX_INT = 2147483647
 class AscendSchedulerConfig(SchedulerConfig):
     enable_chunked_prefill: bool = False
     max_long_partial_prefills: int = 1
-    max_num_partial_prefills: int = 1
     long_prefill_token_threshold: int = MAX_INT
     policy: str = "fcfs"
     scheduler_cls: Union[str, Type[object]] = (
@@ -48,7 +47,6 @@ class AscendSchedulerConfig(SchedulerConfig):
         # Override default values into original SchedulerConfig
         scheduler_config["enable_chunked_prefill"] = False
         scheduler_config["max_long_partial_prefills"] = None
-        scheduler_config["max_num_partial_prefills"] = None
         scheduler_config["long_prefill_token_threshold"] = None
         scheduler_config["policy"] = "fcfs"
         scheduler_config[
@@ -79,9 +77,6 @@ class AscendSchedulerConfig(SchedulerConfig):
         if self.max_long_partial_prefills is None:
             self.max_long_partial_prefills = 1
             self.long_prefill_token_threshold = MAX_INT
-
-        if self.max_num_partial_prefills is None:
-            self.max_num_partial_prefills = 1
 
         if (self.long_prefill_token_threshold is None
                 or self.long_prefill_token_threshold <= 0):
