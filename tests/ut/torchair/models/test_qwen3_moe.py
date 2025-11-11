@@ -4,7 +4,7 @@ import pytest
 from pytest_mock import MockerFixture
 from transformers import PretrainedConfig
 from vllm.distributed.parallel_state import GroupCoordinator
-from vllm.forward_context import get_forward_context
+
 from tests.ut.base import PytestBase
 from vllm_ascend.torchair.models.qwen3_moe import CustomSparseMoeBlock
 
