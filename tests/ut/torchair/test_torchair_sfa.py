@@ -367,8 +367,6 @@ class TestAscendSFATorchairImpl(TestBase):
             "decoder_layer": MagicMock(),
         }
 
-        num_queries_per_kv = num_heads // num_kv_heads
-        num_heads_per_rank = num_heads // mock_tp.world_size
         self.impl = AscendSFATorchairImpl(num_heads=num_heads,
                                           head_size=head_size,
                                           scale=scale,
