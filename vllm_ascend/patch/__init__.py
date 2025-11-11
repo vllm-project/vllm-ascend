@@ -172,3 +172,4 @@
 #    Future Plan:
 #       Remove this to match the optimization supported in the VLLM version.
 #
+from vllm_ascend.patch.worker import patch_deepseekv3
