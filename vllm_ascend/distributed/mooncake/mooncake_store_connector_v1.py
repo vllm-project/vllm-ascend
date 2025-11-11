@@ -166,6 +166,8 @@ class MooncakeStoreConnectorV1Scheduler:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False)
+        self.consumer_is_to_save = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "consumer_is_to_save", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
         self.save_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
@@ -284,7 +286,7 @@ class MooncakeStoreConnectorV1Scheduler:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
 
-        is_consumer = self.kv_role == "kv_consumer" and self.consumer_is_to_load
+        is_consumer = self.kv_role == "kv_consumer"
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
@@ -340,7 +342,7 @@ class MooncakeStoreConnectorV1Scheduler:
                 )
                 if req_meta is not None:
                     meta.add_request(req_meta)
-        else:
+        elif self.consumer_is_to_save or not is_consumer:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 request_tracker = self._request_trackers[req_id]
                 num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -421,7 +423,7 @@ class MooncakeStoreConnectorV1Scheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
-        if self.consumer_is_to_load and not self.save_async:
+        if self.consumer_is_to_save and not self.save_async:
             return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:
