@@ -995,17 +995,25 @@ class AscendMLAImpl(MLAAttentionImpl):
             if self.dcp_size * self.pcp_size > 1:
                 context_seq_len_npu = prefill_metadata.chunked_context.padded_chunk_seq_lens_npu[
                     i]
-
-            torch_npu.atb.npu_paged_cache_load(
-                cache_kv_c,
-                cache_k_pe,
-                prefill_metadata.block_table,
-                context_seq_len_npu,
-                seq_starts=prefill_metadata.chunked_context.starts[i],
-                key=kv_c_normed,
-                value=k_pe,
-            )
-
+            if ia_A5():
+                torch_npu.npu_gather_pa_kv_cache(
+                    cache_kv_c,
+                    cache_k_pe,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    key=kv_c_normed,
+                    value=k_pe,
+                    seq_offset=prefill_metadata.chunked_context.starts[i])
+            else :
+                torch_npu.atb.npu_paged_cache_load(
+                    cache_kv_c,
+                    cache_k_pe,
+                    prefill_metadata.block_table,
+                    context_seq_len_npu,
+                    seq_starts=prefill_metadata.chunked_context.starts[i],
+                    key=kv_c_normed,
+                    value=k_pe,
+                )
             cache_kv_c_k_pe = torch.cat([kv_c_normed, k_pe], dim=-1)
             if self.dcp_size > 1:
                 cache_kv_c_k_pe = get_dcp_group().all_gather(
@@ -1045,25 +1053,41 @@ class AscendMLAImpl(MLAAttentionImpl):
                 mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
             else:
                 mask = self.prefill_mask
-            torch_npu.atb.npu_ring_mla(
-                q_nope=q_nope,
-                q_rope=q_pe,
-                k_nope=k_nope,
-                k_rope=k_pe,
-                value=v,
-                mask=mask,
-                seqlen=seq_len,
-                head_num=self.num_heads,
-                kv_head_num=self.num_heads,
-                pre_out=prefix_output,
-                prev_lse=prefix_lse,
-                qk_scale=self.scale,
-                kernel_type="kernel_type_high_precision",
-                mask_type="no_mask",
-                input_layout="type_bsnd",
-                calc_type="calc_type_default",
-                output=prefix_output,
-                softmax_lse=prefix_lse)
+            if is_A5():
+                prefix_output, prefix_lse = torch_npu.npu_fused_infer_attention_score_v2(
+                    query=q_nope,
+                    key=k_nope,
+                    value=v,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    actual_seq_qlen=seq_len,
+                    num_query_heads=self.num_heads,
+                    num_key_value_heads=self.num_heads,
+                    input_layout="BSND",
+                    softmax_scale=self.scale,
+                    inner_precise=0,
+                    return_softmax_lse=True)
+                prefix_lse, prefix_output = torch_npu.npu_attention_update(prefix_lse, prefix_output, update_type=1)
+            else:
+                torch_npu.atb.npu_ring_mla(
+                    q_nope=q_nope,
+                    q_rope=q_pe,
+                    k_nope=k_nope,
+                    k_rope=k_pe,
+                    value=v,
+                    mask=mask,
+                    seqlen=seq_len,
+                    head_num=self.num_heads,
+                    kv_head_num=self.num_heads,
+                    pre_out=prefix_output,
+                    prev_lse=prefix_lse,
+                    qk_scale=self.scale,
+                    kernel_type="kernel_type_high_precision",
+                    mask_type="no_mask",
+                    input_layout="type_bsnd",
+                    calc_type="calc_type_default",
+                    output=prefix_output,
+                    softmax_lse=prefix_lse)
         return prefix_output, prefix_lse
 
     def _forward_prefill(
@@ -1100,24 +1124,41 @@ class AscendMLAImpl(MLAAttentionImpl):
                            dtype=q_nope.dtype), 1)
             self.prefill_mask = torch.where(prefill_mask == 1, mask_value,
                                             0).to(q_nope.dtype)
-        torch_npu.atb.npu_ring_mla(q_nope=q_nope,
-                                   q_rope=q_pe,
-                                   k_nope=k_nope,
-                                   k_rope=k_pe,
-                                   value=value,
-                                   mask=self.prefill_mask,
-                                   seqlen=attn_metadata.prefill.query_lens,
-                                   head_num=self.num_heads,
-                                   kv_head_num=self.num_heads,
-                                   pre_out=None,
-                                   prev_lse=None,
-                                   qk_scale=self.scale,
-                                   kernel_type="kernel_type_high_precision",
-                                   mask_type="mask_type_triu",
-                                   input_layout="type_bsnd",
-                                   calc_type="calc_type_first_ring",
-                                   output=attn_output,
-                                   softmax_lse=attn_lse)
+        if is_A5():
+            attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score_v2(
+                    query=q_nope,
+                    key=k_nope,
+                    value=value,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    atten_mask=self.prefill_mask.to(torch.bool),
+                    actual_seq_qlen=attn_metadata.prefill.query_lens.cumsum(0),
+                    actual_seq_kvlen=attn_metadata.prefill.query_lens.cumsum(0),
+                    num_query_heads=self.num_heads,
+                    num_key_value_heads=self.num_heads,
+                    input_layout="TND",
+                    softmax_scale=self.scale,
+                    return_softmax_lse=True
+                )
+            else:
+                torch_npu.atb.npu_ring_mla(q_nope=q_nope,
+                                        q_rope=q_pe,
+                                        k_nope=k_nope,
+                                        k_rope=k_pe,
+                                        value=value,
+                                        mask=self.prefill_mask,
+                                        seqlen=attn_metadata.prefill.query_lens,
+                                        head_num=self.num_heads,
+                                        kv_head_num=self.num_heads,
+                                        pre_out=None,
+                                        prev_lse=None,
+                                        qk_scale=self.scale,
+                                        kernel_type="kernel_type_high_precision",
+                                        mask_type="mask_type_triu",
+                                        input_layout="type_bsnd",
+                                        calc_type="calc_type_first_ring",
+                                        output=attn_output,
+                                        softmax_lse=attn_lse)
         attn_output, attn_lse = self._compute_prefill_context( \
             q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
 
@@ -1305,8 +1346,26 @@ class AscendMLAImpl(MLAAttentionImpl):
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
         else:
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-                q_nope, k_nope, k_nope, **common_kwargs)
+            if is_A5():
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                    q_nope,
+                    k_nope,
+                    k_nope,
+                    query_rope=q_pe,
+                    key_rope=k_pe,
+                    atten_mask=spec_attn_mask,
+                    actual_seq_qlen=actual_seq_lengths,
+                    actual_seq_kvlen=decode_meta.seq_lens_list,
+                    num_query_heads=self.num_heads,
+                    input_layout=input_layout,
+                    softmax_scale=self.scale,
+                    sparse_mode=sparse_mode,
+                    block_table=decode_meta.block_table,
+                    block_size=block_size,
+                )
+            else:
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                    q_nope, k_nope, k_nope, **common_kwargs)
 
         return self._v_up_proj(attn_output)
 
