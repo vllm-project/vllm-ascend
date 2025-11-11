@@ -1989,11 +1989,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             == self.input_batch.num_reqs * max_query_len)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=uniform_decode)
-        if self.afd_config:
-            aclgraph_runtime_mode = CUDAGraphMode.NONE
-        else:
-            aclgraph_runtime_mode, batch_descriptor = \
-            self.aclgraph_dispatcher.dispatch(batch_descriptor)
+        # if self.afd_config:
+        #     aclgraph_runtime_mode = CUDAGraphMode.NONE
+        # else:
+        aclgraph_runtime_mode, batch_descriptor = \
+        self.aclgraph_dispatcher.dispatch(batch_descriptor)
         
         if afd_metadata == None:
             afd_metadata = AFDMetadata(
@@ -2632,7 +2632,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.mc2_tokens_capacity,
                     with_prefill=True) == MoECommType.MC2:
                 self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
-        print(f'hidden_states shape is {hidden_states.shape}')
+        # print(f'hidden_states shape is {hidden_states.shape}')
         output = None
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
@@ -2641,8 +2641,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # For profile, have maximum num_reqs and that collectively have
                 # maximum num_tokens.
                 min_tokens_per_req = self.max_num_tokens // self.max_num_reqs
-                print(f'self.max_num_reqs is {self.max_num_reqs}')
-                print(f'self.max_num_tokens is {self.max_num_tokens}')
+                # print(f'self.max_num_reqs is {self.max_num_reqs}')
+                # print(f'self.max_num_tokens is {self.max_num_tokens}')
                 num_scheduled_tokens_list = [min_tokens_per_req
                                              ] * self.max_num_reqs
                 num_scheduled_tokens_list[
@@ -2651,13 +2651,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                 dtype=np.int32)
                 logit_indices = np.cumsum(num_scheduled_tokens) - 1
                 # TODO: need to rum a dummy sampler for generate task
-                print(f'hidden_states before synchronize shape is {hidden_states.shape}')
+                # print(f'hidden_states before synchronize shape is {hidden_states.shape}')
                 NPUPlatform.synchronize()
                 hidden_states = hidden_states[logit_indices]
-                print(f'hidden_states after synchronizeshape is {hidden_states.shape}')
-                print(f'after logit_indices hidden_states shape is {hidden_states.shape}')
                 output = self.model.compute_logits(hidden_states)
-                print(f'output hidden_states shape is {output.shape}')
 
         NPUPlatform.synchronize()
         del hidden_states, output

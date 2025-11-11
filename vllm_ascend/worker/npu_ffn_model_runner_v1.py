@@ -6,14 +6,14 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.nn as nn
-
+from tqdm import tqdm
+import re
 from vllm.config import VllmConfig
 from vllm.distributed.afd_transfer.afd_connector.factory import (
     AFDConnectorFactory)
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    get_world_group, graph_capture)
+from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
+                                             get_world_group, graph_capture,is_global_first_rank)
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
@@ -23,6 +23,9 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm.distributed.afd_transfer.afd_connector.metadata import (
     AFDConnectorMetadata,FFNNeedForwardData,M2NAFDConnectorMetadata)
+from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
+                         get_layers_from_vllm_config)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -51,9 +54,9 @@ class NPUFFNModelRunner(NPUModelRunner):
         
         self._counter = 0
 
-        # Initialize CUDA graph support
-        self.use_cuda_graph = not self.model_config.enforce_eager
-
+        # Initialize ACL graph support
+        # self.use_cuda_graph = not self.model_config.enforce_eager
+        
         # self.cudagraph_batch_sizes sorts in ascending order.
         # The batch sizes in the config are in descending order.
         self.cudagraph_batch_sizes = list(
@@ -113,7 +116,7 @@ class NPUFFNModelRunner(NPUModelRunner):
                 m2n_afdconnector_data.aiv_num = 48
                 
                 hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
-                print(f'recv_attn_output success ,layer id is {current_layer_idx}')
+                # print(f'recv_attn_output success ,layer id is {current_layer_idx}')
                 m2n_afdconnector_data.handle = handle
                 m2n_afdconnector_data.topk_weights = topk_weights
             elif self.connector_name == "camconnector":
@@ -128,15 +131,32 @@ class NPUFFNModelRunner(NPUModelRunner):
             logger.info(f"layer {current_layer_idx} moe recv hidden states type:{type(hidden_states)}, shape:{hidden_states.shape}")
             num_tokens = hidden_states.shape[0]
 
-            # Try to use CUDA graph if available
-            cuda_graph_info = self._find_cuda_graph(current_layer_idx,
-                                                    num_tokens)
-            if cuda_graph_info is not None:
-                # Use captured CUDA graph for computation
-                with set_ascend_forward_context(attn_metadata=None,
-                                         vllm_config=self.vllm_config):
-                    rank_ffn_output = self._execute_with_cuda_graph(
-                        hidden_states, cuda_graph_info)
+            # Try to use ACL graph if available
+
+            # if cuda_graph_info is not None:
+            # uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
+            # scheduler_output.total_num_scheduled_tokens
+            # == self.input_batch.num_reqs * max_query_len)
+            # batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
+            #                                 uniform_decode=uniform_decode)
+            # aclgraph_runtime_mode, batch_descriptor = \
+            # self.aclgraph_dispatcher.dispatch(batch_descriptor)
+            if self.use_aclgraph:
+                # Use captured ACL graph for computation
+                with set_ascend_forward_context(
+                        attn_metadata=None,
+                        vllm_config=self.vllm_config,
+                        reserved_mc2_mask=self.reserved_mc2_mask,
+                        # batch_descriptor=batch_descriptor,
+                        # aclgraph_runtime_mode=aclgraph_runtime_mode,
+                        prefetch_stream=self.prefetch_stream,
+                        model_instance=self.model):
+                    rank_ffn_output = self._execute_with_acl_graph(
+                            hidden_states=hidden_states,
+                            group_list=group_list,
+                            dynamic_scales=dynamic_scales,
+                            topk_weights=topk_weights,
+                            current_layer_idx=current_layer_idx)
             else:
                 # Fallback to eager mode
                 ffn_need_forward_data = afdConnectorMetadata.ffn_need_forward_data
@@ -201,7 +221,7 @@ class NPUFFNModelRunner(NPUModelRunner):
 
     def _execute_with_cuda_graph(self, hidden_states: torch.Tensor,
                                  cuda_graph_info: dict):
-        """Execute FFN computation using captured CUDA graph."""
+        """Execute FFN computation using captured ACL graph."""
         graph = cuda_graph_info['graph']
         input_tensor = cuda_graph_info['input_hidden_states']
         output_tensor = cuda_graph_info['output']
@@ -226,6 +246,46 @@ class NPUFFNModelRunner(NPUModelRunner):
 
         # Return only the actual output (without padding)
         return output_tensor[:actual_tokens].clone()
+    
+    def _execute_with_acl_graph(self, 
+                                hidden_states: torch.Tensor,
+                                current_layer_idx: int,
+                                acl_graph_info: Optional[dict] = None,
+                                router_logits: Optional[torch.Tensor] = None,
+                                group_list: Optional[torch.Tensor] = None,
+                                dynamic_scales: Optional[torch.Tensor] = None,
+                                topk_weights: Optional[torch.Tensor] = None,
+                                topk_ids: Optional[torch.Tensor] = None,
+                                row_idx: Optional[torch.Tensor] = None,
+                                ):
+        """Execute FFN computation using captured acl graph."""
+        if self.connector_name == "m2nconnector":
+            rank_ffn_output = self.model.compute_ffn_output(
+                layer_idx=current_layer_idx, 
+                hidden_states=hidden_states,
+                group_list=group_list,
+                dynamic_scales=dynamic_scales,
+                topk_weights=topk_weights, 
+                topk_ids=topk_ids)
+        elif self.connector_name == "camconnector":
+            rank_ffn_output = self.model.compute_ffn_output(
+                layer_idx=current_layer_idx, 
+                hidden_states=hidden_states,
+                group_list=group_list,
+                dynamic_scales=dynamic_scales,
+                topk_weights=topk_weights, 
+                topk_ids=topk_ids,
+                row_idx=row_idx)
+        else:
+            rank_ffn_output = self.model.compute_ffn_output(
+                layer_idx=current_layer_idx, 
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                topk_weights=topk_weights, 
+                topk_ids=topk_ids,
+                row_idx=row_idx)
+
+        return rank_ffn_output
 
     def _execute_eager_mode(self, 
                             hidden_states: torch.Tensor,
@@ -303,29 +363,13 @@ class NPUFFNModelRunner(NPUModelRunner):
                            device=self.device)
 
     def capture_model(self) -> int:
-        """Capture CUDA graphs for FFN operations."""
-        if not self.use_cuda_graph:
-            logger.warning("Skipping CUDA graph capture.")
-            return 0
+        """Capture ACL graphs for FFN operations."""
 
-        logger.info("Starting CUDA graph capture for FFN operations...")
+        logger.debug("Starting ACL graph capture for FFN operations...")
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
-        # Create memory pool for graphs
-        if self._graph_memory_pool is None:
-            self._graph_memory_pool = torch.cuda.graph_pool_handle()
-
-        # Capture graphs for each layer and different batch sizes
-        # Capture the large shapes first so that the smaller shapes
-        # can reuse the memory pool allocated for the large shapes.
-        with graph_capture(device=self.device):
-            for layer_idx in range(self.num_layers):
-                for num_tokens in reversed(self.cudagraph_batch_sizes):
-                    with set_forward_context(attn_metadata=None,
-                                             vllm_config=self.vllm_config):
-                        self._capture_graph_for_layer_and_size(
-                            layer_idx, num_tokens)
+        self._capture_model()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
@@ -333,13 +377,124 @@ class NPUFFNModelRunner(NPUModelRunner):
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
 
         logger.info(
-            "FFN CUDA graph capturing finished in %.0f secs, took %.2f GiB",
+            "FFN ACL graph capturing finished in %.0f secs, took %.2f GiB",
             elapsed_time, cuda_graph_size / (1 << 30))
         return cuda_graph_size
 
+    def _capture_model(self):
+        if not self.use_aclgraph:
+            logger.warning(
+                "Skipping ACL graph capture. To turn on ACL graph capture, "
+                "ensure `aclraph_mode` was not manually set to `NONE`")
+            return
+        else:
+            self.initialize_aclgraph_capture()
+
+        set_cudagraph_capturing_enabled(True)
+        # Trigger ACL graph capture for specific shapes.
+        # Capture the large shapes first so that the smaller shapes
+        # can reuse the memory pool allocated for the large shapes.
+        # Capture graphs for each layer and different batch sizes
+        # Capture the large shapes first so that the smaller shapes
+        # can reuse the memory pool allocated for the large shapes.
+        with graph_capture(device=self.device):
+            aclgraph_mode = self.compilation_config.cudagraph_mode
+            if aclgraph_mode.mixed_mode() != CUDAGraphMode.NONE:
+                aclgraph_runtime_mode = aclgraph_mode.mixed_mode()
+                compilation_cases = list(reversed(self.aclgraph_batch_sizes))
+                try:
+                    self._capture_aclgraphs(
+                        compilation_cases,
+                        aclgraph_runtime_mode=aclgraph_runtime_mode,
+                        uniform_decode=False)
+                except Exception as e:
+                    error_msg = str(e)
+                    error_code = '0x7020023'
+                    pattern = r'retCode=([^,\s\.]+)'
+                    match = re.search(pattern, error_msg)
+                    if match:
+                        retCode = match.group(1)
+                    # Determine whether the error message is caused by stream capture failure.
+                    if match and retCode == error_code:
+                        logger.error(
+                            f"ACLgraph sizes capture fail: {type(e).__name__}:\n"
+                            "ACLgraph has insufficient available streams to capture the configured number of sizes. "
+                            "Please verify both the availability of adequate streams and the appropriateness of the configured size count.\n\n"
+                            "Recommended solutions:\n"
+                            "1. Manually configure the compilation_config parameter "
+                            "with a reduced set of sizes: '{\"cudagraph_capture_sizes\":[size1, size2, size3, ...]}'.\n"
+                            "2. Utilize ACLgraph's full graph mode as an alternative to the piece-wise approach.\n\n"
+                            f"{str(e)}")
+                    raise
+
+            if aclgraph_mode.decode_mode() == CUDAGraphMode.FULL and \
+                aclgraph_mode.separate_routine():
+                max_num_tokens = self.scheduler_config.max_num_seqs * \
+                        self.uniform_decode_query_len
+                decode_cudagraph_batch_sizes = [
+                    x for x in self.aclgraph_batch_sizes if x <= max_num_tokens
+                    and x >= self.uniform_decode_query_len
+                ]
+                compilation_cases_decode = list(
+                    reversed(decode_cudagraph_batch_sizes))
+                self._capture_aclgraphs(
+                    compilation_cases=compilation_cases_decode,
+                    aclgraph_runtime_mode=CUDAGraphMode.FULL,
+                    uniform_decode=True)
+        
+        # Disable aclgraph capturing globally, so any unexpected aclgraph
+        # capturing will be detected and raise an error after here.
+        # Note: We don't put it into graph_capture context manager because
+        # we may doing lazy capturing in future that still allows capturing
+        # after here.
+        set_cudagraph_capturing_enabled(False)
+        
+    def _capture_aclgraphs(self, compilation_cases: list[int],
+                           aclgraph_runtime_mode: CUDAGraphMode,
+                           uniform_decode: bool):
+        assert aclgraph_runtime_mode != CUDAGraphMode.NONE and \
+            aclgraph_runtime_mode in [CUDAGraphMode.FULL,
+                                      CUDAGraphMode.PIECEWISE]
+
+        # Only rank 0 should print progress bar during capture
+        if is_global_first_rank():
+            logger.info(
+                "Starting to capture ACL graphs for cases: %s, "
+                "mode: %s, uniform_decode: %s", compilation_cases,
+                aclgraph_runtime_mode.name, uniform_decode)
+            compilation_cases = tqdm(
+                compilation_cases,
+                disable=not self.load_config.use_tqdm_on_load,
+                desc="Capturing ACL graphs ({}, {})".format(
+                    "decode" if uniform_decode else "mixed prefill-decode",
+                    aclgraph_runtime_mode.name))
+        for num_tokens in compilation_cases:
+            for _ in range(self.compilation_config.cudagraph_num_of_warmups):
+                # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
+                # But be careful, warm up with `NONE`is orthogonal to
+                # if we want to warm up attention or not. This is
+                # different from the case where `FULL` implies capture
+                # attention while `PIECEWISE` implies no attention.
+                force_attention = (aclgraph_runtime_mode == CUDAGraphMode.FULL)
+                self._dummy_run(num_tokens,
+                                aclgraph_runtime_mode=CUDAGraphMode.NONE,
+                                force_attention=force_attention,
+                                uniform_decode=uniform_decode)
+            self._dummy_run(num_tokens,
+                            aclgraph_runtime_mode=aclgraph_runtime_mode,
+                            force_attention=force_attention,
+                            uniform_decode=uniform_decode)
+               
+            for layer_idx in range(self.num_layers):
+                for num_tokens in reversed(self.cudagraph_batch_sizes):
+                    with set_forward_context(attn_metadata=None,
+                                             vllm_config=self.vllm_config):
+                        self._capture_graph_for_layer_and_size(
+                            layer_idx, num_tokens)
+                        
     def _capture_graph_for_layer_and_size(self, layer_idx: int,
                                           num_tokens: int):
-        """Capture CUDA graph for specific layer and number of tokens."""
+        """Capture ACL graph for specific layer and number of tokens."""
         # Create dummy hidden states
         dummy_hidden_states = torch.randn(
             num_tokens,
@@ -370,7 +525,7 @@ class NPUFFNModelRunner(NPUModelRunner):
             'output': output
         }
 
-        logger.debug("Captured CUDA graph for layer %s with %s tokens",
+        logger.debug("Captured ACL graph for layer %s with %s tokens",
                      layer_idx, num_tokens)
 
     def _run_ffn_computation(self,
@@ -385,22 +540,22 @@ class NPUFFNModelRunner(NPUModelRunner):
             current_layer_idx = layer_idx
 
         tp_world_size = get_tensor_model_parallel_world_size()
-        if tp_world_size > 1:
-            # Handle TP case: all-gather tensors from all TP ranks
-            gathered_hidden_states = tensor_model_parallel_all_gather(
-                hidden_states, dim=0)
-            ffn_output = self.model.compute_ffn_output(current_layer_idx,
-                                                       gathered_hidden_states)
+        # if tp_world_size > 1:
+        #     # Handle TP case: all-gather tensors from all TP ranks
+        #     gathered_hidden_states = tensor_model_parallel_all_gather(
+        #         hidden_states, dim=0)
+        #     ffn_output = self.model.compute_ffn_output(current_layer_idx,
+        #                                                gathered_hidden_states)
 
-            # Extract the output corresponding to current rank
-            start_idx = hidden_states.shape[
-                0] * get_tensor_model_parallel_rank()
-            end_idx = start_idx + hidden_states.shape[0]
-            rank_ffn_output = ffn_output[start_idx:end_idx, :]
-        else:
-            # Single TP case
-            rank_ffn_output = self.model.compute_ffn_output(
-                current_layer_idx, hidden_states)
+        #     # Extract the output corresponding to current rank
+        #     start_idx = hidden_states.shape[
+        #         0] * get_tensor_model_parallel_rank()
+        #     end_idx = start_idx + hidden_states.shape[0]
+        #     rank_ffn_output = ffn_output[start_idx:end_idx, :]
+        # else:
+        # Single TP case
+        rank_ffn_output = self.model.compute_ffn_output(
+            current_layer_idx, hidden_states)
 
         return rank_ffn_output
 
