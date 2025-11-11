@@ -7,8 +7,6 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=path-to-rank-table
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 
-export VLLM_USE_V1=1
-
 vllm serve model_path \
   --host 0.0.0.0 \
   --port 20002 \

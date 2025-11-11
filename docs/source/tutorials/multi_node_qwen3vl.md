@@ -70,7 +70,6 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 
 vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
@@ -112,7 +111,6 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 
 vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
