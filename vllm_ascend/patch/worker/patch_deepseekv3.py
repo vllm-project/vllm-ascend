@@ -128,9 +128,9 @@ class AscendDeepseekV2MoE(DeepseekV2MoE,nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            n_shared_experts=config.n_shared_experts
-            if mix_placement
-            else None,
+            # n_shared_experts=config.n_shared_experts
+            # if mix_placement
+            # else None,
         )
         print("-"*100)
         print(f"{self.shared_experts=}")
