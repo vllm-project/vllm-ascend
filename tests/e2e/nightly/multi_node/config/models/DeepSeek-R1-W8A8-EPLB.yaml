@@ -76,7 +76,7 @@ deployment:
           "kv_role": "kv_producer",
           "kv_parallel_size": 1,
           "kv_port": "20001",
-          "engine_id": "0",
+          "engine_id": "1",
           "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
           }'
           --additional-config
@@ -107,7 +107,7 @@ deployment:
         "kv_role": "kv_consumer",
         "kv_parallel_size": 1,
         "kv_port": "20001",
-        "engine_id": "0",
+        "engine_id": "2",
         "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
         }'
         --additional-config
@@ -137,7 +137,7 @@ deployment:
         "kv_role": "kv_consumer",
         "kv_parallel_size": 1,
         "kv_port": "20001",
-        "engine_id": "0",
+        "engine_id": "2",
         "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
         }'
         --additional-config
