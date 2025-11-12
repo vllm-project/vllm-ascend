@@ -393,6 +393,7 @@ class TestAscendSFATorchairImpl(TestBase):
         self.assertEqual(self.impl.qk_rope_head_dim, 32)
         self.assertEqual(self.impl.qk_head_dim, 96)
         self.assertEqual(self.impl.v_head_dim, 128)
+        self.assertEqual(self.impl.graph_batch_size, 16)
         self.assertIsNotNone(self.impl.rotary_emb)
         self.assertIsNotNone(self.impl.q_proj)
         self.assertIsNotNone(self.impl.kv_b_proj)
