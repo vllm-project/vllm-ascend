@@ -290,14 +290,6 @@ def test_models_with_aclgraph_pad(
             vllm_aclgraph_outputs = runner.model.generate(
                 prompts, sampling_params)
 
-        with VllmRunner(
-                model,
-                max_model_len=1024,
-                enforce_eager=True,
-                quantization="ascend",
-        ) as runner:
-            vllm_eager_outputs = runner.model.generate(prompts,
-                                                       sampling_params)
     else:
         with VllmRunner(
                 model,
@@ -307,14 +299,6 @@ def test_models_with_aclgraph_pad(
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
                 prompts, sampling_params)
-
-        with VllmRunner(
-                model,
-                max_model_len=1024,
-                enforce_eager=True,
-        ) as runner:
-            vllm_eager_outputs = runner.model.generate(prompts,
-                                                       sampling_params)
 
     vllm_aclgraph_outputs_list = []
     for output in vllm_aclgraph_outputs:
