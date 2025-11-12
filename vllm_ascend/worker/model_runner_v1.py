@@ -180,7 +180,7 @@ else:
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -279,6 +279,17 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
         output.sampled_token_ids = valid_sampled_token_ids
         return output
 
+class ExecuteModelState(NamedTuple):
+    """Ephemeral cached state transferred between execute_model() and
+    sample_tokens(), after execute_model() returns None."""
+
+    scheduler_output: "SchedulerOutput"
+    logits: torch.Tensor
+    spec_decode_metadata: SpecDecodeMetadata | None
+    hidden_states: torch.Tensor
+    sample_hidden_states: torch.Tensor
+    aux_hidden_states: list[torch.Tensor] | None
+    kv_connector_output: KVConnectorOutput | None
 
 class NPUModelRunner(LoRAModelRunnerMixin):
 
@@ -609,6 +620,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                  dtype=torch.bool)
         # TODO: EVS Support (Video tokens pruning) (see vllm#22980)
         self.is_multimodal_pruning_enabled = False
+
+        # Ephemeral state transferred between execute_model() and sample_tokens().
+        self.execute_model_state: ExecuteModelState | None = None
 
     def _set_up_drafter(self):
         # Set up speculative decoding.
@@ -2363,7 +2377,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Union[ModelRunnerOutput, AsyncModelRunnerOutput, IntermediateTensors]:
+    ) -> Union[ModelRunnerOutput, IntermediateTensors] | None:
+        if self.execute_model_state is not None:
+            raise RuntimeError(
+                "State error: sample_tokens() must be called "
+                "after execute_model() returns None."
+            )
+
         with ProfileExecuteDuration().capture_async("prepare input"):
             self._update_states(scheduler_output)
             if not scheduler_output.total_num_scheduled_tokens:
@@ -2477,9 +2497,43 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     logits = self.apply_grammar_bitmask(
                         scheduler_output, logits)
             else:
-                if scheduler_output.structured_output_request_ids:
-                    logits = self.apply_grammar_bitmask(
-                        scheduler_output, logits)
+                self.execute_model_state = ExecuteModelState(
+                    scheduler_output,
+                    logits,
+                    spec_decode_metadata,
+                    hidden_states,
+                    sample_hidden_states,
+                    aux_hidden_states,
+                    kv_connector_output,
+                )
+        return None
+
+    @torch.inference_mode
+    def sample_tokens(
+        self, grammar_output: "GrammarOutput | None"
+     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        if self.execute_model_state is None:
+            # Nothing to do (PP non-final rank case), output isn't used.
+            return None  # noqa
+
+        # Unpack ephemeral state.
+        (
+            scheduler_output,
+            logits,
+            spec_decode_metadata,
+            hidden_states,
+            sample_hidden_states,
+            aux_hidden_states,
+            kv_connector_output,
+        ) = self.execute_model_state
+        # Clear ephemeral state.
+        self.execute_model_state = None
+
+        # Apply structured output bitmasks if present.
+        if grammar_output is not None:
+            logits = self.apply_grammar_bitmask(
+                scheduler_output, grammar_output, self.input_batch, logits
+            )
 
         with ProfileExecuteDuration().capture_async("Sample"):
             # Sample the next token and get logprobs if needed.

@@ -19,6 +19,7 @@
 
 import copy
 from typing import Optional, Union
+from types import NoneType
 
 import torch
 import torch.nn as nn
@@ -35,7 +36,7 @@ from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
                              DraftTokenIds, ModelRunnerOutput)
@@ -274,7 +275,7 @@ class NPUWorker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
+    ) -> ModelRunnerOutput | None:
         # enable msMonitor to monitor the performance of vllm-ascend
         if envs_ascend.MSMONITOR_USE_DAEMON:
             dp.step()
@@ -288,7 +289,7 @@ class NPUWorker(WorkerBase):
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
+        if isinstance(output, (ModelRunnerOutput, NoneType)):
             return output
 
         assert isinstance(output, IntermediateTensors)
@@ -311,6 +312,12 @@ class NPUWorker(WorkerBase):
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
         return output
+
+    @torch.inference_mode()
+    def sample_tokens(
+        self, grammar_output: "GrammarOutput"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
