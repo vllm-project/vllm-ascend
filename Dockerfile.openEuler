@@ -77,4 +77,12 @@ RUN bash -c 'f=/vllm-workspace/vllm-ascend/CANN/vendors/hwcomputing/bin/set_env.
         echo "File not found: $f"; \
     fi'
 
+RUN bash -c 'f=/__w/vllm-ascend/CANN/vendors/hwcomputing/bin/set_env.bash; \
+    if [ -f "$f" ]; then \
+        echo "Sourcing $f"; \
+        source "$f"; \
+    else \
+        echo "File not found: $f"; \
+    fi'
+
 CMD ["/bin/bash"]
