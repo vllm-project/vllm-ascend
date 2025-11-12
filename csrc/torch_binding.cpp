@@ -523,7 +523,7 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     return y_out;
 }
 
-std::tuple<at::Tensor, at::Tensor> fused_deep_moe(const at::Tensor &x, const at::Tensor &expert_ids,
+std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode(const at::Tensor &x, const at::Tensor &expert_ids,
                                             const at::Tensor &gmm1_permuted_weight,
                                             const at::Tensor &gmm1_permuted_weight_scale,
                                             const at::Tensor &gmm2_weight, const at::Tensor &gmm2_weight_scale,
@@ -548,7 +548,7 @@ std::tuple<at::Tensor, at::Tensor> fused_deep_moe(const at::Tensor &x, const at:
     vector<char> group_ep_chrs(hcom_ep_name.begin(), hcom_ep_name.end());
     group_ep_chrs.push_back('\0');
     char *group_ep_ptr = &group_ep_chrs[0];
-    EXEC_NPU_CMD(aclnnFusedDeepMoe,
+    EXEC_NPU_CMD(aclnnDispatchGmmCombineDecode,
                 // input
                 x, expert_ids, gmm1_permuted_weight, gmm1_permuted_weight_scale, gmm2_weight,
                 gmm2_weight_scale, expert_smooth_scales_optional, expert_scales_optional,
@@ -619,7 +619,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
 
     ops.def(
-    "fused_deep_moe(Tensor x, Tensor expert_ids, Tensor gmm1_permuted_weight,"
+    "dispatch_gmm_combine_decode(Tensor x, Tensor expert_ids, Tensor gmm1_permuted_weight,"
     "                Tensor gmm1_permuted_weight_scale,"
     "                Tensor gmm2_weight, Tensor gmm2_weight_scale,"
     "                Tensor expert_smooth_scales_optional, Tensor expert_scales_optional,"
@@ -630,5 +630,5 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     "                int global_bs) -> (Tensor output, Tensor ep_recv_count)"
     );
 
-    ops.impl("fused_deep_moe", torch::kPrivateUse1, &vllm_ascend::fused_deep_moe);
+    ops.impl("dispatch_gmm_combine_decode", torch::kPrivateUse1, &vllm_ascend::dispatch_gmm_combine_decode);
 }

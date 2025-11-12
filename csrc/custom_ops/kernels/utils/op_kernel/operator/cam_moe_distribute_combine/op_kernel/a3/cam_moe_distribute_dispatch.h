@@ -13,8 +13,8 @@
 
 #include "kernel_operator.h"
 #include "kernel_tiling/kernel_tiling.h"
-#include "../../../../fused_deep_moe_base.h"
-#include "../../../../fused_deep_moe_tiling.h"
+#include "../../../../dispatch_gmm_combine_decode_base.h"
+#include "../../../../dispatch_gmm_combine_decode_tiling.h"
 
 namespace MoeDistributeDispatchImpl {
 constexpr uint8_t BUFFER_NUM = 2;             // 多buf
@@ -63,7 +63,7 @@ public:
     __aicore__ inline void Init(GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales, GM_ADDR expandXOut,
                                 GM_ADDR dynamicScalesOut, GM_ADDR expandIdxOut, GM_ADDR expertTokenNumsOut,
                                 GM_ADDR sendCountsOut, GM_ADDR outputRecvCount, GM_ADDR tpSendCountsOut,
-                                GM_ADDR workspaceGM, TPipe *pipe, const FusedDeepMoeTilingData *tilingData);
+                                GM_ADDR workspaceGM, TPipe *pipe, const DispatchGmmCombineDecodeTilingData *tilingData);
     __aicore__ inline void Process();
 
 private:
@@ -221,7 +221,7 @@ template <TemplateDispatchTypeClass>
 __aicore__ inline void CamMoeDistributeDispatch<TemplateDispatchTypeFunc>::Init(
     GM_ADDR x, GM_ADDR expertIds, GM_ADDR scales, GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expandIdxOut,
     GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut, GM_ADDR outputRecvCount, GM_ADDR tpSendCountsOut,
-    GM_ADDR workspaceGM, TPipe *pipe, const FusedDeepMoeTilingData *tilingData)
+    GM_ADDR workspaceGM, TPipe *pipe, const DispatchGmmCombineDecodeTilingData *tilingData)
 {
     tpipe_ = pipe;
     aivId_ = GetBlockIdx();

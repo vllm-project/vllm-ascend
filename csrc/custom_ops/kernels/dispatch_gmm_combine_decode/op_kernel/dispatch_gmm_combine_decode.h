@@ -1,13 +1,13 @@
 /*
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
- * Description: FusedDeepMoe operator kernel function header file, for a3
+ * Description: DispatchGmmCombineDecode operator kernel function header file, for a3
  * Author: WANG Qiankun
  * Create: 2025-07-19
  * Note:
- * History: 2025-07-19 create FusedDeepMoe operator kernel function header file, for a3
+ * History: 2025-07-19 create DispatchGmmCombineDecode operator kernel function header file, for a3
  */
-#ifndef FUSED_DEEP_MOE_H
-#define FUSED_DEEP_MOE_H
+#ifndef DISPATCH_GMM_COMBINE_DECODE_H
+#define DISPATCH_GMM_COMBINE_DECODE_H
 
 #include "lib/matmul_intf.h"
 #include <kernel_operator.h>
@@ -29,8 +29,8 @@
 
 #include "operator/cam_moe_distribute_combine/op_kernel/a3/cam_moe_distribute_dispatch.h"
 
-#include "fused_deep_moe_tiling.h"
-#include "fused_deep_moe_base.h"
+#include "dispatch_gmm_combine_decode_tiling.h"
+#include "dispatch_gmm_combine_decode_base.h"
 
 #define ENABLE_GMM2_COMBINE
 
@@ -235,10 +235,10 @@ ACT_DEVICE void GmmDeq(GemmCoord problemShape, uint32_t groupCount, GM_ADDR gmGr
 }
 
 template <TemplateMC2TypeClass>
-class FusedDeepMoe
+class DispatchGmmCombineDecode
 {
 public:
-    __aicore__ inline FusedDeepMoe(){};
+    __aicore__ inline DispatchGmmCombineDecode(){};
     __aicore__ inline void Init(
         // input
         GM_ADDR x, GM_ADDR expert_ids, GM_ADDR gmm1_permuted_weight, GM_ADDR gmm1_permuted_weight_scale,
@@ -246,7 +246,7 @@ public:
         // output
         GM_ADDR output, GM_ADDR outputRecvCount,
         // system
-        GM_ADDR workspaceGM, AscendC::TPipe *pipe, const FusedDeepMoeTilingData *tilingData);
+        GM_ADDR workspaceGM, AscendC::TPipe *pipe, const DispatchGmmCombineDecodeTilingData *tilingData);
     __aicore__ inline void Process();
 
 private:
@@ -285,18 +285,18 @@ private:
 
     AscendC::TPipe *tpipe_{nullptr};
     __gm__ HcclOpResParam *winContext_{nullptr};
-    const FusedDeepMoeTilingData *tilingData_;
+    const DispatchGmmCombineDecodeTilingData *tilingData_;
 };
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void FusedDeepMoe<TemplateMC2TypeFunc>::Init(
+__aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Init(
     // input
     GM_ADDR x, GM_ADDR expert_ids, GM_ADDR gmm1_permuted_weight, GM_ADDR gmm1_permuted_weight_scale,
     GM_ADDR gmm2_weight, GM_ADDR gmm2_weight_scale, GM_ADDR expert_smooth_scales, GM_ADDR expert_scales,
     // output
     GM_ADDR output, GM_ADDR outputRecvCount,
     // system
-    GM_ADDR workspaceGM, AscendC::TPipe *pipe, const FusedDeepMoeTilingData *tilingData)
+    GM_ADDR workspaceGM, AscendC::TPipe *pipe, const DispatchGmmCombineDecodeTilingData *tilingData)
 {
     tpipe_ = pipe;
     blockDim_ = AscendC::GetBlockNum();
@@ -341,15 +341,15 @@ __aicore__ inline void FusedDeepMoe<TemplateMC2TypeFunc>::Init(
 }
 
 template <TemplateMC2TypeClass>
-__aicore__ inline void FusedDeepMoe<TemplateMC2TypeFunc>::Process()
+__aicore__ inline void DispatchGmmCombineDecode<TemplateMC2TypeFunc>::Process()
 {
 #ifdef ENABLE_GMM2_COMBINE
     if (g_coreType == AscendC::AIV) {
-        ((FusedDeepMoeTilingData *)tilingData_)->disGmmDeqSwigluQuantGmmDeqComInfo.aicNum = get_block_num();
+        ((DispatchGmmCombineDecodeTilingData *)tilingData_)->disGmmDeqSwigluQuantGmmDeqComInfo.aicNum = get_block_num();
         if constexpr (EXEC_FLAG & EXEC_FLAG_DEEP_FUSE) {
-            ((FusedDeepMoeTilingData *)tilingData_)->disGmmDeqSwigluQuantGmmDeqComInfo.aivNum = get_block_num();
+            ((DispatchGmmCombineDecodeTilingData *)tilingData_)->disGmmDeqSwigluQuantGmmDeqComInfo.aivNum = get_block_num();
         } else {
-            ((FusedDeepMoeTilingData *)tilingData_)->disGmmDeqSwigluQuantGmmDeqComInfo.aivNum =
+            ((DispatchGmmCombineDecodeTilingData *)tilingData_)->disGmmDeqSwigluQuantGmmDeqComInfo.aivNum =
                 get_block_num() * get_subblockdim();
         }
     }
@@ -444,4 +444,4 @@ __aicore__ inline void FusedDeepMoe<TemplateMC2TypeFunc>::Process()
                                layoutOutput, gmWorkspace, &combiner);
 #endif
 }
-#endif  // FUSED_DEEP_MOE_H
+#endif  // DISPATCH_GMM_COMBINE_DECODE_H

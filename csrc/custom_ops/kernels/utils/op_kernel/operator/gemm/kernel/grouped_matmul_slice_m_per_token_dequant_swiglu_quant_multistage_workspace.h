@@ -1,10 +1,10 @@
 /*
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
- * Description: FusedDeepMoe operator kernel function implementation file
+ * Description: DispatchGmmCombineDecode operator kernel function implementation file
  * Author: WANG Qiankun
  * Create: 2025-07-19
  * Note:
- * History: 2025-07-19 create FusedDeepMoe operator kernel function implementation file
+ * History: 2025-07-19 create DispatchGmmCombineDecode operator kernel function implementation file
  */
 #pragma once
 
@@ -18,7 +18,7 @@
 #include "../../catlass/act/epilogue/tile/tile_swizzle.hpp"
 #include "../../catlass/act/epilogue/tile/tile_copy.hpp"
 
-#include "../../../fused_deep_moe_base.h"
+#include "../../../dispatch_gmm_combine_decode_base.h"
 
 constexpr uint32_t STATE_OFFSET = 512;
 constexpr uint64_t WIN_STATE_OFFSET = 512 * 1024;

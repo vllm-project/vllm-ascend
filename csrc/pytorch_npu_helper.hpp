@@ -220,7 +220,7 @@ inline aclTensor *ConvertType(const at::Tensor &at_tensor)
     }
     aclFormat format = ACL_FORMAT_ND;
 
-    // 适配fused_deep_moe算子的weight入参
+    // 适配dispatch_gmm_combine_decode算子的weight入参
     if (acl_data_type == ACL_INT8 && dimNum == 3) {
         format = ACL_FORMAT_FRACTAL_NZ;
     }

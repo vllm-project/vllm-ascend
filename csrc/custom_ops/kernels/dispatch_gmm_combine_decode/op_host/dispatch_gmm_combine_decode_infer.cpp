@@ -1,10 +1,10 @@
 /*
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
- * Description: FusedDeepMoe tiling function implementation file
+ * Description: DispatchGmmCombineDecode tiling function implementation file
  * Author: Guo Ren
  * Create: 2025-07-22
  * Note:
- * History: 2025-07-13 create FusedDeepMoe infer function file
+ * History: 2025-07-13 create DispatchGmmCombineDecode infer function file
  */
 
 #include <cstdint>
@@ -89,5 +89,5 @@ static ge::graphStatus InferDataType(gert::InferDataTypeContext *context)
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP(FusedDeepMoe).InferShape(InferShape).InferDataType(InferDataType);
+IMPL_OP(DispatchGmmCombineDecode).InferShape(InferShape).InferDataType(InferDataType);
 }  // namespace ge

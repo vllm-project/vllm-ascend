@@ -1,18 +1,18 @@
 /*
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
- * Description: FusedDeepMoe operator definition file
+ * Description: DispatchGmmCombineDecode operator definition file
  * Author: WANG Qiankun
  * Create: 2025-07-19
  * Note:
- * History: 2025-07-19 create FusedDeepMoe operator definition file
+ * History: 2025-07-19 create DispatchGmmCombineDecode operator definition file
  */
 #include "register/op_def_registry.h"
 
 namespace ops {
-class FusedDeepMoe : public OpDef
+class DispatchGmmCombineDecode : public OpDef
 {
 public:
-    explicit FusedDeepMoe(const char *name) : OpDef(name)
+    explicit DispatchGmmCombineDecode(const char *name) : OpDef(name)
     {
         this->Input("x")
             .ParamType(REQUIRED)
@@ -78,5 +78,5 @@ public:
     }
 };
 
-OP_ADD(FusedDeepMoe);
+OP_ADD(DispatchGmmCombineDecode);
 }  // namespace ops

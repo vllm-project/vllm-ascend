@@ -69,7 +69,7 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     return {masked_input, mask};
 }
 
-std::tuple<at::Tensor, at::Tensor> fused_deep_moe_meta(const at::Tensor &x, const at::Tensor &expert_ids,
+std::tuple<at::Tensor, at::Tensor> dispatch_gmm_combine_decode_meta(const at::Tensor &x, const at::Tensor &expert_ids,
                                             const at::Tensor &gmm1_permuted_weight,
                                             const at::Tensor &gmm1_permuted_weight_scale,
                                             const at::Tensor &gmm2_weight, const at::Tensor &gmm2_weight_scale,
@@ -157,7 +157,7 @@ namespace {
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
-    // Masked fused_deep_moe_meta meta implementation
-    ops.impl("fused_deep_moe", &vllm_ascend::meta::fused_deep_moe_meta);
+    // Masked dispatch_gmm_combine_decode_meta meta implementation
+    ops.impl("dispatch_gmm_combine_decode", &vllm_ascend::meta::dispatch_gmm_combine_decode_meta);
 }
 }

@@ -44,7 +44,7 @@ BuildAscendProj() {
     rm -rf ./${proj_name}/op_host/add_custom*
     rm  -rf ./${proj_name}/op_kernel/add_custom*
     CopyOps "./kernels" "./${proj_name}"
-    python $SCRIPTS_PATH/custom_ops/set_conf.py ./${proj_name}/CMakePresets.json $build_type True CAM
+    python $SCRIPTS_PATH/set_conf.py ./${proj_name}/CMakePresets.json $build_type True CAM
     cp -rf ./kernels/pregen ./${proj_name}
 
     source $ASCEND_HOME_PATH/bin/setenv.bash
@@ -58,7 +58,7 @@ BuildAscendProj() {
         mkdir ${BUILD_OUT_PATH}/custom_ops/extract/${soc_version}
         build_out/*.run --extract=${BUILD_OUT_PATH}/custom_ops/extract/${soc_version}
     else
-        cp build_out/*.run ${BUILD_OUT_PATH}/custom_ops/run/CAM_${soc_version}_${os_id}_${arch}.run
+        cp build_out/*.run ${BUILD_OUT_PATH}/custom_ops/run/CANN_${soc_version}_${os_id}_${arch}.run
     fi
 }
 

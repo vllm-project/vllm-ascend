@@ -1,10 +1,10 @@
 /*
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
- * Description: FusedDeepMoe tiling function implementation file
+ * Description: DispatchGmmCombineDecode tiling function implementation file
  * Author: WANG Qiankun
  * Create: 2025-07-19
  * Note:
- * History: 2025-07-19 create FusedDeepMoe tiling function implementation file
+ * History: 2025-07-19 create DispatchGmmCombineDecode tiling function implementation file
  */
 #include <cstdio>
 #include <cstdint>
@@ -13,7 +13,7 @@
 #include "error_log.h"
 #include "graph/utils/type_utils.h"
 #include "register/op_def_registry.h"
-#include "../op_kernel/fused_deep_moe_tiling.h"
+#include "../op_kernel/dispatch_gmm_combine_decode_tiling.h"
 #include "tiling/platform/platform_ascendc.h"
 #include "tiling/hccl/hccl_tiling.h"
 
@@ -67,7 +67,7 @@ static size_t CeilUp(size_t x, size_t y)
 }
 
 static ge::graphStatus CheckTensorShape(gert::TilingContext *context, const char *nodeName,
-                                        FusedDeepMoeTilingData &tilingData)
+                                        DispatchGmmCombineDecodeTilingData &tilingData)
 {
     uint32_t epRankId = tilingData.disGmmDeqSwigluQuantGmmDeqComInfo.epRankId;
     uint32_t moeExpertNum = tilingData.disGmmDeqSwigluQuantGmmDeqComInfo.moeExpertNum;
@@ -127,7 +127,7 @@ static ge::graphStatus CheckTensorShape(gert::TilingContext *context, const char
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus CheckData(const char *nodeName, FusedDeepMoeTilingData &tilingData)
+static ge::graphStatus CheckData(const char *nodeName, DispatchGmmCombineDecodeTilingData &tilingData)
 {
     uint32_t batchSize = tilingData.disGmmDeqSwigluQuantGmmDeqComInfo.bs;
     OP_TILING_CHECK(batchSize < MIN_BATCH_SIZE, OP_LOGE(nodeName, "batchSize(bs) must >= %d.", MIN_BATCH_SIZE),
@@ -162,7 +162,7 @@ static ge::graphStatus CheckData(const char *nodeName, FusedDeepMoeTilingData &t
 }
 
 static ge::graphStatus GetAttrAndSetTilingData(gert::TilingContext *context, const char *nodeName,
-                                               FusedDeepMoeTilingData &tilingData, std::string &groupEp)
+                                               DispatchGmmCombineDecodeTilingData &tilingData, std::string &groupEp)
 {
     auto attrs = context->GetAttrs();
     OP_TILING_CHECK(attrs == nullptr, OP_LOGE(nodeName, "attrs is nullptr."), return ge::GRAPH_FAILED);
@@ -209,10 +209,10 @@ static ge::graphStatus GetAttrAndSetTilingData(gert::TilingContext *context, con
     return ge::GRAPH_SUCCESS;
 }
 
-static void SetHcommCfg(const gert::TilingContext *context, FusedDeepMoeTilingData *tiling, const std::string groupEp)
+static void SetHcommCfg(const gert::TilingContext *context, DispatchGmmCombineDecodeTilingData *tiling, const std::string groupEp)
 {
     const char *nodeName = context->GetNodeName();
-    OP_LOGD(nodeName, "FusedDeepMoe groupEp = %s", groupEp.c_str());
+    OP_LOGD(nodeName, "DispatchGmmCombineDecode groupEp = %s", groupEp.c_str());
     uint32_t opType = OP_TYPE_ALL_TO_ALL;
     std::string algConfigAllToAllStr = "AlltoAll=level0:fullmesh;level1:pairwise";
     std::string algConfigAllGatherStr = "AllGather=level0:ring";
@@ -223,7 +223,7 @@ static void SetHcommCfg(const gert::TilingContext *context, FusedDeepMoeTilingDa
 }
 
 static ge::graphStatus SetWorkSpace(gert::TilingContext *context, const char *nodeName,
-                                    FusedDeepMoeTilingData &tilingData)
+                                    DispatchGmmCombineDecodeTilingData &tilingData)
 {
     size_t *workSpaces = context->GetWorkspaceSizes(1);
     OP_TILING_CHECK(workSpaces == nullptr, OP_LOGE(nodeName, "workSpaces is nullptr."), return ge::GRAPH_FAILED);
@@ -263,10 +263,10 @@ static ge::graphStatus SetWorkSpace(gert::TilingContext *context, const char *no
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus FusedDeepMoeTilingFuncImpl(gert::TilingContext *context)
+static ge::graphStatus DispatchGmmCombineDecodeTilingFuncImpl(gert::TilingContext *context)
 {
     const char *nodeName = context->GetNodeName();
-    FusedDeepMoeTilingData *tilingData = context->GetTilingData<FusedDeepMoeTilingData>();
+    DispatchGmmCombineDecodeTilingData *tilingData = context->GetTilingData<DispatchGmmCombineDecodeTilingData>();
     OP_TILING_CHECK(tilingData == nullptr, OP_LOGE(nodeName, "tilingData is nullptr."), return ge::GRAPH_FAILED);
     std::string groupEp = "";
 
@@ -312,20 +312,20 @@ static ge::graphStatus FusedDeepMoeTilingFuncImpl(gert::TilingContext *context)
     return ge::GRAPH_SUCCESS;
 }
 
-static ge::graphStatus FusedDeepMoeTilingFunc(gert::TilingContext *context)
+static ge::graphStatus DispatchGmmCombineDecodeTilingFunc(gert::TilingContext *context)
 {
-    ge::graphStatus ret = FusedDeepMoeTilingFuncImpl(context);
+    ge::graphStatus ret = DispatchGmmCombineDecodeTilingFuncImpl(context);
     return ret;
 }
 
-struct FusedDeepMoeCompileInfo {};
-ge::graphStatus TilingParseForFusedDeepMoe(gert::TilingParseContext *context)
+struct DispatchGmmCombineDecodeCompileInfo {};
+ge::graphStatus TilingParseForDispatchGmmCombineDecode(gert::TilingParseContext *context)
 {
     (void)context;
     return ge::GRAPH_SUCCESS;
 }
 
-IMPL_OP_OPTILING(FusedDeepMoe)
-    .Tiling(FusedDeepMoeTilingFunc)
-    .TilingParse<FusedDeepMoeCompileInfo>(TilingParseForFusedDeepMoe);
+IMPL_OP_OPTILING(DispatchGmmCombineDecode)
+    .Tiling(DispatchGmmCombineDecodeTilingFunc)
+    .TilingParse<DispatchGmmCombineDecodeCompileInfo>(TilingParseForDispatchGmmCombineDecode);
 }  // namespace optiling

@@ -1,8 +1,8 @@
 #include <string.h>
 #include "graph/types.h"
 #include "aclnn/opdev/platform.h"
-#include "aclnn_fused_deep_moe.h"
-#include "aclnnInner_fused_deep_moe.h"
+#include "aclnn_dispatch_gmm_combine_decode.h"
+#include "aclnnInner_dispatch_gmm_combine_decode.h"
 
 enum NnopbaseHcclServerType {
     NNOPBASE_HCCL_SERVER_TYPE_AICPU = 0,
@@ -15,7 +15,7 @@ extern "C" void __attribute__((weak)) NnopbaseSetHcclServerType(void *executor, 
 extern "C" {
 #endif
 
-aclnnStatus aclnnFusedDeepMoeGetWorkspaceSize(
+aclnnStatus aclnnDispatchGmmCombineDecodeGetWorkspaceSize(
     const aclTensor *x,
     const aclTensor *expertIds,
     const aclTensor *gmm1PermutedWeight,
@@ -37,13 +37,13 @@ aclnnStatus aclnnFusedDeepMoeGetWorkspaceSize(
     uint64_t *workspaceSize,
     aclOpExecutor **executor)
 {
-    return aclnnInnerFusedDeepMoeGetWorkspaceSize(x, expertIds, gmm1PermutedWeight, gmm1PermutedWeightScale,
+    return aclnnInnerDispatchGmmCombineDecodeGetWorkspaceSize(x, expertIds, gmm1PermutedWeight, gmm1PermutedWeightScale,
         gmm2Weight, gmm2WeightScale, expertSmoothScalesOptional, expertScalesOptional, groupEp, epRankSize,
         epRankId, moeExpertNum, shareExpertNum, shareExpertRankNum, quantMode, globalBs,
         output, epRecvCount, workspaceSize, executor);
 }
 
-aclnnStatus aclnnFusedDeepMoe(
+aclnnStatus aclnnDispatchGmmCombineDecode(
     void *workspace,
     uint64_t workspaceSize,
     aclOpExecutor *executor,
@@ -56,7 +56,7 @@ aclnnStatus aclnnFusedDeepMoe(
             NnopbaseSetHcclServerType(executor, NNOPBASE_HCCL_SERVER_TYPE_MTE);
         }
     }
-    return aclnnInnerFusedDeepMoe(workspace, workspaceSize, executor, stream);
+    return aclnnInnerDispatchGmmCombineDecode(workspace, workspaceSize, executor, stream);
 }
 
 #ifdef __cplusplus

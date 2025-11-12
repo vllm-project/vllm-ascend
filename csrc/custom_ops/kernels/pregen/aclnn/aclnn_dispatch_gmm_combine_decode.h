@@ -1,5 +1,5 @@
-#ifndef FUSED_DEEP_MOE
-#define FUSED_DEEP_MOE
+#ifndef DISPATCH_GMM_COMBINE_DECODE
+#define DISPATCH_GMM_COMBINE_DECODE
 
 #include "aclnn/acl_meta.h"
 
@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-__attribute__((visibility("default"))) aclnnStatus aclnnFusedDeepMoeGetWorkspaceSize(
+__attribute__((visibility("default"))) aclnnStatus aclnnDispatchGmmCombineDecodeGetWorkspaceSize(
     const aclTensor *x,
     const aclTensor *expertIds,
     const aclTensor *gmm1PermutedWeight,
@@ -29,7 +29,7 @@ __attribute__((visibility("default"))) aclnnStatus aclnnFusedDeepMoeGetWorkspace
     uint64_t *workspaceSize,
     aclOpExecutor **executor);
 
-__attribute__((visibility("default"))) aclnnStatus aclnnFusedDeepMoe(
+__attribute__((visibility("default"))) aclnnStatus aclnnDispatchGmmCombineDecode(
     void *workspace,
     uint64_t workspaceSize,
     aclOpExecutor *executor,

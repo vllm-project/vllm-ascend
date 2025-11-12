@@ -1,18 +1,18 @@
 /*
  * Copyright (c) Huawei Technologies Co., Ltd. 2025-2025. All rights reserved.
- * Description: FusedDeepMoe tilingData definition file
+ * Description: DispatchGmmCombineDecode tilingData definition file
  * Author: WANG Qiankun
  * Create: 2025-07-19
  * Note:
- * History: 2025-07-19 create FusedDeepMoe tilingData definition file
+ * History: 2025-07-19 create DispatchGmmCombineDecode tilingData definition file
  */
 
-#ifndef FUSED_DEEP_MOE_TILING_H
-#define FUSED_DEEP_MOE_TILING_H
+#ifndef DISPATCH_GMM_COMBINE_DECODE_TILING_H
+#define DISPATCH_GMM_COMBINE_DECODE_TILING_H
 
 #include "kernel_tiling/kernel_tiling.h"
 
-struct FusedDeepMoeInfo {
+struct DispatchGmmCombineDecodeInfo {
     uint32_t epRankSize;           // epRankSize
     uint32_t epRankId;             // epRankId
     uint32_t moeExpertNum;         // moe expert number
@@ -31,10 +31,10 @@ struct FusedDeepMoeInfo {
     uint64_t gmm1HLen;
 };
 
-struct FusedDeepMoeTilingData {
+struct DispatchGmmCombineDecodeTilingData {
     Mc2InitTiling mc2InitTiling;
     Mc2CcTiling mc2CcTiling;
-    FusedDeepMoeInfo disGmmDeqSwigluQuantGmmDeqComInfo;
+    DispatchGmmCombineDecodeInfo disGmmDeqSwigluQuantGmmDeqComInfo;
 };
 
 constexpr uint32_t GM_ALIGN_BYTE = 512;
@@ -70,4 +70,4 @@ constexpr uint32_t WORKSPACE_STAGES = 4;
 
 constexpr uint32_t EXEC_FLAG_DEEP_FUSE = (1U << 0);
 
-#endif  // FUSED_DEEP_MOE_TILING_H
+#endif  // DISPATCH_GMM_COMBINE_DECODE_TILING_H
