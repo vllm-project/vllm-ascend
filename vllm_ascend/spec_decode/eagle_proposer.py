@@ -126,8 +126,9 @@ class EagleProposer(Proposer):
                 del self.model.model.embed_tokens
                 self.model.model.embed_tokens = target_embed_tokens
             else:
-                logger.info("Draft model embed_tokens are already initialized. "
-                            "Keeping separate vocab embedding from the target model.")
+                logger.info(
+                    "Draft model embed_tokens are already initialized. "
+                    "Keeping separate vocab embedding from the target model.")
         else:
             logger.info(
                 "Since PP > 1, the EAGLE head loaded its own vocab embedding" \
@@ -147,7 +148,7 @@ class EagleProposer(Proposer):
                 self.model.lm_head = model.lm_head
         else:
             if (hasattr(model, "lm_head") and hasattr(self.model, "lm_head")
-                and not self.model.has_own_lm_head):
+                    and not self.model.has_own_lm_head):
                 logger.info("Draft model lm_head is uninitialized. "
                             "Sharing lm_head with the target model.")
                 del self.model.lm_head
