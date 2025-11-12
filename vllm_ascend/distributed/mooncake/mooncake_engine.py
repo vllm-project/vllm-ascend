@@ -8,6 +8,10 @@ from typing import Generator, List, Optional, Union
 import torch
 from vllm.config import VllmConfig
 from vllm.utils import logger
+from vllm.distributed import (get_decode_context_model_parallel_rank,
+                              get_decode_context_model_parallel_world_size,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 
 from vllm_ascend.distributed.mooncake.config_data import (
     ChunkedTokenDatabase, LasyerMultiBlockReqMeta, MooncakeConnectorMetadata,
@@ -16,12 +20,17 @@ from vllm_ascend.distributed.mooncake.kv_transfer import (
     KVCacheStoreLayerRecvingThread, KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread, KVCacheStoreSendingThread, KVTransferThread)
 from vllm_ascend.distributed.mooncake.mooncake_store import Mooncakestore
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import (vllm_version_is, prefill_context_parallel_enable)
 
 if vllm_version_is("0.11.0"):
     from vllm.utils import get_kv_cache_torch_dtype
 else:
     from vllm.utils.torch_utils import get_kv_cache_torch_dtype
+
+if prefill_context_parallel_enable():
+    from vllm.distributed import (get_prefill_context_model_parallel_rank,
+                                  get_prefill_context_model_parallel_world_size
+                                  )
 
 
 class MooncakeEngine:
@@ -40,19 +49,35 @@ class MooncakeEngine:
                 and model_config.use_mla):
             self.use_mla = True
         self.use_layerwise = use_layerwize
-        self.tp_rank = parallel_config.rank
-        self.tp_size = parallel_config.tensor_parallel_size
+        
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
+
+        self.pcp_size = get_prefill_context_model_parallel_world_size(
+        ) if prefill_context_parallel_enable() else 1
+        self.pcp_rank = get_prefill_context_model_parallel_rank(
+        ) if self.pcp_size > 1 else 0
+        self.dcp_size = get_decode_context_model_parallel_world_size()
+        self.dcp_rank = get_decode_context_model_parallel_rank(
+        ) if self.dcp_size > 1 else 0
+
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
         self.register_buffer = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "register_buffer", False)
         self.block_size = vllm_config.cache_config.block_size
+
+        if self.pcp_size > 1:
+            self.block_size *= self.pcp_size
+        
+        if self.dcp_size > 1:
+            self.block_size *= self.dcp_size
+
         self.current_layer = 0
         # self.use_mla = first_kv_cache_tuple[0].size(
         #     -1) != first_kv_cache_tuple[1].size(-1)
         self.num_layers = model_config.get_num_layers(parallel_config)
-        self.block_size = vllm_config.cache_config.block_size
         num_kv_head = model_config.get_num_kv_heads(parallel_config)
         head_size = model_config.get_head_size()
         kv_dtype = get_kv_cache_torch_dtype(
@@ -66,7 +91,9 @@ class MooncakeEngine:
         self.metadata = MooncakeEngineMetadata(
             model_config.model,
             parallel_config.world_size,
-            parallel_config.rank,
+            self.pcp_rank,
+            self.dcp_rank,
+            self.tp_rank,
             kv_dtype,
             kv_shape,
             self.block_size,

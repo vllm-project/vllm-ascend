@@ -23,8 +23,12 @@ class MooncakeEngineMetadata:
     model_name: str
     """ world size when running under a distributed setting """
     world_size: int
-    """ worker id when running under a distributed setting """
-    worker_id: int
+    """ Initialize the current PCP's rank """
+    pcp_rank: int
+    """ Initialize the current DCP's rank """
+    dcp_rank: int
+    """ Initialize the current TP's rank """
+    tp_rank: int
     """ the format of kv tensors """
     kv_dtype: torch.dtype
     """ the shape of kv tensors """
@@ -39,20 +43,25 @@ class MooncakeEngineMetadata:
 class MooncakeEngineKey:
     model_name: str
     world_size: int
-    worker_id: int
+    pcp_rank: int
+    dcp_rank: int
+    tp_rank: int
     chunk_hash: str
 
     def __hash__(self):
         return hash((
             self.model_name,
             self.world_size,
-            self.worker_id,
+            self.pcp_rank,
+            self.dcp_rank,
+            self.tp_rank,    
             self.chunk_hash,
         ))
 
     def to_string(self):
         return (f"{self.model_name}@{self.world_size}"
-                f"@{self.worker_id}@{self.chunk_hash}")
+                f"@pcp{self.pcp_rank}@dcp{self.dcp_rank}"
+                f"@tp{self.tp_rank}@{self.chunk_hash}")
 
     def split_layers(self, num_layers: int) -> List["LayerMooncakeEngineKey"]:
         """Split the key into multiple keys for each layer"""
@@ -62,7 +71,9 @@ class MooncakeEngineKey:
                 LayerMooncakeEngineKey(
                     self.model_name,
                     self.world_size,
-                    self.worker_id,
+                    self.pcp_rank,
+                    self.dcp_rank,
+                    self.tp_rank,    
                     self.chunk_hash,
                     layer_id,
                 ))
@@ -74,7 +85,9 @@ class MooncakeEngineKey:
             "__type__": "CacheEngineKey",
             "model_name": self.model_name,
             "world_size": self.world_size,
-            "worker_id": self.worker_id,
+            "pcp_rank": self.pcp_rank,
+            "dcp_rank": self.dcp_rank,
+            "tp_rank": self.tp_rank,
             "chunk_hash": self.chunk_hash,
         }
 
@@ -83,7 +96,9 @@ class MooncakeEngineKey:
         return MooncakeEngineKey(
             model_name=d["model_name"],
             world_size=d["world_size"],
-            worker_id=d["worker_id"],
+            pcp_rank=d["pcp_rank"],
+            dcp_rank=d["dcp_rank"],
+            tp_rank=d["tp_rank"],
             chunk_hash=d["chunk_hash"],
         )
 
@@ -98,14 +113,17 @@ class LayerMooncakeEngineKey(MooncakeEngineKey):
         return hash((
             self.model_name,
             self.world_size,
-            self.worker_id,
+            self.pcp_rank,
+            self.dcp_rank,
+            self.tp_rank,
             self.chunk_hash,
             self.layer_id,
         ))
 
     def to_string(self):
         return (f"{self.model_name}@{self.world_size}"
-                f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}")
+                f"@pcp{self.pcp_rank}@dcp{self.dcp_rank}"
+                f"@tp{self.tp_rank}@{self.chunk_hash}@{self.layer_id}")
 
 
 class ChunkedTokenDatabase():
@@ -123,7 +141,9 @@ class ChunkedTokenDatabase():
         return MooncakeEngineKey(
             self.metadata.model_name,
             self.metadata.world_size,
-            self.metadata.worker_id,
+            self.metadata.pcp_rank,
+            self.metadata.dcp_rank,
+            self.metadata.tp_rank,
             chunk_hash,
         )
 
