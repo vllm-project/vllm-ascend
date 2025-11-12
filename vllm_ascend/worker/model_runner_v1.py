@@ -1173,6 +1173,10 @@ class NPUModelRunner(GPUModelRunner):
 
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
+        if self.shared_kv_cache_layers is not None:
+            # sharing kv across layers need to read the kvcache,
+            # directly return chunked prefill in this scenario
+            return AscendAttentionState.ChunkedPrefill
         if np.array_equal(self.seq_lens.np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
@@ -2223,6 +2227,7 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self.may_add_encoder_only_layers_to_kv_cache_config()
+        self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = (len(self.attn_groups) > 1)
@@ -2261,6 +2266,13 @@ class NPUModelRunner(GPUModelRunner):
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
                                                    kv_cache_raw_tensors)
+
+        # Set up cross-layer KV cache sharing
+        for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
+        ):
+            logger.debug("%s reuses KV cache of %s", layer_name,
+                         target_layer_name)
+            kv_caches[layer_name] = kv_caches[target_layer_name]
 
         from vllm.v1.worker.utils import bind_kv_cache
         bind_kv_cache(kv_caches,
