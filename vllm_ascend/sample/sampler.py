@@ -3,7 +3,7 @@ import torch_npu
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler, random_sample
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, is_A5
 
 DEFAULT_LOGPROBS_MODE = "raw_logprobs"
 

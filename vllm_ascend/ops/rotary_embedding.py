@@ -26,7 +26,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     YaRNScalingRotaryEmbedding)
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import enable_custom_op, is_310p
+from vllm_ascend.utils import enable_custom_op, is_310p, is_A5
 
 
 def _custom_rotary_embedding_enabled(query, neox_style, head_size):
@@ -405,7 +405,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        if self.mrope_section != [16, 24, 24]:
+        if self.mrope_section != [16, 24, 24] or (not is_A5()): # A5不支持npu_mrope算子，这里需要使用小算子替换
             return super().forward_oot(positions, query, key)
 
         import torch_npu
@@ -419,9 +419,6 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         if self.cos_sin_cache.dtype != query.dtype:  # type: ignore
             self.cos_sin_cache = self.cos_sin_cache.to(  # type: ignore
                 query.dtype)  # type: ignore
-        
-        if is_A5(): # A5不支持npu_mrope算子，这里需要使用小算子替换
-        return query, key
                 
         query, key = torch_npu.npu_mrope(positions,
                                          query.contiguous(),
