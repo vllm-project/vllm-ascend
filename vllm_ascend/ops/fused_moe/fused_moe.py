@@ -86,8 +86,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         w13_data = self._maybe_pad_weight(layer.w13_weight.data).transpose(
             1, 2).contiguous()
-        layer.w13_weight = torch.nn.Parameter(w13_data,
-                                                requires_grad=False)
+        layer.w13_weight = torch.nn.Parameter(w13_data, requires_grad=False)
 
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(
             1, 2).contiguous()
