@@ -20,13 +20,6 @@ class AscendPrefillContextParallelMetadata:
 
     num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
 
-    local_chunked_kv_lens: Optional[list[Optional[list[Optional[list[Optional[
-        list[int]]]]]]]] = None
-
-    mask_for_non_zero_chunk: Optional[List[bool]] = None
-
-    max_chunk_num: int = 0
-
     q_head_idx_tensor: torch.Tensor = None
 
     q_tail_idx_tensor: torch.Tensor = None
@@ -113,23 +106,6 @@ class AscendCommonAttentionMetadata:
 
     prefill_context_parallel_metadata: Optional[
         AscendPrefillContextParallelMetadata] = None
-
-
-def extract_req_dcp_by_chunk_pcp(lst,
-                                 chunk_idx,
-                                 dcp_size,
-                                 pcp_rank,
-                                 fill_value=0):
-    num_reqs = len(lst)
-    results: List[List[int]] = []
-    for i in range(num_reqs):
-        if len(lst[i]) == 0 or chunk_idx >= len(lst[i]):
-            # empty req or this req has no corresponding chunk, fill 0
-            results.append([fill_value] * dcp_size)
-            continue
-        dcp_values = lst[i][chunk_idx][pcp_rank]
-        results.append(dcp_values)
-    return results
 
 
 def filter_chunked_req_indices(
