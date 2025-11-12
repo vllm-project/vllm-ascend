@@ -42,6 +42,7 @@ from vllm.model_executor.models.qwen2_5_vl import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, is_enable_nz,
                                vllm_version_is)
 
@@ -536,7 +537,11 @@ class AscendQwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
-            image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+            if vllm_version_is("0.11.0"):
+                image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
+            else:
+                with set_ascend_forward_context(None, self.vllm_config):
+                    image_embeds = self.visual(pixel_values, grid_thw=grid_thw)
 
         # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
@@ -553,7 +558,13 @@ class AscendQwen2_5_VLForConditionalGeneration(
         else:
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
-            video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+            if vllm_version_is("0.11.0"):
+                video_embeds = self.visual(pixel_values_videos,
+                                           grid_thw=grid_thw)
+            else:
+                with set_ascend_forward_context(None, self.vllm_config):
+                    video_embeds = self.visual(pixel_values_videos,
+                                               grid_thw=grid_thw)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
