@@ -165,7 +165,7 @@ def create_request(
                                   remote_host="my-host",
                                   remote_port=1234,
                                   remote_tp_size=1,
-                                  remote_cp_size=1,
+                                  remote_pcp_size=1,
                                   remote_dcp_size=1)
 
     max_tokens = 1 if do_remote_decode else max_tokens
