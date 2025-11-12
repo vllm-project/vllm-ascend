@@ -1,6 +1,6 @@
 [files]
 # these files may be written in non english words
-extend-exclude = ['csrc/batch_matmul_transpose/**']
+extend-exclude = []
 ignore-hidden = true
 ignore-files = true
 ignore-dot = true
@@ -19,7 +19,7 @@ locale = "en"
 extend-ignore-identifiers-re = [".*Unc.*", ".*_thw",
     ".*UE8M0.*", ".*[UE4M3|ue4m3].*", ".*eles.*", ".*fo.*", ".*ba.*",
     ".*ot.*", ".*[Tt]h[rR].*"]
-extend-ignore-words-re = ["CANN", "cann"]
+extend-ignore-words-re = ["CANN", "cann","ND"]
 extend-ignore-re = []
 
 [default.extend-identifiers]
