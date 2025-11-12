@@ -72,7 +72,6 @@ async def test_models(model: str) -> None:
         "OMP_PROC_BIND": "false",
         "HCCL_BUFFSIZE": "1024",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "VLLM_USE_V1": "1"
     }
     additional_config = {
         "ascend_scheduler_config": {

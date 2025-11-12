@@ -14,8 +14,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import json
-import os
 from typing import Any
 
 import openai
@@ -26,15 +24,12 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
-    "vllm-ascend/Qwen3-32B-W8A8",
+    "vllm-ascend/DeepSeek-V3.2-Exp-W8A8",
 ]
 
-MODES = [
-    "aclgraph",
-    "single",
-]
-
-TENSOR_PARALLELS = [4]
+TENSOR_PARALLELS = [8]
+DATA_PARALLELS = [2]
+FULL_GRAPH = [True, False]
 
 prompts = [
     "San Francisco is a",
@@ -44,30 +39,24 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-batch_size_dict = {
-    "linux-aarch64-a2-4": 72,
-    "linux-aarch64-a3-4": 76,
-}
-VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
-performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
-
 aisbench_cases = [{
     "case_type": "accuracy",
-    "dataset_path": "vllm-ascend/aime2024",
+    "dataset_path": "vllm-ascend/gsm8k-lite",
     "request_conf": "vllm_api_general_chat",
-    "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
-    "max_out_len": 32768,
-    "batch_size": 32,
-    "baseline": 83.33,
-    "threshold": 7
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+    "max_out_len": 4096,
+    "batch_size": 8,
+    "baseline": 95,
+    "threshold": 5
 }, {
     "case_type": "performance",
     "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
     "request_conf": "vllm_api_stream_chat",
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 4 * performance_batch_size,
+    "num_prompts": 16,
     "max_out_len": 1500,
-    "batch_size": performance_batch_size,
+    "batch_size": 8,
+    "request_rate": 0,
     "baseline": 1,
     "threshold": 0.97
 }]
@@ -75,38 +64,42 @@ aisbench_cases = [{
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
-async def test_models(model: str, mode: str, tp_size: int) -> None:
+@pytest.mark.parametrize("dp_size", DATA_PARALLELS)
+@pytest.mark.parametrize("full_graph", FULL_GRAPH)
+async def test_models(model: str, tp_size: int, dp_size: int,
+                      full_graph: bool) -> None:
     port = get_open_port()
-    env_dict = {
-        "TASK_QUEUE_ENABLE": "1",
-        "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1",
-        "HCCL_OP_EXPANSION_MODE": "AIV",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
-        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"
-    }
-    compilation_config = {
-        "cudagraph_mode":
-        "FULL_DECODE_ONLY",
-        "cudagraph_capture_sizes":
-        [1, 12, 16, 20, 24, 32, 48, 60, 64, 68, 72, 76, 80]
-    }
+    env_dict = {"HCCL_BUFFSIZE": "1024", "VLLM_ASCEND_ENABLE_MLAPO": "0"}
     server_args = [
-        "--quantization", "ascend", "--no-enable-prefix-caching",
+        "--no-enable-prefix-caching",
+        "--enable-expert-parallel",
         "--tensor-parallel-size",
-        str(tp_size), "--port",
-        str(port), "--max-model-len", "40960", "--max-num-batched-tokens",
-        "40960", "--block-size", "128", "--trust-remote-code",
-        "--reasoning-parser", "qwen3", "--gpu-memory-utilization", "0.9",
-        "--async-scheduling"
+        str(tp_size),
+        "--data-parallel-size",
+        str(dp_size),
+        "--port",
+        str(port),
+        "--max-model-len",
+        "16384",
+        "--max-num-batched-tokens",
+        "16384",
+        "--block-size",
+        "16",
+        "--trust-remote-code",
+        "--quantization",
+        "ascend",
+        "--gpu-memory-utilization",
+        "0.9",
+        "--additional-config",
+        '{"ascend_scheduler_config":{"enabled":true},'
+        '"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}',
     ]
-    if mode == "single":
-        server_args.append("--enforce-eager")
-    if mode == "aclgraph":
-        server_args.extend(
-            ["--compilation-config",
-             json.dumps(compilation_config)])
+    if full_graph:
+        server_args += [
+            "--compilation-config",
+            '{"cudagraph_capture": [16], "cudagraph_model":"FULL_DECODE_ONLY"}'
+        ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
@@ -123,8 +116,5 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
         )
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
-        print(choices)
-        if mode == "single":
-            return
         # aisbench test
         run_aisbench_cases(model, port, aisbench_cases)
