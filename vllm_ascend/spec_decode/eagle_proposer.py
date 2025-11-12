@@ -119,7 +119,6 @@ class EagleProposer(Proposer):
                 raise AttributeError(
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
                 )
-            
             # share embed_tokens with the target model if needed
             if not self.model.has_own_embed_tokens:
                 logger.info("Draft model embed_tokens are uninitialized. "
