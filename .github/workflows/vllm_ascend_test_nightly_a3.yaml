@@ -98,7 +98,7 @@ jobs:
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
 
-  single-node-tests:
+  single-node-tests1:
     name: single-node
     strategy:
       fail-fast: false
