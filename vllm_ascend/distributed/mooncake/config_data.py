@@ -23,11 +23,11 @@ class MooncakeEngineMetadata:
     model_name: str
     """ world size when running under a distributed setting """
     world_size: int
-    """ Initialize the current PCP's rank """
+    """ Initialize the current prefill context model parallel rank """
     pcp_rank: int
-    """ Initialize the current DCP's rank """
+    """ Initialize the current decode context model parallel rank """
     dcp_rank: int
-    """ Initialize the current TP's rank """
+    """ Initialize the current tensor parallel rank """
     tp_rank: int
     """ the format of kv tensors """
     kv_dtype: torch.dtype
