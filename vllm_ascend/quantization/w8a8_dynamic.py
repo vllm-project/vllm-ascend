@@ -248,7 +248,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
-        fused_flag = moe_comm_method.__class__.name__ in [
+        fused_flag = moe_comm_method.__class__.__name__ in [
             "FusedAlltoAllCommImpl",
             "FusedMC2CommImpl",
         ]
