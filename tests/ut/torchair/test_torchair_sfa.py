@@ -334,7 +334,6 @@ class TestAscendSFATorchairImpl(TestBase):
         mock_tp.world_size = 2
         ascend_config.torchair_graph_config.enabled = True
         ascend_config.torchari_graph_config.enable_kv_nz = False
-        ascend_config.torchair_graph_config.graph_batch_sizes = [16]
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
@@ -344,6 +343,7 @@ class TestAscendSFATorchairImpl(TestBase):
         scale = 0.1
         num_kv_heads = 8
         kv_cache_dtype = "auto"
+        graph_batch_size = 16
 
         kv_a_layernorm = MagicMock()
         kv_a_layernorm.weight = torch.randn(96)
