@@ -974,6 +974,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_heads = cache_k_pe.size(2)
         latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
         for i in range(iters):
+<<<<<<< HEAD
             toks = prefill_metadata.chunked_context.seq_tot[i]
             # chunk_seq_lens will be padded when pcp&dcp
             context_seq_len = prefill_metadata.chunked_context.chunk_seq_lens[
@@ -991,6 +992,102 @@ class AscendMLAImpl(MLAAttentionImpl):
                                rope_dim,
                                dtype=q_nope.dtype,
                                device=q_nope.device)
+=======
+            if self.pcp_size * self.dcp_size > 1:
+                ## DCP mode: each rank processes its own (cp,dcp) historical context slice per request dimension
+                num_requests = len(seq_len1)
+                assert num_requests == len(local_chunked_kv_lens)
+                # Before dealing with a new chunk, set to zero, and accumulate the start positions as chunk prefill step increases
+                context_starts_rank = torch.zeros(
+                    num_requests, dtype=torch.int32, device=q_nope.device
+                ) if context_starts_rank is None else context_starts_rank
+
+                ## Calculate tokens each rank should process per request
+                seq_len2_rank = torch.zeros_like(seq_len1, dtype=torch.int32)
+                total_toks = 0
+
+                for req_idx in range(num_requests):
+                    if i >= len(local_chunked_kv_lens[req_idx]):
+                        continue
+                    n_computed_acc = local_chunked_kv_lens[req_idx][i]
+                    total_toks += n_computed_acc[self.pcp_rank][self.dcp_rank]
+                    seq_len2_rank[req_idx] = n_computed_acc[self.pcp_rank][
+                        self.dcp_rank]
+
+                if total_toks > 0:
+                    kv_c_normed = torch.empty(total_toks,
+                                              num_heads,
+                                              latent_kv_dim,
+                                              dtype=q_nope.dtype,
+                                              device=q_nope.device)
+                    k_pe = torch.empty(total_toks,
+                                       num_heads,
+                                       rope_dim,
+                                       dtype=q_nope.dtype,
+                                       device=q_nope.device)
+                    if is_A5():
+                        torch_npu.npu_gather_pa_kv_cache(
+                            cache_kv_c,
+                            cache_k_pe,
+                            prefill_metadata.block_table,
+                            seq_len2_rank.to(q_nope.device),
+                            key=kv_c_normed,
+                            value=k_pe,
+                            seq_offset=prefill_metadata.chunked_context.starts[i])
+                    else:
+                        torch_npu.atb.npu_paged_cache_load(
+                            cache_kv_c,
+                            cache_k_pe,
+                            prefill_metadata.block_table,
+                            seq_len2_rank.to(q_nope.device),
+                            seq_starts=
+                            context_starts_rank,  # slot offsets of current chunk in current iteration
+                            key=kv_c_normed,
+                            value=k_pe,
+                        )
+                    seq_len2 = seq_len2_rank.to(q_nope.device)
+                else:
+                    # If current rank has no tokens to process, create empty tensors
+                    kv_c_normed = torch.empty(0,
+                                              num_heads,
+                                              latent_kv_dim,
+                                              dtype=q_nope.dtype,
+                                              device=q_nope.device)
+                    k_pe = torch.empty(0,
+                                       num_heads,
+                                       rope_dim,
+                                       dtype=q_nope.dtype,
+                                       device=q_nope.device)
+                    seq_len2 = torch.zeros((len(seq_len1), ),
+                                           dtype=torch.int32,
+                                           device=q_nope.device)
+                seq_len = torch.stack([seq_len1.cpu(), seq_len2.cpu()])
+                for req_idx in range(num_requests):
+                    # Before dealing with a new chunk, set to zero, and accumulate the start positions as chunk prefill step increases
+                    if i >= len(local_chunked_kv_lens[req_idx]):
+                        continue
+                    context_starts_rank[req_idx] += local_chunked_kv_lens[
+                        req_idx][i][self.pcp_rank][self.dcp_rank]
+            else:
+                # Original logic: ChunkPrefill-only mode
+                toks = prefill_metadata.chunked_context.seq_tot[i]
+                context_seq_len = prefill_metadata.chunked_context.chunk_seq_lens[
+                    i]
+                context_seq_len_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[
+                    i]
+                seq_len = torch.stack([current_seq_len, context_seq_len])
+
+                kv_c_normed = torch.empty(toks,
+                                          num_heads,
+                                          latent_kv_dim,
+                                          dtype=q_nope.dtype,
+                                          device=q_nope.device)
+                k_pe = torch.empty(toks,
+                                   num_heads,
+                                   rope_dim,
+                                   dtype=q_nope.dtype,
+                                   device=q_nope.device)
+>>>>>>> deepseek v3 基础模型 裁剪恢复
 
             if self.dcp_size * self.pcp_size > 1:
                 context_seq_len_npu = prefill_metadata.chunked_context.padded_chunk_seq_lens_npu[
@@ -1050,6 +1147,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
 
             if self.pcp_size > 1:
+<<<<<<< HEAD
                 mask = attn_metadata.prefill.pcp_metadata.pcp_prefill_mask
             else:
                 mask = self.prefill_mask
@@ -1088,6 +1186,168 @@ class AscendMLAImpl(MLAAttentionImpl):
                     calc_type="calc_type_default",
                     output=prefix_output,
                     softmax_lse=prefix_lse)
+=======
+                # Case that no kv_cache has been stored on this CP rank, no need to do following computation.
+                if torch.all(seq_len2 == 0).item():
+                    continue
+                # PCP mode: first compute this rank's contribution to the chunk
+                if i == 0:
+                    if is_A5():
+                        prefix_output, prefix_lse = torch_npu.npu_fused_infer_attention_score_v2(
+                                query=q_nope,
+                                key=k_nope,
+                                value=v,
+                                query_rope=q_pe,
+                                key_rope=k_pe,
+                                atten_mask=None,
+                                actual_seq_qlen=seq_len,
+                                num_query_heads=self.num_heads,
+                                num_key_value_heads=self.num_heads,
+                                input_layout="BSND",
+                                softmax_scale=self.scale,
+                                inner_precise=0,
+                                return_softmax_lse=True)
+                    else:
+                        torch_npu.atb.npu_ring_mla(
+                            q_nope=q_nope,
+                            q_rope=q_pe,
+                            k_nope=k_nope,
+                            k_rope=k_pe,
+                            value=v,
+                            mask=mask_local,
+                            seqlen=seq_len,
+                            head_num=self.num_heads,
+                            kv_head_num=self.num_heads,
+                            pre_out=None,
+                            prev_lse=None,
+                            qk_scale=self.scale,
+                            kernel_type="kernel_type_high_precision",
+                            mask_type="no_mask",
+                            input_layout="type_bsnd",
+                            calc_type="calc_type_first_ring",
+                            output=prefix_output,
+                            softmax_lse=prefix_lse)
+                    continue
+                if is_A5():
+                    prefix_output, prefix_lse = torch_npu.npu_fused_infer_attention_score_v2(
+                            query=q_nope,
+                            key=k_nope,
+                            value=v,
+                            query_rope=q_pe,
+                            key_rope=k_pe,
+                            atten_mask=None,
+                            actual_seq_qlen=seq_len,
+                            num_query_heads=self.num_heads,
+                            num_key_value_heads=self.num_heads,
+                            input_layout="BSND",
+                            softmax_scale=self.scale,
+                            inner_precise=0,
+                            return_softmax_lse=True)
+                    prefix_lse, prefix_output = torch_npu.npu_attention_update(prefix_lse, prefix_output, update_type=1)
+                else:
+                    torch_npu.atb.npu_ring_mla(
+                        q_nope=q_nope,
+                        q_rope=q_pe,
+                        k_nope=k_nope,
+                        k_rope=k_pe,
+                        value=v,
+                        mask=mask_local,
+                        seqlen=seq_len,
+                        head_num=self.num_heads,
+                        kv_head_num=self.num_heads,
+                        pre_out=prefix_output,
+                        prev_lse=prefix_lse,
+                        qk_scale=self.scale,
+                        kernel_type="kernel_type_high_precision",
+                        mask_type="no_mask",
+                        input_layout="type_bsnd",
+                        calc_type="calc_type_default",
+                        output=prefix_output,
+                        softmax_lse=prefix_lse)
+            else:
+                assert not torch.all(context_seq_len == 0).item()
+                # compute this chunk block then update prefix tensors to keep shapes consistent
+                if is_A5():
+                    prefix_output, prefix_lse = torch_npu.npu_fused_infer_attention_score_v2(
+                        query=q_nope,
+                        key=k_nope,
+                        value=v,
+                        query_rope=q_pe,
+                        key_rope=k_pe,
+                        atten_mask=None,
+                        actual_seq_qlen=seq_len,
+                        num_query_heads=self.num_heads,
+                        num_key_value_heads=self.num_heads,
+                        input_layout="BSND",
+                        softmax_scale=self.scale,
+                        inner_precise=0,
+                        return_softmax_lse=True)
+                    prefix_lse, prefix_output = torch_npu.npu_attention_update(prefix_lse, prefix_output, update_type=1)
+                else:
+                    torch_npu.atb.npu_ring_mla(
+                        q_nope=q_nope,
+                        q_rope=q_pe,
+                        k_nope=k_nope,
+                        k_rope=k_pe,
+                        value=v,
+                        mask=mask_local,
+                        seqlen=seq_len,
+                        head_num=self.num_heads,
+                        kv_head_num=self.num_heads,
+                        pre_out=prefix_output,
+                        prev_lse=prefix_lse,
+                        qk_scale=self.scale,
+                        kernel_type="kernel_type_high_precision",
+                        mask_type="no_mask",
+                        input_layout="type_bsnd",
+                        calc_type="calc_type_default",
+                        output=prefix_output,
+                        softmax_lse=prefix_lse)
+
+        # CP dimension all_gather and fusion
+        if self.pcp_size > 1:
+            # filter non-zero chunk part of prefix_output
+            seq_len1_cpu = seq_len1.cpu()
+            filtered_indices = filter_chunked_req_indices(
+                seq_len1_cpu, mask_for_non_zero_chunk)
+            prefix_output_filtered = prefix_output[filtered_indices, :, :]
+            prefix_lse_filtered = prefix_lse[:, filtered_indices]
+
+            # normalize prefix LSE to [bs, heads, 1] for stable updates
+            prefix_lse_filtered_bt = prefix_lse_filtered.permute(
+                1, 0).unsqueeze(-1).contiguous(
+                ) if prefix_lse_filtered is not None else None
+            out_lse_local = torch.cat(
+                [prefix_output_filtered, prefix_lse_filtered_bt], dim=-1)
+            out_lse_list = [
+                torch.empty_like(out_lse_local) for _ in range(self.pcp_size)
+            ]
+            dist.all_gather(out_lse_list, out_lse_local, group=self.pcp_group)
+            prefix_output_filtered = None
+            prefix_lse_filtered_bt = None
+            for r in range(self.pcp_size):
+                out_lse_r = out_lse_list[r]
+                if torch.all(out_lse_r == 0).item():
+                    continue
+                out_r, lse_r = torch.split(out_lse_r, [self.v_head_dim, 1],
+                                           dim=-1)
+                token_mask = torch.ones([out_r.size(0)],
+                                        dtype=torch.uint8,
+                                        device=out_r.device)
+                prefix_output_filtered, prefix_lse_filtered_bt = self._update_out_and_lse(
+                    prefix_output_filtered, prefix_lse_filtered_bt, out_r,
+                    lse_r, token_mask)
+            # convert lse back to [heads, bs]
+            assert prefix_output_filtered is not None and prefix_lse_filtered_bt is not None
+            prefix_lse_filtered = prefix_lse_filtered_bt.squeeze(-1).permute(
+                1, 0).contiguous()
+
+            prefix_output[filtered_indices, :, :] = prefix_output_filtered.to(
+                prefix_output.dtype)
+            prefix_lse[:, filtered_indices] = prefix_lse_filtered.to(
+                prefix_lse.dtype)
+
+>>>>>>> deepseek v3 基础模型 裁剪恢复
         return prefix_output, prefix_lse
 
     def _forward_prefill(
@@ -1138,27 +1398,26 @@ class AscendMLAImpl(MLAAttentionImpl):
                     num_key_value_heads=self.num_heads,
                     input_layout="TND",
                     softmax_scale=self.scale,
-                    return_softmax_lse=True
-                )
-            else:
-                torch_npu.atb.npu_ring_mla(q_nope=q_nope,
-                                        q_rope=q_pe,
-                                        k_nope=k_nope,
-                                        k_rope=k_pe,
-                                        value=value,
-                                        mask=self.prefill_mask,
-                                        seqlen=attn_metadata.prefill.query_lens,
-                                        head_num=self.num_heads,
-                                        kv_head_num=self.num_heads,
-                                        pre_out=None,
-                                        prev_lse=None,
-                                        qk_scale=self.scale,
-                                        kernel_type="kernel_type_high_precision",
-                                        mask_type="mask_type_triu",
-                                        input_layout="type_bsnd",
-                                        calc_type="calc_type_first_ring",
-                                        output=attn_output,
-                                        softmax_lse=attn_lse)
+                    return_softmax_lse=True)
+        else:
+            torch_npu.atb.npu_ring_mla(q_nope=q_nope,
+                                    q_rope=q_pe,
+                                    k_nope=k_nope,
+                                    k_rope=k_pe,
+                                    value=value,
+                                    mask=self.prefill_mask,
+                                    seqlen=attn_metadata.prefill.query_lens,
+                                    head_num=self.num_heads,
+                                    kv_head_num=self.num_heads,
+                                    pre_out=None,
+                                    prev_lse=None,
+                                    qk_scale=self.scale,
+                                    kernel_type="kernel_type_high_precision",
+                                    mask_type="mask_type_triu",
+                                    input_layout="type_bsnd",
+                                    calc_type="calc_type_first_ring",
+                                    output=attn_output,
+                                    softmax_lse=attn_lse)
         attn_output, attn_lse = self._compute_prefill_context( \
             q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
 
@@ -1347,22 +1606,24 @@ class AscendMLAImpl(MLAAttentionImpl):
             graph_params.handles[num_tokens].append(handle)
         else:
             if is_A5():
-                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
-                    q_nope,
-                    k_nope,
-                    k_nope,
-                    query_rope=q_pe,
-                    key_rope=k_pe,
-                    atten_mask=spec_attn_mask,
-                    actual_seq_qlen=actual_seq_lengths,
-                    actual_seq_kvlen=decode_meta.seq_lens_list,
-                    num_query_heads=self.num_heads,
-                    input_layout=input_layout,
-                    softmax_scale=self.scale,
-                    sparse_mode=sparse_mode,
-                    block_table=decode_meta.block_table,
-                    block_size=block_size,
-                )
+                # attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                #     q_nope,
+                #     k_nope,
+                #     k_nope,
+                #     query_rope=q_pe,
+                #     key_rope=k_pe,
+                #     atten_mask=spec_attn_mask,
+                #     actual_seq_qlen=actual_seq_lengths,
+                #     actual_seq_kvlen=decode_meta.seq_lens_list,
+                #     num_query_heads=self.num_heads,
+                #     input_layout=input_layout,
+                #     softmax_scale=self.scale,
+                #     sparse_mode=sparse_mode,
+                #     block_table=decode_meta.block_table,
+                #     block_size=block_size,
+                # )
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+                    q_nope, k_nope, k_nope, **common_kwargs)
             else:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                     q_nope, k_nope, k_nope, **common_kwargs)

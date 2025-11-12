@@ -1592,7 +1592,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     if self.pcp_size * self.dcp_size > 1 else attn_metadata.slot_mapping[:num_decode_tokens]
                 if is_A5():
                     num_tokens = slot_mapping.shape[0]
-                    torch_nup.npu_scatter_pa_kv_cache(
+                    torch_npu.npu_scatter_pa_kv_cache(
                         key=key[:num_tokens],
                         value=value[:num_tokens].contiguous(),
                         slot_mapping=slot_mapping,
@@ -1619,7 +1619,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                               dim=-1)
 
                 if is_A5(): # 这里代码变动较大需要重新适配
-                    num_tokens = slot_mapping.shape[0]
+                    num_tokens = attn_metadata.slot_mapping.shape[0]
                     torch_npu.npu_scatter_pa_kv_cache(
                         key=key[:num_tokens],
                         value=value[:num_tokens].contiguous(),
