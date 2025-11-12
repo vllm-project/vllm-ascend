@@ -142,10 +142,10 @@ class EagleProposer(Proposer):
             if hasattr(model, "lm_head"):
                 logger.info(
                     "Loading EAGLE LM head weights from the target model.")
-            if supports_multimodal(model):
-                self.model.lm_head = model.get_language_model().lm_head
-            else:
-                self.model.lm_head = model.lm_head
+                if supports_multimodal(model):
+                    self.model.lm_head = model.get_language_model().lm_head
+                else:
+                    self.model.lm_head = model.lm_head
         else:
             if (hasattr(model, "lm_head") and hasattr(self.model, "lm_head")
                     and not self.model.has_own_lm_head):
