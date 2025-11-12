@@ -28,9 +28,9 @@ else:
     from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 
 if prefill_context_parallel_enable():
-    from vllm.distributed import (
-        get_prefill_context_model_parallel_rank,
-        get_prefill_context_model_parallel_world_size)
+    from vllm.distributed import (get_prefill_context_model_parallel_rank,
+                                  get_prefill_context_model_parallel_world_size
+                                  )
 
 
 class MooncakeEngine:
