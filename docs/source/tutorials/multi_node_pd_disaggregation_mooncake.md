@@ -96,8 +96,10 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
 ### Layerwise
 
 :::::{tab-set}
+:sync-group: nodes
 
 ::::{tab-item} Prefiller node 1
+:sync: prefill node1
 
 ```shell
 unset ftp_proxy
@@ -152,6 +154,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Prefiller node 2
+:sync: prefill node2
 
 ```shell
 unset ftp_proxy
@@ -206,6 +209,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 1 (master Node)
+:sync: decoder node1
 
 ```shell
 unset ftp_proxy
@@ -262,6 +266,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 2 (primary node)
+:sync: decoder node2
 
 ```shell
 unset ftp_proxy
@@ -323,8 +328,10 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ### Non-layerwise
 
 :::::{tab-set}
+:sync-group: nodes
 
 ::::{tab-item} Prefiller node 1
+:sync: prefill node1
 
 ```shell
 unset ftp_proxy
@@ -379,6 +386,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Prefiller node 2
+:sync: prefill node2
 
 ```shell
 unset ftp_proxy
@@ -433,6 +441,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 1 (master node)
+:sync: decoder node1
 
 ```shell
 unset ftp_proxy
@@ -489,6 +498,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 2 (primary Node)
+:sync: decoder node2
 
 ```shell
 unset ftp_proxy
