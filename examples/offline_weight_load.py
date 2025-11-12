@@ -75,6 +75,9 @@ else:
     from vllm.utils.mem_constants import GiB_bytes
     from vllm.utils.network_utils import get_open_port
 
+from vllm.model_executor.model_loader.utils import \
+    process_weights_after_loading
+
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -224,14 +227,7 @@ def main(
         gpu_memory_utilization = 0.95,
         enable_sleep_mode=enable_sleep_mode,
     )
-    model_path = model
-    runmodel = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
-    patch_vllm_moe_model_weight_loader(runmodel)
-    sd = load_and_merge_safetensors(model_path)
-    runmodel.load_weights(sd.items())
-    print('load state dict done')
-    tp_ranks = get_tp_group().ranks
-    print(f'TP RANKS: {tp_ranks}')
+
 
     outputs = llm.generate(prompts, sampling_params)
 
@@ -247,6 +243,20 @@ def main(
             assert freed_bytes >= model_weight_gib / tensor_parallel_size * GiB_bytes
 
         llm.wake_up()
+
+        model_path = model
+        runmodel = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
+        patch_vllm_moe_model_weight_loader(runmodel)
+        sd = load_and_merge_safetensors(model_path)
+        runmodel.load_weights(sd.items())
+        print('load state dict done')
+        tp_ranks = get_tp_group().ranks
+        print(f'TP RANKS: {tp_ranks}')
+
+        vllm_config = llm.llm_engine.vllm_config.model_config
+        device = next(runmodel.parameters()).device
+        process_weights_after_loading(runmodel, vllm_config, device)
+
         outputs_after_wakeup = llm.generate(prompts, sampling_params)
         if rank == 0:
             # cmp output
