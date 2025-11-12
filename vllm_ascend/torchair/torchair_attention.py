@@ -26,7 +26,13 @@ from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
                                               AttentionType)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
-from vllm.utils import cdiv
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import cdiv
+else:
+    from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendAttentionMetadataBuilder,
