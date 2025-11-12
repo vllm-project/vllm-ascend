@@ -3016,12 +3016,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
+        num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
         if not self.in_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
-                                            num_scheduled_tokens):
+                                            num_scheduled_tokens,
+                                            num_sampled_tokens):
             if self.is_multimodal_model:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
