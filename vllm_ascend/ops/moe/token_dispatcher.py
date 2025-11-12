@@ -178,6 +178,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False,
                        dynamic_eplb: bool = False):
+        # Apply log2phy if needed
+        if log2phy is not None:
+            topk_ids = log2phy[topk_ids]
+
         self.with_quant = with_quant
         self.expert_map = expert_map
         self.topk_ids = topk_ids
