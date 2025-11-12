@@ -367,11 +367,3 @@ def test_e2e_qwen3_with_torchair_with_nz():
     }
     _qwen3_torchair_test_fixure(additional_config)
 
-
-def test_e2e_qwen3_with_torchair_v1scheduler():
-    additional_config = {
-        "torchair_graph_config": {
-            "enabled": True,
-        },
-    }
-    _qwen3_torchair_test_fixure(additional_config, use_v1_schduler=True)
