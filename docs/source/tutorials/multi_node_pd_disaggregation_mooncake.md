@@ -96,8 +96,10 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
 ### Layerwise
 
 :::::{tab-set}
+:sync-group: nodes
 
 ::::{tab-item} Prefiller node 1
+:sync: prefill node1
 
 ```shell
 unset ftp_proxy
@@ -107,7 +109,6 @@ export HCCL_IF_IP=192.0.0.1
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -153,6 +154,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Prefiller node 2
+:sync: prefill node2
 
 ```shell
 unset ftp_proxy
@@ -162,7 +164,6 @@ export HCCL_IF_IP=192.0.0.2
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -208,6 +209,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 1 (master Node)
+:sync: decoder node1
 
 ```shell
 unset ftp_proxy
@@ -217,7 +219,6 @@ export HCCL_IF_IP=192.0.0.3
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -265,6 +266,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 2 (primary node)
+:sync: decoder node2
 
 ```shell
 unset ftp_proxy
@@ -274,7 +276,6 @@ export HCCL_IF_IP=192.0.0.4
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -327,8 +328,10 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ### Non-layerwise
 
 :::::{tab-set}
+:sync-group: nodes
 
 ::::{tab-item} Prefiller node 1
+:sync: prefill node1
 
 ```shell
 unset ftp_proxy
@@ -338,7 +341,6 @@ export HCCL_IF_IP=192.0.0.1
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -384,6 +386,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Prefiller node 2
+:sync: prefill node2
 
 ```shell
 unset ftp_proxy
@@ -393,7 +396,6 @@ export HCCL_IF_IP=192.0.0.2
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -439,6 +441,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 1 (master node)
+:sync: decoder node1
 
 ```shell
 unset ftp_proxy
@@ -448,7 +451,6 @@ export HCCL_IF_IP=192.0.0.3
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -496,6 +498,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 2 (primary Node)
+:sync: decoder node2
 
 ```shell
 unset ftp_proxy
@@ -505,7 +508,6 @@ export HCCL_IF_IP=192.0.0.4
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10

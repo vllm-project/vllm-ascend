@@ -27,7 +27,6 @@ else:
     from vllm.utils.hashing import sha256
 
 EOS_TOKEN_ID = 50256
-os.environ["VLLM_USE_V1"] = "1"
 
 
 def assert_scheduler_empty(scheduler: Scheduler):

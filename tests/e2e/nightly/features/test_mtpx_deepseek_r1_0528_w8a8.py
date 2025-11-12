@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 import json
-import os
 from typing import Any
 
 import openai
@@ -26,15 +25,10 @@ from tests.e2e.conftest import RemoteOpenAIServer
 from tools.aisbench import run_aisbench_cases
 
 MODELS = [
-    "vllm-ascend/Qwen3-32B-W8A8",
+    "vllm-ascend/DeepSeek-R1-0528-W8A8",
 ]
 
-MODES = [
-    "aclgraph",
-    "single",
-]
-
-TENSOR_PARALLELS = [4]
+MODES = ["mtp2", "mtp3"]
 
 prompts = [
     "San Francisco is a",
@@ -44,13 +38,6 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
-batch_size_dict = {
-    "linux-aarch64-a2-4": 72,
-    "linux-aarch64-a3-4": 76,
-}
-VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
-performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
-
 aisbench_cases = [{
     "case_type": "accuracy",
     "dataset_path": "vllm-ascend/aime2024",
@@ -58,55 +45,75 @@ aisbench_cases = [{
     "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
     "max_out_len": 32768,
     "batch_size": 32,
-    "baseline": 83.33,
+    "baseline": 80,
     "threshold": 7
-}, {
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 4 * performance_batch_size,
-    "max_out_len": 1500,
-    "batch_size": performance_batch_size,
-    "baseline": 1,
-    "threshold": 0.97
 }]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("mode", MODES)
-@pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
-async def test_models(model: str, mode: str, tp_size: int) -> None:
+async def test_models(model: str, mode: str) -> None:
     port = get_open_port()
     env_dict = {
-        "TASK_QUEUE_ENABLE": "1",
-        "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1",
-        "HCCL_OP_EXPANSION_MODE": "AIV",
-        "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
-        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"
+        "OMP_NUM_THREADS": "100",
+        "OMP_PROC_BIND": "false",
+        "HCCL_BUFFSIZE": "1024",
+        "VLLM_RPC_TIMEOUT": "3600000",
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000"
+    }
+    additional_config: dict[str, Any] = {
+        "ascend_scheduler_config": {
+            "enabled": False
+        },
+    }
+    speculative_config = {
+        "num_speculative_tokens": 2,
+        "method": "deepseek_mtp"
     }
     compilation_config = {
-        "cudagraph_mode":
-        "FULL_DECODE_ONLY",
-        "cudagraph_capture_sizes":
-        [1, 12, 16, 20, 24, 32, 48, 60, 64, 68, 72, 76, 80]
+        "cudagraph_capture_sizes": [56],
+        "cudagraph_mode": "FULL_DECODE_ONLY"
     }
     server_args = [
-        "--quantization", "ascend", "--no-enable-prefix-caching",
+        "--quantization",
+        "ascend",
+        "--seed",
+        "1024",
+        "--no-enable-prefix-caching",
+        "--data-parallel-size",
+        "2",
         "--tensor-parallel-size",
-        str(tp_size), "--port",
-        str(port), "--max-model-len", "40960", "--max-num-batched-tokens",
-        "40960", "--block-size", "128", "--trust-remote-code",
-        "--reasoning-parser", "qwen3", "--gpu-memory-utilization", "0.9",
-        "--async-scheduling"
+        "8",
+        "--enable-expert-parallel",
+        "--port",
+        str(port),
+        "--max-model-len",
+        "40960",
+        "--max-num-seqs",
+        "14",
+        "--trust-remote-code",
     ]
-    if mode == "single":
-        server_args.append("--enforce-eager")
-    if mode == "aclgraph":
+    if mode == "mtp2":
+        server_args.extend(["--max-num-batched-tokens", "4096"])
+        server_args.extend(
+            ["--speculative-config",
+             json.dumps(speculative_config)])
+        server_args.extend(["--gpu-memory-utilization", "0.92"])
+        additional_config["torchair_graph_config"] = {"enabled": True}
+    if mode == "mtp3":
+        env_dict["HCCL_OP_EXPANSION_MODE"] = "AIV"
+        server_args.extend(["--max-num-batched-tokens", "2048"])
+        speculative_config["num_speculative_tokens"] = 3
+        server_args.extend(
+            ["--speculative-config",
+             json.dumps(speculative_config)])
+        server_args.extend(["--gpu-memory-utilization", "0.9"])
         server_args.extend(
             ["--compilation-config",
              json.dumps(compilation_config)])
+        additional_config["torchair_graph_config"] = {"enabled": False}
+    server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
@@ -124,7 +131,8 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
         print(choices)
-        if mode == "single":
-            return
         # aisbench test
-        run_aisbench_cases(model, port, aisbench_cases)
+        run_aisbench_cases(model,
+                           port,
+                           aisbench_cases,
+                           server_args=server_args)
