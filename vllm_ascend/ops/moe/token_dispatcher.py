@@ -179,6 +179,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        with_quant: bool = False,
                        dynamic_eplb: bool = False):
         self.with_quant = with_quant
+        if log2phy is not None:
+            topk_ids = log2phy[topk_ids]
         self.expert_map = expert_map
         self.topk_ids = topk_ids
         self.topk_weights = topk_weights

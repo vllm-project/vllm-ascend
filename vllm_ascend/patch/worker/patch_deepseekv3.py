@@ -132,9 +132,7 @@ class AscendDeepseekV2MoE(DeepseekV2MoE,nn.Module):
             # if mix_placement
             # else None,
         )
-        print("-"*100)
-        print(f"{self.shared_experts=}")
-        print("-"*100)
+
         
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
@@ -282,9 +280,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                             "mlp.shared_experts",
                             f"mlp.experts.{self.config.n_routed_experts + j}",
                         )
-                        # if 'shared_experts' in name:
-                        #     print(f"{name=}")
-                        #     print(f"{chunk_name=}")
+
 
                     for mapping in expert_params_mapping:
                         param_name, weight_name, expert_id, shard_id = mapping
