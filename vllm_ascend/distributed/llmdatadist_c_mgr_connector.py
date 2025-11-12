@@ -357,7 +357,7 @@ class LLMDataDistCMgrConnectorWorker():
         self.local_ip = get_ip()
         self.kv_transfer_config: KVTransferConfig = vllm_config.kv_transfer_config
         if is_A5():
-            self.local_agent_metadata: Optional[LLMDataDistCMgrAgentMetaDataA5] = None
+            self.local_agent_metadata: Optional[LLMDataDistCMgrAgentMetadataA5] = None
         else:
             self.local_agent_metadata: Optional[LLMDataDistCMgrAgentMetadata] = None
         self.vllm_config = vllm_config
