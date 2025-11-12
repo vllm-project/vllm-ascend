@@ -186,7 +186,6 @@ class MooncakeStoreConnectorV1Scheduler:
             self._block_size *= self.pcp_size
         if self.dcp_size > 1:
             self._block_size *= self.dcp_size
-            
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         # Whether to discard partial chunks
