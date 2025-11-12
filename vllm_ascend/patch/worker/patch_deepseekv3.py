@@ -227,7 +227,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                 continue
 
             is_fuse_shared_experts_layer = (
-                mix_placement#getattr(self.config, "mix_placement", False)
+                mix_placement
                 and ("mlp.shared_experts" in name)
             )
 
