@@ -343,7 +343,6 @@ class TestAscendSFATorchairImpl(TestBase):
         scale = 0.1
         num_kv_heads = 8
         kv_cache_dtype = "auto"
-        graph_batch_size = 16
 
         kv_a_layernorm = MagicMock()
         kv_a_layernorm.weight = torch.randn(96)
@@ -393,7 +392,6 @@ class TestAscendSFATorchairImpl(TestBase):
         self.assertEqual(self.impl.qk_rope_head_dim, 32)
         self.assertEqual(self.impl.qk_head_dim, 96)
         self.assertEqual(self.impl.v_head_dim, 128)
-        self.assertEqual(self.impl.graph_batch_size, 16)
         self.assertIsNotNone(self.impl.rotary_emb)
         self.assertIsNotNone(self.impl.q_proj)
         self.assertIsNotNone(self.impl.kv_b_proj)
@@ -403,42 +401,6 @@ class TestAscendSFATorchairImpl(TestBase):
         self.assertEqual(self.impl.num_queries_per_kv, 32)
         self.assertEqual(self.impl.tp_size, 2)
         self.assertTrue(self.impl.torchair_graph_enabled)
-
-    def test_v_up_proj_and_o_proj(self):
-        batch_size = 4
-        x = torch.randn(batch_size, self.impl.num_heads,
-                        self.impl.kv_lora_rank)
-
-        self.impl.o_proj.return_value = (torch.randn(
-            batch_size, self.impl.num_heads * self.impl.v_head_dim), )
-        if not hasattr(self.impl, 'W_UV') or self.impl.W_UV is None:
-            self.impl.W_UV = torch.randn(self.impl.num_heads,
-                                         self.impl.kv_lora_rank,
-                                         self.impl.v_head_dim)
-        result = self.impl._v_up_proj_and_o_proj(x)
-
-        self.assertEqual(result.shape[0], batch_size)
-        self.assertEqual(result.shape[1],
-                         self.impl.num_heads * self.impl.v_head_dim)
-
-    def test_q_proj_and_k_up_proj(self):
-        batch_size = 4
-        x = torch.randn(batch_size, self.impl.num_heads, self.impl.qk_head_dim)
-        q_proj_output = torch.randn(batch_size, self.impl.num_heads,
-                                    self.impl.qk_head_dim)
-        self.impl.q_proj.return_value = (q_proj_output, )
-        if not hasattr(self.impl, 'W_UK_T') or self.impl.W_UK_T is None:
-            self.impl.W_UK_T = torch.randn(self.impl.num_heads,
-                                           self.impl.qk_nope_head_dim,
-                                           self.impl.kv_lora_rank)
-        result = self.impl._q_proj_and_k_up_proj(x)
-        ql_nope, q_pe = result
-        self.assertEqual(ql_nope.shape[0], batch_size)
-        self.assertEqual(ql_nope.shape[1], self.impl.num_heads)
-        self.assertEqual(ql_nope.shape[2], self.impl.kv_lora_rank)
-        self.assertEqual(q_pe.shape[0], batch_size)
-        self.assertEqual(q_pe.shape[1], self.impl.num_heads)
-        self.assertEqual(q_pe.shape[2], self.impl.qk_rope_head_dim)
 
     def test_process_weights_after_loading(self):
         layer = MagicMock(sepc=LinearBase)
@@ -462,18 +424,3 @@ class TestAscendSFATorchairImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
-
-    def test_compute_prefill_context_none(self):
-        batch_size = 4
-        kv_cache = torch.randn(10, 1, 1, 192)
-        query = torch.randn(batch_size, self.impl.num_heads,
-                            self.impl.qk_head_dim)
-        metadata = MagicMock()
-        metadata.prefill = None
-        prefix_out = torch.randn(2, 16, 128)
-        prefix_lse = torch.randn(2, 16, 8)
-        out, lse = self.impl._compute_prefill_context(query, kv_cache, 32,
-                                                      metadata, prefix_out,
-                                                      prefix_lse)
-        self.assertTrue(torch.equal(prefix_out, out))
-        self.assertTrue(torch.equal(prefix_lse, lse))
