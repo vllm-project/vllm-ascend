@@ -197,30 +197,20 @@ class NPUWorker(WorkerBase):
         model = self.model_runner.model
         for name, param in model.named_parameters():
             if 'w2_weight' in name and param.shape[2] == hidden_size:
-                parent_module = model
                 parts = name.split('.')
                 param_name = parts[-1]
-                module_path = parts[-1]
-
-                for part in module_path:
-                    parent_module = getattr(parent_module, part)
+                parent_module = model.get_submodule(".".join(parts[:-1]))
 
                 w2_data = param.transpose(1, 2)
                 w2_data = torch.nn.Parameter(w2_data, requires_grad=False)
-
                 setattr(parent_module, param_name, w2_data)
             elif 'w13_weight' in name and param.shape[1] == hidden_size:
-                parent_module = model
                 parts = name.split('.')
                 param_name = parts[-1]
-                module_path = parts[-1]
-
-                for part in module_path:
-                    parent_module = getattr(parent_module, part)
+                parent_module = model.get_submodule(".".join(parts[:-1]))
 
                 w13_data = param.transpose(1, 2)
                 w13_data = torch.nn.Parameter(w13_data, requires_grad=False)
-
                 setattr(parent_module, param_name, w13_data)
 
         # Restore the buffers after level 2 sleep
