@@ -49,8 +49,8 @@ class AscendSchedulerConfig(SchedulerConfig):
         scheduler_config["max_long_partial_prefills"] = None
         scheduler_config["long_prefill_token_threshold"] = None
         scheduler_config["policy"] = "fcfs"
-        scheduler_config["scheduler_cls"] = (
-            "vllm_ascend.core.scheduler.AscendScheduler")
+        scheduler_config[
+            "scheduler_cls"] = "vllm_ascend.core.scheduler.AscendScheduler"
         scheduler_config["enable_pd_transfer"] = False
         scheduler_config["decode_max_num_seqs"] = 0
         # Override params in original SchedulerConfig with params in ascend_scheduler_config
@@ -78,13 +78,13 @@ class AscendSchedulerConfig(SchedulerConfig):
             self.max_long_partial_prefills = 1
             self.long_prefill_token_threshold = MAX_INT
 
-        if self.long_prefill_token_threshold is None or \
-            self.long_prefill_token_threshold <= 0:
+        if (self.long_prefill_token_threshold is None
+                or self.long_prefill_token_threshold <= 0):
             if self.max_model_len is None:
                 self.long_prefill_token_threshold = MAX_INT
             else:
-                self.long_prefill_token_threshold = \
-                    max(1, int(self.max_model_len * 0.04))
+                self.long_prefill_token_threshold = max(
+                    1, int(self.max_model_len * 0.04))
 
         if self.max_long_partial_prefills < 0:
             raise ValueError(

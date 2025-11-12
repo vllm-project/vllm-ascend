@@ -154,11 +154,6 @@ def __post_init__(self):
                         )
             else:
                 self.method = "draft_model"
-                raise NotImplementedError(
-                    "Speculative decoding with draft model is not "
-                    "supported yet. Please consider using other "
-                    "speculative decoding methods such as ngram, medusa, "
-                    "eagle, or deepseek_mtp.")
 
             # Replace hf_config for EAGLE draft_model
             if self.method in ("eagle", "eagle3"):

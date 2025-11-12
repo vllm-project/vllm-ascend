@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
+from vllm_ascend.spec_decode.draft_proposer import DraftModelProposer
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.spec_decode.ngram_proposer import NgramProposer
@@ -31,6 +32,8 @@ def get_spec_decode_method(method,
         return NgramProposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3"):
         return EagleProposer(vllm_config, device, runner)
+    elif method == "draft_model":
+        return DraftModelProposer(vllm_config, device, runner)
     elif method in ('deepseek_mtp', 'qwen3_next_mtp'):
         if is_torchair_graph:
             return TorchairMtpProposer(vllm_config, device, runner)
