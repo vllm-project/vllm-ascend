@@ -93,14 +93,18 @@ def select_experts(hidden_states: torch.Tensor,
             global_num_experts=global_num_experts,
         )
     if mix_placement:
-        pad_shared_expert_ids = torch.full(
-            (topk_ids.shape[0], 1), num_logical_experts, dtype=topk_ids.dtype,
-            device=topk_ids.device)
-        pad_shared_expert_weights = torch.full(
-            (topk_weights.shape[0], 1), 1.0/2.5, dtype=topk_weights.dtype,
-            device=topk_weights.device)
+        pad_shared_expert_ids = torch.full((topk_ids.shape[0], 1),
+                                           num_logical_experts,
+                                           dtype=topk_ids.dtype,
+                                           device=topk_ids.device)
+
+        pad_shared_expert_weights = torch.full((topk_weights.shape[0], 1),
+                                               1.0 / 2.5,
+                                               dtype=topk_weights.dtype,
+                                               device=topk_weights.device)
         topk_ids = torch.cat([topk_ids, pad_shared_expert_ids], dim=1)
-        topk_weights = torch.cat([topk_weights, pad_shared_expert_weights], dim=1)
+        topk_weights = torch.cat([topk_weights, pad_shared_expert_weights], 
+                                 dim=1)
     return topk_weights, topk_ids
 
 
