@@ -709,7 +709,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query[:num_tokens],
                 key[:num_tokens],
-                value[:num_tokens]
+                value[:num_tokens],
                 atten_mask=mask.to(torch.bool),
                 actual_seq_qlen=attn_metadata.query_lens.cumsum(0),
                 actual_seq_kvlen=attn_metadata.seq_lens.cumsum(0),
@@ -1620,10 +1620,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                 if is_A5(): # 这里代码变动较大需要重新适配
                     num_tokens = slot_mapping.shape[0]
-                    torch_nup.npu_scatter_pa_kv_cache(
+                    torch_npu.npu_scatter_pa_kv_cache(
                         key=key[:num_tokens],
                         value=value[:num_tokens].contiguous(),
-                        slot_mapping=slot_mapping,
+                        slot_mapping=attn_metadata.slot_mapping,
                         out=(self.key_cache, self.value_cache)
                     )
                 else:

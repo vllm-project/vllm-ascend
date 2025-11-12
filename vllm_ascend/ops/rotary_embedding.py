@@ -405,7 +405,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        if self.mrope_section != [16, 24, 24] or (not is_A5()): # A5不支持npu_mrope算子，这里需要使用小算子替换
+        if self.mrope_section != [16, 24, 24] or  is_A5(): # A5不支持npu_mrope算子，这里需要使用小算子替换
             return super().forward_oot(positions, query, key)
 
         import torch_npu
