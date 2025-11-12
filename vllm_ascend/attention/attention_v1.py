@@ -50,7 +50,7 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d, nd_to_nz_spec,
+                               nd_to_nz_2d, nd_to_nz_spec, is_A5,
                                prefill_context_parallel_enable,
                                weak_ref_tensors)
 
@@ -706,9 +706,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if is_A5():
             ori_output = output
             num_tokens = attn_metadata.query_start_loc[-1]
-            output,_ = torch_npu.npu_fused_infer_attention_score_v2(
+            output, _ = torch_npu.npu_fused_infer_attention_score_v2(
                 query[:num_tokens],
                 key[:num_tokens],
+                value[:num_tokens]
                 atten_mask=mask.to(torch.bool),
                 actual_seq_qlen=attn_metadata.query_lens.cumsum(0),
                 actual_seq_kvlen=attn_metadata.seq_lens.cumsum(0),
@@ -1589,12 +1590,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
             if has_decode:
                 slot_mapping = attn_metadata.slot_mapping[:num_decode_tokens * self.pcp_size: self.pcp_size] \
                     if self.pcp_size * self.dcp_size > 1 else attn_metadata.slot_mapping[:num_decode_tokens]
-                torch_npu._npu_reshape_and_cache(
-                    key=key[:num_decode_tokens],
-                    value=value[:num_decode_tokens],
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    slot_indices=slot_mapping)
+                if is_A5():
+                    num_tokens = slot_mapping.shape[0]
+                    torch_nup.npu_scatter_pa_kv_cache(
+                        key=key[:num_tokens],
+                        value=value[:num_tokens].contiguous(),
+                        slot_mapping=slot_mapping,
+                        out=(self.key_cache, self.value_cache)
+                    )
+                else:
+                    torch_npu._npu_reshape_and_cache(
+                        key=key[:num_decode_tokens],
+                        value=value[:num_decode_tokens],
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        slot_indices=slot_mapping)
 
             if has_prefill:
                 if self.pcp_size > 1:
@@ -1609,12 +1619,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                               dim=-1)
 
                 if is_A5(): # 这里代码变动较大需要重新适配
-                    num_token = slots.shape[0]
-                    torch_npu.npu_scatter_a_kv_cache(
-                        key=key[self.pcp_size * num_decode_tokens:attn_metadata.num_actual_tokens_pcp_padded],
-                        value=value[self.pcp_size * num_decode_tokens:attn_metadata.num_actual_tokens_pcp_padded],
-                        slot_mapping=slot_mapping[self.pcp_size * num_decode_tokens:attn_metadata.num_actual_tokens_pcp_padded],
-                        out=(self.key_cache, slef.value_cache)
+                    num_tokens = slot_mapping.shape[0]
+                    torch_nup.npu_scatter_pa_kv_cache(
+                        key=key[:num_tokens],
+                        value=value[:num_tokens].contiguous(),
+                        slot_mapping=slot_mapping,
+                        out=(self.key_cache, self.value_cache)
                     )
                 else:
                     torch_npu._npu_reshape_and_cache(

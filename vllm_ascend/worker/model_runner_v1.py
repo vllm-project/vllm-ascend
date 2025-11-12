@@ -148,7 +148,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                enable_sp, get_ascend_soc_version, is_310p,
                                is_enable_nz, is_moe_model, lmhead_tp_enable,
                                prefill_context_parallel_enable,
-                               vllm_version_is, is_mc2_models)
+                               vllm_version_is, is_mc2_models, is_A5)
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if prefill_context_parallel_enable():

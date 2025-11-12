@@ -174,7 +174,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '0'))),
     # Whether to enable transpose weight and cast format to FRACTAL_NZ.
     "VLLM_ASCEND_ENABLE_NZ":
-    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 0)),
     # Decide whether we should enable CP parallelism.
     "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", '0')))

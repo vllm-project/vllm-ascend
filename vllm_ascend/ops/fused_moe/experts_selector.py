@@ -19,7 +19,7 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
-
+from vllm_ascend.utils import is_A5
 from vllm_ascend.ascend_config import get_ascend_config
 
 

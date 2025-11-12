@@ -45,7 +45,7 @@ from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_enable_nz, prefill_context_parallel_enable,
-                               weak_ref_tensors)
+                               weak_ref_tensors, is_A5)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 # isort: off
