@@ -3781,6 +3781,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         def create_attn_groups(
             attn_backends_map: dict[AttentionBackend, list[str]],
+            kv_cache_group_id: int
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
             for (attn_backend,
@@ -3793,15 +3794,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.device,
                 ))
                 attn_group = AttentionGroup(attn_backend,
-                                            attn_metadata_builders,
-                                            layer_names, kv_cache_spec)
+                                            layer_names,
+                                            kv_cache_spec,
+                                            kv_cache_group_id,
+                                            attn_metadata_builders)
                 attn_groups.append(attn_group)
             return attn_groups
 
-        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+        for i, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
             attn_backends = get_attn_backends_for_group(  # type: ignore
                 kv_cache_group_spec)
-            self.attn_groups.append(create_attn_groups(attn_backends))
+            self.attn_groups.append(create_attn_groups(attn_backends, i))
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
