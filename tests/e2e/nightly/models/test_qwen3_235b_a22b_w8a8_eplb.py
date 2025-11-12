@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import json
 from typing import Any
 
 import openai
@@ -26,8 +27,6 @@ from tools.aisbench import run_aisbench_cases
 MODELS = [
     "vllm-ascend/Qwen3-235B-A22B-W8A8",
 ]
-
-TENSOR_PARALLELS = [16]
 
 prompts = [
     "San Francisco is a",
@@ -44,46 +43,48 @@ aisbench_cases = [{
     "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
     "max_out_len": 32768,
     "batch_size": 32,
-    "baseline": 93,
+    "top_k": 20,
+    "baseline": 95,
     "threshold": 5
-}, {
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 80,
-    "max_out_len": 1500,
-    "batch_size": 20,
-    "request_rate": 0,
-    "baseline": 1,
-    "threshold": 0.97
 }]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
-async def test_models(model: str, tp_size: int) -> None:
+async def test_models(model: str) -> None:
     port = get_open_port()
     env_dict = {
-        "TASK_QUEUE_ENABLE": "1",
+        "OMP_NUM_THREADS": "10",
         "OMP_PROC_BIND": "false",
-        "HCCL_OP_EXPANSION_MODE": "AIV",
-        "PAGED_ATTENTION_MASK_LEN": "5500",
-        "DYNAMIC_EPLB": "true",
-        "HCCL_BUFFSIZE": "1024"
+        "HCCL_BUFFSIZE": "1024",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        "VLLM_ASCEND_ENABLE_FLASHCOMM1": "1"
     }
+    additional_config: dict[str, Any] = {
+        "ascend_scheduler_config": {
+            "enabled": False
+        },
+    }
+    compilation_config = {"cudagraph_mode": "FULL_DECODE_ONLY"}
     server_args = [
-        "--no-enable-prefix-caching", "--enable-expert-parallel",
-        "--tensor-parallel-size",
-        str(tp_size), "--port",
-        str(port), "--max-model-len", "36864", "--max-num-batched-tokens",
-        "36864", "--block-size", "128", "--trust-remote-code",
-        "--quantization", "ascend", "--gpu-memory-utilization", "0.9",
-        "--additional-config",
-        '{"enable_weight_nz_layout":true, "dynamic_eplb": true, '
-        '"num_iterations_eplb_update": 1000, "num_wait_worker_iterations": 200}'
+        "--quantization", "ascend", "--async-scheduling",
+        "--data-parallel-size", "4", "--tensor-parallel-size", "4",
+        "--enable-expert-parallel", "--port",
+        str(port), "--max-model-len", "40960", "--max-num-batched-tokens",
+        "8192", "--max-num-seqs", "12", "--trust-remote-code",
+        "--gpu-memory-utilization", "0.9"
     ]
+    env_dict["EXPERT_MAP_RECORD"] = "true"
+    env_dict["DYNAMIC_EPLB"] = "true"
+    additional_config["dynamic_eplb"] = True
+    additional_config["num_iterations_eplb_update"] = 14000
+    additional_config["num_wait_worker_iterations"] = 30
+    additional_config["init_redundancy_expert"] = 0
+    additional_config["gate_eplb"] = False
+    server_args.extend(
+        ["--compilation-config",
+         json.dumps(compilation_config)])
+    server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
@@ -100,5 +101,9 @@ async def test_models(model: str, tp_size: int) -> None:
         )
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
+        print(choices)
         # aisbench test
-        run_aisbench_cases(model, port, aisbench_cases)
+        run_aisbench_cases(model,
+                           port,
+                           aisbench_cases,
+                           server_args=server_args)

@@ -82,7 +82,8 @@ class TestAscendMLAPrefillMetadata(TestBase):
             seq_tot=seq_tot,
             max_seq_lens=max_seq_lens,
             workspace=workspace,
-            chunk_seq_lens=chunk_seq_lens)
+            chunk_seq_lens=chunk_seq_lens,
+            chunk_seq_lens_npu=chunk_seq_lens)
 
         metadata = AscendMLAPrefillMetadata(
             attn_mask=torch.tensor([[1, 0], [1, 1]], dtype=torch.bool),
@@ -103,6 +104,8 @@ class TestAscendMLAPrefillMetadata(TestBase):
         self.assertEqual(metadata.chunked_context.max_seq_lens, max_seq_lens)
         self.assertIs(metadata.chunked_context.workspace, workspace)
         self.assertIs(metadata.chunked_context.chunk_seq_lens, chunk_seq_lens)
+        self.assertIs(metadata.chunked_context.chunk_seq_lens_npu,
+                      chunk_seq_lens)
 
 
 class TestAscendMLADecodeMetadata(TestBase):
@@ -413,6 +416,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(q_pe.shape[1], self.impl.num_heads)
         self.assertEqual(q_pe.shape[2], self.impl.qk_rope_head_dim)
 
+    @patch('vllm_ascend.utils._ENABLE_NZ', True)
     @patch('torch_npu.npu_format_cast')
     def test_process_weights_after_loading(self, mock_format_cast):
         layer = MagicMock(spec=LinearBase)
@@ -478,7 +482,11 @@ class TestAscendMLAImpl(TestBase):
         chunk_ctx = MagicMock()
         chunk_ctx.seq_tot = [8]
         chunk_ctx.chunk_seq_lens = [torch.tensor([8])]
+        chunk_ctx.chunk_seq_lens_npu = [torch.tensor([8])]
         chunk_ctx.starts = [torch.tensor([0])]
+        chunk_ctx.max_chunk_num = 1
+        chunk_ctx.mask_for_non_zero_chunk = [True]
+        chunk_ctx.local_chunked_kv_lens = [[[[8]]]]
 
         prefill_meta = MagicMock()
         prefill_meta.chunked_context = chunk_ctx

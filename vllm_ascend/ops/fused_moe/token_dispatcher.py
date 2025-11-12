@@ -225,7 +225,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "expand_scales": expand_scales
         }
 
-        group_list_type = 1 if dynamic_eplb else 0
+        group_list_type = 0
 
         return {
             "group_list_type": group_list_type,

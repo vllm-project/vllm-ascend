@@ -100,8 +100,6 @@ def test_models_with_aclgraph(
     )
 
 
-@pytest.mark.skip("Skipping this test for now, "
-                  "it fails intermittently and needs investigation.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [5])
 def test_models_with_aclgraph_full_decode_only(
@@ -172,7 +170,10 @@ def test_models_with_aclgraph_full_decode_only(
                 model,
                 max_model_len=1024,
                 enforce_eager=False,
-                compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+                compilation_config={
+                    "cudagraph_capture_sizes": [4, 8, 32, 64],
+                    "cudagraph_mode": "FULL_DECODE_ONLY"
+                },
         ) as runner:
             vllm_aclgraph_outputs = runner.model.generate(
                 prompts, sampling_params)
@@ -180,7 +181,9 @@ def test_models_with_aclgraph_full_decode_only(
         with VllmRunner(
                 model,
                 max_model_len=1024,
-                enforce_eager=True,
+                compilation_config={
+                    "cudagraph_capture_sizes": [4, 8, 32, 64],
+                },
         ) as runner:
             vllm_eager_outputs = runner.model.generate(prompts,
                                                        sampling_params)

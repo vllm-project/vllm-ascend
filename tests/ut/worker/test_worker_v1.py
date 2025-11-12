@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -19,7 +20,13 @@ class TestNPUWorker(TestBase):
         self.model_config_mock = MagicMock(spec=ModelConfig)
         self.model_config_mock.dtype = torch.float16
         self.model_config_mock.trust_remote_code = False
-        self.model_config_mock.hf_config = None
+
+        self.hf_config_mock = MagicMock()
+        self.hf_config_mock.model_type = "test_model"
+        if hasattr(self.hf_config_mock, 'index_topk'):
+            delattr(self.hf_config_mock, 'index_topk')
+
+        self.model_config_mock.hf_config = self.hf_config_mock
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
 
@@ -271,6 +278,7 @@ class TestNPUWorker(TestBase):
 
             self.assertIn("Sleep mode is not enabled", str(cm.exception))
 
+    @patch('vllm_ascend.utils._ENABLE_NZ', False)
     @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
     @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
     def test_wake_up_mode_enabled(self, mock_allocator_class,
@@ -295,6 +303,7 @@ class TestNPUWorker(TestBase):
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
 
     @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
+    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_wake_up_mode_disabled_raises_error(self, mock_sleep_mode_enabled):
         """Test wake_up method raises exception when sleep mode is disabled"""
         from vllm_ascend.worker.worker_v1 import NPUWorker
