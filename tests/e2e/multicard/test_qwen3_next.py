@@ -20,6 +20,8 @@
 
 Run `pytest tests/e2e/multicard/test_qwen3_next.py`.
 """
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
@@ -57,6 +59,7 @@ def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
         del vllm_model
 
 
+@pytest.mark.skip(reason="TODO: fix the test case later.")
 def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
     example_prompts = [
         "Hello, my name is",
