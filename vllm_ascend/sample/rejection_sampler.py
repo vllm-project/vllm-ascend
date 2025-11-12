@@ -320,7 +320,8 @@ def rejection_greedy_sample_spec_len_1_pytorch(
     accept_req_mask = draft_token_ids == target_argmax
     output_token_ids[:, 0] = target_argmax
     bonus_token_ids = bonus_token_ids.squeeze(1)
-    output_token_ids[accept_req_mask, 1] = bonus_token_ids[accept_req_mask]
+    output_token_ids[:, 1] = torch.where(accept_req_mask, bonus_token_ids,
+                                         output_token_ids[:, 1])
 
 
 def rejection_greedy_sample_pytorch(
