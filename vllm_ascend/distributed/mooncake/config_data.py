@@ -54,7 +54,7 @@ class MooncakeEngineKey:
             self.world_size,
             self.pcp_rank,
             self.dcp_rank,
-            self.tp_rank,    
+            self.tp_rank,
             self.chunk_hash,
         ))
 
@@ -73,7 +73,7 @@ class MooncakeEngineKey:
                     self.world_size,
                     self.pcp_rank,
                     self.dcp_rank,
-                    self.tp_rank,    
+                    self.tp_rank,
                     self.chunk_hash,
                     layer_id,
                 ))

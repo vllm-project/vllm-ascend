@@ -38,7 +38,6 @@ class MooncakeConnectorV1(KVConnectorBase_V1):
 
         if self.pcp_size > 1:
             self._block_size *= self.pcp_size
-        
         if self.dcp_size > 1:
             self._block_size *= self.dcp_size
 
@@ -185,7 +184,6 @@ class MooncakeStoreConnectorV1Scheduler:
 
         if self.pcp_size > 1:
             self._block_size *= self.pcp_size
-        
         if self.dcp_size > 1:
             self._block_size *= self.dcp_size
             
