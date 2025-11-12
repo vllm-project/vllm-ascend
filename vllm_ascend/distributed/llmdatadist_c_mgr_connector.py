@@ -70,7 +70,7 @@ class LLMDataDistCMgrAgentMetadata(msgspec.Struct):
     super_device_id: str
     cluster_id: int
 
-class LLMDataDistCMgrAgentMetaDataA5(msgspec.Struct):
+class LLMDataDistCMgrAgentMetadataA5(msgspec.Struct):
     server_id: str
     device_id: str
     cluster_id: int
