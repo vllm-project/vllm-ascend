@@ -549,8 +549,7 @@ async def _handle_completions(api: str, request: Request):
                         try:
                             chunk_str = chunk.decode("utf-8").strip()
                         except UnicodeDecodeError:
-                            logger.debug(
-                                f"Skipping chunk: {chunk}")
+                            logger.debug(f"Skipping chunk: {chunk}")
                             yield chunk
                             continue
                         if not chunk_str:
@@ -561,8 +560,7 @@ async def _handle_completions(api: str, request: Request):
                             chunk_json = json.loads(chunk_str)
                         except json.JSONDecodeError:
                             # if chunk is [done], skip it.
-                            logger.debug(
-                                f"Skipping chunk: {chunk_str}")
+                            logger.debug(f"Skipping chunk: {chunk_str}")
                             yield chunk
                             continue
                         choices = chunk_json.get("choices", [])
@@ -573,16 +571,12 @@ async def _handle_completions(api: str, request: Request):
                         choice = choices[0]
                         delta = choice.get("delta") or {}
                         message = choice.get("message") or {}
-                        content = (
-                                delta.get("content")
-                                or message.get("content")
-                                or choice.get("text")
-                                or ""
-                                )
+                        content = (delta.get("content")
+                                   or message.get("content")
+                                   or choice.get("text") or "")
                         generated_token += content
 
-                        stop_reason = choice.get(
-                            "stop_reason")
+                        stop_reason = choice.get("stop_reason")
                         usage = chunk_json.get("usage", {})
                         completion_tokens = (completion_tokens + 1) if stream_flag else \
                             (completion_tokens + usage.get("completion_tokens"))
@@ -604,8 +598,7 @@ async def _handle_completions(api: str, request: Request):
                             break
                         if retry_count > 0 and not stream_flag:
                             if chat_flag:
-                                choice["message"][
-                                    "content"] = generated_token
+                                choice["message"]["content"] = generated_token
                             else:
                                 choice["text"] = generated_token
                             chunk = json.dumps(chunk_json).encode("utf-8")

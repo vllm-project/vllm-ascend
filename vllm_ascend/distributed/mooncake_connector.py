@@ -711,7 +711,8 @@ class MooncakeConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
         self.local_ip = get_ip()
-        if isinstance(ipaddress.ip_address(self.local_ip), ipaddress.IPv6Address):
+        if isinstance(ipaddress.ip_address(self.local_ip),
+                      ipaddress.IPv6Address):
             logger.warning("IPV6 for prefill disaggregate is expreimental")
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 

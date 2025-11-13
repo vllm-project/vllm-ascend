@@ -465,8 +465,10 @@ class MooncakeLayerwiseConnectorScheduler:
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
-        if isinstance(ipaddress.ip_address(self.side_channel_host), ipaddress.IPv6Address):
-            logger.warning("IPV6 address for prefill disaggregate is expreimental")
+        if isinstance(ipaddress.ip_address(self.side_channel_host),
+                      ipaddress.IPv6Address):
+            logger.warning(
+                "IPV6 address for prefill disaggregate is expreimental")
         self.max_device_id = vllm_config.parallel_config.tensor_parallel_size * \
                              vllm_config.parallel_config.data_parallel_size
 
