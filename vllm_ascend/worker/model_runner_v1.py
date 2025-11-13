@@ -180,7 +180,10 @@ else:
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
-    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    if vllm_version_is("0.11.0"):
+        from vllm.v1.core.sched.output import SchedulerOutput
+    else:
+        from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
@@ -2205,9 +2208,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def apply_grammar_bitmask(
         self,
         scheduler_output: "SchedulerOutput",
+        grammar_output: "GrammarOutput | None",
         logits: torch.Tensor,
     ) -> torch.Tensor:
-        grammar_bitmask = scheduler_output.grammar_bitmask
+        grammar_bitmask = grammar_output.grammar_bitmask
 
         # We receive the structured output bitmask from the scheduler,
         # compacted to contain bitmasks only for structured output requests.
@@ -2226,7 +2230,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logit_index = batch_index + cumulative_offset
             cumulative_offset += len(
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
-            if req_id in scheduler_output.structured_output_request_ids:
+            if req_id in grammar_output.structured_output_request_ids:
                 struct_out_req_batch_indices[req_id] = logit_index
 
         out_indices = []
@@ -2238,7 +2242,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         cumulative_index = 0
         if vllm_version_is("0.11.0"):
             seq = sorted(
-                scheduler_output.structured_output_request_ids.items(),
+                grammar_output.structured_output_request_ids.items(),
                 key=lambda x: x[1])
             for req_id, _ in seq:
                 logit_index = struct_out_req_batch_indices[req_id]
@@ -2251,7 +2255,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     out_indices.append(logit_index + i)
                 cumulative_index += 1 + num_spec_tokens
         else:
-            for req_id in scheduler_output.structured_output_request_ids:
+            for req_id in grammar_output.structured_output_request_ids:
                 num_spec_tokens = len(
                     scheduler_output.scheduled_spec_decode_tokens.get(
                         req_id, []))
@@ -2578,8 +2582,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
             logits = self.apply_grammar_bitmask(
-                scheduler_output, grammar_output, self.input_batch, logits
-            )
+                scheduler_output, grammar_output, logits)
 
         with ProfileExecuteDuration().capture_async("Sample"):
             # Sample the next token and get logprobs if needed.
