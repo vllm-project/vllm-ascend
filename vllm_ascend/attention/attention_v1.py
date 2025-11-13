@@ -487,8 +487,8 @@ class AscendAttentionMetadataBuilder:
         if len(local_context_lens_allranks) == 0:
             return []
         chunked_req_mask = [(req.sum() > 0).item()
-                                   for req in local_context_lens_allranks
-                                   if req is not None]
+                            for req in local_context_lens_allranks
+                            if req is not None]
         return chunked_req_mask
 
     def build_for_graph_capture(
