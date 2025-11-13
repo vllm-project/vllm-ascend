@@ -418,8 +418,13 @@ class NPUPlatform(Platform):
 
     @classmethod
     def import_kernels(cls) -> None:
-        from vllm_ascend.utils import enable_custom_op
-        enable_custom_op()
+        # Directly importing vllm_ascend_C prevents ASCEND_RT_VISIBLE_DEVICES
+        # from being applied during runtime initialization, which causes bugs
+        # in the RL module. See https://github.com/vllm-project/vllm-ascend/pull/884.
+        # TODO: when the above issue is fixed, we can uncomment the following lines.
+        # from vllm_ascend.utils import enable_custom_op
+        # enable_custom_op()
+        pass
 
     @classmethod
     def get_attn_backend_cls(
