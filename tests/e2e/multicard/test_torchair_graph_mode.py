@@ -300,79 +300,11 @@ def test_e2e_deepseekv2lite_with_nz():
     _deepseek_v2_lite_torchair_test_fixure(additional_config)
 
 
-# test deepseek-v3 mla and nz mode
-def _deepseekv3bf16_torchair_test_fixure(
-    additional_config: Dict,
-    *,
-    tensor_parallel_size=2,
-    use_v1_schduler=False,
-):
-    example_prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-
-    kwargs = {}
-    if not use_v1_schduler:
-        kwargs = {
-            "ascend_scheduler_config": {
-                "enable": True,
-            },
-            "refresh": True,
-        }
-    additional_config.update(**kwargs)
-
-    with VllmRunner(
-            "mlx-community/DeepSeek-V3-3bit-bf16",
-            dtype="half",
-            tensor_parallel_size=tensor_parallel_size,
-            distributed_executor_backend="mp",
-            additional_config=additional_config,
-    ) as vllm_model:
-        vllm_output = vllm_model.generate_greedy(example_prompts, 5)
-
-    for i in range(len(vllm_output)):
-        generated_text = vllm_output[i][1]
-        assert len(
-            generated_text.strip()) > 0, f"The {i}-th output is null, failed"
-
-
-def test_e2e_deepseekv3bf16_with_torchair():
+def test_e2e_deepseekv2lite_with_optimize():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
+            "enable_super_kernel": True,
         },
     }
-    _deepseekv3bf16_torchair_test_fixure(additional_config)
-
-
-def test_e2e_deepseekv3bf16_with_torchair_ms_mla():
-    additional_config = {
-        "torchair_graph_config": {
-            "enabled": True,
-            "enabled_multistream_mla": True,
-        },
-    }
-    _deepseekv3bf16_torchair_test_fixure(additional_config)
-
-
-def test_e2e_deepseekv3bf16_with_torchair_with_nz():
-    additional_config = {
-        "torchair_graph_config": {
-            "enabled": True,
-            "enable_kv_nz": True,
-        },
-    }
-    _deepseekv3bf16_torchair_test_fixure(additional_config)
-
-
-def test_e2e_deepseekv3bf16_with_torchair_v1scheduler():
-    additional_config = {
-        "torchair_graph_config": {
-            "enabled": True,
-        },
-    }
-    _deepseekv3bf16_torchair_test_fixure(additional_config,
-                                         use_v1_schduler=True)
+    _deepseek_v2_lite_torchair_test_fixure(additional_config)
