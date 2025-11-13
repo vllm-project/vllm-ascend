@@ -227,7 +227,7 @@ class NPUPlatform(Platform):
             compilation_config.splitting_ops.extend([
                 "vllm.unified_ascend_attention_with_output", "vllm.mla_forward"
             ])
-            compilation_config.oot_compiler = AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
+            compilation_config.backend = AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
 
             update_aclgraph_sizes(vllm_config)
         elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
