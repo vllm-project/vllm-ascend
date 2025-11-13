@@ -51,7 +51,7 @@ jobs:
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
   single-node-tests:
     name: single-node
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: image_build
     strategy:
       fail-fast: false

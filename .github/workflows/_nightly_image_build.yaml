@@ -2,7 +2,7 @@ name: 'image / nightly / Ubuntu / test'
 
 on:
   schedule:
-    - cron: '0 */4 * * *'
+    - cron: '0 0,4,8,12,14 * * *'
   workflow_call:
     inputs:
       target:
@@ -59,7 +59,7 @@ jobs:
           docker build \
             --network host \
             --platform linux/arm64 \
-            -f tools/Dockerfile.${TARGET} \
+            -f .github/Dockerfile.${TARGET} \
             --build-arg CANN_VERSION="8.3.rc1" \
             --build-arg UBUNTU_VERSION="22.04" \
             --build-arg PYTHON_VERSION="3.11" \
