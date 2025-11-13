@@ -365,7 +365,9 @@ class AscendFusedMoE(FusedMoE):
             hidden_states=final_hidden_states,
             reduce_results=self.reduce_results,
             context_metadata=context_metadata)
+
         return final_hidden_states
+
 
 class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
 
