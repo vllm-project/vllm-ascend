@@ -196,6 +196,83 @@ INFO:     127.0.0.1:54004 - "POST /v1/chat/completions HTTP/1.1" 200 OK
 
 ## Functional Verification
 
+Once your server is started, you can query the model with input prompts:
+
+```shell
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+    "model": "Qwen/Qwen3-VL-8B-Instruct",
+    "messages": [
+    {"role": "system", "content": "You are a helpful assistant."},
+    {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
+        {"type": "text", "text": "What is the text in the illustrate?"}
+    ]}
+    ]
+    }'
+```
+
 ## Accuracy Evaluation
 
+Here are two accuracy evaluation methods.
+
+### Using AISBench
+
+1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+
+2. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
+
+| dataset | version | metric | mode | vllm-api-general-chat |
+|----- | ----- | ----- | ----- | -----|
+| cevaldataset | - | accuracy | gen | 92.20 |
+
+### Using Language Model Evaluation Harness
+
+As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in online mode.
+
+1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
+
+2. Run `lm_eval` to execute the accuracy evaluation.
+
+```shell
+lm_eval \
+  --model local-completions \
+  --model_args model="Qwen/Qwen3-VL-8B-Instruct",base_url=http://127.0.0.1:8000/v1/completions,max_length=8192 \
+  --tasks mmmu_val \
+  --batch_size 32 \
+  --output_path ./
+```
+
+3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
+
+|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
+|-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
+|gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.9591|±  |0.0055|
+|gsm8k|      3|strict-match    |     5|exact_match|↑  |0.9583|±  |0.0055|
+
 ## Performance
+
+### Using AISBench
+
+Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
+
+### Using vLLM Benchmark
+
+Run performance evaluation of `Qwen3-VL-8B-Instruct` as an example.
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) for more details.
+
+There are three `vllm bench` subcommand:
+- `latency`: Benchmark the latency of a single batch of requests.
+- `serve`: Benchmark the online serving throughput.
+- `throughput`: Benchmark offline inference throughput.
+
+Take the `serve` as an example. Run the code as follows.
+
+```shell
+export VLLM_USE_MODELSCOPE=true
+vllm bench serve --model vllm-ascend/DeepSeek-V3.2-Exp-W8A8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+```
+
+After about several minutes, you can get the performance evaluation result.
