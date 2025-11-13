@@ -3,7 +3,7 @@ import math
 import random
 import threading
 import time
-from typing import Any, Generator, List, Optional, Union
+from typing import Generator, List, Optional, Union
 
 # Third Party
 import numpy as np
@@ -81,26 +81,19 @@ class MooncakeEngine:
             self.need_saves = 1
             self.saves_group = [[i for i in range(self.tp_size)]]
         else:
-            prefill_parallel_config: dict[
-                str,
-                Any] = vllm_config.kv_transfer_config.get_from_extra_config(
-                    "prefill", {})
-
-            assert "tp_size" in prefill_parallel_config.keys()
-            self._prefill_tp_size = prefill_parallel_config["tp_size"]
             self.num_key_value_heads = vllm_config.model_config.hf_config.num_key_value_heads
-            if self.num_key_value_heads >= self._prefill_tp_size:
-                self.need_saves = self.num_key_value_heads
+            if self.num_key_value_heads >= self.tp_size:
+                self.need_saves = self.tp_size
                 self.saves_group = [[i] for i in range(self.tp_size)]
             else:
-                self.need_saves = self._prefill_tp_size
+                self.need_saves = self.num_key_value_heads
                 self.saves_group = np.arange(self.tp_size).reshape(
-                    -1, self._prefill_tp_size //
-                    self.num_key_value_heads).tolist()
+                    -1, self.tp_size // self.num_key_value_heads).tolist()
 
+        self.save_num = self.tp_rank // (self.tp_size // self.need_saves)
         self.token_database = ChunkedTokenDatabase(self.metadata,
                                                    self.need_saves,
-                                                   self.tp_rank, self.tp_size)
+                                                   self.save_num)
 
         self.m_store = Mooncakestore(parallel_config)
 
@@ -625,7 +618,7 @@ class MooncakeEngine:
                     keys.append(key.to_string())
                     starts.append(start)
                 multi_tp_keys = keys[:]
-                for i in range(1, self.tp_size):
+                for i in range(1, self.need_saves):
                     for item in keys:
                         new_str = item.replace(  # type: ignore[attr-defined]
                             "@0", f"@{i}", 1)
@@ -636,7 +629,7 @@ class MooncakeEngine:
                 multi_tp_values = [
                     res[i * num_block:(i + 1) *
                         num_block]  # type: ignore[index]
-                    for i in range(self.tp_size)
+                    for i in range(self.need_saves)
                 ]
                 index = self.find_min_first_non_one_index(multi_tp_values)
                 if index != -1:

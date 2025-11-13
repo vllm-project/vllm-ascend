@@ -114,14 +114,11 @@ class ChunkedTokenDatabase():
         self,
         metadata: MooncakeEngineMetadata,
         need_saves: int,
-        tp_rank: int,
-        tp_size: int,
+        save_num: int,
     ):
         self.metadata = metadata
         self.need_saves = need_saves
-
-        save_group_size = tp_size // self.need_saves
-        self.save_num = tp_rank // save_group_size
+        self.save_num = save_num
 
     def _make_key_by_hash(self,
                           chunk_hash: str,
