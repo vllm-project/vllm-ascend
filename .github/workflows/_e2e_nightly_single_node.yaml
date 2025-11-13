@@ -62,67 +62,11 @@ jobs:
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-      - name: Config mirrors
-        run: |
-          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-          apt-get update -y
-          apt install git -y
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ inputs.vllm }}
-          path: ./vllm-empty
-
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
-        run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
-
-      - name: Install vllm-project/vllm-ascend
-        env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
-
-      - name: Install custom-ops (for DeepSeek-V3.2-Exp)
-        if: ${{ inputs.name == 'deepseek3_2-exp-w8a8' }}
-        shell: bash -l {0}
-        run: |
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
-          chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-          ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-          export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-          export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-          pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-          . /usr/local/Ascend/ascend-toolkit/set_env.sh
-
-      - name: Checkout aisbench repo and Install aisbench
-        run: |
-          git clone https://gitee.com/aisbench/benchmark.git
-          cd benchmark
-          git checkout v3.0-20250930-master
-          pip3 install -e ./
-          pip3 install -r requirements/api.txt
-          pip3 install -r requirements/extra.txt
-
       - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
+          BENCHMARK_HOME: /vllm-workspace/vllm-ascend/benchmark
         run: |
           pytest -sv ${{ inputs.tests }}

@@ -41,9 +41,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  image_build:
+    name: nightly image build
+    uses: ./.github/workflows/_nightly_image_build.yaml
+    with:
+      target: a3
+    secrets:
+      HW_USERNAME: ${{ secrets.HW_USERNAME }}
+      HW_TOKEN: ${{ secrets.HW_TOKEN }}
   single-node-tests:
     name: single-node
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: image_build
     strategy:
       fail-fast: false
       matrix:
@@ -94,13 +103,13 @@ jobs:
     with:
       vllm: v0.11.0
       runner: ${{ matrix.test_config.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-a3-ubuntu22.04-py3.11
+      image: ${{ needs.image_build.outputs.image-tag }}
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
 
   multi-node-tests:
     name: multi-node
-    needs: single-node-tests
+    needs: [single-node-tests, image_build]
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
@@ -129,7 +138,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-0
-      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11
+      image: ${{ needs.image_build.outputs.image-tag }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
