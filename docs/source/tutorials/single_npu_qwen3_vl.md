@@ -194,25 +194,6 @@ INFO 03-12 11:16:50 engine.py:280] Added request chatcmpl-92148a41eca64b6d82d3d7
 INFO:     127.0.0.1:54004 - "POST /v1/chat/completions HTTP/1.1" 200 OK
 ```
 
-## Functional Verification
-
-Once your server is started, you can query the model with input prompts:
-
-```shell
-curl http://localhost:8000/v1/chat/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-    "model": "Qwen/Qwen3-VL-8B-Instruct",
-    "messages": [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": "https://modelscope.oss-cn-beijing.aliyuncs.com/resource/qwen.png"}},
-        {"type": "text", "text": "What is the text in the illustrate?"}
-    ]}
-    ]
-    }'
-```
-
 ## Accuracy Evaluation
 
 Here are two accuracy evaluation methods.
@@ -237,19 +218,18 @@ As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy e
 
 ```shell
 lm_eval \
-  --model local-completions \
-  --model_args model="Qwen/Qwen3-VL-8B-Instruct",base_url=http://127.0.0.1:8000/v1/completions,max_length=8192 \
-  --tasks mmmu_val \
-  --batch_size 32 \
-  --output_path ./
+    --model vllm-vlm \
+    --model_args pretrained=/root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
+    --tasks mmmu_val \
+    --batch_size 32 \
+    --output_path ./results
 ```
 
 3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
 
-|Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
-|-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
-|gsm8k|      3|flexible-extract|     5|exact_match|↑  |0.9591|±  |0.0055|
-|gsm8k|      3|strict-match    |     5|exact_match|↑  |0.9583|±  |0.0055|
+|Task    |Metric  |Value |Stderr |
+|--------|--------|-----:|------:|
+|mmmu_val|acc,none|0.5378|±0.0158|
 
 ## Performance
 
@@ -272,7 +252,7 @@ Take the `serve` as an example. Run the code as follows.
 
 ```shell
 export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model vllm-ascend/DeepSeek-V3.2-Exp-W8A8  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model vllm-ascend/Qwen3-VL-8B-Instruct  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
