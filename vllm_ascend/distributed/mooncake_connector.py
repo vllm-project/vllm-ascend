@@ -72,8 +72,8 @@ class ReqMeta:
     remote_host: str
     remote_port: int
     remote_engine_id: str
-    remote_pcp_size: str
-    remote_dcp_size: str
+    remote_pcp_size: int
+    remote_dcp_size: int
 
 
 class KVCacheTaskTracker:
