@@ -325,7 +325,7 @@ def _qwen3_torchair_test_fixure(
     additional_config.update(**kwargs)
 
     with VllmRunner(
-            "Qwen/Qwen3-30B-A3B",
+            "Qwen/Qwen2.5-0.5B-Instruct",
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
