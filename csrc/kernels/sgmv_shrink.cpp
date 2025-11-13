@@ -242,7 +242,7 @@ private:
 
 // declare all dtype kernel
 SGMV_SHRINK_TYPE_DECLARE(half)
-#if (__CCE_AICORE__ >= 220)
+#if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
     SGMV_SHRINK_TYPE_DECLARE(bfloat16_t)
 #endif
 
@@ -260,11 +260,13 @@ extern void sgmv_shrink_impl(AscendType type, void* stream, void* x, void* weigh
                                                         numTokensPerCore, inputHiddenDim, maxLoRARank,
                                                         scale);
     } else if (type == AscendType::BF16) {
+        #if !defined(__CCE_AICORE__) || (__CCE_AICORE__ >= 220)
         sgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize, 
                                                                   seqLen, seqLenSize, 
                                                                   y, batchSize,
                                                                   numTokensPerCore, inputHiddenDim, maxLoRARank,
                                                                   scale);
+        #endif
     } else {
         return;
     }
