@@ -945,11 +945,11 @@ def get_flashcomm2_config_and_validate(ascend_config,
                                                      vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
-    flashcomm2_oproj_shared = envs_ascend.VLLM_ASCEND_FLASHCOMM2_OSHARED
+    flashcomm2_oproj_shared = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED
 
     if not flashcomm2_enable():
         logger.info("FLASHCOMM2 not enable.")
-        return flashcomm2_oproj_tp_size
+        return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
     logger.info(
         f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size={flashcomm2_oproj_tp_size} and global_tp_size={global_tp_size}"

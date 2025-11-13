@@ -138,9 +138,6 @@ class AscendConfig:
             get_flashcomm2_config_and_validate
         self.flashcomm2_oproj_tensor_parallel_size, self.flashcomm2_oproj_shared = get_flashcomm2_config_and_validate(
             self, vllm_config)
-        
-        self.flashcomm2_oproj_shared = additional_config.get(
-            "flashcomm2_oproj_shared", None)
         if self.flashcomm2_oproj_shared:
             if self.flashcomm2_oproj_tensor_parallel_size is None:
                 raise AssertionError(
