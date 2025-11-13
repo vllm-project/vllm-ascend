@@ -287,10 +287,16 @@ class NPUWorker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
-        output = self.model_runner.execute_model(scheduler_output,
-                                                 intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, NoneType)):
-            return output
+        if vllm_version_is("0.11.0"):
+            output = self.model_runner.execute_model_0_11_0(scheduler_output,
+                                                           intermediate_tensors)
+            if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
+                return output
+        else:
+            output = self.model_runner.execute_model(scheduler_output,
+                                                    intermediate_tensors)
+            if isinstance(output, (ModelRunnerOutput, NoneType)):
+                return output
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
