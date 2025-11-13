@@ -32,6 +32,14 @@ class TestKVCacheSendingLayerThread(unittest.TestCase):
         self.engine = MagicMock()
         self.engine.register_memory.return_value = 0
         self.engine.batch_transfer_sync_write.return_value = 1
+        self._patcher_cs = patch(
+            'vllm_ascend.distributed.mooncake_layerwise_connector.torch_npu.npu.current_stream'
+        )
+        self.mock_current_stream = self._patcher_cs.start()
+        self.addCleanup(self._patcher_cs.stop)
+        fake_stream = MagicMock(name="FakeStream")
+        fake_stream.synchronize = MagicMock()
+        self.mock_current_stream.return_value = fake_stream
 
         self.first_kv_cache = torch.zeros((2, 2, 2, 8),
                                           dtype=torch.float32,

@@ -19,7 +19,6 @@
 from typing import Any, List, Optional, Union
 
 import torch
-import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
@@ -244,12 +243,9 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
                                    is_prefill=False,
                                    is_qwen_torchair=True)
             forward_kwargs = {}
-            if envs.VLLM_USE_V1:
-                output_shape = q.shape
-                output = torch.empty(output_shape,
-                                     dtype=q.dtype,
-                                     device=q.device)
-                forward_kwargs['output'] = output
+            output_shape = q.shape
+            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+            forward_kwargs['output'] = output
 
             attn_output = self.attn.impl.forward(self.attn,
                                                  q,

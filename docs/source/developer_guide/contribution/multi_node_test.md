@@ -51,7 +51,7 @@ From the workflow perspective, we can see how the final test script is executed,
     #  - no headless(have api server)
     decoder_host_index: [1]
 
-    # Add each node's vllm serve cli command just like you runs locally
+    # Add each node's vllm serve cli command just like you run locally
     deployment:
     -
         server_cmd: >

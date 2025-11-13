@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 from unittest.mock import patch
 
+import numpy as np
 import torch
 import torch_npu
 import vllm.envs as envs
@@ -326,9 +327,12 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
             actual_seq_lengths_kv = attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:,
                                                                                              pcp_rank,
                                                                                              dcp_rank]
-            if (runtime_shape - len(actual_seq_lengths_kv)) > 0:
-                actual_seq_lengths_kv = actual_seq_lengths_kv + [0] * (
-                    runtime_shape - len(actual_seq_lengths_kv))
+            pad_length = runtime_shape - len(actual_seq_lengths_kv)
+            if pad_length > 0:
+                pad_tensor = np.zeros(pad_length,
+                                      dtype=actual_seq_lengths_kv.dtype)
+                actual_seq_lengths_kv = np.concatenate(
+                    [actual_seq_lengths_kv, pad_tensor])
 
             actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[:
                                                                       attn_metadata
@@ -367,7 +371,7 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
 
 
 def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
-                                   runtime_shape, speculative_config):
+                                   runtime_shape):
     graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
     # for each layer's attention op in the graph.
@@ -384,16 +388,14 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
             decode_meta = forward_context.attn_metadata[key].decode
             seq_len = decode_meta.cp_seq_len
 
-            if speculative_config and speculative_config.method == "deepseek_mtp":
-                spec_multiple = speculative_config.num_speculative_tokens + 1
-                seq_len = seq_len + [0] * (runtime_shape // spec_multiple -
-                                           len(seq_len))
-            else:
-                pad_length = runtime_shape - len(seq_len)
-                pad_tensor = torch.zeros(pad_length,
-                                         dtype=seq_len.dtype,
-                                         device=seq_len.device)
-                seq_len = torch.cat([seq_len, pad_tensor], dim=0)
+            # For pcp + spec decode, we flatten seq_lens
+            # to avoid irregular spec_attn_mask shape,
+            # so there's no need to divide runtime_shape by spec_multiple
+            pad_length = runtime_shape - len(seq_len)
+            pad_tensor = torch.zeros(pad_length,
+                                     dtype=seq_len.dtype,
+                                     device=seq_len.device)
+            seq_len = torch.cat([seq_len, pad_tensor], dim=0)
 
             torch.npu.graph_task_update_begin(update_stream, handle)
 

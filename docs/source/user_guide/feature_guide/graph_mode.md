@@ -8,7 +8,7 @@ This guide provides instructions for using Ascend Graph Mode with vLLM Ascend. P
 
 ## Getting Started
 
-From v0.9.1rc1 with V1 Engine, vLLM Ascend will run models in graph mode by default to keep the same behavior with vLLM. If you hit any issues, please feel free to open an issue on GitHub and fallback to the eager mode temporarily by set `enforce_eager=True` when initializing the model.
+From v0.9.1rc1 with V1 Engine, vLLM Ascend will run models in graph mode by default to keep the same behavior with vLLM. If you hit any issues, please feel free to open an issue on GitHub and fallback to the eager mode temporarily by setting `enforce_eager=True` when initializing the model.
 
 There are two kinds for graph mode supported by vLLM Ascend:
 - **ACLGraph**: This is the default graph mode supported by vLLM Ascend. In v0.9.1rc1, only Qwen series models are well tested.
@@ -45,14 +45,14 @@ import os
 from vllm import LLM
 
 # TorchAirGraph is only work without chunked-prefill now
-model = LLM(model="deepseek-ai/DeepSeek-R1-0528", additional_config={"torchair_graph_config": {"enabled": True},"ascend_scheduler_config": {"enabled": True,}})
+model = LLM(model="deepseek-ai/DeepSeek-R1-0528", additional_config={"torchair_graph_config": {"enabled": True},"ascend_scheduler_config": {"enabled": True}})
 outputs = model.generate("Hello, how are you?")
 ```
 
 Online example:
 
 ```shell
-vllm serve Qwen/Qwen2-7B-Instruct --additional-config='{"torchair_graph_config": {"enabled": true},"ascend_scheduler_config": {"enabled": true,}}'
+vllm serve deepseek-ai/DeepSeek-R1-0528 --additional-config='{"torchair_graph_config": {"enabled": true},"ascend_scheduler_config": {"enabled": true}}'
 ```
 
 You can find more details about additional configuration [here](../configuration/additional_config.md).
@@ -74,5 +74,5 @@ outputs = model.generate("Hello, how are you?")
 Online example:
 
 ```shell
-vllm serve Qwen/Qwen2-7B-Instruct --enforce-eager
+vllm serve someother_model_weight --enforce-eager
 ```

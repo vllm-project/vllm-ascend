@@ -80,7 +80,7 @@ The following is a simple example of how to use sleep mode.
 
     vllm serve Qwen/Qwen2.5-0.5B-Instruct --enable-sleep-mode
 
-    # after serveing is up, post these endpoints
+    # after serving is up, post to these endpoints
 
     # sleep level 1
     curl -X POST http://127.0.0.1:8000/sleep \

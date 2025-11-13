@@ -8,6 +8,9 @@ from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from tests.ut.base import TestBase
 from vllm_ascend.utils import vllm_version_is
 
+init_cached_hf_modules_path = "vllm.utils.init_cached_hf_modules" if vllm_version_is(
+    "0.11.0") else "vllm.utils.import_utils.init_cached_hf_modules"
+
 
 class TestNPUWorker(TestBase):
 
@@ -20,7 +23,13 @@ class TestNPUWorker(TestBase):
         self.model_config_mock = MagicMock(spec=ModelConfig)
         self.model_config_mock.dtype = torch.float16
         self.model_config_mock.trust_remote_code = False
-        self.model_config_mock.hf_config = None
+
+        self.hf_config_mock = MagicMock()
+        self.hf_config_mock.model_type = "test_model"
+        if hasattr(self.hf_config_mock, 'index_topk'):
+            delattr(self.hf_config_mock, 'index_topk')
+
+        self.model_config_mock.hf_config = self.hf_config_mock
 
         self.parallel_config_mock = MagicMock(spec=ParallelConfig)
 
@@ -47,7 +56,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_normal_case(
         self,
@@ -109,7 +118,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_trust_remote_code(
         self,
@@ -154,7 +163,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_custom_cache_dtype(
         self,
@@ -272,9 +281,9 @@ class TestNPUWorker(TestBase):
 
             self.assertIn("Sleep mode is not enabled", str(cm.exception))
 
+    @patch('vllm_ascend.utils._ENABLE_NZ', False)
     @patch("vllm_ascend.worker.worker_v1.sleep_mode_enabled")
     @patch("vllm_ascend.worker.worker_v1.CaMemAllocator")
-    @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_wake_up_mode_enabled(self, mock_allocator_class,
                                   mock_sleep_mode_enabled):
         """Test wake_up method when sleep mode is enabled"""

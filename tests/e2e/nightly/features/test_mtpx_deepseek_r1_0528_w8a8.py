@@ -1,0 +1,138 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+import json
+from typing import Any
+
+import openai
+import pytest
+from vllm.utils import get_open_port
+
+from tests.e2e.conftest import RemoteOpenAIServer
+from tools.aisbench import run_aisbench_cases
+
+MODELS = [
+    "vllm-ascend/DeepSeek-R1-0528-W8A8",
+]
+
+MODES = ["mtp2", "mtp3"]
+
+prompts = [
+    "San Francisco is a",
+]
+
+api_keyword_args = {
+    "max_tokens": 10,
+}
+
+aisbench_cases = [{
+    "case_type": "accuracy",
+    "dataset_path": "vllm-ascend/aime2024",
+    "request_conf": "vllm_api_general_chat",
+    "dataset_conf": "aime2024/aime2024_gen_0_shot_chat_prompt",
+    "max_out_len": 32768,
+    "batch_size": 32,
+    "baseline": 80,
+    "threshold": 7
+}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("mode", MODES)
+async def test_models(model: str, mode: str) -> None:
+    port = get_open_port()
+    env_dict = {
+        "OMP_NUM_THREADS": "100",
+        "OMP_PROC_BIND": "false",
+        "HCCL_BUFFSIZE": "1024",
+        "VLLM_RPC_TIMEOUT": "3600000",
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000"
+    }
+    additional_config: dict[str, Any] = {
+        "ascend_scheduler_config": {
+            "enabled": False
+        },
+    }
+    speculative_config = {
+        "num_speculative_tokens": 2,
+        "method": "deepseek_mtp"
+    }
+    compilation_config = {
+        "cudagraph_capture_sizes": [56],
+        "cudagraph_mode": "FULL_DECODE_ONLY"
+    }
+    server_args = [
+        "--quantization",
+        "ascend",
+        "--seed",
+        "1024",
+        "--no-enable-prefix-caching",
+        "--data-parallel-size",
+        "2",
+        "--tensor-parallel-size",
+        "8",
+        "--enable-expert-parallel",
+        "--port",
+        str(port),
+        "--max-model-len",
+        "40960",
+        "--max-num-seqs",
+        "14",
+        "--trust-remote-code",
+    ]
+    if mode == "mtp2":
+        server_args.extend(["--max-num-batched-tokens", "4096"])
+        server_args.extend(
+            ["--speculative-config",
+             json.dumps(speculative_config)])
+        server_args.extend(["--gpu-memory-utilization", "0.92"])
+        additional_config["torchair_graph_config"] = {"enabled": True}
+    if mode == "mtp3":
+        env_dict["HCCL_OP_EXPANSION_MODE"] = "AIV"
+        server_args.extend(["--max-num-batched-tokens", "2048"])
+        speculative_config["num_speculative_tokens"] = 3
+        server_args.extend(
+            ["--speculative-config",
+             json.dumps(speculative_config)])
+        server_args.extend(["--gpu-memory-utilization", "0.9"])
+        server_args.extend(
+            ["--compilation-config",
+             json.dumps(compilation_config)])
+        additional_config["torchair_graph_config"] = {"enabled": False}
+    server_args.extend(["--additional-config", json.dumps(additional_config)])
+    request_keyword_args: dict[str, Any] = {
+        **api_keyword_args,
+    }
+    with RemoteOpenAIServer(model,
+                            server_args,
+                            server_port=port,
+                            env_dict=env_dict,
+                            auto_port=False) as server:
+        client = server.get_async_client()
+        batch = await client.completions.create(
+            model=model,
+            prompt=prompts,
+            **request_keyword_args,
+        )
+        choices: list[openai.types.CompletionChoice] = batch.choices
+        assert choices[0].text, "empty response"
+        print(choices)
+        # aisbench test
+        run_aisbench_cases(model,
+                           port,
+                           aisbench_cases,
+                           server_args=server_args)
