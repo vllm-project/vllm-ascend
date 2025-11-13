@@ -146,8 +146,13 @@ class AscendQwen2_5_VisionBlock_Without_Padding(Qwen2_5_VisionBlock):
                  norm_layer: Optional[Callable[[int], nn.Module]] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "") -> None:
-        super().__init__(dim, num_heads, mlp_hidden_dim, act_fn, norm_layer,
-                         quant_config, prefix)
+        super().__init__(dim=dim,
+                         num_heads=num_heads,
+                         mlp_hidden_dim=mlp_hidden_dim,
+                         act_fn=act_fn,
+                         norm_layer=norm_layer,
+                         quant_config=quant_config,
+                         prefix=prefix)
         self.attn = AscendQwen2_5_VisionAttention_Without_Padding(
             embed_dim=dim,
             num_heads=num_heads,
@@ -367,8 +372,15 @@ class AscendQwen3_VisionBlock(Qwen3_VisionBlock):
         prefix: str = "",
         use_data_parallel: bool = False,
     ) -> None:
-        super().__init__(dim, num_heads, mlp_hidden_dim, act_fn, norm_layer,
-                         quant_config, prefix, use_data_parallel)
+        super().__init__(dim=dim,
+                         num_heads=num_heads,
+                         mlp_hidden_dim=mlp_hidden_dim,
+                         act_fn=act_fn,
+                         norm_layer=norm_layer,
+                         quant_config=quant_config,
+                         prefix=prefix,
+                         use_data_parallel=use_data_parallel)
+
         self.attn = AscendQwen2_5_VisionAttention_Without_Padding(
             embed_dim=dim,
             num_heads=num_heads,
