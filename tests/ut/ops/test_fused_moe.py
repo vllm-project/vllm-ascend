@@ -600,39 +600,3 @@ class TestUnifiedApplyMLP(TestBase):
         self.assertTrue(mock_forward_context.with_quant)
         self.assertEqual(result.shape, hidden_states_shape)
         self.assertEqual(result.dtype, torch.bfloat16)
-
-
-class TestLoadWeight(TestBase):
-
-    def test_load_w13_transpose(self):
-        with patch.object(AscendFusedMoE, "__init__",
-                          lambda self, *args, **kwargs: None):
-            moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
-
-            expert_data = torch.randn(128, 8)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
-
-            expert_data = torch.randn(8, 128)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w1", loaded_weight, 0)
-
-            expert_data = torch.randn(128, 8)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w3", loaded_weight, 0)
-
-            expert_data = torch.randn(8, 128)
-            loaded_weight = torch.randn(128, 4)
-            moe._load_w13(expert_data, 1, "w3", loaded_weight, 0)
-
-    def test_load_w2_transpose(self):
-        with patch.object(AscendFusedMoE, "__init__",
-                          lambda self, *args, **kwargs: None):
-            moe = AscendFusedMoE(num_experts=4, top_k=2, hidden_size=8)
-            expert_data = torch.randn(128, 4)
-            loaded_weight = torch.randn(128, 8)
-            moe._load_w2(expert_data, 1, loaded_weight, 0)
-
-            expert_data = torch.randn(4, 128)
-            loaded_weight = torch.randn(128, 8)
-            moe._load_w2(expert_data, 1, loaded_weight, 0)
