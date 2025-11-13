@@ -169,29 +169,6 @@ class MtpProposer(Proposer):
         self.use_sparse = hasattr(vllm_config.model_config.hf_config,
                                   "index_topk")
 
-        self.query_start_loc = torch.zeros(
-            self.runner.max_num_reqs * (self.num_speculative_tokens + 1) + 1,
-            dtype=torch.int32,
-            device=self.device)
-        self.query_start_loc_cpu = torch.zeros(
-            self.runner.max_num_reqs * (self.num_speculative_tokens + 1) + 1,
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=is_pin_memory_available())
-        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
-        self.slot_mapping = torch.zeros(self.runner.max_num_tokens,
-                                        dtype=torch.int32,
-                                        device=self.device)
-        self.seq_lens = torch.zeros(self.runner.max_num_reqs *
-                                    (self.num_speculative_tokens + 1),
-                                    dtype=torch.int32,
-                                    device=self.device)
-        self.seq_lens_cpu = torch.zeros(self.runner.max_num_reqs *
-                                        (self.num_speculative_tokens + 1),
-                                        dtype=torch.int32,
-                                        device="cpu",
-                                        pin_memory=is_pin_memory_available())
-
     def load_model(self, model) -> None:
         loader = get_model_loader(self.vllm_config.load_config)
 
@@ -262,25 +239,16 @@ class MtpProposer(Proposer):
             attn_metadata = None
         elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
             max_seq_lens = self.runner.model_config.max_model_len
-            self.seq_lens_cpu[:num_reqs] = max_seq_lens
-            self.seq_lens_cpu[num_reqs:] = 0
-            self.seq_lens[:num_reqs] = max_seq_lens
-            self.seq_lens[num_reqs:] = 0
             if len(self.runner.attn_groups) > 0:
                 num_computed_tokens_cpu = (
                     self.runner.input_batch.
                     num_computed_tokens_cpu_tensor[:num_reqs])
-                query_start_loc = torch.tensor(
-                    [0] + self.runner.actual_seq_lengths_q[:num_reqs],
-                    device=self.runner.device,
-                    dtype=torch.int32)
-                self.query_start_loc[:num_reqs + 1].copy_(query_start_loc)
                 common_attn_metadata = AscendCommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc[:num_reqs + 1],
-                    query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
-                                                                 1],
-                    seq_lens_cpu=self.seq_lens_cpu,
-                    seq_lens=self.seq_lens[:num_reqs],
+                    query_start_loc=self.runner.query_start_loc[:num_reqs + 1],
+                    query_start_loc_cpu=self.runner.query_start_loc_cpu[
+                        :num_reqs + 1],
+                    seq_lens_cpu=self.runner.seq_lens_cpu,
+                    seq_lens=self.runner.seq_lens_cpu[:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
                     max_query_len=self.num_speculative_tokens + 1,
@@ -289,7 +257,7 @@ class MtpProposer(Proposer):
                     block_table_tensor=self.runner.input_batch.block_table[0].
                     get_device_tensor()[:num_reqs],
                     slot_mapping=self.runner.input_batch.block_table[0].slot_mapping,
-                    positions=self.positions,
+                    positions=self.runner.positions,
                     attn_mask=self.runner.attn_mask,
                     spec_attn_mask=self.runner.spec_attn_mask,
                     attn_state=self.runner.attn_state,
@@ -421,6 +389,7 @@ class MtpProposer(Proposer):
                 common_attn_metadata.query_start_loc = \
                     query_start_loc_pcp_full[:num_reqs + 1]
             if self.speculative_config.disable_padded_drafter_batch:
+                # NOTE: Currently, MTP-fullgraph is incompatibility with pcp
                 token_indices_to_sample = None
                 common_attn_metadata, token_indices =\
                     self._prepare_inputs(
@@ -523,16 +492,21 @@ class MtpProposer(Proposer):
 
         # [q1 - n1, q2 - n2, q3 - n3] ->
         # [0, q1 - n1, q1 + q2 - n1 - n2, q1 + q2 + q3 - n1 - n2 - n3]
-        query_start_loc_len = query_start_loc_cpu.shape[0]
-        np.cumsum(new_num_tokens_per_req_np, out=self.query_start_loc_np[1:query_start_loc_len])
+        new_query_start_loc_cpu = torch.zeros(
+            query_start_loc_cpu.shape,
+            dtype=torch.int32,
+            pin_memory=is_pin_memory_available(),
+        )
+        new_query_start_loc_np = new_query_start_loc_cpu.numpy()
+        np.cumsum(new_num_tokens_per_req_np, out=new_query_start_loc_np[1:])
 
-        total_num_tokens = self.query_start_loc_np[query_start_loc_len - 1]
+        total_num_tokens = new_query_start_loc_np[-1]
         # Example assuming num_tokens_per_req_np = [2, 4, 3]
         # this implies that `new_query_start_locs` is:
         # [0, 2, 6, 9] ->
         # [0, 0, 2, 2, 2, 2, 6, 6, 6]
         #  _r1_  ____r2____  ___r3__
-        new_query_start_locs_expanded = np.repeat(self.query_start_loc_np[:query_start_loc_len - 1],
+        new_query_start_locs_expanded = np.repeat(new_query_start_loc_np[:-1],
                                                   new_num_tokens_per_req_np)
         # [0, 1, 2, 3, 4, 5, 6, 7, 8] ->
         # [0, 1, 0, 1, 2, 3, 0, 1, 2]
@@ -554,16 +528,14 @@ class MtpProposer(Proposer):
         token_indices = torch.from_numpy(token_indices_np).to(
             device, non_blocking=True)
 
-        self.query_start_loc[:query_start_loc_len].copy_(
-            self.query_start_loc_cpu[:query_start_loc_len], non_blocking=True)
         common_attn_metadata.slot_mapping[:token_indices.shape[0]].copy_(
             common_attn_metadata.slot_mapping[token_indices])
-        common_attn_metadata.positions[:token_indices.shape[0]].copy_(
-            common_attn_metadata.positions[token_indices])
+        common_attn_metadata.slot_mapping[token_indices.shape[0]:].fill_(-1)
 
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
-            query_start_loc=self.query_start_loc[:query_start_loc_len],
-            query_start_loc_cpu=self.query_start_loc_cpu[:query_start_loc_len],
+            query_start_loc=new_query_start_loc_cpu.to(device, ## Address is ok?
+                                                       non_blocking=True),
+            query_start_loc_cpu=new_query_start_loc_cpu,  ## Address is ok?
             seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
             seq_lens_cpu=new_seq_lens_cpu,
             num_computed_tokens_cpu=common_attn_metadata.
@@ -572,8 +544,9 @@ class MtpProposer(Proposer):
             num_actual_tokens=total_num_tokens,
             max_query_len=new_query_len_per_req.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
-            slot_mapping=common_attn_metadata.slot_mapping[token_indices],
+            slot_mapping=common_attn_metadata.slot_mapping,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
+            # Looks like we do not need to fixed the address of positions in common_attn_metadata
             positions=common_attn_metadata.positions[token_indices],
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
@@ -713,9 +686,9 @@ class MtpProposer(Proposer):
             max_query_len = common_attn_metadata.max_query_len
             uniform_decode = (max_query_len in list(
                 range(1, self.num_speculative_tokens + 2))) and (
-                    scheduler_output.total_num_scheduled_tokens //
-                    (self.num_speculative_tokens + 2 - max_query_len)
-                    == self.runner.input_batch.num_reqs * max_query_len)
+                    scheduler_output.total_num_scheduled_tokens ==
+                    self.runner.input_batch.num_reqs *
+                    (self.num_speculative_tokens + 1))
             batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                                uniform_decode=uniform_decode)
         else:
@@ -723,15 +696,6 @@ class MtpProposer(Proposer):
                                                uniform_decode=False)
         aclgraph_runtime_mode, batch_descriptor = \
             self.runner.aclgraph_dispatcher.dispatch(batch_descriptor)
-        if aclgraph_runtime_mode not in [
-                CUDAGraphMode.PIECEWISE, CUDAGraphMode.NONE, CUDAGraphMode.FULL
-        ]:
-            # Fallback to piecewise graph, when acl full graph is enabled
-            logger.debug(
-                "Currently the eagle proposer only supports cudagraph_mode "
-                f"PIECEWISE, and is forced to set graph mode from {aclgraph_runtime_mode} "
-                "to CUDAGraphMode.PIECEWISE")
-            aclgraph_runtime_mode = CUDAGraphMode.PIECEWISE
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs(
         ) and aclgraph_runtime_mode == CUDAGraphMode.FULL:
@@ -881,6 +845,10 @@ class MtpProposer(Proposer):
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:hidden_states.shape[0]] = hidden_states
             attn_metadata_i.slot_mapping[:batch_size] = slot_mapping
+            if self.speculative_config.disable_padded_drafter_batch:
+                self.positions[batch_size:num_input_tokens] = 0
+                self.input_ids[batch_size:num_input_tokens] = 0
+                self.hidden_states[batch_size:num_input_tokens].fill_(0)
 
             if attn_metadata_i.prefill is not None:
                 attn_metadata_i.prefill.seq_lens = attn_metadata_i.seq_lens
