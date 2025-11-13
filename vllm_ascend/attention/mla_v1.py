@@ -276,7 +276,8 @@ class AscendMLAMetadataBuilder:
         self.dcp_size = get_decode_context_model_parallel_world_size()
         self.dcp_rank = get_decode_context_model_parallel_rank(
         ) if self.dcp_size > 1 else 0
-        self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
+        self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size if prefill_context_parallel_enable(
+        ) else 1
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size * self.pcp_size
         decode_max_num_seqs = getattr(scheduler_config, 'decode_max_num_seqs',
                                       0)
