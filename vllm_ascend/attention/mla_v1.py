@@ -112,12 +112,12 @@ class AscendMLAPrefillMetadata:
         chunk_seq_lens: torch.Tensor
         chunk_seq_lens_npu: torch.Tensor
         # for mla DCP & PCP
-        padded_chunk_seq_lens_npu: torch.Tensor
-        padded_local_chunk_seq_lens: list[list[int]] | None = None
-        local_context_lens_allranks: list[list[int]] | None = None
-        padded_local_cu_seq_lens: torch.Tensor | None = None
-        cu_seq_lens_lst: list[list[int]] | None = None
-        chunk_size: int | None = None
+        padded_chunk_seq_lens_npu: torch.Tensor = None
+        padded_local_chunk_seq_lens: Optional[list[list[int]]] = None
+        local_context_lens_allranks: Optional[list[list[int]]] = None
+        padded_local_cu_seq_lens: torch.Tensor = None
+        cu_seq_lens_lst: Optional[list[list[int]]] = None
+        chunk_size: Optional[int] = None
 
     attn_mask: torch.Tensor
     query_lens: torch.Tensor
@@ -449,9 +449,10 @@ class AscendMLAMetadataBuilder:
                              dtype=torch.int32)
 
                 if self.dcp_size * self.pcp_size > 1:
-                    local_context_lens_allranks = torch.tensor(
-                        num_computed_tokens_of_pcp_dcp[reqs_start:num_reqs]
-                    ).reshape(-1, self.dcp_size * self.pcp_size)
+                    if num_computed_tokens_of_pcp_dcp is not None:
+                        local_context_lens_allranks = torch.tensor(
+                            num_computed_tokens_of_pcp_dcp[reqs_start:num_reqs]
+                        ).reshape(-1, self.dcp_size * self.pcp_size)
                     # Note(qcs): The max local context lengths
                     # padded to `cp_local_block_size`.
                     padded_local_context_lens_cpu = (cdiv(
