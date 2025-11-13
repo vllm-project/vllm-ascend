@@ -65,8 +65,14 @@ _ENABLE_NZ = None
 def is_310p():
     global _IS_310P
     if _IS_310P is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
+        try:
+            from vllm_ascend import _build_info  # type: ignore
+            _IS_310P = _build_info.__soc_version__.lower().startswith(
+                "ascend310p")
+        except ImportError:
+            logger.warning("vllm-ascend is build with developer mode, "
+                           "_build_info not found, assuming not ascend310p.")
+            _IS_310P = False
     return _IS_310P
 
 
@@ -83,8 +89,14 @@ def is_enable_nz(vllm_config: Optional[VllmConfig] = None) -> bool:
 def sleep_mode_enabled():
     global _SLEEP_MODE_ENABLED
     if _SLEEP_MODE_ENABLED is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _SLEEP_MODE_ENABLED = _build_info.__sleep_mode_enabled__
+        try:
+            from vllm_ascend import _build_info  # type: ignore
+            _SLEEP_MODE_ENABLED = _build_info.__sleep_mode_enabled__
+        except ImportError:
+            logger.warning(
+                "vllm-ascend is build with developer mode, "
+                "_build_info not found, assuming _SLEEP_MODE_ENABLED=True.")
+            _SLEEP_MODE_ENABLED = True
     return _SLEEP_MODE_ENABLED
 
 
