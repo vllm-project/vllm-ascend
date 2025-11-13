@@ -36,13 +36,15 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+from vllm_ascend.torchair.ops.shared_weight_layer import (
+    post_process_after_loading_for_shared_weight_series,
+    reach_layer_for_shared_weight_series,
+    register_layer_to_shared_weight_series)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_enable_nz, prefill_context_parallel_enable,
-                               weak_ref_tensors, flashcomm2_o_shared_enabled)
+                               flashcomm2_o_shared_enabled, is_enable_nz,
+                               prefill_context_parallel_enable,
+                               weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import InputBatch
-from vllm_ascend.torchair.ops.shared_weight_layer import (post_process_after_loading_for_shared_weight_series,
-                                                          reach_layer_for_shared_weight_series,
-                                                          register_layer_to_shared_weight_series)
 
 # isort: off
 if prefill_context_parallel_enable():
@@ -855,11 +857,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.o_proj = kwargs['o_proj']
 
         if flashcomm2_o_shared_enabled():
-            from vllm_ascend.distributed.parallel_state import get_flashcomm2_o_shared_group
-            register_layer_to_shared_weight_series(series_name="o_proj",
-                                                   group=get_flashcomm2_o_shared_group(),
-                                                   layer=self.o_proj,
-                                                   prefetch_step=1)
+            from vllm_ascend.distributed.parallel_state import \
+                get_flashcomm2_o_shared_group
+            register_layer_to_shared_weight_series(
+                series_name="o_proj",
+                group=get_flashcomm2_o_shared_group(),
+                layer=self.o_proj,
+                prefetch_step=1)
 
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
@@ -1550,10 +1554,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_no_split.contiguous(), need_gather_q_kv)
 
         if flashcomm2_o_shared_enabled():
-            from vllm_ascend.multistream.context import get_multistream_microbatch_context
+            from vllm_ascend.multistream.context import \
+                get_multistream_microbatch_context
             if get_multistream_microbatch_context() != 0:
                 reach_layer_for_shared_weight_series(self.o_proj)
-                
+
         decode_preprocess_res = None
         prefill_preprocess_res = None
         if has_prefill:
