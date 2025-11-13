@@ -300,8 +300,8 @@ def test_e2e_deepseekv2lite_with_nz():
     _deepseek_v2_lite_torchair_test_fixure(additional_config)
 
 
-# test qwen3 mla and nz mode
-def _qwen3_torchair_test_fixure(
+# test deepseek-v3 mla and nz mode
+def _deepseekv3bf16_torchair_test_fixure(
     additional_config: Dict,
     *,
     tensor_parallel_size=2,
@@ -325,7 +325,7 @@ def _qwen3_torchair_test_fixure(
     additional_config.update(**kwargs)
 
     with VllmRunner(
-            "Qwen/Qwen2.5-0.5B-Instruct",
+            "mlx-community/DeepSeek-V3-3bit-bf16",
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
@@ -339,30 +339,40 @@ def _qwen3_torchair_test_fixure(
             generated_text.strip()) > 0, f"The {i}-th output is null, failed"
 
 
-def test_e2e_qwen3_with_torchair():
+def test_e2e_deepseekv3bf16_with_torchair():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
         },
     }
-    _qwen3_torchair_test_fixure(additional_config)
+    _deepseekv3bf16_torchair_test_fixure(additional_config)
 
 
-def test_e2e_qwen3_with_torchair_ms_mla():
+def test_e2e_deepseekv3bf16_with_torchair_ms_mla():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
             "enabled_multistream_mla": True,
         },
     }
-    _qwen3_torchair_test_fixure(additional_config)
+    _deepseekv3bf16_torchair_test_fixure(additional_config)
 
 
-def test_e2e_qwen3_with_torchair_with_nz():
+def test_e2e_deepseekv3bf16_with_torchair_with_nz():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
             "enable_kv_nz": True,
         },
     }
-    _qwen3_torchair_test_fixure(additional_config)
+    _deepseekv3bf16_torchair_test_fixure(additional_config)
+
+
+def test_e2e_deepseekv3bf16_with_torchair_v1scheduler():
+    additional_config = {
+        "torchair_graph_config": {
+            "enabled": True,
+        },
+    }
+    _deepseekv3bf16_torchair_test_fixure(additional_config,
+                                         use_v1_schduler=True)
