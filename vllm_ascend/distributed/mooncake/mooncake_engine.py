@@ -50,6 +50,8 @@ class MooncakeEngine:
             "load_async", False)
         self.register_buffer = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "register_buffer", False)
+        self.no_redundancy = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "no_redundancy", False)
         self.block_size = vllm_config.cache_config.block_size
         self.current_layer = 0
         # self.use_mla = first_kv_cache_tuple[0].size(
@@ -77,9 +79,12 @@ class MooncakeEngine:
         )
 
         self.use_mla = vllm_config.model_config.is_deepseek_mla
-        if self.use_mla:
+        if not self.no_redundancy:
+            self.need_saves = self.tp_size
+            self.saves_group = [[i] for i in range(self.tp_size)]
+        elif self.use_mla:
             self.need_saves = 1
-            self.saves_group = [[i for i in range(self.tp_size)]]
+            self.saves_group = [list(range(self.tp_size))]
         else:
             self.num_key_value_heads = vllm_config.model_config.hf_config.num_key_value_heads
             if self.num_key_value_heads >= self.tp_size:
@@ -650,8 +655,8 @@ class MooncakeEngine:
     def get_save_tp_ranks(self, req_id) -> List[int]:
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
-        result = [rand.sample(group, 1) for group in self.saves_group]
-        return sum(result, [])
+        result = [rand.choice(group) for group in self.saves_group]
+        return result
 
     def close(self) -> None:
         """Close the cache engine and free all the resources"""

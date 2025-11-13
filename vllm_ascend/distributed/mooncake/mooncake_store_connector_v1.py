@@ -28,6 +28,8 @@ class MooncakeConnectorV1(KVConnectorBase_V1):
 
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "use_layerwise", False)
+        self.no_redundancy = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "no_redundancy", False)
 
         self.kv_caches: dict[str, torch.Tensor] = {}
 
@@ -47,7 +49,8 @@ class MooncakeConnectorV1(KVConnectorBase_V1):
             assert self.connector_worker is not None
             if vllm_config.parallel_config.rank == 0:
                 self.lookup_server = MooncakeLookupServer(
-                    self.connector_worker, vllm_config, self.use_layerwise)
+                    self.connector_worker, vllm_config, self.use_layerwise,
+                    self.no_redundancy)
 
     ############################################################
     # Scheduler Side Methods
@@ -461,6 +464,7 @@ class MooncakeLookupServer:
         mooncake_engine: MooncakeEngine,
         vllm_config: "VllmConfig",
         use_layerwise: bool,
+        no_redundancy: bool,
     ):
         self.decoder = MsgpackDecoder(torch.Tensor)
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
@@ -475,7 +479,7 @@ class MooncakeLookupServer:
         self.mooncake_engine = mooncake_engine
         self.running = True
 
-        if vllm_config.model_config.is_deepseek_mla:
+        if vllm_config.model_config.is_deepseek_mla and no_redundancy:
             self.lookup = self.mooncake_engine.lookup
         else:
             self.lookup = self.mooncake_engine.lookup_scheduler
