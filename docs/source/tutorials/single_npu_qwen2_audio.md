@@ -1,4 +1,4 @@
-# Single NPU (Qwen2-Audio 7B)
+# Single NPU (Qwen2-Audio-7B)
 
 ## Run vllm-ascend on Single NPU
 

@@ -215,8 +215,16 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
                 output,
             ) = param
             seq_lens = forward_context.attn_metadata[key].seq_lens
-            torch.npu.graph_task_update_begin(update_stream, handle)
-            torch_npu._npu_paged_attention(
+
+            # When using FULL_DECODE_ONLY, there are some rare bugs for FULL_DECODE_ONLY
+            # mode with GQA. This is triggered by getting workspace for _npu_paged_attention
+            # in torch_npu. On some rare cases, _npu_paged_attention with smaller seq_lens
+            # might encounter a bigger workspace, while currently we use max_model_len to
+            # calculate max workspace in capturing. So additional get_workspace is added
+            # here to avoid such bugs.
+            # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
+            # replaced by npu_fused_infer_attention_score which does not contain such bugs.
+            workspace = torch_npu._npu_paged_attention_get_workspace(
                 query=query,
                 key_cache=key_cache,
                 value_cache=value_cache,
@@ -225,8 +233,18 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
                 scale_value=scale,
                 block_table=block_table,
                 context_lens=seq_lens,
-                out=output,
-                workspace=graph_params.workspaces.get(runtime_shape))
+                out=output)
+            torch.npu.graph_task_update_begin(update_stream, handle)
+            torch_npu._npu_paged_attention(query=query,
+                                           key_cache=key_cache,
+                                           value_cache=value_cache,
+                                           num_kv_heads=num_kv_heads,
+                                           num_heads=num_heads,
+                                           scale_value=scale,
+                                           block_table=block_table,
+                                           context_lens=seq_lens,
+                                           out=output,
+                                           workspace=workspace)
             torch.npu.graph_task_update_end(update_stream)
 
             event.record(update_stream)
@@ -302,16 +320,28 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
                 graph_params.events[runtime_shape],
         ):
             (q_nope, k_nope, value, num_heads, num_kv_heads, scale,
-             block_table, block_size, actual_seq_lengths_kv, attn_output,
-             softmax_lse, pcp_rank, dcp_rank, dcp_size) = param
-            actual_seq_lengths_kv = forward_context.attn_metadata[
-                key].decode_meta.num_computed_tokens_of_pcp_dcp[:, pcp_rank,
-                                                                dcp_rank]
+             block_table, block_size, actual_seq_lengths_kv,
+             actual_seq_lengths_q, attn_output, softmax_lse, dcp_size,
+             pcp_rank, dcp_rank) = param
+            attn_metadata = forward_context.attn_metadata[key]
+            actual_seq_lengths_kv = attn_metadata.decode_meta.num_computed_tokens_of_pcp_dcp[:,
+                                                                                             pcp_rank,
+                                                                                             dcp_rank]
             pad_length = runtime_shape - len(actual_seq_lengths_kv)
-            pad_tensor = np.zeros(pad_length,
-                                  dtype=actual_seq_lengths_kv.dtype)
-            actual_seq_lengths_kv = np.concatenate(
-                [actual_seq_lengths_kv, pad_tensor])
+            if pad_length > 0:
+                pad_tensor = np.zeros(pad_length,
+                                      dtype=actual_seq_lengths_kv.dtype)
+                actual_seq_lengths_kv = np.concatenate(
+                    [actual_seq_lengths_kv, pad_tensor])
+
+            actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q[:
+                                                                      attn_metadata
+                                                                      .
+                                                                      num_decode_tokens]
+            if (runtime_shape - len(actual_seq_lengths_q)):
+                actual_seq_lengths_q = actual_seq_lengths_q + [
+                    actual_seq_lengths_q[-1]
+                ] * (runtime_shape - len(actual_seq_lengths_q))
             if dcp_size > 1:
                 num_heads = num_heads * dcp_size
 
@@ -323,7 +353,7 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
                 value,
                 num_heads=num_heads,
                 num_key_value_heads=num_kv_heads,
-                input_layout="BSND",
+                input_layout="TND",
                 atten_mask=None,
                 scale=scale,
                 antiquant_mode=0,
@@ -332,6 +362,7 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
                 block_table=block_table,
                 block_size=block_size,
                 actual_seq_lengths_kv=actual_seq_lengths_kv,
+                actual_seq_lengths=actual_seq_lengths_q,
                 workspace=graph_params.workspaces.get(runtime_shape),
                 out=[attn_output, softmax_lse])
             torch.npu.graph_task_update_end(update_stream)
@@ -340,7 +371,7 @@ def update_attn_dcp_pcp_params(update_stream, forward_context, runtime_shape):
 
 
 def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
-                                   runtime_shape, speculative_config):
+                                   runtime_shape):
     graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
     # for each layer's attention op in the graph.
@@ -357,16 +388,14 @@ def update_mla_attn_dcp_pcp_params(update_stream, forward_context,
             decode_meta = forward_context.attn_metadata[key].decode
             seq_len = decode_meta.cp_seq_len
 
-            if speculative_config and speculative_config.method == "deepseek_mtp":
-                spec_multiple = speculative_config.num_speculative_tokens + 1
-                seq_len = seq_len + [0] * (runtime_shape // spec_multiple -
-                                           len(seq_len))
-            else:
-                pad_length = runtime_shape - len(seq_len)
-                pad_tensor = torch.zeros(pad_length,
-                                         dtype=seq_len.dtype,
-                                         device=seq_len.device)
-                seq_len = torch.cat([seq_len, pad_tensor], dim=0)
+            # For pcp + spec decode, we flatten seq_lens
+            # to avoid irregular spec_attn_mask shape,
+            # so there's no need to divide runtime_shape by spec_multiple
+            pad_length = runtime_shape - len(seq_len)
+            pad_tensor = torch.zeros(pad_length,
+                                     dtype=seq_len.dtype,
+                                     device=seq_len.device)
+            seq_len = torch.cat([seq_len, pad_tensor], dim=0)
 
             torch.npu.graph_task_update_begin(update_stream, handle)
 

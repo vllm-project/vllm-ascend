@@ -6,8 +6,6 @@ DeepSeek-V3.2-Exp is a sparse attention model. The main architecture is similar 
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-The `DeepSeek-V3.2-Exp` model is first supported in `vllm-ascend:v0.11.0rc0`.
-
 ## Supported Features
 
 Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -29,28 +27,17 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-:::::{tab-set}
-::::{tab-item} Use deepseek-v3.2 docker image
-
-Currently, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp`(for Atlas 800 A3).
-
-Refer to [using docker](../installation.md#set-up-using-docker) to set up environment using Docker, remember to replace the image with deepseek-v3.2 docker image.
-
-:::{note}
-The image is based on a specific version and will not continue to release new version.
-Only AArch64 architecture are supported currently due to extra operator's installation limitations.
-:::
-
-::::
-::::{tab-item} Use vllm-ascend docker image
-
 You can using our official docker image and install extra operator for supporting `DeepSeek-V3.2-Exp`.
 
 :::{note}
 Only AArch64 architecture are supported currently due to extra operator's installation limitations.
 :::
 
-For `A3` image:
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
 
 1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -66,23 +53,9 @@ wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_
 pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 ```
 
-3. Download and install `MLAPO`.
-
-```shell
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-mlapo-linux.aarch64.run
-# please set a custom install-path, here take `/`vllm-workspace/CANN` as example.
-chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run 
-./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/torch_npu-2.7.1%2Bgitb7c90d0-cp311-cp311-linux_aarch64.whl
-pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/libopsproto_rt2.0.so
-cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
-# Don't forget to replace `/vllm-workspace/CANN/` to the custom path you set before.
-source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
-export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
-```
-
-For `A2` image, you should change all `wget` commands as above, and replace `A3` with `A2` release file.
+::::
+::::{tab-item} A2 series
+:sync: A2
 
 1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -98,32 +71,14 @@ wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/custom_
 pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 ```
 
-3. Download and install `MLAPO`.
-
-```shell
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/CANN-custom_ops-mlapo-linux.aarch64.run
-# please set a custom install-path, here take `/`vllm-workspace/CANN` as example.
-chmod +x ./CANN-custom_ops-mlapo-linux.aarch64.run 
-./CANN-custom_ops-mlapo-linux.aarch64.run --quiet --install-path=/vllm-workspace/CANN
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/torch_npu-2.7.1%2Bgitb7c90d0-cp311-cp311-linux_aarch64.whl
-pip install torch_npu-2.7.1+gitb7c90d0-cp311-cp311-linux_aarch64.whl
-wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a2/libopsproto_rt2.0.so
-cp libopsproto_rt2.0.so /usr/local/Ascend/ascend-toolkit/8.2.RC1/opp/built-in/op_proto/lib/linux/aarch64/libopsproto_rt2.0.so
-# Don't forget to replace `/vllm-workspace/CANN/` to the custom path you set before.
-source /vllm-workspace/CANN/vendors/customize/bin/set_env.bash
-export LD_PRELOAD=/vllm-workspace/CANN/vendors/customize/op_proto/lib/linux/aarch64/libcust_opsproto_rt2.0.so:${LD_PRELOAD}
-```
-
-::::
-::::{tab-item} Build from source
-
-You can build all from source.
-
-- Install `vllm-ascend`, refer to [set up using python](../installation.md#set-up-using-python).
-- Install extra operator for supporting `DeepSeek-V3.2-Exp`, refer to `Use vllm-ascend docker image` tab.
-
 ::::
 :::::
+
+In addition, if you don't want to use the docker image as above, you can also build all from source:
+
+- Install `vllm-ascend` from source, refer to [installation](../installation.md).
+
+- Install extra operator for supporting `DeepSeek-V3.2-Exp`, refer to the above tab.
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -162,7 +117,10 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 - `DeepSeek-V3.2-Exp-w8a8`: require 2 Atlas 800 A2 (64G × 8).
 
 :::::{tab-set}
+:sync-group: install
+
 ::::{tab-item} DeepSeek-V3.2-Exp A3 series
+:sync: A3
 
 Run the following scripts on two nodes respectively.
 
@@ -251,6 +209,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 
 ::::
 ::::{tab-item} DeepSeek-V3.2-Exp-W8A8 A2 series
+:sync: A2
 
 Run the following scripts on two nodes respectively.
 

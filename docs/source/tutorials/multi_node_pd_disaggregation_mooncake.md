@@ -57,23 +57,14 @@ for i in {0..15}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
-git clone https://github.com/kvcache-ai/Mooncake.git
+git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 ```
 
-Update and install Python
-
-```shell
-apt-get update
-apt-get install python3
-```
-
-Modify Mooncake compilation option
+(Optional) Replace go install url if the network is poor
 
 ```shell
 cd Mooncake
-vi mooncake-common/common.cmake
-# find this row and set USE_ASCEND_DIRECT ON.
-option(USE_ASCEND_DIRECT "option for using ascend npu with adxl engine" ON)
+sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
 ```
 
 Install mpi
@@ -93,7 +84,7 @@ Compile and install
 ```shell
 mkdir build
 cd build
-cmake ..
+cmake .. -USE_ASCEND_DIRECT=ON
 make -j
 make install
 ```
@@ -105,8 +96,10 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
 ### Layerwise
 
 :::::{tab-set}
+:sync-group: nodes
 
 ::::{tab-item} Prefiller node 1
+:sync: prefill node1
 
 ```shell
 unset ftp_proxy
@@ -116,7 +109,6 @@ export HCCL_IF_IP=192.0.0.1
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -162,6 +154,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Prefiller node 2
+:sync: prefill node2
 
 ```shell
 unset ftp_proxy
@@ -171,7 +164,6 @@ export HCCL_IF_IP=192.0.0.2
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -217,6 +209,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 1 (master Node)
+:sync: decoder node1
 
 ```shell
 unset ftp_proxy
@@ -226,7 +219,6 @@ export HCCL_IF_IP=192.0.0.3
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -274,6 +266,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 2 (primary node)
+:sync: decoder node2
 
 ```shell
 unset ftp_proxy
@@ -283,7 +276,6 @@ export HCCL_IF_IP=192.0.0.4
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -336,8 +328,10 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ### Non-layerwise
 
 :::::{tab-set}
+:sync-group: nodes
 
 ::::{tab-item} Prefiller node 1
+:sync: prefill node1
 
 ```shell
 unset ftp_proxy
@@ -347,7 +341,6 @@ export HCCL_IF_IP=192.0.0.1
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -393,6 +386,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Prefiller node 2
+:sync: prefill node2
 
 ```shell
 unset ftp_proxy
@@ -402,7 +396,6 @@ export HCCL_IF_IP=192.0.0.2
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -448,6 +441,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 1 (master node)
+:sync: decoder node1
 
 ```shell
 unset ftp_proxy
@@ -457,7 +451,6 @@ export HCCL_IF_IP=192.0.0.3
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
@@ -505,6 +498,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 2 (primary Node)
+:sync: decoder node2
 
 ```shell
 unset ftp_proxy
@@ -514,7 +508,6 @@ export HCCL_IF_IP=192.0.0.4
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10

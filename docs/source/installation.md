@@ -5,7 +5,7 @@ This document describes how to install vllm-ascend manually.
 ## Requirements
 
 - OS: Linux
-- Python: >= 3.9, < 3.12
+- Python: >= 3.10, < 3.12
 - A hardware with Ascend NPU. It's usually the Atlas 800 A2 series.
 - Software:
 
@@ -136,11 +136,7 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
    :substitutions:
 
 # Install vllm-project/vllm. The newest supported version is |vllm_version|.
-# Because the version |vllm_version| has not been archived in pypi, so you need to install from source.
-git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
-cd vllm
-VLLM_TARGET_DEVICE=empty pip install -v -e .
-cd ..
+pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from pypi.
 pip install vllm-ascend==|pip_vllm_ascend_version|
@@ -309,7 +305,10 @@ First, check physical layer connectivity, then verify each node, and finally ver
 Execute the following commands on each node in sequence. The results must all be `success` and the status must be `UP`:
 
 :::::{tab-set}
+:sync-group: multi-node
+
 ::::{tab-item} A2 series
+:sync: A2
 
 ```bash
  # Check the remote switch ports
@@ -328,6 +327,7 @@ Execute the following commands on each node in sequence. The results must all be
 
 ::::
 ::::{tab-item} A3 series
+:sync: A3
 
 ```bash
  # Check the remote switch ports
@@ -350,7 +350,10 @@ Execute the following commands on each node in sequence. The results must all be
 #### Interconnect Verification:
 ##### 1. Get NPU IP Addresses
 :::::{tab-set}
+:sync-group: multi-node
+
 ::::{tab-item} A2 series
+:sync: A2
 
 ```bash
 for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
@@ -358,6 +361,7 @@ for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
 
 ::::
 ::::{tab-item} A3 series
+:sync: A3
 
 ```bash
 for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
@@ -380,7 +384,10 @@ Using vLLM-ascend official container is more efficient to run multi-node environ
 Run the following command to start the container in each node (You should download the weight to /root/.cache in advance):
 
 :::::{tab-set}
+:sync-group: multi-node
+
 ::::{tab-item} A2 series
+:sync: A2
 
 ```{code-block} bash
    :substitutions:
@@ -421,6 +428,7 @@ docker run --rm \
 
 ::::
 ::::{tab-item} A3 series
+:sync: A3
 
 ```{code-block} bash
    :substitutions:
@@ -469,7 +477,3 @@ docker run --rm \
 
 ::::
 :::::
-
-### Verify installation
-
-TODO
