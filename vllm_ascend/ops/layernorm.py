@@ -114,7 +114,7 @@ class AscendRMSNorm(RMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
-        if residual is not None and residual.numel() > 0:
+        if residual is not None:
             assert x.size(0) == residual.size(0)
             x, residual = _addrmsnorm_forward_oot(
                 self, x, residual, self.next_need_quant_fusion_linear,
