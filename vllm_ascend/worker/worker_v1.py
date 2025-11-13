@@ -288,13 +288,13 @@ class NPUWorker(WorkerBase):
                     all_gather_group=get_tp_group()))
 
         if vllm_version_is("0.11.0"):
-            output = self.model_runner.execute_model_0_11_0(scheduler_output,
-                                                           intermediate_tensors)
+            output = self.model_runner.execute_model_0_11_0(
+                scheduler_output, intermediate_tensors)
             if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
                 return output
         else:
             output = self.model_runner.execute_model(scheduler_output,
-                                                    intermediate_tensors)
+                                                     intermediate_tensors)
             if isinstance(output, (ModelRunnerOutput, NoneType)):
                 return output
 

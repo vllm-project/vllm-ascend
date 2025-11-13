@@ -2573,14 +2573,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logits = model_output_broadcast_data["logits"]
 
             # Apply structured output bitmasks if present
-            if vllm_version_is("0.11.0"):
-                if scheduler_output.grammar_bitmask is not None:
-                    logits = self.apply_grammar_bitmask(
-                        scheduler_output, logits)
-            else:
-                if scheduler_output.structured_output_request_ids:
-                    logits = self.apply_grammar_bitmask(
-                        scheduler_output, logits)
+            if scheduler_output.grammar_bitmask is not None:
+                logits = self.apply_grammar_bitmask_0_11_0(
+                    scheduler_output, logits)
 
         with ProfileExecuteDuration().capture_async("Sample"):
             # Sample the next token and get logprobs if needed.
