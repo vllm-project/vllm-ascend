@@ -22,8 +22,6 @@ from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 
-from vllm_ascend.utils import dispose_tensor
-
 
 def _addrmsnorm_forward_oot(
     self,
@@ -76,12 +74,8 @@ def _addrmsnorm_forward_oot(
             x, _ = torch_npu.npu_rms_norm(x, self.weight,
                                           self.variance_epsilon)
         else:
-            previous_x = x
-            previous_residual = residual
             x, _, residual = torch_npu.npu_add_rms_norm(
                 x, residual, self.weight, self.variance_epsilon)
-            dispose_tensor(previous_x)
-            dispose_tensor(previous_residual)
         if bias is not None:
             x.add_(bias)
     torch.ops.vllm.maybe_wait_prefetch_done(x)
@@ -114,7 +108,7 @@ class AscendRMSNorm(RMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
-        if residual is not None and residual.numel() > 0:
+        if residual is not None:
             assert x.size(0) == residual.size(0)
             x, residual = _addrmsnorm_forward_oot(
                 self, x, residual, self.next_need_quant_fusion_linear,
