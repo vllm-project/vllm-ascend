@@ -110,7 +110,7 @@ class AscendRMSNorm(RMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
-        if residual is not None:
+        if residual is not None and residual.numel() > 0:
             assert x.size(0) == residual.size(0)
             previous_x = x
             previous_residual = residual
