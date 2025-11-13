@@ -242,7 +242,9 @@ private:
 
 // declare all dtype kernel
 SGMV_SHRINK_TYPE_DECLARE(half);
-SGMV_SHRINK_TYPE_DECLARE(bfloat16_t);
+#ifndef __CCE_AI_CORE__ || __CCE_AI_CORE__ >= 200
+    SGMV_SHRINK_TYPE_DECLARE(bfloat16_t);
+#endif
 
 namespace vllm_ascend {
 extern void sgmv_shrink_impl(AscendType type, void* stream, void* x, void* weight, 
@@ -258,11 +260,13 @@ extern void sgmv_shrink_impl(AscendType type, void* stream, void* x, void* weigh
                                                         numTokensPerCore, inputHiddenDim, maxLoRARank,
                                                         scale);
     } else if (type == AscendType::BF16) {
-        sgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize,
+        #ifndef __CCE_AI_CORE__ || __CCE_AI_CORE__ >= 200
+            sgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, loraIndices, loraIndicesSize,
                                                               seqLen, seqLenSize,
                                                               y, batchSize,
                                                               numTokensPerCore, inputHiddenDim, maxLoRARank,
                                                               scale);
+        #endif
     } else {
         return;
     }
