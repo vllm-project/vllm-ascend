@@ -15,15 +15,13 @@ spec:
       spec:
         containers:
           - name: vllm-leader
-            image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11") }}
+            image: {{ image | default("swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3") }}
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: WORKSPACE
-                value: "/root/workspace"
+                value: "/vllm-workspace"
               # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
-              - name: VLLM_VERSION
-                value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
@@ -75,15 +73,13 @@ spec:
       spec:
         containers:
           - name: vllm-worker
-            image: {{ image | default("m.daocloud.io/quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11") }}
+            image: {{ image | default("swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3") }}
             env:
               - name: CONFIG_YAML_PATH
                 value: {{ config_file_path | default("DeepSeek-V3.yaml") }}
               - name: WORKSPACE
-                value: "/root/workspace"
+                value: "/vllm-workspace"
               # Set vLLM version and vLLM-Ascend version here, once there is a new release, update here.
-              - name: VLLM_VERSION
-                value: "v0.11.0"
               - name: VLLM_ASCEND_VERSION
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: VLLM_ASCEND_REMOTE_URL
