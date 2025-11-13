@@ -35,6 +35,50 @@ print_error() {
     exit 1
 }
 
+show_vllm_info() {
+    cd "$WORKSPACE"
+    echo "Installed vLLM-related Python packages:"
+    pip list | grep vllm || echo "No vllm packages found."
+
+    echo ""
+    echo "============================"
+    echo "vLLM Git information"
+    echo "============================"
+    cd vllm
+    if [ -d .git ]; then
+    echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+    echo "Commit hash: $(git rev-parse HEAD)"
+    echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+    echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+    echo "Message:     $(git log -1 --pretty=format:'%s')"
+    echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+    echo "Remote:      $(git remote -v | head -n1)"
+    echo ""
+    else
+    echo "No .git directory found in vllm"
+    fi
+    cd ..
+
+    echo ""
+    echo "============================"
+    echo "vLLM-Ascend Git information"
+    echo "============================"
+    cd vllm-ascend
+    if [ -d .git ]; then
+    echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+    echo "Commit hash: $(git rev-parse HEAD)"
+    echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+    echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+    echo "Message:     $(git log -1 --pretty=format:'%s')"
+    echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+    echo "Remote:      $(git remote -v | head -n1)"
+    echo ""
+    else
+    echo "No .git directory found in vllm-ascend"
+    fi
+    cd ..
+}
+
 check_npu_info() {
     echo "====> Check NPU info"
     npu-smi info
@@ -78,6 +122,7 @@ run_tests_with_log() {
 main() {
     check_npu_info
     check_and_config
+    show_vllm_info
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }
