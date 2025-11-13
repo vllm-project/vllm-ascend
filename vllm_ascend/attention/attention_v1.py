@@ -278,25 +278,7 @@ class AscendAttentionMetadataBuilder:
         AscendAttentionMetadataBuilder.reorder_batch_threshold = self.decode_threshold
 
         scheduler_config = vllm_config.scheduler_config
-        self.block_size = vllm_config.cache_config.block_size
-        self.max_blocks = (vllm_config.model_config.max_model_len +
-                           self.block_size - 1) // self.block_size
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
-        if self.chunked_prefill_enabled:
-            self.chunked_prefill_workspace_size = min(
-                # Max sure there is enough for 8 full length request or at least
-                # 4 pages of cache per request
-                max(8 * self.model_config.max_model_len,
-                    4 * scheduler_config.max_num_seqs * self.block_size),
-                128 * 1024)
-            assert self.chunked_prefill_workspace_size >= \
-                   scheduler_config.max_num_seqs * self.block_size
-            self.chunked_prefill_workspace = torch.empty(
-                (self.chunked_prefill_workspace_size,
-                 self.model_config.get_head_size()),
-                dtype=self.model_config.dtype,
-                device=device,
-            )
 
     def reorder_batch(self, input_batch,
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -504,10 +486,10 @@ class AscendAttentionMetadataBuilder:
         assert local_context_lens_allranks is not None
         if len(local_context_lens_allranks) == 0:
             return []
-        mask_for_non_zero_chunk = [(req.sum() > 0).item()
+        chunked_req_mask = [(req.sum() > 0).item()
                                    for req in local_context_lens_allranks
                                    if req is not None]
-        return mask_for_non_zero_chunk
+        return chunked_req_mask
 
     def build_for_graph_capture(
         self,
