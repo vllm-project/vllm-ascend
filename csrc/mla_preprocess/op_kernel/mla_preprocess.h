@@ -49,7 +49,6 @@ constexpr uint8_t CACHE_MODE_INT8_NZCACHE = 2;  // high performance KV NZ format
 constexpr uint8_t CACHE_MODE_NZCACHE = 3;
 
 // pp matmul
-constexpr uint32_t HIDDTEN_STATE = 7168;
 constexpr uint32_t FLOAT_BLOCK_SIZE = 64;
 constexpr uint32_t HALF_BLOCK_SIZE = 64;
 constexpr uint32_t HALF_VECTOR_SIZE = 64;

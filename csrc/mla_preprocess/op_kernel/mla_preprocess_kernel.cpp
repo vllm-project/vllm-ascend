@@ -41,6 +41,7 @@ extern "C" __global__ __aicore__ void mla_preprocess(
 
     mlaTilingData.tilingKey = tilingData->tilingKey;
     mlaTilingData.n = tilingData->n;
+    mlaTilingData.hiddenStateDim = tilingData->hiddenStateDim;
 
     mlaTilingData.mm1.numBatch = tilingData->mm1.numBatch;
     mlaTilingData.mm1.m = tilingData->mm1.m;

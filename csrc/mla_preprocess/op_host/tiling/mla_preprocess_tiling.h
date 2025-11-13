@@ -90,6 +90,9 @@ struct MlaTilingData {
     uint32_t esqHeadTail{0};
     uint32_t esqColLoop{0};
     uint32_t esqColTail{0};
+
+    // hidden state dimension
+    uint32_t hiddenStateDim{7168};
 };
 
 #endif  // MLAPREPROCESS_TILING_H
