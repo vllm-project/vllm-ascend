@@ -7,6 +7,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.ops.fused_moe.moe_comm_method import (AllGatherCommImpl,
                                                        AlltoAllCommImpl,
                                                        MC2CommImpl)
+from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
 
 
 class TestMoECommMethod(TestBase):
@@ -67,7 +68,7 @@ class TestMoECommMethod(TestBase):
 
         # Verify prepare was called with correct arguments
         mock_pf_instance.prepare.assert_called_once_with(
-            hidden_states, router_logits, False, False)
+            hidden_states, router_logits, False, False, QuantType.NONE)
 
         # Test finalize method
         comm_impl.finalize(h_out,
@@ -115,7 +116,7 @@ class TestMoECommMethod(TestBase):
 
         # Verify prepare was called with correct arguments
         mock_pf_instance.prepare.assert_called_once_with(
-            hidden_states, router_logits, False, False)
+            hidden_states, router_logits, False, False, QuantType.NONE)
 
         # Test finalize method
         comm_impl.finalize(h_out,
@@ -165,7 +166,7 @@ class TestMoECommMethod(TestBase):
 
         # Verify prepare was called with correct arguments
         mock_pf_instance.prepare.assert_called_once_with(
-            hidden_states, router_logits, False, False)
+            hidden_states, router_logits, False, False, QuantType.NONE)
 
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_current_vllm_config")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.get_forward_context")
