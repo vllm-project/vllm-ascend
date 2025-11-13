@@ -88,6 +88,7 @@ import argparse
 import asyncio
 import functools
 import heapq
+import ipaddress
 import json
 import os
 import sys
@@ -117,7 +118,13 @@ class ServerState:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.url = f'http://{host}:{port}/v1'
+        ip = ipaddress.ip_address(self.host)
+        if isinstance(ip, ipaddress.IPv4Address):
+            self.url = f'http://{host}:{port}/v1'
+        elif isinstance(ip, ipaddress.IPv6Address):
+            self.url = f'http://[{host}]:{port}/v1'
+        else:
+            raise RuntimeError(f"Invild host IP address {ip}")
         self.client = httpx.AsyncClient(timeout=None,
                                         base_url=self.url,
                                         limits=httpx.Limits(

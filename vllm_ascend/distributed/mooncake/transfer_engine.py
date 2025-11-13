@@ -1,3 +1,4 @@
+import ipaddress
 import threading
 from typing import Optional
 
@@ -9,6 +10,9 @@ _global_te_lock = threading.Lock()
 
 def get_global_te(hostname: str, device_name: Optional[str]):
     global _global_te
+    ip = ipaddress.ip_address(hostname)
+    if isinstance(ip, ipaddress.IPv6Address):
+        raise RuntimeError("The backend if mooncake's Ascend Direct Xfer Library currcenly dose not support IPv6.")
     if _global_te is None:
         with _global_te_lock:
             # Double-Checked Locking
