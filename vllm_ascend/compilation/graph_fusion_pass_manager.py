@@ -37,7 +37,6 @@ class GraphFusionPassManager:
         for pass_ in self.passes:
             if pass_.is_applicable(**kwargs):
                 pass_(graph)
-        # graph.recompile() # 这句话是必写吗
         return graph
 
     def add(self, pass_: VllmInductorPass):

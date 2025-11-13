@@ -16,14 +16,16 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Optional
 import functools
+from typing import Any, Callable, Optional
+
 import torch
 import torch.fx as fx
-from vllm.compilation.compiler_interface import CompilerInterface
+import torch.utils._pytree as pytree
 from torch._dynamo.backends.common import aot_autograd
 from torch._inductor.utils import output_node
-import torch.utils._pytree as pytree
+from vllm.compilation.compiler_interface import CompilerInterface
+
 
 def get_dtype_from_args(args: list[Any]) -> list[torch.dtype]:
     """
@@ -51,23 +53,20 @@ def graph_returns_tuple(gm: fx.GraphModule) -> bool:
     """True if a FX graph returns a tuple"""
     if not isinstance(gm, fx.GraphModule):
         return True  # can't check this, assume true
-    (rv,) = output_node(gm).args
+    (rv, ) = output_node(gm).args
     if isinstance(rv, (list, tuple)):
         return True
-    if (
-        isinstance(rv, torch.fx.node.Node)
-        and hasattr(rv.target, "_schema")
-        and len(rv.target._schema.returns) > 1
-        and all(str(ret.type) == "Tensor" for ret in rv.target._schema.returns)
-    ):
+    if (isinstance(rv, torch.fx.node.Node) and hasattr(rv.target, "_schema")
+            and len(rv.target._schema.returns) > 1 and all(
+                str(ret.type) == "Tensor"
+                for ret in rv.target._schema.returns)):
         # for graphs whose result is one node with multiple outputs
         return True
     return False
-    
-    
+
+
 def make_graph_return_tuple(
-    gm: fx.GraphModule,
-) -> tuple[Any, fx.GraphModule]:
+    gm: fx.GraphModule, ) -> tuple[Any, fx.GraphModule]:
     """
     Mutate gm so it returns a tuple.  This is only needed for graphs
     not created by torchdynamo that return non-tuples.
@@ -76,18 +75,19 @@ def make_graph_return_tuple(
         gm: The modified GraphModule that returns a tuple
     """
     node = output_node(gm)
-    (rv,) = node.args
+    (rv, ) = node.args
     rv, spec = pytree.tree_flatten(rv)
     with gm.graph.inserting_before(node):
         gm.graph.output(rv)
     gm.graph.erase_node(node)
     assert graph_returns_tuple(gm)
-    
+
     return spec, gm
 
 
 class AscendAdaptor(CompilerInterface):
     name = "AscendAdaptor"
+
     def compile(
         self,
         graph: fx.GraphModule,
@@ -96,6 +96,7 @@ class AscendAdaptor(CompilerInterface):
         runtime_shape: Optional[int] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
+
         def compile_inner(graph, example_inputs):
             current_pass_manager = compiler_config["graph_fusion_manager"]
             arg_dtypes = get_dtype_from_args(example_inputs)
@@ -113,12 +114,16 @@ class AscendAdaptor(CompilerInterface):
         else:
             spec = None
 
-        compiled_fn = aot_autograd(fw_compiler=compile_inner)(graph, example_inputs)
+        compiled_fn = aot_autograd(fw_compiler=compile_inner)(graph,
+                                                              example_inputs)
 
         if spec is not None:
+
             @functools.wraps(compiled_fn)
             def wrapper(*args, **kwargs):
-                return pytree.tree_unflatten(compiled_fn(*args, **kwargs), spec)
+                return pytree.tree_unflatten(compiled_fn(*args, **kwargs),
+                                             spec)
+
             return wrapper, None
         else:
             return compiled_fn, None
