@@ -294,6 +294,9 @@ class ExecuteModelState(NamedTuple):
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     kv_connector_output: KVConnectorOutput | None
+    attn_metadata: dict[str, Any]
+    positions: torch.Tensor
+
 
 
 class NPUModelRunner(LoRAModelRunnerMixin):
@@ -2554,6 +2557,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     sample_hidden_states,
                     aux_hidden_states,
                     kv_connector_output,
+                    attn_metadata,
+                    positions,
                 )
         return None
 
@@ -2574,6 +2579,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             sample_hidden_states,
             aux_hidden_states,
             kv_connector_output,
+            attn_metadata,
+            positions,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
