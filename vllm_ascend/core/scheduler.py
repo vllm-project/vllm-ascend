@@ -499,8 +499,6 @@ class AscendScheduler(Scheduler):
             finished_req_ids=self.finished_req_ids,  # type: ignore
             free_encoder_mm_hashes=self.encoder_cache_manager.
             get_freed_mm_hashes(),
-            structured_output_request_ids={},
-            grammar_bitmask=None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
