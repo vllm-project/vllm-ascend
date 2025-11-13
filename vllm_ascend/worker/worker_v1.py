@@ -18,8 +18,8 @@
 #
 
 import copy
-from typing import Optional, Union
 from types import NoneType
+from typing import Optional
 
 import torch
 import torch.nn as nn

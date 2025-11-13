@@ -282,6 +282,7 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
         output.sampled_token_ids = valid_sampled_token_ids
         return output
 
+
 class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
@@ -293,6 +294,7 @@ class ExecuteModelState(NamedTuple):
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     kv_connector_output: KVConnectorOutput | None
+
 
 class NPUModelRunner(LoRAModelRunnerMixin):
 
@@ -2195,9 +2197,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                               grammar_bitmask.shape[1]))
         cumulative_index = 0
         if vllm_version_is("0.11.0"):
-            seq = sorted(
-                grammar_output.structured_output_request_ids.items(),
-                key=lambda x: x[1])
+            seq = sorted(grammar_output.structured_output_request_ids.items(),
+                         key=lambda x: x[1])
             for req_id, _ in seq:
                 logit_index = struct_out_req_batch_indices[req_id]
                 num_spec_tokens = len(
@@ -2383,10 +2384,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors] | None:
         if self.execute_model_state is not None:
-            raise RuntimeError(
-                "State error: sample_tokens() must be called "
-                "after execute_model() returns None."
-            )
+            raise RuntimeError("State error: sample_tokens() must be called "
+                               "after execute_model() returns None.")
 
         with ProfileExecuteDuration().capture_async("prepare input"):
             self._update_states(scheduler_output)
@@ -2515,7 +2514,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
-     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
             return None  # noqa
@@ -2535,8 +2534,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
-            logits = self.apply_grammar_bitmask(
-                scheduler_output, grammar_output, logits)
+            logits = self.apply_grammar_bitmask(scheduler_output,
+                                                grammar_output, logits)
 
         with ProfileExecuteDuration().capture_async("Sample"):
             # Sample the next token and get logprobs if needed.
@@ -3782,10 +3781,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in attn_backend_layers.items()
             }
 
-        def create_attn_groups(
-            attn_backends_map: dict[AttentionBackend, list[str]],
-            kv_cache_group_id: int
-        ) -> list[AttentionGroup]:
+        def create_attn_groups(attn_backends_map: dict[AttentionBackend,
+                                                       list[str]],
+                               kv_cache_group_id: int) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
             for (attn_backend,
                  kv_cache_spec), layer_names in attn_backends_map.items():
@@ -3796,15 +3794,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.vllm_config,
                     self.device,
                 ))
-                attn_group = AttentionGroup(attn_backend,
-                                            layer_names,
-                                            kv_cache_spec,
-                                            kv_cache_group_id,
+                attn_group = AttentionGroup(attn_backend, layer_names,
+                                            kv_cache_spec, kv_cache_group_id,
                                             attn_metadata_builders)
                 attn_groups.append(attn_group)
             return attn_groups
 
-        for i, kv_cache_group_spec in enumerate(kv_cache_config.kv_cache_groups):
+        for i, kv_cache_group_spec in enumerate(
+                kv_cache_config.kv_cache_groups):
             attn_backends = get_attn_backends_for_group(  # type: ignore
                 kv_cache_group_spec)
             self.attn_groups.append(create_attn_groups(attn_backends, i))
