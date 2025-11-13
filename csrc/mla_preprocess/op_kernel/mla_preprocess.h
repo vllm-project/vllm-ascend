@@ -102,6 +102,7 @@ constexpr uint32_t KEY_FP16_CACHEMODE_0_QUANTMODE_0 = 0;
 constexpr uint32_t KEY_FP16_CACHEMODE_1_QUANTMODE_0 = 1;
 constexpr uint32_t KEY_BF16_CACHEMODE_0_QUANTMODE_0 = 256;
 constexpr uint32_t KEY_BF16_CACHEMODE_1_QUANTMODE_0 = 257;
+constexpr uint32_t KEY_BF16_CACHEMODE_2_QUANTMODE_0 = 258;
 constexpr uint32_t KEY_BF16_CACHEMODE_3_QUANTMODE_0 = 259;
 
 enum class QuantMode : int32_t {
