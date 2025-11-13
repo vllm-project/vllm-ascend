@@ -135,9 +135,20 @@ class AscendConfig:
         self.SLO_limits_for_dynamic_batch = additional_config.get(
             "SLO_limits_for_dynamic_batch", -1)
         from vllm_ascend.utils import \
-            get_flashcomm2_oproj_tp_size_and_validate_config
-        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(
+            get_flashcomm2_config_and_validate
+        self.flashcomm2_oproj_tensor_parallel_size, self.flashcomm2_oproj_shared = get_flashcomm2_config_and_validate(
             self, vllm_config)
+        
+        self.flashcomm2_oproj_shared = additional_config.get(
+            "flashcomm2_oproj_shared", None)
+        if self.flashcomm2_oproj_shared:
+            if self.flashcomm2_oproj_tensor_parallel_size is None:
+                raise AssertionError(
+                    f"flashcomm2_oproj_shared must be enabled simultaneously with flashcomm2_oproj_tensor_parallel_size"
+                )
+            logger.info(
+                f"Enable Flashcomm2 with flashcomm2_oproj_shared"
+            )
 
 
 class TorchairGraphConfig:

@@ -941,10 +941,11 @@ def flashcomm2_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
 
 
-def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
+def get_flashcomm2_config_and_validate(ascend_config,
                                                      vllm_config):
     flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
     global_tp_size = vllm_config.parallel_config.tensor_parallel_size
+    flashcomm2_oproj_shared = envs_ascend.VLLM_ASCEND_FLASHCOMM2_OSHARED
 
     if not flashcomm2_enable():
         logger.info("FLASHCOMM2 not enable.")
@@ -979,8 +980,19 @@ def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
             "with additional support for hybrid deployment scenarios. "
             "It is not applicable in D-scenario environments.")
 
-    return flashcomm2_oproj_tp_size
+    if flashcomm2_oproj_shared:
+            if flashcomm2_oproj_tp_size is None:
+                raise AssertionError(
+                    f"flashcomm2_oproj_shared must be enabled simultaneously with flashcomm2_oproj_tensor_parallel_size"
+                )
+            logger.info(
+                f"Enable Flashcomm2 with flashcomm2_oproj_shared"
+            )
 
+    return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
+
+def flashcomm2_o_shared_enabled() -> bool:
+    return get_ascend_config().flashcomm2_oproj_shared
 
 def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
     # Reorganize batch_ids so that, after the all2all and reduce-scatter operation, each batch_id corresponds to the rank_id within the DP domain.

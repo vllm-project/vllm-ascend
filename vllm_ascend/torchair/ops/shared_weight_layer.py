@@ -5,6 +5,7 @@ import torch
 import torch.distributed as dist
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.models.utils import extract_layer_index
 
 
 def dispose_tensor(x: torch.Tensor):
@@ -15,7 +16,8 @@ def dispose_tensor(x: torch.Tensor):
 class LayerMetadata:
     """Metadata for a layer.
     """
-    layer: Optional[LinearBase]  # The layer object.
+    layer_idx: int  # The index of the layer.
+    layer: LinearBase  # The layer object.
     post_method: Callable[[
         torch.nn.Module
     ], None]  # The `process_weights_after_loading` method from the quant method.
@@ -54,8 +56,17 @@ class SeriesMetadata:
         # This method only needs to be called once per series.
         if self.shared_windows:
             return
+
+        self.layers.sort(key=lambda x: x.layer_idx)
+        self.num_layers = len(self.layers)
+        assert self.num_layers > 0, "No layers in the series"
+        assert self.prefetch_step >= 0 and self.prefetch_step <= self.num_layers - 2, "prefetch_step must be in [0, num_layers - 2]"
+        self.start_layer = self.layers[0].layer_idx
+        self.end_layer = self.layers[-1].layer_idx + 1
+
         for layer_idx in range(self.start_layer, self.end_layer):
             layer = self.layers[layer_idx - self.start_layer]
+            assert layer.layer_idx == layer_idx, "layer_idx must be consecutive"
             is_source = self.is_source(layer_idx)
             # If the weight uses dummy weight, make a copy temporary such that the post method call won't affect other layers which also uses dummy weight.
             if not is_source:
@@ -65,7 +76,6 @@ class SeriesMetadata:
                            src=self.group.ranks[layer_idx %
                                                 self.group.world_size],
                            group=self.group.device_group)
-            assert layer.layer is not None
             # Call `process_weights_after_loading` from the quant method.
             layer.post_method(layer.layer)
             step = layer_idx - self.start_layer
@@ -93,7 +103,7 @@ class SeriesMetadata:
                 # When the layer not intended to be stored in this device, dispose the tensor.
                 if not is_source:
                     dispose_tensor(layer.weight)
-
+        # Dispose the dummy tensor since it's no longer needed.
         dispose_tensor(self.dummy_weight)
 
     def reach_layer(self, layer_idx: int):
@@ -165,6 +175,8 @@ After loading the model, you must call `post_process_after_loading_for_shared_we
 During execution, each time a new layer is reached, you must call `reach_layer_for_shared_weight_series(layer)` for that layer to prefetch the weights. The argument `prefetch_step` is a non-negative integer k that manages asynchronous weight prefetching. Each call to `reach_layer_for_shared_weight_series(current_layer)` method will trigger an asynchronous prefetch for the weights of the k-th subsequent layer after `current_layer` within the series.
 
 Note: The layers are managed as a circular buffer. The index of the layer to prefetch is determined by the formula:
+- start_layer is the index of the first layer in the series (inclusive).
+- end_layer is the index of the last layer in the series (exclusive). Thus, the series includes all layers with indices in the range [start_layer, end_layer).
 - total_layers = end_layer - start_layer
 - prefetch_layer_idx = (layer_idx + prefetch_step) % total_layers + start_layer
 
@@ -173,9 +185,6 @@ To hold the weights for the current layer and the k prefetched layers, a pool of
 Arguments:
     series_name: This name identifies which series this layer belongs to.
     group: The group coordinator for handling asynchronous communications. It is recommended to create a new group coordinator for each new series.
-    start_layer: The index of the first layer in the series (inclusive).
-    end_layer: The index of the last layer in the series (exclusive). Thus, the series includes all layers with indices in the range [start_layer, end_layer).
-    layer_idx: The index of the current layer.
     layer: The linear layer object to register.
     prefetch_step: An integer that manages asynchronous weight prefetching. Setting it to 0 or 1 can cover most cases.
 """
@@ -184,43 +193,33 @@ Arguments:
 def register_layer_to_shared_weight_series(
     series_name: str,
     group: GroupCoordinator,
-    start_layer: int,
-    end_layer: int,
-    layer_idx: int,
     layer: LinearBase,
     prefetch_step: int = 1,
 ):
     global _series_dict
     if series_name not in _series_dict:
-        num_layers = end_layer - start_layer
-        assert num_layers > 0
-        assert prefetch_step >= 0 and prefetch_step <= num_layers - 2
         _series_dict[series_name] = SeriesMetadata(
             group=group,
-            start_layer=start_layer,
-            end_layer=end_layer,
-            num_layers=num_layers,
+            start_layer=0,
+            end_layer=0,
+            num_layers=0,
             prefetch_step=prefetch_step,
             dummy_weight=torch.empty_like(layer.weight),
-            layers=[
-                LayerMetadata(
-                    layer=None,
-                    post_method=lambda layer: None,
-                    weight=torch.empty([]),
-                    window_idx=-1,
-                ) for _ in range(num_layers)
-            ],
+            layers=[],
             shared_windows=[],
             window_offset=prefetch_step,
         )
     series = _series_dict[series_name]
     assert layer.quant_method is not None
-    series.layers[layer_idx - start_layer] = LayerMetadata(
-        layer=layer,
-        post_method=layer.quant_method.process_weights_after_loading,
-        weight=layer.weight,
-        window_idx=-1,
-    )
+    layer_idx = extract_layer_index(layer.prefix)
+    series.layers.append(
+        LayerMetadata(
+            layer_idx=layer_idx,
+            layer=layer,
+            post_method=layer.quant_method.process_weights_after_loading,
+            weight=layer.weight,
+            window_idx=-1,
+        ))
     # Discard the original `process_weights_after_loading` method such that it won't be called by others.
     layer.quant_method.process_weights_after_loading = lambda layer: None
     # When the layer not intended to be stored in this device, dispose the tensor and skip weight loading.
