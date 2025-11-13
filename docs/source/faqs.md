@@ -15,7 +15,8 @@ Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b)，Atlas A3 series(
 - Atlas 800I A2 Inference series (Atlas 800I A2)
 - Atlas A3 Training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 Inference series (Atlas 800I A3)
-- [Experimental] Atlas 300I Inference series (Atlas 300I Duo). Currently for 310I Duo the stable version is vllm-ascend v0.10.0rc1.
+- [Experimental] Atlas 300I Inference series (Atlas 300I Duo).
+- [Experimental] Currently for 310I Duo the stable version is vllm-ascend v0.10.0rc1.
 
 Below series are NOT supported yet:
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet
@@ -135,7 +136,7 @@ OOM errors typically occur when the model exceeds the memory capacity of a singl
 
 In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
 
-- **Limit --max-model-len**:  It can save the HBM usage for kv cache initialization step.
+- **Limit `--max-model-len`**:  It can save the HBM usage for kv cache initialization step.
 
 - **Adjust `--gpu-memory-utilization`**: If unspecified, the default value is `0.9`. You can decrease this value to reserve more memory to reduce fragmentation risks. See details in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/serving/engine_args.html#vllm.engine.arg_utils-_engine_args_parser-cacheconfig).
 

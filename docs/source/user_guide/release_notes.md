@@ -136,7 +136,7 @@ This is the 1st release candidate of v0.10.1 for vLLM Ascend. Please follow the 
     * Added `lmhead_tensor_parallel_size` in `additional_config`, set it to enable lmhead tensor parallel. [#2309](https://github.com/vllm-project/vllm-ascend/pull/2309)
     * Some unused environment variables `HCCN_PATH`, `PROMPT_DEVICE_ID`, `DECODE_DEVICE_ID`, `LLMDATADIST_COMM_PORT` and `LLMDATADIST_SYNC_CACHE_WAIT_TIME`  are removed. [#2448](https://github.com/vllm-project/vllm-ascend/pull/2448)
     * Environment variable `VLLM_LLMDD_RPC_PORT` is renamed to `VLLM_ASCEND_LLMDD_RPC_PORT` now. [#2450](https://github.com/vllm-project/vllm-ascend/pull/2450)
-    * Added `VLLM_ASCEND_ENABLE_MLP_OPTIMIZE` in environment variables, whether to enable mlp optimize when tensor parallel is enabled. This feature provides better performance in eager mode. [#2120](https://github.com/vllm-project/vllm-ascend/pull/2120)
+    * Added `VLLM_ASCEND_ENABLE_MLP_OPTIMIZE` in environment variables, Whether to enable mlp optimize when tensor parallel is enabled. This feature provides better performance in eager mode. [#2120](https://github.com/vllm-project/vllm-ascend/pull/2120)
     * Removed `MOE_ALL2ALL_BUFFER` and `VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ` in environment variables. [#2612](https://github.com/vllm-project/vllm-ascend/pull/2612)
     * Added `enable_prefetch` in `additional_config`, Whether to enable weight prefetch. [#2465](https://github.com/vllm-project/vllm-ascend/pull/2465)
     * Added `mode` in `additional_config.torchair_graph_config`, When using reduce-overhead mode for torchair, mode needs to be set. [#2461](https://github.com/vllm-project/vllm-ascend/pull/2461)

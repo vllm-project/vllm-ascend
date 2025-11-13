@@ -61,7 +61,7 @@ msgid ""
 "**ACLGraph**: This is the default graph mode supported by vLLM Ascend. In "
 "v0.9.1rc1, only Qwen series models are well tested."
 msgstr ""
-"**ACLGraph**：这是 vLLM Ascend 支持的默认图模式。在 v0.9.1rc1 版本中，只有 Qwen 系列模型得到了充分测试。"
+"**ACLGraph**：这是 vLLM Ascend 支持的默认图模式。在 v0.9.1rc1 版本中，Qwen 和Deepseek系列模型得到了充分测试。"
 
 #: ../../user_guide/feature_guide/graph_mode.md:15
 msgid ""
