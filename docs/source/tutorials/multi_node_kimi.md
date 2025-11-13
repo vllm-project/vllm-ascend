@@ -70,7 +70,6 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 
 # The w8a8 weight can be obtained from https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8
@@ -116,7 +115,6 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 
 vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \

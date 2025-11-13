@@ -57,32 +57,26 @@ for i in {0..15}; do hccn_tool -i $i -ping -g address x.x.x.x;done
 Mooncake is the serving platform for Kimi, a leading LLM service provided by Moonshot AI. First, we need to obtain the Mooncake project. Refer to the following command:
 
 ```shell
-git clone -b pooling_async_memecpy_v1 https://github.com/AscendTransport/Mooncake
+git clone -b v0.3.7.post2 --depth 1 https://github.com/kvcache-ai/Mooncake.git
 ```
 
-Update and install Python
-
-```shell
-apt-get update
-apt-get install python3
-```
-
-Install the relevant dependencies. The installation of Go is not required.
+(Optional) Replace go install url if the network is poor
 
 ```shell
 cd Mooncake
-bash dependencies.sh -y
+sed -i 's|https://go.dev/dl/|https://golang.google.cn/dl/|g' dependencies.sh
 ```
 
 Install mpi
 
 ```shell
-apt purge mpich libmpich-dev -y
-apt purge openmpi-bin -y
-apt purge openmpi-bin libopenmpi-dev -y
-apt install mpich libmpich-dev -y
-export CPATH=/usr/lib/aarch64-linux-gnu/mpich/include/:$CPATH
-export CPATH=/usr/lib/aarch64-linux-gnu/openmpi/lib:$CPATH
+apt-get install mpich libmpich-dev -y
+```
+
+Install the relevant dependencies. The installation of Go is not required.
+
+```shell
+bash dependencies.sh -y
 ```
 
 Compile and install
@@ -90,11 +84,9 @@ Compile and install
 ```shell
 mkdir build
 cd build
-cmake ..
+cmake .. -USE_ASCEND_DIRECT=ON
 make -j
 make install
-cp mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/libascend_transport_mem.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
-cp mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
 ```
 
 ## Prefiller/Decoder Deployment
@@ -104,8 +96,10 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
 ### Layerwise
 
 :::::{tab-set}
+:sync-group: nodes
 
 ::::{tab-item} Prefiller node 1
+:sync: prefill node1
 
 ```shell
 unset ftp_proxy
@@ -115,14 +109,9 @@ export HCCL_IF_IP=192.0.0.1
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1  # enable aggregated transmission
-export ASCEND_TRANSPORT_PRINT=0  # print ascend transport logs
-export ACL_OP_INIT_MODE=1  # acl op initialization mode to prevent device id acquisition failure
-export ASCEND_A3_ENABLE=1  # enable hccs transmission for A3; set to 0 for A2
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -165,6 +154,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Prefiller node 2
+:sync: prefill node2
 
 ```shell
 unset ftp_proxy
@@ -174,14 +164,9 @@ export HCCL_IF_IP=192.0.0.2
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -224,6 +209,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 1 (master Node)
+:sync: decoder node1
 
 ```shell
 unset ftp_proxy
@@ -233,14 +219,9 @@ export HCCL_IF_IP=192.0.0.3
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -285,6 +266,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 2 (primary node)
+:sync: decoder node2
 
 ```shell
 unset ftp_proxy
@@ -294,14 +276,9 @@ export HCCL_IF_IP=192.0.0.4
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -351,8 +328,10 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ### Non-layerwise
 
 :::::{tab-set}
+:sync-group: nodes
 
 ::::{tab-item} Prefiller node 1
+:sync: prefill node1
 
 ```shell
 unset ftp_proxy
@@ -362,14 +341,9 @@ export HCCL_IF_IP=192.0.0.1
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -412,6 +386,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Prefiller node 2
+:sync: prefill node2
 
 ```shell
 unset ftp_proxy
@@ -421,14 +396,9 @@ export HCCL_IF_IP=192.0.0.2
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -471,6 +441,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 1 (master node)
+:sync: decoder node1
 
 ```shell
 unset ftp_proxy
@@ -480,14 +451,9 @@ export HCCL_IF_IP=192.0.0.3
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \
@@ -532,6 +498,7 @@ vllm serve /model/Qwen3-235B-A22B-W8A8 \
 ::::
 
 ::::{tab-item} Decoder node 2 (primary Node)
+:sync: decoder node2
 
 ```shell
 unset ftp_proxy
@@ -541,14 +508,9 @@ export HCCL_IF_IP=192.0.0.4
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=2048
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export ASCEND_AGGREGATE_ENABLE=1
-export ASCEND_TRANSPORT_PRINT=0
-export ACL_OP_INIT_MODE=1
-export ASCEND_A3_ENABLE=1
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
 
 vllm serve /model/Qwen3-235B-A22B-W8A8 \

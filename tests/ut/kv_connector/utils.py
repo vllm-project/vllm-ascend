@@ -27,7 +27,6 @@ else:
     from vllm.utils.hashing import sha256
 
 EOS_TOKEN_ID = 50256
-os.environ["VLLM_USE_V1"] = "1"
 
 
 def assert_scheduler_empty(scheduler: Scheduler):
@@ -165,7 +164,7 @@ def create_request(
                                   remote_host="my-host",
                                   remote_port=1234,
                                   remote_tp_size=1,
-                                  remote_cp_size=1,
+                                  remote_pcp_size=1,
                                   remote_dcp_size=1)
 
     max_tokens = 1 if do_remote_decode else max_tokens

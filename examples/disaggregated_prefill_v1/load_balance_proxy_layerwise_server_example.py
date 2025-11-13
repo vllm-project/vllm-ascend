@@ -447,7 +447,7 @@ def get_api_request_id(api, req_id):
 
 def get_origin_request_id(api, req_id):
     if api == "/completions":
-        return req_id.replace("cmpl-", "").replace("-0", "")
+        return req_id.replace("cmpl-", "")[:-2]
     elif api == "/chat/completions":
         return req_id.replace("chatcmpl-", "")
 
@@ -561,9 +561,12 @@ async def metaserver(request: Request):
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay)
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+        proxy_state.release_prefiller_kv(prefiller_idx,prefiller_score)
 
     except Exception as e:
         logger.error(f"Post metaserver failed with: {str(e)}")
+        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
 
 if __name__ == '__main__':

@@ -47,16 +47,8 @@ function install_binary_test() {
     # Setup extra-index-url for x86 & torch_npu dev version
     pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
-    if [[ "${VLLM_VERSION} " != "v0.11.0rc3" ]]; then
-        # The vLLM version already in pypi, we install from pypi.
-        pip install vllm=="${PIP_VLLM_VERSION}"
-    else
-        # The vLLM version not in pypi, we install from source code with a specific tag.
-        git clone --depth 1 --branch "${VLLM_VERSION}" https://github.com/vllm-project/vllm
-        cd vllm
-        VLLM_TARGET_DEVICE=empty pip install -v -e .
-        cd ..
-    fi
+    # The vLLM version already in pypi, we install from pypi.
+    pip install vllm=="${PIP_VLLM_VERSION}"
 
     pip install vllm-ascend=="${PIP_VLLM_ASCEND_VERSION}"
 

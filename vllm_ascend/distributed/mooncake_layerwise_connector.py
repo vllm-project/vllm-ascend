@@ -3,6 +3,7 @@ import contextlib
 import copy
 import hashlib
 import math
+import os
 import queue
 import struct
 import threading
@@ -18,6 +19,7 @@ import msgspec
 import numpy as np
 import numpy.typing as npt
 import torch
+import torch_npu
 import zmq
 from mooncake.engine import TransferEngine  # type: ignore
 from vllm.config import VllmConfig
@@ -31,6 +33,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.utils import (align_memory,
+                                           get_transfer_timeout_value,
                                            kv_alltoall_and_rearrange)
 from vllm_ascend.utils import vllm_version_is
 
@@ -91,6 +94,8 @@ class KVCacheSendingLayerThread(threading.Thread):
         self.total_layers = total_layers
         self.use_mla = use_mla
         self.block_len = block_len
+        self.model_stream = torch_npu.npu.current_stream()
+        self.current_layer = -1
 
         if self.pd_head_ratio > 1:
             # regesit kv buffer for tp inequal
@@ -190,7 +195,9 @@ class KVCacheSendingLayerThread(threading.Thread):
                     src_list.append(src)
                     dst_list.append(dst)
                     length_list.append(length)
-            torch.npu.synchronize()
+            if self.current_layer != layer_index:
+                self.current_layer = layer_index
+                self.model_stream.synchronize()
             ret = self.engine.batch_transfer_sync_write(
                 session_id, src_list, dst_list, length_list)
             if ret < 0:
@@ -241,7 +248,7 @@ class KVCacheSendingLayerThread(threading.Thread):
                                     ((self.tp_rank // self.num_head_replica) %
                                      self.pd_head_ratio))
                     src_layer_addr += length
-            torch.npu.synchronize()
+            self.model_stream.synchronize()
             ret = self.engine.batch_transfer_sync_write(
                 session_id, src_list, dst_list, length_list)
             if ret < 0:
@@ -602,6 +609,8 @@ class MooncakeLayerwiseConnectorWorker:
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self._get_prefill_decode_size(vllm_config)
+        os.environ["ASCEND_TRANSFER_TIMEOUT"] = str(
+            get_transfer_timeout_value())
         if self._prefill_tp_size < self._decode_tp_size:
             raise ValueError(
                 f"prefill_tp_size: {self._prefill_tp_size} must be greater than"
@@ -662,7 +671,7 @@ class MooncakeLayerwiseConnectorWorker:
         self.device_id = device_ids[self.tp_rank]  # type: ignore
 
         if vllm_config.kv_transfer_config.get_from_extra_config(
-                'use_ascend_direct', False):
+                'use_ascend_direct', True):
             hostname = self.side_channel_host
         else:
             hostname = f"{self.side_channel_host}:0:npu_{self.device_id}"

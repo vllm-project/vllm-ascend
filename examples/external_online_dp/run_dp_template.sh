@@ -11,8 +11,6 @@ export HCCL_DETERMINISTIC=True
 export HCCL_BUFFSIZE=1024
 export TASK_QUEUE_ENABLE=1
 
-export VLLM_USE_V1=1
-
 export ASCEND_RT_VISIBLE_DEVICES=$1
 
 vllm serve model_path \

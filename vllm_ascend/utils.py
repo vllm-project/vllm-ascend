@@ -59,6 +59,7 @@ _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
+_ENABLE_NZ = None
 
 
 def is_310p():
@@ -69,8 +70,14 @@ def is_310p():
     return _IS_310P
 
 
-def is_enable_nz():
-    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
+def is_enable_nz(vllm_config: Optional[VllmConfig] = None) -> bool:
+    global _ENABLE_NZ
+    if _ENABLE_NZ is None:
+        if not vllm_config:
+            raise ValueError(
+                "vllm_config must be provided when _ENABLE_NZ is None")
+        _ENABLE_NZ = envs_ascend.VLLM_ASCEND_ENABLE_NZ and vllm_config.model_config.hf_config.model_type != "qwen3_next"
+    return _ENABLE_NZ
 
 
 def sleep_mode_enabled():
@@ -659,6 +666,17 @@ def enable_sp(vllm_config=None) -> bool:
             # We retain the env VLLM_ASCEND_ENABLE_FLASHCOMM here for backward compatibility.
             or bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))))
 
+        if not _ENABLE_SP:
+            return _ENABLE_SP
+
+        assert vllm_config.parallel_config.tensor_parallel_size > 1, \
+            "Flash Comm v1 (Sequence Parallelism) is only supported when tp_size > 1."
+
+        assert (
+            not is_moe_model(vllm_config)
+            or vllm_config.parallel_config.enable_expert_parallel
+        ), "Flash Comm v1 (Sequence Parallelism) requires enable_expert_parallel=True for MoE models."
+
     return _ENABLE_SP
 
 
@@ -672,12 +690,22 @@ def prefill_context_parallel_enable() -> bool:
 
 
 def is_moe_model(vllm_config: VllmConfig):
+    """Checks if the model is a MoE model by config"""
     global _IS_MOE_MODEL
     if _IS_MOE_MODEL is None:
-        config = vllm_config.model_config.hf_config
-        _IS_MOE_MODEL = any('experts' in key.lower()
-                            for key in config.to_dict())
+        model_configs = vllm_config.model_config.hf_config.to_dict()
+        _IS_MOE_MODEL = _is_contain_expert(model_configs)
     return _IS_MOE_MODEL
+
+
+def _is_contain_expert(config: Any):
+    if isinstance(config, dict):
+        for k, v in config.items():
+            if "expert" in str(k):
+                return True
+            if _is_contain_expert(v):
+                return True
+    return False
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
@@ -793,3 +821,68 @@ def has_layer_idx(model_instance: torch.nn.Module) -> bool:
         _HAS_LAYER_IDX = hasattr(model_instance, "model") and \
             hasattr(model_instance.model, "start_layer")
     return _HAS_LAYER_IDX
+
+
+def flashcomm2_enable() -> bool:
+    return envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE > 0
+
+
+def get_flashcomm2_oproj_tp_size_and_validate_config(ascend_config,
+                                                     vllm_config):
+    flashcomm2_oproj_tp_size = envs_ascend.VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE
+    global_tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+    if not flashcomm2_enable():
+        logger.info("FLASHCOMM2 not enable.")
+        return flashcomm2_oproj_tp_size
+
+    logger.info(
+        f"Enable FLASHCOMM2 with flashcomm2_oproj_tensor_parallel_size={flashcomm2_oproj_tp_size} and global_tp_size={global_tp_size}"
+    )
+    if not envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM1:
+        logger.warning_once(
+            "It is recommended to enable FLASHCOMM1 simultaneously when starting FLASHCOMM2 for optimal performance."
+        )
+    if ascend_config.oproj_tensor_parallel_size is not None:
+        raise AssertionError(
+            "flashcomm2_oproj_tensor_parallel_size cannot be enabled simultaneously with oproj_tensor_parallel_size"
+        )
+    if global_tp_size <= flashcomm2_oproj_tp_size:
+        raise AssertionError(
+            f"flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size}) cannot exceed global tensor parallel size ({global_tp_size})"
+        )
+    if global_tp_size % flashcomm2_oproj_tp_size != 0:
+        raise AssertionError(
+            f"Global tensor parallel size ({global_tp_size}) must be divisible by flashcomm2_oproj_tensor_parallel_size ({flashcomm2_oproj_tp_size})"
+        )
+    if vllm_config.kv_transfer_config is None:
+        logger.warning_once(
+            "It is recommended to enable FLASHCOMM2 in P-scenario deployments, enable it in hybrid deployment may lead to decode performance degradation."
+        )
+    if vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer:
+        raise AssertionError(
+            "FLASHCOMM2 primarily targets P-scenario deployments, "
+            "with additional support for hybrid deployment scenarios. "
+            "It is not applicable in D-scenario environments.")
+
+    return flashcomm2_oproj_tp_size
+
+
+def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
+    # Reorganize batch_ids so that, after the all2all and reduce-scatter operation, each batch_id corresponds to the rank_id within the DP domain.
+    # For example, when DP = [0, 1, 2, ..., 15] and flashcomm2_oproj_tensor_parallel_size = 2,
+    # the reorganized batch_ids will be [[batch0, batch8], [batch1, batch9], ..., [batch7, batch15]].
+    flashcomm2_otp_size = get_ascend_config(
+    ).flashcomm2_oproj_tensor_parallel_size
+    num_oproj_tensor_parallel_groups: int = (global_tp_size //
+                                             flashcomm2_otp_size)
+
+    reorgnized_batch_ids = []
+    for i in range(num_oproj_tensor_parallel_groups):
+        ranks = []
+        for j in range(flashcomm2_otp_size):
+            rank_idx = i + j * num_oproj_tensor_parallel_groups
+            ranks.append(rank_idx)
+        reorgnized_batch_ids.append(ranks)
+
+    return reorgnized_batch_ids

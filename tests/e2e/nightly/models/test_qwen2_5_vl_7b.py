@@ -45,7 +45,7 @@ aisbench_cases = [{
     "dataset_conf": "textvqa/textvqa_gen_base64",
     "max_out_len": 2048,
     "batch_size": 128,
-    "baseline": 81,
+    "baseline": 82.05,
     "threshold": 5
 }, {
     "case_type": "performance",
@@ -72,21 +72,13 @@ async def test_models(model: str, tp_size: int) -> None:
         "HCCL_OP_EXPANSION_MODE": "AIV"
     }
     server_args = [
-        "--no-enable-prefix-caching",
-        "--disable-mm-preprocessor-cache",
+        "--no-enable-prefix-caching", "--disable-mm-preprocessor-cache",
         "--tensor-parallel-size",
-        str(tp_size),
-        "--port",
-        str(port),
-        "--max-model-len",
-        "30000",
-        "--max-num-batched-tokens",
-        "40000",
-        "--max-num-seqs",
-        "400",
-        "--trust-remote-code",
-        "--gpu-memory-utilization",
-        "0.8",
+        str(tp_size), "--port",
+        str(port), "--max-model-len", "30000", "--max-num-batched-tokens",
+        "40000", "--max-num-seqs", "400", "--trust-remote-code",
+        "--gpu-memory-utilization", "0.8", "--compilation_config",
+        '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,

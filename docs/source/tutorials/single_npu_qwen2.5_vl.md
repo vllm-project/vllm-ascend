@@ -1,4 +1,4 @@
-# Single NPU (Qwen2.5-VL 7B)
+# Single NPU (Qwen2.5-VL-7B)
 
 ## Run vllm-ascend on Single NPU
 
@@ -46,6 +46,8 @@ Run the following script to execute offline inference on a single NPU:
 ```bash
 pip install qwen_vl_utils --extra-index-url https://download.pytorch.org/whl/cpu/
 ```
+
+Create a python script with the following content:
 
 ```python
 from transformers import AutoProcessor
