@@ -11,8 +11,8 @@ NC="\033[0m" # No Color
 # Configuration
 LOG_DIR="/root/.cache/tests/logs"
 OVERWRITE_LOGS=true
-SRC_DIR="$WORKSPACE/source_code"
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
 
 # Function to print section headers
 print_section() {
@@ -35,17 +35,49 @@ print_error() {
     exit 1
 }
 
-# Function to check command success
-check_success() {
-    if [ $? -ne 0 ]; then
-        print_error "$1"
+show_vllm_info() {
+    cd "$WORKSPACE"
+    echo "Installed vLLM-related Python packages:"
+    pip list | grep vllm || echo "No vllm packages found."
+
+    echo ""
+    echo "============================"
+    echo "vLLM Git information"
+    echo "============================"
+    cd vllm
+    if [ -d .git ]; then
+    echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+    echo "Commit hash: $(git rev-parse HEAD)"
+    echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+    echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+    echo "Message:     $(git log -1 --pretty=format:'%s')"
+    echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+    echo "Remote:      $(git remote -v | head -n1)"
+    echo ""
+    else
+    echo "No .git directory found in vllm"
     fi
+    cd ..
+
+    echo ""
+    echo "============================"
+    echo "vLLM-Ascend Git information"
+    echo "============================"
+    cd vllm-ascend
+    if [ -d .git ]; then
+    echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+    echo "Commit hash: $(git rev-parse HEAD)"
+    echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+    echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+    echo "Message:     $(git log -1 --pretty=format:'%s')"
+    echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+    echo "Remote:      $(git remote -v | head -n1)"
+    echo ""
+    else
+    echo "No .git directory found in vllm-ascend"
+    fi
+    cd ..
 }
-
-if [ $(id -u) -ne 0 ]; then
-	print_error "Require root permission, try sudo ./dependencies.sh"
-fi
-
 
 check_npu_info() {
     echo "====> Check NPU info"
@@ -58,79 +90,6 @@ check_and_config() {
     git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf "https://github.com/"
     pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
-}
-
-checkout_src() {
-    echo "====> Checkout source code"
-    mkdir -p "$SRC_DIR"
-
-    # vllm-ascend
-    if [ ! -d "$SRC_DIR/vllm-ascend" ]; then
-        git clone --depth 1 -b $VLLM_ASCEND_VERSION $VLLM_ASCEND_REMOTE_URL "$SRC_DIR/vllm-ascend"
-    fi
-
-    # vllm
-    if [ ! -d "$SRC_DIR/vllm" ]; then
-        git clone -b $VLLM_VERSION https://github.com/vllm-project/vllm.git "$SRC_DIR/vllm"
-    fi
-}
-
-install_sys_dependencies() {
-    echo "====> Install system dependencies"
-    apt-get update -y
-
-    DEP_LIST=()
-    while IFS= read -r line; do
-        [[ -n "$line" && ! "$line" =~ ^# ]] && DEP_LIST+=("$line")
-    done < "$SRC_DIR/vllm-ascend/packages.txt"
-
-    apt-get install -y "${DEP_LIST[@]}" gcc g++ cmake libnuma-dev iproute2
-}
-
-install_vllm() {
-    echo "====> Install vllm and vllm-ascend"
-    VLLM_TARGET_DEVICE=empty pip install -e "$SRC_DIR/vllm"
-    pip install -e "$SRC_DIR/vllm-ascend"
-    pip install modelscope
-    # Install for pytest
-    pip install -r "$SRC_DIR/vllm-ascend/requirements-dev.txt"
-}
-
-install_ais_bench() {
-    local AIS_BENCH="$SRC_DIR/vllm-ascend/benchmark"
-    git clone https://gitee.com/aisbench/benchmark.git $AIS_BENCH
-    cd $AIS_BENCH
-    git checkout v3.0-20250930-master
-    pip3 install -e ./
-    pip3 install -r requirements/api.txt
-    pip3 install -r requirements/extra.txt
-    cd -
-}
-
-install_extra_components() {
-    echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
-    
-    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
-        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
-        return 1
-    fi
-    chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
-    ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
-    
-    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
-        echo "Failed to download custom_ops wheel"
-        return 1
-    fi
-    pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-    
-export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
-EOF
-    
-    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
-          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
-    echo "====> Extra components installation completed"
 }
 
 kill_npu_processes() {
@@ -163,16 +122,8 @@ run_tests_with_log() {
 main() {
     check_npu_info
     check_and_config
-    checkout_src
-    install_sys_dependencies
-    install_vllm
-    if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
-        install_extra_components
-    fi
-    install_ais_bench
-    cd "$WORKSPACE/source_code"
-    . $SRC_DIR/vllm-ascend/tests/e2e/nightly/multi_node/scripts/build_mooncake.sh
-    cd "$WORKSPACE/source_code/vllm-ascend"
+    show_vllm_info
+    cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }
 
