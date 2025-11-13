@@ -100,7 +100,7 @@ class BlockTable:
         self.slot_mapping_cpu = torch.zeros(
             self.max_num_batched_tokens +
             2 * self.pcp_world_size * self.max_num_reqs,
-            dtype=torch.int64,
+            dtype=torch.int32,
             device="cpu",
             pin_memory=self.pin_memory)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
