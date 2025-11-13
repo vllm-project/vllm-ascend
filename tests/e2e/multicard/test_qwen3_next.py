@@ -20,8 +20,6 @@
 
 Run `pytest tests/e2e/multicard/test_qwen3_next.py`.
 """
-import pytest
-
 from tests.e2e.conftest import VllmRunner
 
 
@@ -59,7 +57,6 @@ def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
         del vllm_model
 
 
-@pytest.mark.skip(reason="TODO: fix the test case later.")
 def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
     example_prompts = [
         "Hello, my name is",
@@ -82,6 +79,12 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
                     max_model_len=4096,
                     gpu_memory_utilization=0.8,
                     distributed_executor_backend="mp",
+                    additional_config={
+                        "ascend_scheduler_config": {
+                            "enabled": True,
+                            "enable_chunked_prefill": False
+                        }
+                    },
                     speculative_config={
                         "method": "qwen3_next_mtp",
                         "num_speculative_tokens": 1
