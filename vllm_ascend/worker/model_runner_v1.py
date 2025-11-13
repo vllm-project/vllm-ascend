@@ -1396,7 +1396,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output,
                 decode_threshold=self.reorder_batch_threshold)
 
-    def generate_kv_idx(self, tokens, scheduler_output):
+    def generate_kv_idx(self, scheduler_output):
         if not self.pcp_size > 1:
             return
         self.cp_kv_recover_idx_for_chunk = [[] for _ in range(self.pcp_size)]
@@ -1467,12 +1467,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu[req_indices],
             arange,
         )
-        self.generate_kv_idx(tokens, scheduler_output)
+
         self.input_batch.block_table.compute_slot_mapping(
             req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
         if self.pcp_size > 1:
+            if not self.vllm_config.model_config.use_mla:
+                self.generate_kv_idx(scheduler_output)
             tokens, position_pcp, pcp_unpad_mask = self._update_tokens_for_pcp(
                 tokens)
             num_scheduled_tokens = np.array(tokens, dtype=np.int32)
