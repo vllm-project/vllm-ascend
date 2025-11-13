@@ -94,7 +94,8 @@ class AscendQuantConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        if torch.npu.is_available():
+        quant_method = hf_quant_cfg.get("quant_method", None)
+        if quant_method is None and torch.npu.is_available():
             return ASCEND_QUANTIZATION_METHOD
         return None
 
