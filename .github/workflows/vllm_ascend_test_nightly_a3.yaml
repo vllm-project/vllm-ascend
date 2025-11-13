@@ -103,7 +103,7 @@ jobs:
     with:
       vllm: v0.11.0
       runner: ${{ matrix.test_config.os }}
-      image: ${{ needs.image_build.outputs.image-tag }}
+      image: ${{ fromJSON(format('"{0}"', needs.image_build.outputs.image-tag || 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3')) }}
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
 
@@ -138,7 +138,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-0
-      image: ${{ needs.image_build.outputs.image-tag }}
+      image: ${{ fromJSON(format('"{0}"', needs.image_build.outputs.image-tag || 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3')) }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
