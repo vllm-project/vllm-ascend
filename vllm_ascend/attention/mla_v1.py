@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import (TYPE_CHECKING, ClassVar, NamedTuple, Optional, Tuple, Type,
                     TypeVar)
 
+import numpy as np
 import torch
 import torch_npu
 from torch import nn
@@ -26,6 +27,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          trans_rope_weight, transdata,
                                          wait_for_kv_layer_from_connector)
 from vllm_ascend.compilation.acl_graph import (get_graph_params,
+                                               get_mtp_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
@@ -289,6 +291,31 @@ class AscendMLAMetadataBuilder:
         # better way of doing this
         return modified_batch
 
+    def pad_actual_seq_len_q(self, num_reqs_pad_size, num_reqs,
+                             actual_seq_lengths_q):
+        """
+        Only use for acl full graph mode.
+        Pad the last element of the actual_seq_lengths_q equal to the TND(T) and
+        the num of dimensions equal to the batch_size of main model.
+        
+        For example:
+        batch_size = 8, num_reqs = 4, num_speculative_tokens = 1
+        input actual_seq_lengths_q = [1, 2, 4, 5]  (the 3rd req was accept a token)
+        After padding the actual_seq_lengths_q will be similar to [1, 2, 4, 5, 6, 6, 7, 8]
+        """
+        need_padding = num_reqs_pad_size > 0
+        if need_padding:
+            start_val = actual_seq_lengths_q[-1]
+            end_val = num_reqs + num_reqs_pad_size
+            num_step = num_reqs_pad_size
+            interpolated = np.round(
+                np.linspace(start_val, end_val,
+                            num_step + 1)[1:]).astype(int).tolist()
+            assert interpolated[-1] == end_val
+            assert len(interpolated) == num_reqs_pad_size
+            actual_seq_lengths_q = actual_seq_lengths_q + interpolated
+        return actual_seq_lengths_q
+
     def build(
         self,
         common_prefix_len: int,
@@ -309,7 +336,13 @@ class AscendMLAMetadataBuilder:
         # it blocks on all previous kernels.
         device = self.device
 
-        block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
+        graph_pad_size = common_attn_metadata.graph_pad_size
+        if graph_pad_size > num_reqs:
+            # Should we add other check to make sure is in full graph mode?
+            block_table = (
+                common_attn_metadata.block_table_tensor[:graph_pad_size])
+        else:
+            block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
         slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         input_positions = common_attn_metadata.positions[:
                                                          num_actual_tokens].long(
@@ -406,8 +439,28 @@ class AscendMLAMetadataBuilder:
             max_seq_lens = seq_lens[:num_decodes].max().item()
             seq_lens = seq_lens[:num_decodes]
             input_positions = input_positions[:num_decode_tokens]
-            block_table = block_table[:num_decodes, ...]
+            if graph_pad_size > num_decodes:
+                # Should we add other check to make sure is in full graph mode?
+                block_table = block_table[:graph_pad_size, ...]
+            else:
+                block_table = block_table[:num_decodes, ...]
             seq_lens_list = seq_lens.tolist()
+
+            if graph_pad_size > num_reqs:
+                # Should we add other check to make sure is in full graph mode?
+                num_reqs_pad_size = graph_pad_size - num_reqs
+                actual_seq_lengths_q = self.pad_actual_seq_len_q(
+                    num_reqs_pad_size, num_reqs, actual_seq_lengths_q)
+                seq_lens_list = seq_lens_list + [0] * (
+                    graph_pad_size - num_decodes)
+                num_block_pad_size = graph_pad_size - block_table.shape[0]
+                if num_block_pad_size > 0:
+                    block_table_padding = torch.zeros(
+                        (num_block_pad_size, ) + block_table.shape[1:],
+                        dtype=block_table.dtype,
+                        device=block_table.device)
+                    block_table = torch.cat([block_table, block_table_padding],
+                                            dim=0)
 
             # TODO: After the fullgraph supports MTP, the if branch needs to deleted
             assert self.cos_cache is not None
@@ -1028,8 +1081,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_lengths": actual_seq_lengths,
             "actual_seq_lengths_kv": decode_meta.seq_lens_list,
         }
-        graph_params = get_graph_params()
         forward_context: ForwardContext = get_forward_context()
+        if forward_context.is_mtp_model:
+            graph_params = get_mtp_graph_params()
+        else:
+            graph_params = get_graph_params()
         if forward_context.capturing:
             stream = torch_npu.npu.current_stream()
 

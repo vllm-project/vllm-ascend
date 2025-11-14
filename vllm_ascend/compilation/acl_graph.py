@@ -249,7 +249,10 @@ def update_attn_params(update_stream, forward_context, runtime_shape):
 
 def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                            speculative_config):
-    graph_params = get_graph_params()
+    if forward_context.is_mtp_model:
+        graph_params = get_mtp_graph_params()
+    else:
+        graph_params = get_graph_params()
     # FIXME: Behold! We are using a temporary hack here to update the args
     # for each layer's attention op in the graph.
     with torch.npu.stream(update_stream):
@@ -265,7 +268,8 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
              softmax_lse) = param
             seq_lens_list = forward_context.attn_metadata[
                 key].decode.seq_lens_list
-            if speculative_config and speculative_config.method == "deepseek_mtp":
+            if speculative_config and speculative_config.method == "deepseek_mtp" \
+                and not forward_context.is_mtp_model:
                 actual_seq_lengths = forward_context.attn_metadata[
                     key].decode.actual_seq_lengths_q
                 spec_multiple = speculative_config.num_speculative_tokens + 1
@@ -275,10 +279,17 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
                     spec_multiple * (i + 1)
                     for i in range(runtime_shape // spec_multiple)
                 ]
+            elif forward_context.is_mtp_model:
+                actual_seq_lengths = forward_context.attn_metadata[
+                    key].decode.actual_seq_lengths_q
+                block_table = forward_context.attn_metadata[
+                    key].decode.block_table
+                seq_lens_list = seq_lens_list + [0] * (
+                    len(actual_seq_lengths) - len(seq_lens_list))
             else:
                 seq_lens_list = seq_lens_list + [0] * (runtime_shape -
                                                        len(seq_lens_list))
-                torch.npu.graph_task_update_begin(update_stream, handle)
+            torch.npu.graph_task_update_begin(update_stream, handle)
 
             torch_npu.npu_fused_infer_attention_score.out(
                 q_nope,
@@ -340,3 +351,32 @@ def update_graph_params_workspaces(num_tokens: int, workspace: Any):
 
 def get_graph_params():
     return _graph_params
+
+
+_mtp_graph_params: Optional[GraphParams] = None
+
+
+def set_mtp_graph_params(aclgraph_capture_sizes: set[int]):
+    global _mtp_graph_params
+    if _mtp_graph_params is not None:
+        raise ValueError("MTPGraph parameters have already been set!")
+    _mtp_graph_params = GraphParams(
+        {size: []
+         for size in aclgraph_capture_sizes},
+        {size: None
+         for size in aclgraph_capture_sizes},
+        {size: []
+         for size in aclgraph_capture_sizes},
+        {size: []
+         for size in aclgraph_capture_sizes},
+    )
+
+
+def update_mtp_graph_params_workspaces(num_tokens: int, workspace: Any):
+    global _mtp_graph_params
+    if _mtp_graph_params is not None:
+        _mtp_graph_params.workspaces[num_tokens] = workspace
+
+
+def get_mtp_graph_params():
+    return _mtp_graph_params
