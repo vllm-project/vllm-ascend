@@ -947,6 +947,7 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
     flashcomm2_oproj_shared = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED
 
     if not flashcomm2_enable():
+        flashcomm2_oproj_shared = False
         logger.info("FLASHCOMM2 not enable.")
         return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
@@ -978,13 +979,6 @@ def get_flashcomm2_config_and_validate(ascend_config, vllm_config):
             "FLASHCOMM2 primarily targets P-scenario deployments, "
             "with additional support for hybrid deployment scenarios. "
             "It is not applicable in D-scenario environments.")
-
-    if flashcomm2_oproj_shared:
-        if flashcomm2_oproj_tp_size is None:
-            raise AssertionError(
-                "flashcomm2_oproj_shared must be enabled simultaneously with flashcomm2_oproj_tensor_parallel_size"
-            )
-        logger.info("Enable Flashcomm2 with flashcomm2_oproj_shared")
 
     return flashcomm2_oproj_tp_size, flashcomm2_oproj_shared
 
