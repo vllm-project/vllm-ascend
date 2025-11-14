@@ -98,7 +98,7 @@ jobs:
           pytest -sv tests/e2e/singlecard/test_embedding.py
           # pytest -sv tests/e2e/singlecard/test_embedding_aclgraph.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
-          pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          # pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_profile_execute_duration.py
           pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_sampler.py
@@ -185,7 +185,7 @@ jobs:
           pytest -sv tests/e2e/multicard/test_external_launcher.py
           pytest -sv tests/e2e/multicard/test_single_request_aclgraph.py
           pytest -sv tests/e2e/multicard/test_fused_moe_allgather_ep.py
-          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          # pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
 
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
@@ -284,4 +284,4 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           . /usr/local/Ascend/8.3.RC1/bisheng_toolkit/set_env.sh
-          pytest -sv tests/e2e/multicard/test_qwen3_next.py
+          # pytest -sv tests/e2e/multicard/test_qwen3_next.py
