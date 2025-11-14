@@ -2,22 +2,7 @@ name: 'image / nightly / Ubuntu / test'
 
 on:
   schedule:
-    - cron: '0 0,4,8,12,14 * * *'
-  workflow_call:
-    inputs:
-      target:
-        required: true
-        type: string
-        description: 'Target architecture, e.g., a2, a3'
-    outputs:
-      image-tag:
-        description: 'The built image tag'
-        value: ${{ jobs.build-and-sync.outputs.image-tag }}
-    secrets:
-      HW_USERNAME:
-        required: true
-      HW_TOKEN:
-        required: true
+    - cron: '0 0,4,8,12,15 * * *'
 
 # This workflow builds and pushes Docker images for nightly-ci
 # It will be built base on the quay.io/ascend/vllm-ascend:main
@@ -28,7 +13,7 @@ jobs:
 
     strategy:
       matrix:
-        target: ${{ fromJson(github.event_name == 'schedule' && '["a2","a3"]' || format('["{0}"]', inputs.target || 'a3')) }}
+        target: ['a2', 'a3']
 
     outputs:
       image-tag: ${{ steps.build-image.outputs.image-tag }}
