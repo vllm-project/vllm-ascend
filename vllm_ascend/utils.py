@@ -418,15 +418,24 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
     Check whether it is vLLM default capture sizes.
     """
 
-    cuda_graph_sizes = vllm_config.scheduler_config.cuda_graph_sizes
-    if len(cuda_graph_sizes) == 1:
-        default_size_capture_list = [1, 2, 4] + [
-            i for i in range(8, cuda_graph_sizes[0] + 1, 8)
-        ]
+    max_cudagraph_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
+    cudagraph_capture_sizes = [
+        i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
+    ]
+    if max_cudagraph_capture_size >= 8:
+        # Step size 8 for small batch sizes, up to 256(not included)
+        cudagraph_capture_sizes += list(
+            range(8, min(max_cudagraph_capture_size + 1, 256), 8)
+        )
+    if max_cudagraph_capture_size >= 256:
+        # Step size 16 for larger batch sizes
+        cudagraph_capture_sizes += list(
+            range(256, max_cudagraph_capture_size + 1, 16)
+        )
 
-        if default_size_capture_list == \
-            vllm_config.compilation_config.cudagraph_capture_sizes:
-            return True
+    if cudagraph_capture_sizes == \
+        vllm_config.compilation_config.cudagraph_capture_sizes:
+        return True
 
     return False
 
