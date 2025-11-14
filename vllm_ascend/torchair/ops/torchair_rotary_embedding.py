@@ -28,11 +28,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_custom_op, is_310p
 
 
-def custom_rotary_embedding_enabled(query, neox_style, head_size):
-    return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and enable_custom_op(
-    )
-
-
 def rope_forward_oot(
     self,
     positions: torch.Tensor,
@@ -59,18 +54,7 @@ def rope_forward_oot(
     neox_style = self.is_neox_style
     if is_neox_style_override is not None:
         neox_style = is_neox_style_override
-    # adopt custom kernel path for rotary_embedding
-    if custom_rotary_embedding_enabled(query, neox_style,
-                                       self.head_size) and not is_310p():
-        query, key = torch.ops._C_ascend.rotary_embedding(
-            positions,
-            query,
-            key,
-            self.head_size,
-            self.cos_sin_cache,
-            neox_style,
-        )
-        return query.view(query_shape), key.view(key_shape)
+
     if offsets is not None:
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")

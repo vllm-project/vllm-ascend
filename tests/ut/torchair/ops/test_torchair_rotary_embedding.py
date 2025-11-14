@@ -5,69 +5,8 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.torchair.ops.torchair_rotary_embedding import (
-    _set_cos_sin_cache, custom_rotary_embedding_enabled,
-    native_rope_deepseek_forward, rope_forward_oot, rotate_half,
+    _set_cos_sin_cache, native_rope_deepseek_forward, rope_forward_oot, rotate_half,
     yarn_find_correction_dim, yarn_get_mscale)
-
-
-class TestCustomRotaryEmbeddingEnabled(TestBase):
-
-    def setUp(self):
-        # Common setup for tests
-        self.positions = torch.tensor([1, 2, 3])
-        self.query = torch.randn(3, 4, dtype=torch.float16)
-        self.key = torch.randn(3, 4, dtype=torch.float16)
-        self.head_size = 32
-        self.cos_sin_cache = torch.randn(3, 4)
-
-        # Mock self object for rope_forward_oot
-        self.mock_self = MagicMock()
-        self.mock_self.head_size = self.head_size
-        self.mock_self.cos_sin_cache = self.cos_sin_cache
-        self.mock_self.is_neox_style = True
-        self.mock_self.forward_native.return_value = (self.query, self.key)
-
-    def test_custom_rotary_embedding_enabled(self):
-        # Test when all conditions are True
-        with patch(
-                'vllm_ascend.torchair.ops.torchair_rotary_embedding.enable_custom_op',
-                return_value=True):
-            result = custom_rotary_embedding_enabled(self.query, True,
-                                                     self.head_size)
-            self.assertTrue(result)
-
-        # Test when dtype is not float16
-        with patch(
-                'vllm_ascend.torchair.ops.torchair_rotary_embedding.enable_custom_op',
-                return_value=True):
-            query = self.query.to(torch.float32)
-            result = custom_rotary_embedding_enabled(query, True,
-                                                     self.head_size)
-            self.assertFalse(result)
-
-        # Test when neox_style is False
-        with patch(
-                'vllm_ascend.torchair.ops.torchair_rotary_embedding.enable_custom_op',
-                return_value=True):
-            result = custom_rotary_embedding_enabled(self.query, False,
-                                                     self.head_size)
-            self.assertFalse(result)
-
-        # Test when head_size is not divisible by 32
-        with patch(
-                'vllm_ascend.torchair.ops.torchair_rotary_embedding.enable_custom_op',
-                return_value=True):
-            result = custom_rotary_embedding_enabled(self.query, True,
-                                                     self.head_size + 1)
-            self.assertFalse(result)
-
-        # Test when custom op is disabled
-        with patch(
-                'vllm_ascend.torchair.ops.torchair_rotary_embedding.enable_custom_op',
-                return_value=False):
-            result = custom_rotary_embedding_enabled(self.query, True,
-                                                     self.head_size)
-            self.assertFalse(result)
 
 
 class TestRopeForwardOot(TestBase):
@@ -109,9 +48,6 @@ class TestRopeForwardOot(TestBase):
         'vllm_ascend.torchair.ops.torchair_rotary_embedding.get_ascend_config')
     @patch('vllm_ascend.torchair.ops.torchair_rotary_embedding.is_310p',
            return_value=False)
-    @patch(
-        'vllm_ascend.torchair.ops.torchair_rotary_embedding.custom_rotary_embedding_enabled',
-        return_value=True)
     @patch('torch.ops._npu_rotary_embedding')
     def test_rope_forward_oot_custom_kernel(self, mock_rotary_embedding,
                                             mock_custom_enabled, mock_is_310p,
@@ -132,9 +68,6 @@ class TestRopeForwardOot(TestBase):
 
     @patch(
         'vllm_ascend.torchair.ops.torchair_rotary_embedding.get_ascend_config')
-    @patch(
-        'vllm_ascend.torchair.ops.torchair_rotary_embedding.custom_rotary_embedding_enabled',
-        return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
     def test_rope_forward_oot_contiguous(self, mock_npu_rotary,
                                          mock_custom_enabled,
@@ -169,9 +102,6 @@ class TestRopeForwardOot(TestBase):
 
     @patch(
         'vllm_ascend.torchair.ops.torchair_rotary_embedding.get_ascend_config')
-    @patch(
-        'vllm_ascend.torchair.ops.torchair_rotary_embedding.custom_rotary_embedding_enabled',
-        return_value=False)
     @patch('torch_npu._npu_rotary_embedding')
     def test_rope_forward_oot_neox_style_override(self, mock_npu_rotary,
                                                   mock_custom_enabled,
