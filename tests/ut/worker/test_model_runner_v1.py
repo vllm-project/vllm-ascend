@@ -11,6 +11,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from typing import Dict
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -354,7 +355,7 @@ def test_get_split_computed_tokens_basic():
 
     num_computed_tokens = np.array([10, 20], dtype=np.int32)
     request_ids = ["req1", "req2"]
-    request_start_rank_dict = {}
+    request_start_rank_dict: Dict[str, tuple[int, int]] = {}
 
     # Mock the functions from their actual import locations
     mock_pcp_group = MagicMock()
