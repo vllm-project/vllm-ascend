@@ -3403,7 +3403,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             if self.use_hybrid_blocks:
                 # NOTE: when sharing kvcache between linear_attn and self_attn,
-                # we should use an unified buffer of kv, which may break pd Disaggregation.
+                # we should use an unified buffer of kv, which requires more
+                # address align operations in connector in pd Disaggregation scenario.
                 # The sizes of k cache and conv cache (v cache and ssm cache)
                 # could not be aligned, thus we should use an unified buffer of kv
                 # for sharing cache tensor in hybrid attention scenario
@@ -3630,7 +3631,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     start_idx = 0
                     for shape, dtype in zip(kv_cache_spec.shapes,
                                             kv_cache_spec.dtypes):
-                        # noramlly, there is conv state and ssm state in this loop. And there is only
+                        # normally, there is conv state and ssm state in this loop. And there is only
                         # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
 
