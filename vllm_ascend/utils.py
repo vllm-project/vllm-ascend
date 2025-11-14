@@ -439,8 +439,8 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
             cudagraph_capture_sizes += list(
                 range(256, max_cudagraph_capture_size + 1, 16))
 
-    if cudagraph_capture_sizes == \
-        vllm_config.compilation_config.cudagraph_capture_sizes:
+    if sorted(cudagraph_capture_sizes, reverse=True) == \
+            vllm_config.compilation_config.cudagraph_capture_sizes:
         return True
 
     return False
