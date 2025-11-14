@@ -185,7 +185,7 @@ jobs:
           #s pytest -sv tests/e2e/multicard/test_external_launcher.py
           #s pytest -sv tests/e2e/multicard/test_single_request_aclgraph.py
           #s pytest -sv tests/e2e/multicard/test_fused_moe_allgather_ep.py
-          #s pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
 
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
