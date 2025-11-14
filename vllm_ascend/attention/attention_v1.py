@@ -170,6 +170,7 @@ class AscendMetadataForPrefill:
         actual_chunk_seq_lengths: list[int]
         actual_seq_lengths_kv: list[int]
         starts: torch.Tensor
+        chunk_seq_mask_filtered_indices: torch.Tensor
         chunked_req_mask: Optional[list[bool]] = None
         local_context_lens_allranks: Optional[list[list[int]]] = None
         cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
@@ -408,6 +409,8 @@ class AscendAttentionMetadataBuilder:
                     batch_chunk_seq_mask = torch.repeat_interleave(
                         batch_chunk_seq_mask,
                         repeats=(query_lens * self.pcp_size).to(self.device))
+                    chunk_seq_mask_filtered_indices = filter_chunked_req_indices(
+                        query_lens, chunked_req_mask).to(self.device)
                     chunked_context_metadata = \
                         AscendMetadataForPrefill.ChunkedContextMetadata(
                             actual_chunk_seq_lengths= torch.cumsum(query_lens * pcp_size, dim=0),
@@ -417,7 +420,8 @@ class AscendAttentionMetadataBuilder:
                             local_context_lens_allranks=local_context_lens_allranks,
                             cp_kv_recover_idx_for_chunk=cp_kv_recover_idx_for_chunk,
                             kv_inverse_idx_for_chunk=kv_inverse_idx_for_chunk,
-                            batch_chunk_seq_mask=batch_chunk_seq_mask
+                            batch_chunk_seq_mask=batch_chunk_seq_mask,
+                            chunk_seq_mask_filtered_indices=chunk_seq_mask_filtered_indices
                         )
                 attn_mask_seqlens = common_long_seq_metadata.attn_mask_seqlens
                 head_attn_nomask_seqlens = common_long_seq_metadata.head_attn_nomask_seqlens
@@ -1230,9 +1234,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             self.pcp_rank * num_tokens:(self.pcp_rank + 1) * num_tokens, :, :]
 
         assert attn_output_full_chunk.shape == current_attn_output_prefill.shape and attn_lse_full_chunk.shape == current_attn_lse_prefill.shape
-        seq_len = attn_metadata.query_lens.detach().clone()
-        filtered_indices = filter_chunked_req_indices(
-            seq_len, attn_metadata.prefill.chunked_context.chunked_req_mask)
+        filtered_indices = attn_metadata.prefill.chunked_context.chunk_seq_mask_filtered_indices
 
         attn_output_prefill_filtered = current_attn_output_prefill[
             filtered_indices, :, :]
@@ -1276,9 +1278,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         local_chunked_kv_lens_rank = local_chunked_kv_lens[:, self.pcp_rank,
                                                            self.dcp_rank]
+        total_toks = local_chunked_kv_lens_rank.sum()
 
         key, value = self._load_kv_for_chunk(attn_metadata, kv_cache,
-                                             local_chunked_kv_lens_rank, query)
+                                             local_chunked_kv_lens_rank, query,
+                                             total_toks)
         if self.dcp_size > 1:
             num_heads = self.num_heads * self.dcp_size
         else:
@@ -1294,7 +1298,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                       dtype=torch.float32,
                                       device=query.device)
 
-        if not torch.all(local_chunked_kv_lens_rank == 0).item():
+        if total_toks > 0:
             prefix_chunk_output, prefix_chunk_lse = torch.ops.npu.npu_fused_infer_attention_score(
                 query,
                 key,
@@ -1315,11 +1319,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
             batch_chunk_seq_mask = attn_metadata.prefill.chunked_context.batch_chunk_seq_mask
             out_mask = batch_chunk_seq_mask[:, None, None].expand_as(
                 prefix_chunk_output)
-            prefix_chunk_output = torch.where(out_mask, 0, prefix_chunk_output)
+            prefix_chunk_output[out_mask] = 0
             lse_mask = batch_chunk_seq_mask[:, None,
                                             None].expand_as(prefix_chunk_lse)
-            prefix_chunk_lse = torch.where(lse_mask, -torch.inf,
-                                           prefix_chunk_lse)
+            prefix_chunk_lse[lse_mask] = -torch.inf
 
         prefix_output, prefix_lse = self._update_chunk_attn_out_lse(
             prefix_chunk_output, prefix_chunk_lse)
@@ -1375,13 +1378,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return prefix_output, prefix_lse
 
     def _load_kv_for_chunk(self, attn_metadata, kv_cache,
-                           local_chunked_kv_lens_rank, query):
+                           local_chunked_kv_lens_rank, query, total_toks):
         cache_key = kv_cache[0]
         cache_value = kv_cache[1]
         num_heads = cache_key.size(2)
         head_size = kv_cache[0].size(-1)
-
-        total_toks = local_chunked_kv_lens_rank.sum()
 
         key = torch.empty(total_toks,
                           num_heads,
