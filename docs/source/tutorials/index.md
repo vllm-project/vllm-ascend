@@ -7,6 +7,7 @@ single_npu
 single_npu_qwen2.5_vl
 single_npu_qwen2_audio
 single_npu_qwen3_embedding
+single_npu_qwen3_reranker
 single_npu_qwen3_quantization
 single_npu_qwen3_w4a4
 multi_npu_qwen3_next
