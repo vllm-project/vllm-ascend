@@ -138,6 +138,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
     "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE":
     lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
+    "VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM2_OSHARED", 0)),
     # Whether to enable MLP weight prefetch, only used in small concurrency.
     "VLLM_ASCEND_ENABLE_PREFETCH_MLP":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", '0'))),

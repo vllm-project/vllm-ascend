@@ -43,8 +43,13 @@ from vllm_ascend.compilation.acl_graph import (get_graph_params,
                                                update_graph_params_workspaces)
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+from vllm_ascend.torchair.ops.shared_weight_layer import (
+    post_process_after_loading_for_shared_weight_series,
+    reach_layer_for_shared_weight_series,
+    register_layer_to_shared_weight_series)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_enable_nz, prefill_context_parallel_enable,
+                               flashcomm2_o_shared_enabled, is_enable_nz,
+                               prefill_context_parallel_enable,
                                weak_ref_tensors)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
@@ -725,6 +730,16 @@ class AscendMLAImpl(MLAAttentionImpl):
             'q_b_proj']
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
+
+        if flashcomm2_o_shared_enabled():
+            from vllm_ascend.distributed.parallel_state import \
+                get_flashcomm2_o_shared_group
+            register_layer_to_shared_weight_series(
+                series_name="o_proj",
+                group=get_flashcomm2_o_shared_group(),
+                layer=self.o_proj,
+                prefetch_step=1)
+
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
         self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
@@ -871,6 +886,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                     "thus mlapo is disabled for these layers.")
         if self.enable_mlapo:
             self._process_weights_for_fused_mlapo(act_dtype)
+
+        if flashcomm2_o_shared_enabled():
+            post_process_after_loading_for_shared_weight_series(self.o_proj)
 
     def _process_weights_for_fused_mlapo(self, act_dtype: torch.dtype):
         kv_a_proj_wt = self.fused_qkv_a_proj.weight.data[
@@ -1408,6 +1426,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
             kv_no_split.contiguous(), need_gather_q_kv)
 
+        if flashcomm2_o_shared_enabled():
+            reach_layer_for_shared_weight_series(self.o_proj)
+
         decode_preprocess_res = None
         prefill_preprocess_res = None
         if has_prefill:
@@ -1526,6 +1547,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
+            if flashcomm2_o_shared_enabled():
+                reach_layer_for_shared_weight_series(self.o_proj)
             return output.fill_(0)
         if self.pcp_size > 1:
             num_actual_tokens = attn_metadata.num_actual_tokens_pcp_padded // self.pcp_size
