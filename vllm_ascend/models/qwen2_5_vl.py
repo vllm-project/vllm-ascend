@@ -46,9 +46,6 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, is_enable_nz,
                                vllm_version_is)
 
-if not vllm_version_is("0.11.0"):
-    pass
-
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
 
