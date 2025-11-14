@@ -322,9 +322,7 @@ class AscendAttentionMetadataBuilder:
         # slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
         attn_state = common_attn_metadata.attn_state
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
-                                                                       num_reqs
-                                                                       + 1]
+
         num_computed_tokens_cpu = (seq_lens - query_lens)
 
         if attn_state == AscendAttentionState.DecodeOnly and \
