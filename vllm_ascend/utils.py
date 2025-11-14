@@ -418,18 +418,26 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
     Check whether it is vLLM default capture sizes.
     """
 
-    max_cudagraph_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
-    cudagraph_capture_sizes = [
-        i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
-    ]
-    if max_cudagraph_capture_size >= 8:
-        # Step size 8 for small batch sizes, up to 256(not included)
-        cudagraph_capture_sizes += list(
-            range(8, min(max_cudagraph_capture_size + 1, 256), 8))
-    if max_cudagraph_capture_size >= 256:
-        # Step size 16 for larger batch sizes
-        cudagraph_capture_sizes += list(
-            range(256, max_cudagraph_capture_size + 1, 16))
+    if vllm_version_is("0.11.0"):
+        cuda_graph_sizes = vllm_config.scheduler_config.cuda_graph_sizes
+        if len(cuda_graph_sizes) == 1:
+            cudagraph_capture_sizes = [1, 2, 4] + [
+                i for i in range(8, cuda_graph_sizes[0] + 1, 8)
+            ]
+    else:
+        max_cudagraph_capture_size = \
+            vllm_config.compilation_config.max_cudagraph_capture_size
+        cudagraph_capture_sizes = [
+            i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
+        ]
+        if max_cudagraph_capture_size >= 8:
+            # Step size 8 for small batch sizes, up to 256(not included)
+            cudagraph_capture_sizes += list(
+                range(8, min(max_cudagraph_capture_size + 1, 256), 8))
+        if max_cudagraph_capture_size >= 256:
+            # Step size 16 for larger batch sizes
+            cudagraph_capture_sizes += list(
+                range(256, max_cudagraph_capture_size + 1, 16))
 
     if cudagraph_capture_sizes == \
         vllm_config.compilation_config.cudagraph_capture_sizes:
@@ -462,8 +470,13 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             i for i in range(24, max_capture_size + 1, 8)
         ]
 
-        update_cudagraph_capture_sizes(vllm_config,
-                                       new_cudagraph_capture_sizes)
+        if vllm_version_is("0.11.0"):
+            vllm_config.compilation_config.cudagraph_capture_sizes = new_cudagraph_capture_sizes
+            vllm_config.compilation_config.init_with_cudagraph_sizes(
+                new_cudagraph_capture_sizes)
+        else:
+            update_cudagraph_capture_sizes(vllm_config,
+                                           new_cudagraph_capture_sizes)
 
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
