@@ -413,7 +413,7 @@ class AscendAttentionMetadataBuilder:
                         query_lens, chunked_req_mask).to(self.device)
                     chunked_context_metadata = \
                         AscendMetadataForPrefill.ChunkedContextMetadata(
-                            actual_chunk_seq_lengths= torch.cumsum(query_lens * pcp_size, dim=0),
+                            actual_chunk_seq_lengths=torch.cumsum(query_lens * pcp_size, dim=0),
                             actual_seq_lengths_kv=actual_seq_lengths_kv,
                             chunked_req_mask=chunked_req_mask,
                             starts=local_chunk_starts,
