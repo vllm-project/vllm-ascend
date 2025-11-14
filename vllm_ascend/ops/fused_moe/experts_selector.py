@@ -196,10 +196,24 @@ def _select_experts_with_fusion_ops(
             routed_scaling_factor=1,
             eps=float(1e-20))
     if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax":
-        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
-            x=router_logits, finished=None, k=top_k)
-        topk_ids = topk_ids.to(torch.int32)
+        if e_score_correction_bias is not None and \
+                e_score_correction_bias.dtype != router_logits.dtype:
+            e_score_correction_bias = e_score_correction_bias.to(
+                router_logits.dtype)
+        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
+            x=router_logits,
+            k=top_k,
+            bias=e_score_correction_bias,
+            k_group=1,
+            group_count=1,
+            group_select_mode=0,
+            renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
+            norm_type=0,  # 0: softmax; 1: sigmoid(fix)
+            routed_scaling_factor=routed_scaling_factor,
+            eps=float(1e-20))
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        if topk_weights.dtype != hidden_states.dtype:
+            topk_weights = topk_weights.to(hidden_states.dtype)
 
     return topk_weights, topk_ids
 
@@ -275,3 +289,28 @@ def _native_select_experts(
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
+
+
+def zero_experts_compute(
+    expert_indices: torch.Tensor,
+    expert_scales: torch.Tensor,
+    num_experts: int,
+    zero_expert_type: str,
+    hidden_states: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if zero_expert_type == "identity":
+        zero_expert_mask = expert_indices < num_experts
+        zero_expert_scales = expert_scales.clone()
+        zero_expert_scales = torch.where(zero_expert_mask, 0.0,
+                                         zero_expert_scales)
+
+        hidden_states = hidden_states.unsqueeze(1)
+        zero_expert_scales = zero_expert_scales.unsqueeze(2)
+        result = hidden_states * zero_expert_scales
+        result = result.sum(dim=1)
+
+    normal_expert_mask = expert_indices >= num_experts
+    expert_indices = torch.where(normal_expert_mask, 0, expert_indices)
+    expert_scales = torch.where(normal_expert_mask, 0.0, expert_scales)
+
+    return expert_indices, expert_scales, result
