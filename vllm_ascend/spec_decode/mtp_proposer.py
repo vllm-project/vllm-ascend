@@ -75,24 +75,6 @@ class MtpProposer(Proposer):
         self.use_sparse = hasattr(vllm_config.model_config.hf_config,
                                   "index_topk")
 
-        self.query_start_loc = torch.zeros(
-            self.runner.max_num_reqs * (self.num_speculative_tokens + 1) + 1,
-            dtype=torch.int32,
-            device=self.device)
-        self.query_start_loc_cpu = torch.zeros(
-            self.runner.max_num_reqs * (self.num_speculative_tokens + 1) + 1,
-            dtype=torch.int32,
-            device="cpu",
-            pin_memory=True)
-        self.slot_mapping = torch.zeros(self.runner.max_num_tokens,
-                                        dtype=torch.int32,
-                                        device=self.device)
-        self.seq_lens_cpu = torch.zeros(self.runner.max_num_reqs *
-                                        (self.num_speculative_tokens + 1),
-                                        dtype=torch.int32,
-                                        device="cpu",
-                                        pin_memory=True)
-
     def load_model(self, model) -> None:
         loader = get_model_loader(self.vllm_config.load_config)
 
@@ -177,8 +159,6 @@ class MtpProposer(Proposer):
             # assert with_prefill is False, \
             #     "Full decode graph only supports uniform batch now."
             max_seq_lens = self.runner.model_config.max_model_len
-            self.seq_lens_cpu[:num_reqs] = max_seq_lens
-            self.seq_lens_cpu[num_reqs:] = 0
             if len(self.runner.attn_groups) > 0:
                 num_computed_tokens_cpu = (
                     self.runner.input_batch.
@@ -187,13 +167,15 @@ class MtpProposer(Proposer):
                     [0] + self.runner.actual_seq_lengths_q[:num_reqs],
                     device=self.runner.device,
                     dtype=torch.int32)
-                self.query_start_loc[:num_reqs + 1].copy_(query_start_loc)
                 common_attn_metadata = AscendCommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc[:num_reqs + 1],
-                    query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs +
-                                                                 1],
-                    seq_lens_cpu=self.seq_lens_cpu,
-                    seq_lens=self.seq_lens_cpu[:num_reqs],
+                    query_start_loc=torch.tensor(
+                        [0] + self.runner.actual_seq_lengths_q[:num_reqs],
+                        device=self.device,
+                        dtype=torch.int32),
+                    query_start_loc_cpu=self.runner.query_start_loc_cpu[
+                        :num_reqs + 1],
+                    seq_lens_cpu=self.runner.seq_lens_cpu,
+                    seq_lens=self.runner.seq_lens_cpu[:num_reqs],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
                     max_query_len=self.num_speculative_tokens + 1,
@@ -201,14 +183,12 @@ class MtpProposer(Proposer):
                     actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
                     block_table_tensor=self.runner.input_batch.block_table[0].
                     get_device_tensor()[:num_reqs],
-                    slot_mapping=self.slot_mapping,
-                    positions=self.positions,
+                    slot_mapping=self.runner.input_batch.block_table[0].slot_mapping,
+                    positions=self.runner.positions,
                     attn_mask=self.runner.attn_mask,
                     spec_attn_mask=self.runner.spec_attn_mask,
                     attn_state=self.runner.attn_state,
                     decode_token_per_req=self.runner.decode_token_per_req,
-                    cos=self.runner.cos,
-                    sin=self.runner.sin,
                 )
 
                 builder = self.runner.attn_groups[0][0].get_metadata_builder()
@@ -319,22 +299,6 @@ class MtpProposer(Proposer):
             target_hidden_states = hidden_states[:num_scheduled_tokens]
             target_slot_mapping = attn_metadata.slot_mapping
             cu_num_tokens = attn_metadata.query_start_loc
-
-            query_start_loc_num = len(cu_num_tokens)
-            self.query_start_loc[:query_start_loc_num].copy_(
-                cu_num_tokens[:query_start_loc_num])
-            self.query_start_loc[query_start_loc_num:].fill_(0)
-            self.query_start_loc_cpu[:query_start_loc_num].copy_(
-                self.query_start_loc[:query_start_loc_num], non_blocking=True)
-            self.query_start_loc_cpu[query_start_loc_num:].fill_(0)
-
-            target_slot_mapping_len = target_slot_mapping.shape[0]
-            self.slot_mapping[:target_slot_mapping_len].copy_(
-                target_slot_mapping)
-            self.slot_mapping[target_slot_mapping_len:].fill_(0)
-            target_positions_len = target_positions.shape[0]
-            self.positions[:target_positions_len].copy_(target_positions)
-            self.positions[target_positions_len:].fill_(0)
         else:
             # TODO(woosuk): Refactor this.
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
@@ -432,20 +396,6 @@ class MtpProposer(Proposer):
             target_hidden_states = hidden_states[token_indices]
             target_slot_mapping = slot_mapping[token_indices]
 
-        batch_size = num_rejected_tokens.shape[0]
-        self.query_start_loc[:batch_size + 1].copy_(cu_num_tokens[:batch_size +
-                                                                  1])
-        self.query_start_loc[batch_size + 1:].fill_(0)
-        self.query_start_loc_cpu[:batch_size + 1].copy_(
-            self.query_start_loc[:batch_size + 1], non_blocking=True)
-        self.query_start_loc_cpu[batch_size + 1:].fill_(0)
-        target_positions_len = target_positions.shape[0]
-        self.positions[:target_positions_len].copy_(target_positions)
-        self.positions[target_positions_len:].fill_(0)
-        target_slot_mapping_len = target_slot_mapping.shape[0]
-        self.slot_mapping[:target_slot_mapping_len].copy_(target_slot_mapping)
-        self.slot_mapping[target_slot_mapping_len:].fill_(0)
-
         return cu_num_tokens, token_indices, target_token_ids, target_positions, target_hidden_states, target_slot_mapping
 
     def _propose(
@@ -517,8 +467,6 @@ class MtpProposer(Proposer):
         seq_lens = target_positions[last_token_indices] + 1
         seq_lens = seq_lens.int()
         seq_lens_len = seq_lens.shape[0]
-        self.seq_lens_cpu[:seq_lens_len].copy_(seq_lens, non_blocking=True)
-        self.seq_lens_cpu[seq_lens_len:].fill_(0)
 
         if not self.torchair_graph_enabled:
             # torch mode need to update num_tokens_across_dp
@@ -552,18 +500,27 @@ class MtpProposer(Proposer):
             # Currently, if not torchair, runner.graph_pad_size will always be -1.
             graph_pad_size = self.runner.graph_pad_size
 
+        runner_slot_mapping = self.runner.input_batch.block_table[0].slot_mapping
+        runner_slot_mapping[:target_slot_mapping.shape[0]].copy_(target_slot_mapping)
+        runner_slot_mapping[target_slot_mapping.shape[0]:num_input_tokens].fill_(0)
+
+        # NOTE: Currently, just positions, slot_mapping, block_table and
+        # seq_lens will be sent into MLAMetadata.
+        # But only block_table and slot_mapping will be used, actually.
+        # So we only fixed the block_table and slot_mapping's address.
+        # If attention need to use other params one day, they should be fixed too.
         common_attn_metadata = AscendCommonAttentionMetadata(
-            query_start_loc=self.query_start_loc[:batch_size + 1],
-            query_start_loc_cpu=self.query_start_loc_cpu[:batch_size + 1],
-            seq_lens_cpu=self.seq_lens_cpu[:seq_lens_len],
+            query_start_loc=cu_num_tokens[:batch_size + 1],
+            query_start_loc_cpu=cu_num_tokens[:batch_size + 1].cpu(),
+            seq_lens_cpu=seq_lens.cpu(),
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=self.runner.input_batch.block_table[0].
             get_device_tensor(),
-            slot_mapping=self.slot_mapping[:target_slot_mapping.shape[0]],
-            positions=self.positions[:target_positions.shape[0]],
+            slot_mapping=runner_slot_mapping,
+            positions=target_positions,
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
@@ -585,6 +542,7 @@ class MtpProposer(Proposer):
             attn_metadata = self.runner.attn_metadata_builder.build(
                 0, common_attn_metadata, self.runner.get_model())
 
+        self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
         self.hidden_states[num_tokens:].fill_(0)
 
@@ -734,7 +692,6 @@ class MtpProposer(Proposer):
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:hidden_states.shape[0]] = hidden_states
             attn_metadata_i.slot_mapping[:batch_size] = slot_mapping
-
             if attn_metadata_i.prefill is not None:
                 attn_metadata_i.prefill.seq_lens = attn_metadata_i.seq_lens
                 attn_metadata_i.prefill.seq_lens_list = attn_metadata_i.prefill.seq_lens.tolist(
