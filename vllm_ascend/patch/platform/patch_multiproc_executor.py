@@ -8,7 +8,6 @@ import vllm.v1.executor.multiproc_executor
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
-from vllm.utils import get_mp_context
 from vllm.v1.executor.abstract import FailureCallback
 from vllm.v1.executor.multiproc_executor import (
     MultiprocExecutor, UnreadyWorkerProcHandle, WorkerProc,
@@ -18,10 +17,11 @@ from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.11.0"):
     from vllm.utils import (get_distributed_init_method, get_loopback_ip,
-                            get_open_port)
+                            get_mp_context, get_open_port)
 else:
     from vllm.utils.network_utils import (get_distributed_init_method,
                                           get_loopback_ip, get_open_port)
+    from vllm.utils.system_utils import get_mp_context
 
 
 class AscendMultiprocExecutor(MultiprocExecutor):
