@@ -361,6 +361,7 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             i for i in range(24, max_capture_size + 1, 8)
         ]
 
+        vllm_config.compilation_config.cudagraph_capture_sizes = new_cudagraph_capture_sizes
         vllm_config.compilation_config.init_with_cudagraph_sizes(
             new_cudagraph_capture_sizes)
 
