@@ -22,8 +22,10 @@ from torch.nn.functional import pad
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.utils import dispose_tensor, is_310p
+from vllm_ascend.utils import dispose_tensor, is_310p, enable_custom_op
 
+
+enable_custom_op()
 
 def cumsum_group_list(group_list: torch.Tensor,
                       group_list_type: int,
@@ -85,6 +87,17 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
         weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(
             hidden_states)
     is_mc2 = get_forward_context().moe_comm_type == MoECommType.MC2
+
+    weight = []
+    weight_scale = []
+    assert w1.dim() == 3 and w1_scale.dim() == 2
+    w1_num_experts, _, _ = w1.shape
+    w1_scale_num_experts, _ = w1_scale.shape
+    assert w1_num_experts == w1_scale_num_experts
+    for i in range(w1_num_experts):
+        weight.append(w1[i])
+        weight_scale.append(w1_scale[i])
+
     if w1_scale_bias is None and is_mc2:
         if fusion and not dynamic_eplb:
             # gmm1: gate_up_proj & act_fn: swiglu
@@ -96,6 +109,16 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 x_scale=pertoken_scale)
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
+        elif fusion and dynamic_eplb:
+            hidden_states, swiglu_out_scale, _ = (
+                torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+                    x=hidden_states,
+                    weight=weight,
+                    weight_scale=weight_scale,
+                    x_scale=pertoken_scale,
+                    group_list=cumsum_group_list(group_list, group_list_type),
+                )
+            )
         else:
             if w1_scale.dtype != torch.float32:
                 w1_scale = w1_scale.to(torch.float32)
@@ -156,6 +179,17 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                 x_scale=pertoken_scale)
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
+        elif fusion and dynamic_eplb:
+            hidden_states, swiglu_out_scale, _ = (
+                torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
+                    x=hidden_states,
+                    weight=weight,
+                    weight_scale=weight_scale,
+                    x_scale=pertoken_scale,
+                    group_list=cumsum_group_list(group_list, group_list_type),
+                    bias=bias1,
+                )
+            )            
         else:
             # gmm1: gate_up_proj
             hidden_states = torch_npu.npu_grouped_matmul(
