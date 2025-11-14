@@ -77,7 +77,7 @@ jobs:
     with:
       soc_version: a3
       runner: linux-aarch64-a3-0
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
@@ -138,6 +138,6 @@ jobs:
     with:
       vllm: v0.11.0
       runner: ${{ matrix.test_config.os }}
-      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
