@@ -330,7 +330,7 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
             i for i in range(8, cuda_graph_sizes[0] + 1, 8)
         ]
 
-        if default_size_capture_list == \
+        if sorted(default_size_capture_list, reverse=True) == \
             vllm_config.compilation_config.cudagraph_capture_sizes:
             return True
 
