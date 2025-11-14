@@ -231,7 +231,7 @@ def test_e2e_qwen3_moe_with_torchair():
 def _deepseek_v2_lite_torchair_test_fixure(
     additional_config: Dict,
     *,
-    tensor_parallel_size=2,
+    tensor_parallel_size=1,
     use_v1_schduler=False,
 ):
     example_prompts = [
@@ -305,6 +305,16 @@ def test_e2e_deepseekv2lite_with_optimize():
         "torchair_graph_config": {
             "enabled": True,
             "enable_super_kernel": True,
+        },
+    }
+    _deepseek_v2_lite_torchair_test_fixure(additional_config)
+
+
+def test_e2e_deepseekv2lite_with_torchair_ms_mla():
+    additional_config = {
+        "torchair_graph_config": {
+            "enabled": True,
+            "enable_multistream_mla": True,
         },
     }
     _deepseek_v2_lite_torchair_test_fixure(additional_config)
