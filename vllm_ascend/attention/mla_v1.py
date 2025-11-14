@@ -1554,7 +1554,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_no_split.contiguous(), need_gather_q_kv)
 
         if flashcomm2_o_shared_enabled():
-                reach_layer_for_shared_weight_series(self.o_proj)
+            reach_layer_for_shared_weight_series(self.o_proj)
 
         decode_preprocess_res = None
         prefill_preprocess_res = None
