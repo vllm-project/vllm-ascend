@@ -174,6 +174,7 @@ class AscendMetadataForPrefill:
         local_context_lens_allranks: Optional[list[list[int]]] = None
         cp_kv_recover_idx_for_chunk: Optional[list[int]] = None
         kv_inverse_idx_for_chunk: Optional[list[int]] = None
+        batch_chunk_seq_mask: Optional[list[bool]] = None
 
     """ Prefill Specific Metadata for Ascend"""
     pcp_metadata: Optional[AscendPCPMetadata] = None
@@ -401,15 +402,22 @@ class AscendAttentionMetadataBuilder:
                         cp_kv_recover_idx_for_chunk.to(torch.float32)
                     ) if cp_kv_recover_idx_for_chunk is not None else None
 
+                    batch_chunk_seq_mask = (
+                        local_context_lens_allranks[:, self.pcp_rank,
+                                                    self.dcp_rank] == 0)
+                    batch_chunk_seq_mask = torch.repeat_interleave(
+                        batch_chunk_seq_mask,
+                        repeats=(query_lens * self.pcp_size).to(self.device))
                     chunked_context_metadata = \
                         AscendMetadataForPrefill.ChunkedContextMetadata(
-                            actual_chunk_seq_lengths=torch.cumsum(query_lens * pcp_size, dim=0),
+                            actual_chunk_seq_lengths= torch.cumsum(query_lens * pcp_size, dim=0),
                             actual_seq_lengths_kv=actual_seq_lengths_kv,
                             chunked_req_mask=chunked_req_mask,
                             starts=local_chunk_starts,
                             local_context_lens_allranks=local_context_lens_allranks,
                             cp_kv_recover_idx_for_chunk=cp_kv_recover_idx_for_chunk,
-                            kv_inverse_idx_for_chunk=kv_inverse_idx_for_chunk
+                            kv_inverse_idx_for_chunk=kv_inverse_idx_for_chunk,
+                            batch_chunk_seq_mask=batch_chunk_seq_mask
                         )
                 attn_mask_seqlens = common_long_seq_metadata.attn_mask_seqlens
                 head_attn_nomask_seqlens = common_long_seq_metadata.head_attn_nomask_seqlens
@@ -1304,6 +1312,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 actual_seq_lengths_kv,
                 actual_seq_lengths=attn_metadata.prefill.chunked_context.
                 actual_chunk_seq_lengths)
+            batch_chunk_seq_mask = attn_metadata.prefill.chunked_context.batch_chunk_seq_mask
+            out_mask = batch_chunk_seq_mask[:, None, None].expand_as(
+                prefix_chunk_output)
+            prefix_chunk_output = torch.where(out_mask, 0, prefix_chunk_output)
+            lse_mask = batch_chunk_seq_mask[:, None,
+                                            None].expand_as(prefix_chunk_lse)
+            prefix_chunk_lse = torch.where(lse_mask, -torch.inf,
+                                           prefix_chunk_lse)
 
         prefix_output, prefix_lse = self._update_chunk_attn_out_lse(
             prefix_chunk_output, prefix_chunk_lse)
