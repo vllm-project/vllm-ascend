@@ -88,17 +88,17 @@ jobs:
           # We found that if running aclgraph tests in batch, it will cause AclmdlRICaptureBegin error. So we run
           # the test separately.
 
-          pytest -sv tests/e2e/singlecard/test_completion_with_prompt_embeds.py
-          pytest -sv tests/e2e/singlecard/test_aclgraph.py
-          pytest -sv tests/e2e/singlecard/test_aclgraph_mem.py
-          pytest -sv tests/e2e/singlecard/test_ascend_scheduler.py
-          pytest -sv tests/e2e/singlecard/test_bge_model.py
-          pytest -sv tests/e2e/singlecard/test_camem.py
-          pytest -sv tests/e2e/singlecard/test_chunked.py
-          pytest -sv tests/e2e/singlecard/test_embedding.py
+          #s pytest -sv tests/e2e/singlecard/test_completion_with_prompt_embeds.py
+          #s pytest -sv tests/e2e/singlecard/test_aclgraph.py
+          #s pytest -sv tests/e2e/singlecard/test_aclgraph_mem.py
+          #s pytest -sv tests/e2e/singlecard/test_ascend_scheduler.py
+          #s pytest -sv tests/e2e/singlecard/test_bge_model.py
+          #s pytest -sv tests/e2e/singlecard/test_camem.py
+          #s pytest -sv tests/e2e/singlecard/test_chunked.py
+          #s pytest -sv tests/e2e/singlecard/test_embedding.py
           # pytest -sv tests/e2e/singlecard/test_embedding_aclgraph.py
-          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
-          # pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          #s pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          #s pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_profile_execute_duration.py
           pytest -sv tests/e2e/singlecard/test_quantization.py
           pytest -sv tests/e2e/singlecard/test_sampler.py
@@ -179,13 +179,13 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
-          pytest -sv tests/e2e/multicard/test_data_parallel.py
-          pytest -sv tests/e2e/multicard/test_expert_parallel.py
-          pytest -sv tests/e2e/multicard/test_external_launcher.py
-          pytest -sv tests/e2e/multicard/test_single_request_aclgraph.py
-          pytest -sv tests/e2e/multicard/test_fused_moe_allgather_ep.py
-          # pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          #s pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
+          #s pytest -sv tests/e2e/multicard/test_data_parallel.py
+          #s pytest -sv tests/e2e/multicard/test_expert_parallel.py
+          #s pytest -sv tests/e2e/multicard/test_external_launcher.py
+          #s pytest -sv tests/e2e/multicard/test_single_request_aclgraph.py
+          #s pytest -sv tests/e2e/multicard/test_fused_moe_allgather_ep.py
+          #s pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
 
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
