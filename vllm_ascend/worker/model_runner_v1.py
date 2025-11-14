@@ -142,6 +142,7 @@ from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.spec_decode.eagle_proposer import EagleProposer
 from vllm_ascend.spec_decode.interface import SpecDcodeType
 from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
+from vllm_ascend.spec_decode.suffix_proposer import SuffixDecodingProposer
 from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                AscendSocVersion, ProfileExecuteDuration,
@@ -614,7 +615,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.spec_attn_mask = None
         self.drafter: Optional[Union[NgramProposer, EagleProposer, MtpProposer,
-                                     TorchairMtpProposer]] = None
+                                     TorchairMtpProposer,
+                                     SuffixDecodingProposer]] = None
         self.actual_seq_lengths_q: list[int] = []
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -1009,7 +1011,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
         # Chunk Prefill situation.
-        elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
+        elif (
+                attn_state == AscendAttentionState.ChunkedPrefill
+                or attn_state == AscendAttentionState.SpecDecoding
+        ) and not self.vllm_config.model_config.use_mla and not self.use_sparse:
             if self.dcp_size > 1:
                 max_seq_len = max(seq_lens.max().item(), 0)
                 return self.attn_mask_builder.get_attn_mask(
@@ -2391,7 +2396,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         moe_comm_type = self._select_moe_comm_method(num_input_tokens,
                                                      self.with_prefill)
 
-        uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
+        uniform_decode = (max_query_len <= self.uniform_decode_query_len) and (
             scheduler_output.total_num_scheduled_tokens
             == self.input_batch.num_reqs * max_query_len)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
@@ -3067,8 +3072,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor)
                 if need_dummy_logits:
-                    self.drafter.model.compute_logits(
-                        hidden_states[dummy_indices])
+                    if isinstance(self.drafter, NgramProposer) or isinstance(
+                            self.drafter, SuffixDecodingProposer):
+                        dummy_compute_logits(hidden_states)
+                    else:
+                        self.drafter.model.compute_logits(
+                            hidden_states[dummy_indices])
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if not self.in_profile_run and self.dynamic_eplb:
