@@ -303,9 +303,16 @@ def test_e2e_deepseekv2lite_with_nz():
 def test_e2e_deepseekv2lite_with_optimize():
     additional_config = {
         "torchair_graph_config": {
-            "enabled": True,
-            "multistream_overlap_shared_expert": True,
-            "enable_super_kernel": True,
+            "enable_view_optimize": False
+        },
+    }
+    _deepseek_v2_lite_torchair_test_fixure(additional_config)
+
+
+def test_e2e_deepseekv2lite_with_frozen():
+    additional_config = {
+        "torchair_graph_config": {
+            "enable_frozen_parameter": False
         },
     }
     _deepseek_v2_lite_torchair_test_fixure(additional_config)
