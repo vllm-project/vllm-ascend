@@ -115,7 +115,7 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_block_size() -> list[int]:
-        return [64]
+        return [128]
 
 
 class AscendAttentionState(Enum):

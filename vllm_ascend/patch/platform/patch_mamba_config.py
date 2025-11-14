@@ -51,7 +51,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
         block_size=model_config.max_model_len,
     ).page_size_bytes
 
-    block_alignment_bytes = 64
+    block_alignment_bytes = 128
 
     # some attention backends (e.g. FA) only support setting
     # block size to multiple of 16, so let's suggest a value
