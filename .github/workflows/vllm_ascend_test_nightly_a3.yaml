@@ -41,19 +41,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  image_build:
-    if: github.event_name != 'pull_request'
-    name: nightly image build
-    uses: ./.github/workflows/_nightly_image_build.yaml
-    with:
-      target: a3
-    secrets:
-      HW_USERNAME: ${{ secrets.HW_USERNAME }}
-      HW_TOKEN: ${{ secrets.HW_TOKEN }}
-
   multi-node-tests:
     name: multi-node
-    needs: [image_build]
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
@@ -98,7 +87,7 @@ jobs:
   single-node-tests:
     name: single-node
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    needs: [image_build, multi-node-tests]
+    needs: multi-node-tests
     strategy:
       fail-fast: false
       matrix:
