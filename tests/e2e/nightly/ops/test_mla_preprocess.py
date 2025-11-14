@@ -1,5 +1,5 @@
 """
-Tests for the MOE layers.
+Tests for the Mla Preprocess Operator.
 Run `python tests/ops/test_mla_preprocess.py`.
 """
 
