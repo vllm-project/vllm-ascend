@@ -1554,9 +1554,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_no_split.contiguous(), need_gather_q_kv)
 
         if flashcomm2_o_shared_enabled():
-            from vllm_ascend.multistream.context import \
-                get_multistream_microbatch_context
-            if get_multistream_microbatch_context() != 0:
                 reach_layer_for_shared_weight_series(self.o_proj)
 
         decode_preprocess_res = None
