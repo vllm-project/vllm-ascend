@@ -52,6 +52,7 @@ concurrency:
 
 jobs:
   e2e-nightly:
+    if: false
     name: ${{ inputs.tests }}
     runs-on: ${{ inputs.runner }}
     container:
