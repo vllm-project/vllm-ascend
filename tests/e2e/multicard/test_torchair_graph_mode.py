@@ -304,6 +304,7 @@ def test_e2e_deepseekv2lite_with_optimize():
     additional_config = {
         "torchair_graph_config": {
             "enabled": True,
+            "multistream_overlap_shared_expert": True,
             "enable_super_kernel": True,
         },
     }
