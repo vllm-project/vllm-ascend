@@ -88,6 +88,7 @@ import argparse
 import asyncio
 import functools
 import heapq
+import ipaddress
 import os
 import sys
 import threading
@@ -115,7 +116,13 @@ class ServerState:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.url = f'http://{host}:{port}/v1'
+        ip = ipaddress.ip_address(self.host)
+        if isinstance(ip, ipaddress.IPv4Address):
+            self.url = f'http://{host}:{port}/v1'
+        elif isinstance(ip, ipaddress.IPv6Address):
+            self.url = f'http://[{host}]:{port}/v1'
+        else:
+            raise RuntimeError(f"Invild host IP address {ip}")
         self.client = httpx.AsyncClient(timeout=None,
                                         base_url=self.url,
                                         limits=httpx.Limits(
@@ -561,7 +568,7 @@ async def metaserver(request: Request):
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay)
         proxy_state.release_prefiller(prefiller_idx, prefiller_score)
-        proxy_state.release_prefiller_kv(prefiller_idx,prefiller_score)
+        proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
 
     except Exception as e:
         logger.error(f"Post metaserver failed with: {str(e)}")

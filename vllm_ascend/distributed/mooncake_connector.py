@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
 import hashlib
+import ipaddress
 import math
 import os
 import queue
@@ -710,6 +711,9 @@ class MooncakeConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
         self.local_ip = get_ip()
+        if isinstance(ipaddress.ip_address(self.local_ip),
+                      ipaddress.IPv6Address):
+            logger.warning("IPV6 for prefill disaggregate is expreimental")
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
 
         self.side_channel_host = get_ip()
