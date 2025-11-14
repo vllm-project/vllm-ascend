@@ -25,10 +25,10 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
-                                             get_tp_group,
-                                             get_decode_context_model_parallel_rank,
-                                             get_decode_context_model_parallel_world_size)
+from vllm.distributed.parallel_state import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size
+    get_tensor_model_parallel_rank, get_tp_group)
 from vllm.utils import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
@@ -37,11 +37,11 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
-from vllm_ascend.utils import vllm_version_is
-from vllm_ascend.utils import prefill_context_parallel_enable
+from vllm_ascend.utils import prefill_context_parallel_enable, vllm_version_is
 if prefill_context_parallel_enable():
-    from vllm.distributed import (get_prefill_context_model_parallel_rank,
-                                  get_prefill_context_model_parallel_world_size)
+    from vllm.distributed import (
+        get_prefill_context_model_parallel_rank,
+        get_prefill_context_model_parallel_world_size)
 
 if vllm_version_is("0.11.0"):
     from vllm.utils import get_ip, make_zmq_path, make_zmq_socket
@@ -737,8 +737,7 @@ class MooncakeConnectorScheduler:
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port +
             vllm_config.parallel_config.data_parallel_rank *
-            vllm_config.parallel_config.tensor_parallel_size * 
-            self.pcp_size)
+            vllm_config.parallel_config.tensor_parallel_size * self.pcp_size)
 
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
@@ -911,8 +910,7 @@ class MooncakeConnectorWorker:
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port +
             vllm_config.parallel_config.data_parallel_rank *
-            vllm_config.parallel_config.tensor_parallel_size * 
-            self.pcp_size)
+            vllm_config.parallel_config.tensor_parallel_size * self.pcp_size)
         self.handshake_port = self.side_channel_port + self.pcp_rank * self.tp_size + self.tp_rank
         self.sockets: dict = {}
 
@@ -934,8 +932,11 @@ class MooncakeConnectorWorker:
                     f"Expected at least {end_index} devices, but found {len(device_ids)} "
                     "in PHYSICAL_DEVICES.")
             device_ids = device_ids[start_index:end_index]
-        assert len(device_ids) > self.pcp_rank * self.tp_size + self.tp_rank  # type: ignore
-        self.device_id = device_ids[self.pcp_rank * self.tp_size + self.tp_rank]  # type: ignore
+        assert len(
+            device_ids
+        ) > self.pcp_rank * self.tp_size + self.tp_rank  # type: ignore
+        self.device_id = device_ids[self.pcp_rank * self.tp_size +
+                                    self.tp_rank]  # type: ignore
 
         if vllm_config.kv_transfer_config.get_from_extra_config(
                 'use_ascend_direct', True):
@@ -1125,12 +1126,19 @@ class MooncakeConnectorWorker:
 
     def _get_kv_split_metadata(
         self,
+        req_id: str,
         meta: ReqMeta,
     ) -> tuple[list[list[int]], list[list[int]], list[list[int]]]:
         """
         In cp/dcp scenario, kv_cache may be split, so we need to pull multiple blocks from multiple remote P node.
         Use this function to calculate remote port and remote block number of each remote P node that we need to pull.
         """
+        if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
+            choosen_rank_list = self._get_remote_tp_rank(req_id)
+            remote_handshake_port_list = [[x + meta.remote_port for x in choosen_rank_list]]
+            local_block_ids_list, remote_block_ids_list = [meta.local_block_ids], [meta.remote_block_ids]
+            return remote_handshake_port_list, local_block_ids_list, remote_block_ids_list
+        
         if self.pcp_size == meta.remote_pcp_size and self.dcp_size == meta.remote_dcp_size:
             # remote & local cp/dcp are equal, do kv transfer point-to-point
             remote_kv_num = 1
@@ -1143,8 +1151,9 @@ class MooncakeConnectorWorker:
                 assert (self.dcp_size == 1 and (self.tp_size == 1 or self.tp_size == self._prefill_tp_size)) or \
                     (self.dcp_size == meta.remote_dcp_size and self.tp_size == self._prefill_tp_size)
             else:
-                assert self.tp_size == self._prefill_tp_size and (self.dcp_size == 1 or 
-                self.dcp_size == meta.remote_dcp_size)
+                assert self.tp_size == self._prefill_tp_size and (
+                    self.dcp_size == 1
+                    or self.dcp_size == meta.remote_dcp_size)
             # remote & local cp/dcp are not equal, each D node needs to pull from pcp(*dcp) P nodes
             # 1. for mla, support D pcp_size = 1, D dcp_size = (1 or P dcp_size)
             # 2. for gqa, support D tp_size = P tp_size, D dcp_size = P dcp_size
@@ -1186,8 +1195,11 @@ class MooncakeConnectorWorker:
         local_block_offset = 0
         for remote_kv_id in range(len(remote_handshake_port_list)):
             num_blocks_to_pull = remote_block_nums[remote_kv_id]
-            remote_block_ids_list.append(meta.remote_block_ids[:num_blocks_to_pull])
-            local_block_ids_list.append(meta.local_block_ids[local_block_offset:local_block_offset+num_blocks_to_pull])
+            remote_block_ids_list.append(
+                meta.remote_block_ids[:num_blocks_to_pull])
+            local_block_ids_list.append(
+                meta.local_block_ids[local_block_offset:local_block_offset+
+                num_blocks_to_pull])
             local_block_offset += num_blocks_to_pull
         assert local_block_offset == len(meta.local_block_ids), \
         f"local_block_offset ({local_block_offset}) should equal with local_block_ids len ({len(meta.local_block_ids)})"
@@ -1203,10 +1215,12 @@ class MooncakeConnectorWorker:
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
 
-            remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(meta)
+            remote_handshake_port_list, local_block_ids_list, remote_block_ids_list = self._get_kv_split_metadata(
+                req_id, meta)
 
             for pcp_dcp_rank in range(len(remote_handshake_port_list)):
-                if len(local_block_ids_list[pcp_dcp_rank]) + len(remote_block_ids_list[pcp_dcp_rank]) == 0:
+                if len(local_block_ids_list[pcp_dcp_rank]) + len(
+                    remote_block_ids_list[pcp_dcp_rank]) == 0:
                     continue
                 for i in range(self.num_need_pulls):
                     assert self.kv_recv_thread is not None
@@ -1216,7 +1230,8 @@ class MooncakeConnectorWorker:
                         remote_block_ids=remote_block_ids_list[pcp_dcp_rank],
                         remote_engine_id=meta.remote_engine_id,
                         remote_host=meta.remote_host,
-                        remote_handshake_port=remote_handshake_port_list[pcp_dcp_rank][i],
+                        remote_handshake_port=remote_handshake_port_list[
+                            pcp_dcp_rank][i],
                         offset=i,
                         num_need_pulls=self.num_need_pulls)
 
