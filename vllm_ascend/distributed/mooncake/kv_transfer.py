@@ -1,4 +1,5 @@
 import queue
+import random
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Optional
@@ -33,6 +34,7 @@ class KVTransferThread(threading.Thread):
         self.request_queue: queue.Queue[Any] = queue.Queue()
         # TODO(jianzs): make this configurable
         self.executor = ThreadPoolExecutor(max_workers=32)
+        self.rand = random.Random(tp_rank)
         self.finished_requests: set[str] = set()
 
     def prepare_value(self, start: int, end: int, block_ids: list[int]):
@@ -48,6 +50,15 @@ class KVTransferThread(threading.Thread):
             addr_list.append(addr)
             size_list.append(length)
         return addr_list, size_list, block_id
+
+    def random_shuffle_list(
+        self, keys: list[str], addr_list: list[list[int]],
+        size_list: list[list[int]]
+    ) -> tuple[list[str], list[list[int]], list[list[int]]]:
+        combined = list(zip(keys, addr_list, size_list))
+        self.rand.shuffle(combined)
+        shuffled_keys, shuffled_addrs, shuffled_sizes = zip(*combined)
+        return list(shuffled_keys), list(shuffled_addrs), list(shuffled_sizes)
 
     def prepare_value_layer(self, start: int, end: int, block_ids: list[int],
                             layer_id: int):
@@ -202,6 +213,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 addr_list.append(addr)
                 size_list.append(size)
                 blockIds.append(block_id)
+            key_list, addr_list, size_list = self.random_shuffle_list(
+                key_list, addr_list, size_list)
             self.m_store.get_batch(key_list, addr_list, size_list, blockIds)
         else:
             for start, end, key in self.token_database.process_tokens(
