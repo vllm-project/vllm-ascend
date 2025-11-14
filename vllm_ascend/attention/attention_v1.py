@@ -322,9 +322,7 @@ class AscendAttentionMetadataBuilder:
         # slot_mapping = common_attn_metadata.slot_mapping[:num_actual_tokens]
         attn_mask = common_attn_metadata.attn_mask
         attn_state = common_attn_metadata.attn_state
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
-                                                                       num_reqs
-                                                                       + 1]
+
         num_computed_tokens_cpu = (seq_lens - query_lens)
 
         if attn_state == AscendAttentionState.DecodeOnly and \
@@ -1485,8 +1483,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
             intermediate_output = self._forward_pcp_dcp(
                 query, key, value, kv_cache, attn_metadata, output)
         elif attn_type == AttentionType.ENCODER_ONLY:
-            # TODO(zzzwwjj): Deal with this `cum_seq_len` more elegantly.
-            cum_seq_len = attn_metadata.query_start_loc[1:].tolist()
             intermediate_output = torch_npu.npu_fusion_attention(
                 query,
                 key,
@@ -1498,8 +1494,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 atten_mask=attn_metadata.attn_mask,
                 pre_tockens=attn_metadata.max_query_len,
                 next_tockens=attn_metadata.max_query_len,
-                actual_seq_qlen=cum_seq_len,
-                actual_seq_kvlen=cum_seq_len,
+                actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
             )[0]
         # V0-Style scheduler situation.
         elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
