@@ -908,7 +908,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 128, self.dtype, self.device)
         # Decode-only situation.
         else:
-            return None
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+                return self.attn_mask_builder.get_splitfuse_attn_mask()
+            else:
+                return None
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
@@ -2262,6 +2265,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.seq_lens_np[:num_reqs] = seq_lens
             self.seq_lens_np[num_reqs:] = 0
 
+            cu_num_tokens, arange = self._get_cumsum_and_arange(
+                num_scheduled_tokens)
+
+            self.query_start_loc[1:num_reqs + 1] = torch.Tensor(cu_num_tokens)
+            self.query_start_loc_cpu[1:num_reqs +
+                                     1] = torch.Tensor(cu_num_tokens)
+
+            assigned_mask_dim = 2048
+            self.attn_mask = torch.triu(torch.ones(assigned_mask_dim,
+                                                   assigned_mask_dim),
+                                        diagonal=1).to(torch.int8).to(
+                                            self.device)
+
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
 
@@ -3386,8 +3402,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         for attn_group in self._attn_group_iterator():
             builder = attn_group.get_metadata_builder()
-            if builder.aclgraph_support.value < min_ag_support.value:
-                min_ag_support = builder.aclgraph_support
+            graph_support = None
+            if hasattr(builder, 'aclgraph_support'):
+                graph_support = builder.aclgraph_support.value
+                builder_aclgraph = builder.aclgraph_support
+            else:
+                graph_support = builder.cudagraph_support.value
+                builder_aclgraph = builder.cudagraph_support
+            if graph_support < min_ag_support.value:
+                min_ag_support = builder_aclgraph
                 min_ag_builder_name = builder.__class__.__name__
 
         # This is an imitation of compilation_config.splitting_ops_contain_attention()
