@@ -28,9 +28,12 @@ import huggingface_hub
 import pandas as pd
 from modelscope import snapshot_download  # type: ignore
 
-DATASET_CONF_DIR = "benchmark/ais_bench/benchmark/configs/datasets"
-REQUEST_CONF_DIR = "benchmark/ais_bench/benchmark/configs/models/vllm_api"
-DATASET_DIR = "benchmark/ais_bench/datasets"
+BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("."))
+DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark",
+                                "configs", "datasets")
+REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark",
+                                "configs", "models", "vllm_api")
+DATASET_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "datasets")
 
 
 class AisbenchRunner:
@@ -68,6 +71,7 @@ class AisbenchRunner:
                  model: str,
                  port: int,
                  aisbench_config: dict,
+                 host_ip: str = "localhost",
                  verify=True):
         self.model = model
         self.dataset_path = maybe_download_from_modelscope(
@@ -76,6 +80,7 @@ class AisbenchRunner:
         assert self.dataset_path is not None and self.model_path is not None, \
             f"Failed to download dataset or model: dataset={self.dataset_path}, model={self.model_path}"
         self.port = port
+        self.host_ip = host_ip
         self.task_type = aisbench_config["case_type"]
         self.request_conf = aisbench_config["request_conf"]
         self.dataset_conf = aisbench_config.get("dataset_conf")
@@ -131,6 +136,7 @@ class AisbenchRunner:
             content = f.read()
         content = re.sub(r'model=.*', f'model="{self.model}",', content)
         content = re.sub(r'host_port.*', f'host_port = {self.port},', content)
+        content = re.sub(r'host_ip.*', f'host_ip = "{self.host_ip}",', content)
         content = re.sub(r'max_out_len.*',
                          f'max_out_len = {self.max_out_len},', content)
         content = re.sub(r'batch_size.*', f'batch_size = {self.batch_size},',
@@ -238,14 +244,21 @@ class AisbenchRunner:
         assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, f"Accuracy verification failed. The accuracy of {self.dataset_path} is {acc_value}, which is not within {self.threshold} relative to baseline {self.baseline}."
 
 
-def run_aisbench_cases(model, port, aisbench_cases, server_args=""):
+def run_aisbench_cases(model,
+                       port,
+                       aisbench_cases,
+                       server_args="",
+                       host_ip="localhost"):
     aisbench_results = []
     aisbench_errors = []
     for aisbench_case in aisbench_cases:
         if not aisbench_case:
             continue
         try:
-            with AisbenchRunner(model, port, aisbench_case) as aisbench:
+            with AisbenchRunner(model=model,
+                                port=port,
+                                host_ip=host_ip,
+                                aisbench_config=aisbench_case) as aisbench:
                 aisbench_results.append(aisbench.result)
         except Exception as e:
             aisbench_results.append("")
@@ -284,12 +297,12 @@ def get_lock(model_name_or_path: str | Path, cache_dir: str | None = None):
 
 def maybe_download_from_modelscope(
     model: str,
-    repo_type: str | None = None,
+    repo_type: str = "model",
     revision: str | None = None,
     download_dir: str | None = None,
     ignore_patterns: str | list[str] | None = None,
     allow_patterns: list[str] | str | None = None,
-) -> str | None:
+) -> str:
     """
     Download model/dataset from ModelScope hub.
     Returns the path to the downloaded model, or None if the model is not
@@ -310,5 +323,4 @@ def maybe_download_from_modelscope(
             )
         else:
             model_path = model
-        return model_path
-    return None
+    return model_path

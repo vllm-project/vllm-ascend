@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import json
 from typing import Any
 
 import openai
@@ -26,9 +27,6 @@ from tools.aisbench import run_aisbench_cases
 MODELS = [
     "vllm-ascend/DeepSeek-R1-W8A8",
 ]
-
-TENSOR_PARALLELS = [8]
-DATA_PARALLELS = [2]
 
 prompts = [
     "San Francisco is a",
@@ -47,45 +45,61 @@ aisbench_cases = [{
     "batch_size": 32,
     "baseline": 95,
     "threshold": 5
-}, {
-    "case_type": "performance",
-    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
-    "request_conf": "vllm_api_stream_chat",
-    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
-    "num_prompts": 80,
-    "max_out_len": 1500,
-    "batch_size": 20,
-    "request_rate": 0,
-    "baseline": 1,
-    "threshold": 0.97
 }]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
-@pytest.mark.parametrize("dp_size", DATA_PARALLELS)
-async def test_models(model: str, tp_size: int, dp_size: int) -> None:
+async def test_models(model: str) -> None:
     port = get_open_port()
     env_dict = {
-        "TASK_QUEUE_ENABLE": "1",
+        "OMP_NUM_THREADS": "100",
         "OMP_PROC_BIND": "false",
-        "HCCL_OP_EXPANSION_MODE": "AIV",
-        "PAGED_ATTENTION_MASK_LEN": "5500",
-        "DYNAMIC_EPLB": "true"
+        "HCCL_BUFFSIZE": "200",
+        "VLLM_ASCEND_ENABLE_MLAPO": "1",
+        "VLLM_RPC_TIMEOUT": "3600000",
+        "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": "3600000",
+        "DISABLE_L2_CACHE": "1",
+        "DYNAMIC_EPLB": "true",
+    }
+    speculative_config = {
+        "num_speculative_tokens": 1,
+        "method": "deepseek_mtp"
+    }
+    compilation_config = {
+        "cudagraph_capture_sizes": [24],
+        "cudagraph_mode": "FULL_DECODE_ONLY"
+    }
+    additional_config: dict[str, Any] = {
+        "ascend_scheduler_config": {
+            "enabled": False
+        },
+        "torchair_graph_config": {
+            "enabled": True
+        },
+        "enable_shared_expert_dp": False,
+        "multistream_overlap_shared_expert": False,
+        "dynamic_eplb": True,
+        "num_iterations_eplb_update": 14000,
+        "num_wait_worker_iterations": 30,
+        "init_redundancy_expert": 0,
+        "gate_eplb": False
     }
     server_args = [
-        "--no-enable-prefix-caching", "--enable-expert-parallel",
-        "--tensor-parallel-size",
-        str(tp_size), "--data-parallel-size",
-        str(dp_size), "--port",
-        str(port), "--max-model-len", "36864", "--max-num-batched-tokens",
-        "36864", "--block-size", "128", "--trust-remote-code",
-        "--quantization", "ascend", "--gpu-memory-utilization", "0.9",
-        "--additional-config", '{"enable_weight_nz_layout":true, '
-        '"torch_air_graph_config":{"enabled": true, "enable_multistream_mla": true, "graph_batch_size": [16], "use_cached_graph": true},'
-        '"dynamic_eplb": true, "num_iterations_eplb_update": 200, "num_wait_worker_iterations": 100, "init_redundancy_expert": 16}'
+        "--quantization", "ascend", "--seed", "1024",
+        "--no-enable-prefix-caching", "--data-parallel-size", "4",
+        "--tensor-parallel-size", "4", "--enable-expert-parallel", "--port",
+        str(port), "--max-model-len", "40000", "--max-num-batched-tokens",
+        "4096", "--max-num-seqs", "12", "--trust-remote-code",
+        "--gpu-memory-utilization", "0.92"
     ]
+    server_args.extend(
+        ["--speculative-config",
+         json.dumps(speculative_config)])
+    server_args.extend(
+        ["--compilation-config",
+         json.dumps(compilation_config)])
+    server_args.extend(["--additional-config", json.dumps(additional_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
@@ -102,5 +116,9 @@ async def test_models(model: str, tp_size: int, dp_size: int) -> None:
         )
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
+        print(choices)
         # aisbench test
-        run_aisbench_cases(model, port, aisbench_cases)
+        run_aisbench_cases(model,
+                           port,
+                           aisbench_cases,
+                           server_args=server_args)

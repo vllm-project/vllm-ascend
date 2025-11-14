@@ -29,9 +29,12 @@ on:
       image:
         required: false
         type: string
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11"
       tests:
         required: true
+        type: string
+      name:
+        required: false
         type: string
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -44,72 +47,71 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 1 card / 4 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-${{ inputs.tests }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.tests }}
   cancel-in-progress: true
 
 jobs:
   e2e-nightly:
-    name: e2e-nightly
+    name: ${{ inputs.tests }}
     runs-on: ${{ inputs.runner }}
     container:
       image: ${{ inputs.image }}
-      env:
-        VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
-      - name: Config mirrors
+      - name: Show vLLM and vLLM-Ascend version
+        working-directory: /vllm-workspace
         run: |
-          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-          apt-get update -y
-          apt install git -y
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+          echo "Installed vLLM-related Python packages:"
+          pip list | grep vllm || echo "No vllm packages found."
 
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
+          echo ""
+          echo "============================"
+          echo "vLLM Git information"
+          echo "============================"
+          cd vllm
+          if [ -d .git ]; then
+            echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+            echo "Commit hash: $(git rev-parse HEAD)"
+            echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+            echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+            echo "Message:     $(git log -1 --pretty=format:'%s')"
+            echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+            echo "Remote:      $(git remote -v | head -n1)"
+            echo ""
+          else
+            echo "No .git directory found in vllm"
+          fi
+          cd ..
 
-      - name: Install system dependencies
-        run: |
-          apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ inputs.vllm }}
-          path: ./vllm-empty
-
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
-        run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
-
-      - name: Install vllm-project/vllm-ascend
-        env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
-
-      - name: Checkout aisbench repo and Install aisbench
-        run: |
-          git clone https://gitee.com/aisbench/benchmark.git
-          cd benchmark
-          git checkout v3.0-20250930-master
-          pip3 install -e ./
-          pip3 install -r requirements/api.txt
-          pip3 install -r requirements/extra.txt
+          echo ""
+          echo "============================"
+          echo "vLLM-Ascend Git information"
+          echo "============================"
+          cd vllm-ascend
+          if [ -d .git ]; then
+            echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+            echo "Commit hash: $(git rev-parse HEAD)"
+            echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+            echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+            echo "Message:     $(git log -1 --pretty=format:'%s')"
+            echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+            echo "Remote:      $(git remote -v | head -n1)"
+            echo ""
+          else
+            echo "No .git directory found in vllm-ascend"
+          fi
+          cd ..
 
       - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
           VLLM_CI_RUNNER: ${{ inputs.runner }}
+          BENCHMARK_HOME: /vllm-workspace/vllm-ascend/benchmark
+        working-directory: /vllm-workspace/vllm-ascend
         run: |
-          # TODO: enable more tests
           pytest -sv ${{ inputs.tests }}

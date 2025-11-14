@@ -27,6 +27,7 @@ on:
   pull_request: 
     branches:
       - 'main'
+    types: [ labeled, synchronize ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -41,8 +42,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  image_build:
+    name: nightly image build
+    uses: ./.github/workflows/_nightly_image_build.yaml
+    with:
+      target: a2
+    secrets:
+      HW_USERNAME: ${{ secrets.HW_USERNAME }}
+      HW_TOKEN: ${{ secrets.HW_TOKEN }}
   single-node-tests:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: single-node
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: image_build
     strategy:
       fail-fast: false
       matrix:
@@ -61,9 +72,11 @@ jobs:
       vllm: v0.11.0
       runner: ${{ matrix.test_config.os }}
       tests: ${{ matrix.test_config.tests }}
+      image: ${{ fromJSON(format('"{0}"', needs.image_build.outputs.image-tag || 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2')) }}
 
   multi-node-tests:
-    needs: single-node-tests
+    name: multi-node
+    needs: [single-node-tests, image_build]
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
@@ -71,18 +84,58 @@ jobs:
       matrix:
         test_config:
           - name: multi-node-deepseek-dp
-            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8-A2.yaml
+            config_file_path: DeepSeek-R1-W8A8-A2.yaml
             size: 2
           - name: multi-node-deepseek-dp-torchair
-            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8-A2-torchair.yaml
+            config_file_path: DeepSeek-R1-W8A8-A2-torchair.yaml
             size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a2
       runner: linux-aarch64-a2-0
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      image: ${{ fromJSON(format('"{0}"', needs.image_build.outputs.image-tag || 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2')) }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_A2_B64 }}
+
+  single-node-accuracy-tests:
+    if: >-
+      ${{
+        github.event_name == 'schedule' ||
+        github.event_name == 'workflow_dispatch' ||
+        (
+          contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
+          contains(github.event.pull_request.labels.*.name, 'ready-for-test')
+        )
+      }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config:
+          - os: linux-aarch64-a2-1
+            model_list:
+              - Qwen3-8B
+              - Qwen2.5-VL-7B-Instruct
+              - Qwen2-Audio-7B-Instruct
+              - Qwen3-8B-W8A8
+              - Qwen3-VL-8B-Instruct
+              - Qwen2.5-Omni-7B
+              - Meta-Llama-3.1-8B-Instruct
+          - os: linux-aarch64-a2-2
+            model_list:
+              - Qwen3-30B-A3B
+              - Qwen3-VL-30B-A3B-Instruct
+              - DeepSeek-V2-Lite
+              - Qwen3-30B-A3B-W8A8
+          - os: linux-aarch64-a2-4
+            model_list:
+              - Qwen3-Next-80B-A3B-Instruct
+    uses: ./.github/workflows/_e2e_nightly_single_node_models.yaml
+    with:
+      vllm: v0.11.0
+      runner: ${{ matrix.test_config.os }}
+      model_list: ${{ toJson(matrix.test_config.model_list) }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      upload: false

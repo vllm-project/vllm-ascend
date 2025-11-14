@@ -37,6 +37,11 @@ from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_comm_method import setup_moe_comm_method
+from vllm_ascend.ops.fused_moe.prepare_finalize import QuantType
+from vllm_ascend.quantization.w4a8_dynamic import \
+    AscendW4A8DynamicFusedMoEMethod
+from vllm_ascend.quantization.w8a8_dynamic import \
+    AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
                                shared_expert_dp_enabled,
@@ -266,7 +271,8 @@ class AscendFusedMoE(FusedMoE):
             self.expert_map != -1) if self.expert_map is not None else
                              self.global_num_experts)
         if self.dynamic_eplb:
-            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
+            self.moe_load = torch.zeros(local_num_experts,
+                                        dtype=torch.int64).npu()
 
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
@@ -289,6 +295,22 @@ class AscendFusedMoE(FusedMoE):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         setup_moe_comm_method(self.moe_config)
+        self.quant_type = self._get_quant_type()
+
+    def _get_quant_type(self) -> QuantType:
+        quant_method = self.quant_method
+        if not hasattr(quant_method,
+                       "quant_method") or quant_method.quant_method is None:
+            return QuantType.NONE
+
+        method = quant_method.quant_method
+
+        if isinstance(method, AscendW8A8DynamicFusedMoEMethod):
+            return QuantType.W8A8
+        elif isinstance(method, AscendW4A8DynamicFusedMoEMethod):
+            return QuantType.W4A8
+        else:
+            return QuantType.NONE
 
     def update_expert_map(self, new_expert_map):
         self.expert_map = new_expert_map
@@ -333,13 +355,20 @@ class AscendFusedMoE(FusedMoE):
             hidden_states=hidden_states,
             router_logits=router_logits,
             replace_allreduce=forward_context.sp_enabled,
-            enable_shared_expert_dp=self.enable_shared_expert_dp)
+            enable_shared_expert_dp=self.enable_shared_expert_dp,
+            quant_type=self.quant_type)
+
+        if isinstance(hidden_states, tuple):
+            hidden_states, pertoken_scale = hidden_states
+        else:
+            pertoken_scale = None
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
+            pertoken_scale=pertoken_scale,
             top_k=self.top_k,
             renormalize=self.renormalize,
             use_grouped_topk=self.use_grouped_topk,
@@ -362,10 +391,9 @@ class AscendFusedMoE(FusedMoE):
 
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
-
-        if self.dynamic_eplb:
-            self.moe_load += expert_tokens if group_list_type else \
-                torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+            if self.dynamic_eplb:
+                self.moe_load += expert_tokens if group_list_type == 1 else \
+                    torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,

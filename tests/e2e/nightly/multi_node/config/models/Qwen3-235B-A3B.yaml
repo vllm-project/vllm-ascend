@@ -8,6 +8,7 @@ env_common:
   OMP_NUM_THREADS: 100
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
+  NUMEXPR_MAX_THREADS: 128
 
 deployment:
   -
@@ -47,3 +48,4 @@ deployment:
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
 benchmarks:
+

@@ -15,7 +15,7 @@ on:
         required: false
         type: string
         description: base image for pods
-        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11"
+        default: "swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11"
       config_file_path:
         required: true
         type: string
@@ -60,21 +60,22 @@ defaults:
 # only cancel in-progress runs of the same workflow
 # and ignore the lint / 8 cards test type
 concurrency:
-  group: ascend-nightly-${{ github.ref }}-${{ inputs.config_file_path }}
+  group: ascend-nightly-${{ github.workflow_ref }}-${{ github.ref }}-${{ inputs.config_file_path }}
   cancel-in-progress: true
 
 jobs:
   e2e:
-    # This is a runner with no NPU for k8s controller
+    name: ${{ inputs.config_file_path }}
+    # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11
       env:
         KUBECONFIG: /tmp/kubeconfig
         KUBECTL: /root/.cache/.kube/kubectl
         NAMESPACE: vllm-project
         LEADER_POD: vllm-0
-        RESULT_FILE: /root/.cache/tests/ret/test_result.txt
+        RESULT_FILE: /root/.cache/tests/ret_${{ inputs.soc_version }}
     steps:
         - name: Install system denpendencies
           run: |
@@ -83,7 +84,7 @@ jobs:
            pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
            pip install jinja2-cli
 
-           apt-get update -y && apt-get install -y git curl
+           #apt-get update -y && apt-get install -y git curl
 
         - name: Install kubectl
           run: |
@@ -112,11 +113,12 @@ jobs:
             # prepare for lws entrypoint scripts
             install -D tests/e2e/nightly/multi_node/scripts/run.sh /root/.cache/tests/run.sh
 
-        - name: Clear result ret
+        - name: Clear resources
           run: |
-            rm -f $RESULT_FILE
-
+            # pre clear the crd resources created by lws
+            kubectl delete leaderworkerset vllm -n "$NAMESPACE" --ignore-not-found
         - name: Launch cluster
+          id: launcher
           run: |
             set -e
 
@@ -128,6 +130,8 @@ jobs:
             vllm_ascend_ref="${{ inputs.vllm_ascend_ref }}"
             vllm_ascend_remote_url="${{ inputs.vllm_ascend_remote_url }}"
             result_file_path="$RESULT_FILE"
+            fail_tag=FAIL_TAG_"${{ inputs.config_file_path }}"
+            echo "FAIL_TAG=${fail_tag}" >> $GITHUB_ENV
 
             required_params=("size" "replicas" "image" "config_file_path")
             for param in "${required_params[@]}"; do
@@ -153,6 +157,7 @@ jobs:
               -D vllm_ascend_ref="$vllm_ascend_ref" \
               -D result_file_path="$result_file_path" \
               -D npu_per_node="$npu_per_node" \
+              -D fail_tag="$fail_tag" \
               --outfile lws.yaml
 
             kubectl apply -f ./lws.yaml
@@ -176,30 +181,14 @@ jobs:
 
         - name: Stream logs
           run: |
-            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE"
-
-        - name: Determine is success
-          run: |
-            TIMEOUT=300
-            ELAPSED=0
-            while [ ! -f "$RESULT_FILE" ]; do
-              sleep 5
-              ELAPSED=$((ELAPSED + 5))
-              if [ $ELAPSED -ge $TIMEOUT ]; then
-                echo "Timeout waiting for test result file"
-                exit 1
+            set -euo pipefail
+            echo "Looking for logs containing: $FAIL_TAG"
+            kubectl logs -f "$LEADER_POD" -n "$NAMESPACE" | while read -r line; do
+              echo "$line"
+              if echo "$line" | grep -q "$FAIL_TAG"; then
+                exit 1   # workflow step failed
               fi
             done
-
-            RET=$(cat "$RESULT_FILE")
-            echo "Test result: $RET"
-
-            if [ "$RET" -ne 0 ]; then
-              echo "Test failed"
-              exit 1
-            else
-              echo "Test succeeded"
-            fi
 
         - name: Post process
           if: always()

@@ -41,8 +41,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  image_build:
+    name: nightly image build
+    uses: ./.github/workflows/_nightly_image_build.yaml
+    with:
+      target: a3
+    secrets:
+      HW_USERNAME: ${{ secrets.HW_USERNAME }}
+      HW_TOKEN: ${{ secrets.HW_TOKEN }}
   single-node-tests:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: single-node
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: image_build
     strategy:
       fail-fast: false
       matrix:
@@ -59,6 +69,9 @@ jobs:
           - name: deepseek-r1-w8a8-eplb
             os: linux-aarch64-a3-16
             tests: tests/e2e/nightly/models/test_deepseek_r1_w8a8_eplb.py
+          - name: deepseek-r1-w8a8-mtpx
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/features/test_mtpx_deepseek_r1_0528_w8a8.py
           - name: qwen2-5-vl-7b
             os: linux-aarch64-a3-4
             tests: tests/e2e/nightly/models/test_qwen2_5_vl_7b.py
@@ -77,15 +90,26 @@ jobs:
           - name: qwq-32b-a3
             os: linux-aarch64-a3-4
             tests: tests/e2e/nightly/models/test_qwq_32b.py
+          - name: qwen3-30b-w8a8
+            os: linux-aarch64-a3-2
+            tests: tests/e2e/nightly/models/test_qwen3_30b_w8a8.py
+          - name: qwen3-235b-w8a8
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/models/test_qwen3_235b_w8a8.py
+          - name: deepseek3_2-exp-w8a8
+            os: linux-aarch64-a3-16
+            tests: tests/e2e/nightly/models/test_deepseek_v3_2_exp_w8a8.py
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       vllm: v0.11.0
       runner: ${{ matrix.test_config.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      image: ${{ fromJSON(format('"{0}"', needs.image_build.outputs.image-tag || 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3')) }}
       tests: ${{ matrix.test_config.tests }}
+      name: ${{ matrix.test_config.name }}
 
   multi-node-tests:
-    needs: single-node-tests
+    name: multi-node
+    needs: [single-node-tests, image_build]
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
@@ -93,21 +117,37 @@ jobs:
       matrix:
         test_config:
           - name: multi-node-deepseek-pd
-            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-V3.yaml
+            config_file_path: DeepSeek-V3.yaml
             size: 2
           - name: multi-node-qwen3-dp
-            config_file_path: tests/e2e/nightly/multi_node/config/models/Qwen3-235B-A3B.yaml
+            config_file_path: Qwen3-235B-A3B.yaml
             size: 2
           - name: multi-node-dpsk-4node-pd
-            config_file_path: tests/e2e/nightly/multi_node/config/models/DeepSeek-R1-W8A8.yaml
+            config_file_path: DeepSeek-R1-W8A8.yaml
             size: 4
+          - name: multi-node-qwenw8a8-2node
+            config_file_path: Qwen3-235B-W8A8.yaml
+            size: 2
+          - name: multi-node-glm-2node
+            config_file_path: GLM-4_5.yaml
+            size: 2
+          - name: multi-node-dpsk3.2-exp-2node
+            config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
+            size: 2
+          - name: multi-node-deepseek-r1-w8a8-eplb
+            config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
+            size: 4
+          - name: multi-node-qwenw8a8-2node-eplb
+            config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+            size: 2
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
       runner: linux-aarch64-a3-0
-      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1-a3-ubuntu22.04-py3.11
+      image: ${{ fromJSON(format('"{0}"', needs.image_build.outputs.image-tag || 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3')) }}
       replicas: 1
       size: ${{ matrix.test_config.size }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
     secrets:
       KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+  

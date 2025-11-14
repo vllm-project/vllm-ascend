@@ -104,7 +104,6 @@ export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH="/path/to/your/generated/ranktable.json"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
 
 vllm serve /model/Qwen3-30B-A3B  \
   --host 0.0.0.0 \
@@ -144,7 +143,6 @@ export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH="/path/to/your/generated/ranktable.json"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
 
 vllm serve /model/Qwen3-30B-A3B  \
   --host 0.0.0.0 \
@@ -183,7 +181,6 @@ export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH="/path/to/your/generated/ranktable.json"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
 
 vllm serve /model/Qwen3-30B-A3B  \
   --host 0.0.0.0 \
