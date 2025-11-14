@@ -19,10 +19,12 @@
 from functools import partial
 from typing import Callable, Optional
 
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_npu
+import torch.distributed as dist
 from einops import rearrange
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
@@ -40,6 +42,7 @@ from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import (_ACTIVATION_REGISTRY,
                                                    get_act_and_mul_fn)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionAttention, Qwen2_5_VisionBlock, Qwen2_5_VisionPatchEmbed,
@@ -50,6 +53,7 @@ from vllm.model_executor.models.qwen2_5_vl import (
 try:
     from vllm.model_executor.models.qwen3_vl import (
         Qwen3_VisionBlock, Qwen3_VisionPatchEmbed, Qwen3_VisionTransformer,
+        Qwen3_VisionPatchMerger,Qwen3_VisionMLP,
         Qwen3VLDummyInputsBuilder, Qwen3VLForConditionalGeneration,
         Qwen3VLMultiModalProcessor, Qwen3VLProcessingInfo)
     from vllm.model_executor.models.qwen3_vl_moe import (
@@ -68,7 +72,43 @@ from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from vllm_ascend.models.qwen2_5_vl import AscendQwen2_5_VisionRotaryEmbedding
+from vllm_ascend.distributed.context_parallel_utils import (all_gather_2d,
+                                                            all_to_all_3d,
+                                                            all_to_all_4d)
 
+                                                            
+def get_rank_world():
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    return rank, world_size
+
+class AscendQwen3_VisionMLP(Qwen3_VisionMLP):
+    def __init__(self,
+             in_features: int,
+             hidden_features: int,
+             bias: bool = False,
+             act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
+             quant_config: Optional[QuantizationConfig] = None,
+             prefix: str = ""):
+        super().__init__(in_features, hidden_features, bias, act_fn,
+                         quant_config, prefix)
+        self.linear_fc1 = ReplicatedLinear(
+            in_features,
+            hidden_features,
+            bias=bias,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix=f"{prefix}.linear_fc1"
+        )
+        self.linear_fc2 = ReplicatedLinear(
+            hidden_features,
+            in_features,
+            bias=bias,
+            quant_config=quant_config,
+            return_bias=False,
+            prefix=f"{prefix}.linear_fc2"
+        )
+        self.act_fn = act_fn
 
 class AscendQwen2_5_VisionAttention_Without_Padding(Qwen2_5_VisionAttention):
 
@@ -88,8 +128,30 @@ class AscendQwen2_5_VisionAttention_Without_Padding(Qwen2_5_VisionAttention):
             prefix,
         )
         self.embed_dim = embed_dim
+        self.rank, self.world_size = get_rank_world()
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)
+        self.num_attention_heads_per_partition = dist_utils.divide(
+            num_heads, self.world_size)
+        self.qkv = ReplicatedLinear(input_size=embed_dim,
+                                    output_size=3 * projection_size,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.qkv")
+        self.proj = ReplicatedLinear(input_size=projection_size,
+                                     output_size=embed_dim,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.proj")
+    
+    def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        # [s, b, 3 * head * head_dim]
+        seq_len, bs, _ = qkv.shape
+        # [s, b, 3 * head * head_dim] -> 3 * [s, b, head * head_dim]
+        q, k, v = qkv.chunk(3, dim=2)
+        # 3 * [s, b, head * head_dim] -> 3 * [s, b, head, head_dim]
+        new_shape = (seq_len, bs, self.num_attention_heads_per_partition,
+                     self.hidden_size_per_attention_head)
+        q, k, v = (x.view(*new_shape) for x in (q, k, v))
+        return q, k, v
 
     def forward(
         self,
@@ -97,10 +159,26 @@ class AscendQwen2_5_VisionAttention_Without_Padding(Qwen2_5_VisionAttention):
         cu_seqlens: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        true_seq: int,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
-
+        x = rearrange(x,
+                    's b (t h d) -> (b t) s h d',
+                    b=1,
+                    t=3,
+                    h=self.num_attention_heads_per_partition *
+                    self.world_size)
+        x = all_to_all_4d(x, is_seq_to_head=True)
+        cur_seq = x.shape[1]
+        x = x[:, :true_seq, :, :]
+        x = rearrange(
+            x,
+            '(b t) s h d -> s b (t h d)',
+            b=1,
+            t=3,
+            h=self.num_attention_heads_per_partition,
+        )
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
         q, k, v = self.split_qkv(x)
         batch_size = q.shape[1]
@@ -127,6 +205,9 @@ class AscendQwen2_5_VisionAttention_Without_Padding(Qwen2_5_VisionAttention):
             num_heads=self.num_attention_heads_per_partition,
             num_kv_heads=self.num_attention_heads_per_partition,
             out=context_layer)
+        padding = (0, 0, 0, 0, 0, cur_seq - true_seq)
+        context_layer = F.pad(context_layer, padding)
+        context_layer = all_to_all_3d(context_layer, is_seq_to_head=False)
 
         context_layer = rearrange(context_layer,
                                   "(b s) h d -> s b (h d)",
@@ -375,15 +456,55 @@ class AscendQwen3_VisionBlock(Qwen3_VisionBlock):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn")
+        self.mlp = AscendQwen3_VisionMLP(dim,
+                                        mlp_hidden_dim,
+                                        act_fn=act_fn,
+                                        bias=True,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.mlp")
 
     def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
-                cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(
-            self.norm1(x), cu_seqlens=cu_seqlens, cos=cos, sin=sin)
+                cos: torch.Tensor, sin: torch.Tensor,
+                true_seq: int) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x),
+                          cu_seqlens=cu_seqlens,
+                          cos=cos,
+                          sin=sin,
+                          true_seq=true_seq)
 
         x = x + self.mlp(self.norm2(x))
         return x
 
+class AscendQwen3_VisionPatchMerger(Qwen3_VisionPatchMerger):
+    def __init__(
+        self,
+        d_model: int,
+        context_dim: int,
+        norm_layer: Optional[Callable[[int], nn.Module]] = None,
+        spatial_merge_size: int = 2,
+        use_postshuffle_norm: bool = False,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        use_data_parallel: bool = False,
+        ) -> None:
+        super().__init__(d_model, context_dim, norm_layer, spatial_merge_size,use_postshuffle_norm,
+                         quant_config, prefix, use_data_parallel)
+        self.linear_fc1 = ReplicatedLinear(
+            self.hidden_size,
+            self.hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_fc1",
+            disable_tp=use_data_parallel,
+        )
+        self.linear_fc2 = ReplicatedLinear(
+            self.hidden_size,
+            d_model,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.linear_fc2",
+            disable_tp=use_data_parallel,
+        )
 
 class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
 
@@ -415,6 +536,30 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
                 prefix=f"{prefix}.blocks.{layer_idx}")
             for layer_idx in range(vision_config.depth)
         ])
+        self.merger = AscendQwen3_VisionPatchMerger(
+            d_model=vision_config.out_hidden_size,
+            context_dim=self.hidden_size,
+            norm_layer=norm_layer,
+            spatial_merge_size=self.spatial_merge_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.merger",
+            use_data_parallel = use_data_parallel,
+        )
+        self.deepstack_merger_list = nn.ModuleList(
+            [
+                AscendQwen3_VisionPatchMerger(
+                    d_model=vision_config.out_hidden_size,
+                    context_dim=self.hidden_size,
+                    spatial_merge_size=self.spatial_merge_size,
+                    use_postshuffle_norm=True,
+                    norm_layer=norm_layer,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.deepstack_merger_list.{layer_idx}",
+                    use_data_parallel=use_data_parallel,
+                )
+                for layer_idx in range(len(self.deepstack_visual_indexes))
+            ]
+        )
         self.hidden_size_per_attention_head = dist_utils.divide(
             self.hidden_size, self.num_heads)
 
@@ -434,9 +579,8 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
         x: torch.Tensor,
         grid_thw: list[list[int]],
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking = True)
         hidden_states = self.patch_embed(hidden_states)
-
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
@@ -448,17 +592,31 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
             grid_thw_tensor[:, 0]).cpu().to(torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
-        hidden_states = hidden_states.unsqueeze(1)
+        seq_len, _ = hidden_states.size()
         rotary_pos_emb = rotary_pos_emb.to(hidden_states.device)
-
+        #pad for sp:
+        rank, world_size = get_rank_world()
+        merge_size = self.spatial_merge_size**2
+        padding_size = math.ceil(math.ceil(seq_len / world_size) / merge_size
+                                 ) * merge_size * world_size - seq_len
+        if padding_size > 0:
+            padding = torch.zeros(padding_size,
+                                  *hidden_states.size()[1:],
+                                  dtype=hidden_states.dtype,
+                                  device=hidden_states.device)
+            hidden_states = torch.cat([hidden_states, padding], dim=0)
+        
         cos, sin = self.cal_cos_sin(rotary_pos_emb)
-
+        
+        hidden_states = hidden_states.chunk(world_size, dim=0)[rank]
+        hidden_states = hidden_states.unsqueeze(1)
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
             hidden_states = blk(hidden_states,
                                 cu_seqlens=cu_seqlens,
                                 cos=cos,
-                                sin=sin)
+                                sin=sin,
+                                true_seq=seq_len)
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(
                     layer_num)
@@ -469,6 +627,9 @@ class AscendQwen3_VisionTransformer(Qwen3_VisionTransformer):
         hidden_states = torch.cat(
             [hidden_states] + deepstack_feature_lists,
             dim=1)  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
+        hidden_states = all_gather_2d(hidden_states, world_size=world_size, group=None)
+        if padding_size:
+            hidden_states = hidden_states[:-padding_size // merge_size]
         return hidden_states
 
 
