@@ -85,3 +85,4 @@ def get_quant_method(quant_description: Dict[str, Any],
             )
     raise NotImplementedError("Currently, vLLM Ascend only supports following quant types:" \
                                 f"{list(ASCEND_QUANTIZATION_METHOD_MAP.keys())}")
+
