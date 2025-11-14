@@ -451,7 +451,8 @@ class AscendMLAMetadataBuilder:
                 num_reqs_pad_size = graph_pad_size - num_reqs
                 actual_seq_lengths_q = self.pad_actual_seq_len_q(
                     num_reqs_pad_size, num_reqs, actual_seq_lengths_q)
-                seq_lens_list = seq_lens_list + [0] * num_reqs_pad_size
+                seq_lens_list = seq_lens_list + [0] * (
+                    graph_pad_size - num_decodes)
                 num_block_pad_size = graph_pad_size - block_table.shape[0]
                 if num_block_pad_size > 0:
                     block_table_padding = torch.zeros(
