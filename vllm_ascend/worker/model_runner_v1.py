@@ -3627,50 +3627,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     kv_cache = self._convert_torch_format(kv_cache)
                     kv_caches[layer_name] = kv_cache
                 elif isinstance(kv_cache_spec, MambaSpec):
-                    has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
-                    storage_offset_bytes = 0
-                    # print(100*"!")
-                    # print(kv_cache_spec.shapes, kv_cache_spec.dtypes)
-                    # ((3, 2048), (8, 128, 128))  (torch.bfloat16, torch.bfloat16)
-                    # 6144 131072
-                    target_num_elements = 0
-                    offset = 0
+                    target_idx = 0
+                    start_idx = 0
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                        # print(f"shape: {shape}", f"dtype: {dtype}")
-                        # shape: (3, 2048) dtype: torch.bfloat16
-                        # shape: (8, 128, 128) dtype: torch.bfloat16
-                        dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size
-                        )
+                        # noramlly, there is conv state and ssm state in this loop. And there is only
+                        # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
-                        stride = torch.empty(target_shape).stride()
-                        target_stride = (num_element_per_page, *stride[1:])
-                        assert storage_offset_bytes % dtype_size == 0
-                        # # print(f"target_shape: {target_shape}", f"stride: {stride}, target_stride: {target_stride}, dtype_size: {dtype_size}, storage_offset: {storage_offset_bytes // dtype_size}")
-                        # # target_shape: (2032, 3, 2048) stride: (6144, 2048, 1), target_stride: (196608, 2048, 1), dtype_size: 2, storage_offset: 0
-                        # # target_shape: (2032, 8, 128, 128) stride: (131072, 16384, 128, 1), target_stride: (196608, 16384, 128, 1), dtype_size: 2, storage_offset: 6144
-                        # tensor = torch.as_strided(
-                        #     raw_tensor.view(dtype),
-                        #     size=target_shape,
-                        #     stride=target_stride,
-                        #     storage_offset=storage_offset_bytes // dtype_size,
-                        # )
-                        # state_tensors.append(tensor)
-                        # storage_offset_bytes += stride[0] * dtype_size
-                        # print(f"storage_offset_bytes: {storage_offset_bytes}")
-                        # # storage_offset_bytes: 12288
-                        # # storage_offset_bytes: 274432
 
-                        if storage_offset_bytes == 0:
-                            target_num_elements = torch.prod(torch.tensor(target_shape)).item()
-                            offset = target_num_elements % num_element_per_page
-                            tensor = raw_tensor.view(dtype)[:target_num_elements].view(target_shape)
-                            storage_offset_bytes += stride[0] * dtype_size
-                        else:
-                            tensor = raw_tensor.view(dtype)[target_num_elements + offset:target_num_elements + offset + torch.prod(torch.tensor(target_shape)).item()].view(target_shape)
+                        target_idx += torch.prod(torch.tensor(target_shape)).item()
+                        tensor = raw_tensor.view(dtype)[start_idx:target_idx].view(target_shape)
+                        start_idx = target_idx
                         state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
                 else:
