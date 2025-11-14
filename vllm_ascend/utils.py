@@ -319,6 +319,53 @@ def get_max_hidden_layers(hf_config) -> int:
     return max(layer_counts)
 
 
+def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
+    """
+    Check whether it is vLLM default capture sizes.
+    """
+
+    cuda_graph_sizes = vllm_config.scheduler_config.cuda_graph_sizes
+    if len(cuda_graph_sizes) == 1:
+        default_size_capture_list = [1, 2, 4] + [
+            i for i in range(8, cuda_graph_sizes[0] + 1, 8)
+        ]
+
+        if sorted(default_size_capture_list, reverse=True) == \
+            vllm_config.compilation_config.cudagraph_capture_sizes:
+            return True
+
+    return False
+
+
+def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
+    """
+    Update ACL graph default capture sizes, so that new sizes
+    are more friendly to ascend ops && hardware.
+    """
+
+    if vllm_config.model_config is None or \
+        vllm_config.model_config.enforce_eager or \
+        not _is_default_capture_sizes(vllm_config):
+        return
+
+    # modify the default capture_sizes for Qwen3-MoE models on dp settings.
+    # this is mainly because performance of _npu_paged_attention might degrades
+    # on special shapes.
+    # TODO(Angazenn): we will remove this once _npu_paged_attention is fully
+    # replaced by npu_fused_infer_attention_score which does not contain such bugs.
+    if vllm_config.model_config and vllm_config.model_config.hf_config.model_type == "qwen3_moe" \
+        and vllm_config.parallel_config.tensor_parallel_size == 1 \
+        and vllm_config.parallel_config.data_parallel_size > 1 :
+        max_capture_size = vllm_config.scheduler_config.cuda_graph_sizes[0]
+        new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [
+            i for i in range(24, max_capture_size + 1, 8)
+        ]
+
+        vllm_config.compilation_config.cudagraph_capture_sizes = new_cudagraph_capture_sizes
+        vllm_config.compilation_config.init_with_cudagraph_sizes(
+            new_cudagraph_capture_sizes)
+
+
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
     # NOTE: Currently, we can only capture 1800 graphs at most,
