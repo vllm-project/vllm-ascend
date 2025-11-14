@@ -158,11 +158,10 @@ if prefill_context_parallel_enable():
         get_prefill_context_model_parallel_world_size)
 
 if vllm_version_is("0.11.0"):
-    from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                            get_dtype_size)
+    from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler
 else:
     from vllm.utils.mem_utils import DeviceMemoryProfiler
-    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
+    from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 # yapf: enable
 
@@ -3410,10 +3409,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # for sharing cache tensor in hybrid attention scenario
                 # |------ k cache ------|------ v cache ------|
                 # | conv cache |----- ssm cache ------|- pad -|
-                kv_cache_size = kv_cache_tensor.size if self.vllm_config.kv_transfer_config is None else kv_cache_tensor.size + alignment                    
-                tensor = torch.zeros(
-                    kv_cache_size, dtype=torch.int8, device=self.device
-                )
+                kv_cache_size = kv_cache_tensor.size if self.vllm_config.kv_transfer_config is None else kv_cache_tensor.size + alignment
+                tensor = torch.zeros(kv_cache_size,
+                                     dtype=torch.int8,
+                                     device=self.device)
                 if self.vllm_config.kv_transfer_config is not None:
                     tensor = self._align_memory(
                         tensor, alignment)[:kv_cache_tensor.size]
@@ -3446,7 +3445,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     k_tensor_split_factor = 2 * head_size / self.model_config.hf_text_config.kv_lora_rank
                     v_tensor_split_factor = 2 * head_size / self.model_config.hf_text_config.qk_rope_head_dim
                     dsa_k_cache_size = int(kv_cache_tensor.size //
-                                            dsa_k_cache_factor)
+                                           dsa_k_cache_factor)
                 else:
                     # for other deepseek models, use MLAAttentionSpec
                     k_tensor_split_factor = head_size / self.model_config.hf_text_config.kv_lora_rank
@@ -3460,37 +3459,35 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # for other attentions, e.g., self_attn, sliding window attn
                 if self.vllm_config.kv_transfer_config is None:
                     k_tensor = torch.zeros(k_tensor_size,
-                                            dtype=torch.int8,
-                                            device=self.device)
+                                           dtype=torch.int8,
+                                           device=self.device)
                     v_tensor = torch.zeros(v_tensor_size,
-                                            dtype=torch.int8,
-                                            device=self.device)
+                                           dtype=torch.int8,
+                                           device=self.device)
                     #### k cache: for deepseek sparse attention
                     if dsa_k_cache_factor is not None:
-                        dsa_k_cache_tensor = torch.zeros(
-                            dsa_k_cache_size,
-                            dtype=torch.int8,
-                            device=self.device)
+                        dsa_k_cache_tensor = torch.zeros(dsa_k_cache_size,
+                                                         dtype=torch.int8,
+                                                         device=self.device)
                 else:
                     k_tensor = torch.zeros(k_tensor_size + alignment,
-                                            dtype=torch.int8,
-                                            device=self.device)
+                                           dtype=torch.int8,
+                                           device=self.device)
                     v_tensor = torch.zeros(v_tensor_size + alignment,
-                                            dtype=torch.int8,
-                                            device=self.device)
-                    k_tensor = self._align_memory(
-                        k_tensor, alignment)[:k_tensor_size]
-                    v_tensor = self._align_memory(
-                        v_tensor, alignment)[:v_tensor_size]
+                                           dtype=torch.int8,
+                                           device=self.device)
+                    k_tensor = self._align_memory(k_tensor,
+                                                  alignment)[:k_tensor_size]
+                    v_tensor = self._align_memory(v_tensor,
+                                                  alignment)[:v_tensor_size]
                     #### k cache: for deepseek sparse attention
                     if dsa_k_cache_factor is not None and dsa_k_cache_size is not None:
-                        dsa_k_cache_tensor = torch.zeros(
-                            dsa_k_cache_size + alignment,
-                            dtype=torch.int8,
-                            device=self.device)
+                        dsa_k_cache_tensor = torch.zeros(dsa_k_cache_size +
+                                                         alignment,
+                                                         dtype=torch.int8,
+                                                         device=self.device)
                         dsa_k_cache_tensor = self._align_memory(
-                            dsa_k_cache_tensor,
-                            alignment)[:dsa_k_cache_size]
+                            dsa_k_cache_tensor, alignment)[:dsa_k_cache_size]
 
                 # shared the kvcache between the self_attn specs in the same group
                 kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor) if \
@@ -3544,7 +3541,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                 layer_name]
                             assert raw_dsa_k_tensor is not None
                             sum_page_size_bytes = raw_k_tensor.numel(
-                            ) + raw_v_tensor.numel() + raw_dsa_k_tensor.numel()
+                            ) + raw_v_tensor.numel() + raw_dsa_k_tensor.numel(
+                            )
                         else:
                             raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
                                 layer_name]
@@ -3588,7 +3586,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                     # NOTE: In hybrid attention model, we use an unified kv cache tensor
                     if self.use_hybrid_blocks:
-                        kv_cache = raw_kv_tensor.view(dtype).view(kv_cache_shape)
+                        kv_cache = raw_kv_tensor.view(dtype).view(
+                            kv_cache_shape)
                         kv_cache = self._convert_torch_format(kv_cache)
                         kv_caches[layer_name] = kv_cache
                         continue
@@ -3629,13 +3628,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     state_tensors = []
                     target_idx = 0
                     start_idx = 0
-                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                    for shape, dtype in zip(kv_cache_spec.shapes,
+                                            kv_cache_spec.dtypes):
                         # noramlly, there is conv state and ssm state in this loop. And there is only
                         # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
 
-                        target_idx += torch.prod(torch.tensor(target_shape)).item()
-                        tensor = raw_tensor.view(dtype)[start_idx:target_idx].view(target_shape)
+                        target_idx += torch.prod(
+                            torch.tensor(target_shape)).item()
+                        tensor = raw_tensor.view(
+                            dtype)[start_idx:target_idx].view(target_shape)
                         start_idx = target_idx
                         state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
