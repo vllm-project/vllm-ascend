@@ -21,7 +21,6 @@ from vllm_ascend.spec_decode.mtp_proposer import MtpProposer
 from vllm_ascend.spec_decode.ngram_proposer import NgramProposer
 from vllm_ascend.torchair.torchair_mtp_proposer import TorchairMtpProposer
 
-
 def get_spec_decode_method(method,
                            vllm_config,
                            device,
@@ -35,6 +34,13 @@ def get_spec_decode_method(method,
         if is_torchair_graph:
             return TorchairMtpProposer(vllm_config, device, runner)
         return MtpProposer(vllm_config, device, runner)
+    elif method == 'suffix':
+        from vllm_ascend.utils import vllm_version_is
+        if not vllm_version_is("0.11.0"):
+            from vllm_ascend.spec_decode.suffix_proposer import SuffixDecodingProposer
+            return SuffixDecodingProposer(vllm_config, device, runner)
+        else:
+            raise ValueError("suffix deocding is unsupported on vllm 0.11.0")
     else:
         raise ValueError("Unknown speculative decoding method: "
                          f"{method}")
