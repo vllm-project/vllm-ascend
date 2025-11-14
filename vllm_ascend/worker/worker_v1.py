@@ -209,10 +209,28 @@ class NPUWorker(WorkerBase):
         if not (self.vllm_config.afd_config
                 and self.vllm_config.afd_config.is_ffn_server):
             return
+        if not self.model_config.enforce_eager:
+            print("start to ffn profile_run  ")
+            self.model_runner.profile_run()
+            # self.model_runner.initialize_afd_connector()
+            print("finsh  ffn profile_run  ")
+            print("start  ffn compile_or_warm_up_model  ")
+            # TODO(yxj):add compile_or_warm_up_model
+            warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
+                            or []).copy()
 
-        # self.model_runner.capture_model()
-        # self.model_runner.initialize_afd_connector()
-
+            warmup_sizes = [
+                x for x in warmup_sizes if x not in
+                self.vllm_config.compilation_config.cudagraph_capture_sizes
+            ]
+            for size in sorted(warmup_sizes, reverse=True):
+                logger.info("Compile and warming up model for size %d", size)
+                self.model_runner._dummy_run(size)
+            print("finsh  ffn compile_or_warm_up_model  ")
+            print("start to capture ffn capture_model")
+            self.model_runner.capture_model()
+            # self.model_runner.initialize_afd_connector()
+            print("finsh  capture ffn capture_model")
         if self.profiler:
             self.profiler.start()
             for _ in range(1000):  # FIXME: hardcoded profiler iterations

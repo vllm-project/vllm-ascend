@@ -185,6 +185,7 @@ class ACLGraphWrapper:
                 f"got {new_input_addresses}")
 
         logger.info_once("Replaying aclgraph")
+        print("Replay graphs")
         entry.aclgraph.replay()
         return entry.output
 
