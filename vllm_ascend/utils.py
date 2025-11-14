@@ -357,9 +357,12 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         and vllm_config.parallel_config.tensor_parallel_size == 1 \
         and vllm_config.parallel_config.data_parallel_size > 1 :
         max_capture_size = vllm_config.scheduler_config.cuda_graph_sizes[0]
-        vllm_config.compilation_config.cudagraph_capture_sizes = [
-            1, 2, 5, 10, 15, 20
-        ] + [i for i in range(24, max_capture_size + 1, 8)]
+        new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [
+            i for i in range(24, max_capture_size + 1, 8)
+        ]
+
+        vllm_config.compilation_config.init_with_cudagraph_sizes(
+            new_cudagraph_capture_sizes)
 
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
