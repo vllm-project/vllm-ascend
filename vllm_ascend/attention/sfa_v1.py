@@ -261,7 +261,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_prefetch = ascend_config.weight_prefetch_config.enabled
-        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
+        self.enable_kv_nz = ascend_config.enable_kv_nz
 
         assert self.indexer is not None, "Indexer is required for DSA."
         # indexer param

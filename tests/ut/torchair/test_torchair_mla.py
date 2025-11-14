@@ -505,7 +505,7 @@ class TestAscendMLATorchairImpl(TestBase):
     def setUp(self, ascend_config, vllm_config, mock_get_tp_size, mock_tp):
         mock_tp.world_size = 2
         ascend_config.torchair_graph_config.enabled = True
-        ascend_config.torchair_graph_config.enable_kv_nz = False
+        ascend_config.enable_kv_nz = False
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
