@@ -88,11 +88,15 @@ class Mooncakestore():
     def put_batch(self, keys: list[str], addrs: list[list[int]],
                   sizes: list[list[int]], block_ids: list[int]):
         try:
-            config = ReplicateConfig()
-            config.preferred_segment = self.local_seg
-            config.prefer_alloc_in_same_node = True
-            res = self.store.batch_put_from_multi_buffers(
-                keys, addrs, sizes, config)
+            if self.config.alloc_in_same_node:
+                config = ReplicateConfig()
+                config.preferred_segment = self.local_seg
+                config.prefer_alloc_in_same_node = True
+                res = self.store.batch_put_from_multi_buffers(
+                    keys, addrs, sizes, config)
+            else:
+                res = self.store.batch_put_from_multi_buffers(
+                    keys, addrs, sizes)
             for value in res:
                 if value < 0:
                     logger.error(f"Failed to put key {keys},res:{res}")
