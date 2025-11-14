@@ -76,10 +76,6 @@ class AscendAttentionBackend(AttentionBackend):
         return AscendAttentionBackendImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AscendMetadata"]:
-        return AscendMetadata
-
-    @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
         return AscendAttentionMetadataBuilder
 
