@@ -25,6 +25,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -122,6 +123,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
@@ -211,6 +213,7 @@ jobs:
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
+        TRANSFORMERS_OFFLINE: 1
     steps:
       - name: Check npu and CANN info
         run: |
