@@ -31,7 +31,7 @@ def test_models_distributed_Qwen3_NEXT_TP4():
     with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
                     tensor_parallel_size=4,
                     max_model_len=4096,
-                    gpu_memory_utilization=0.8,
+                    gpu_memory_utilization=0.95,
                     distributed_executor_backend="mp",
                     enforce_eager=True) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -46,7 +46,7 @@ def test_models_distributed_Qwen3_NEXT_TP4_FULL_DECODE_ONLY():
     with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
                     tensor_parallel_size=4,
                     max_model_len=4096,
-                    gpu_memory_utilization=0.8,
+                    gpu_memory_utilization=0.95,
                     distributed_executor_backend="mp",
                     enforce_eager=False,
                     compilation_config={
@@ -69,7 +69,7 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
     with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
                     tensor_parallel_size=4,
                     max_model_len=4096,
-                    gpu_memory_utilization=0.8,
+                    gpu_memory_utilization=0.95,
                     distributed_executor_backend="mp") as vllm_model:
         ref_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
     del vllm_model
@@ -77,7 +77,7 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
     with VllmRunner("Qwen/Qwen3-Next-80B-A3B-Instruct",
                     tensor_parallel_size=4,
                     max_model_len=4096,
-                    gpu_memory_utilization=0.8,
+                    gpu_memory_utilization=0.95,
                     distributed_executor_backend="mp",
                     additional_config={
                         "ascend_scheduler_config": {
