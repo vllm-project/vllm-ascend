@@ -425,13 +425,11 @@ def _is_default_capture_sizes(vllm_config: VllmConfig) -> bool:
     if max_cudagraph_capture_size >= 8:
         # Step size 8 for small batch sizes, up to 256(not included)
         cudagraph_capture_sizes += list(
-            range(8, min(max_cudagraph_capture_size + 1, 256), 8)
-        )
+            range(8, min(max_cudagraph_capture_size + 1, 256), 8))
     if max_cudagraph_capture_size >= 256:
         # Step size 16 for larger batch sizes
         cudagraph_capture_sizes += list(
-            range(256, max_cudagraph_capture_size + 1, 16)
-        )
+            range(256, max_cudagraph_capture_size + 1, 16))
 
     if cudagraph_capture_sizes == \
         vllm_config.compilation_config.cudagraph_capture_sizes:
@@ -459,10 +457,13 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     if vllm_config.model_config and vllm_config.model_config.hf_config.model_type == "qwen3_moe" \
         and vllm_config.parallel_config.tensor_parallel_size == 1 \
         and vllm_config.parallel_config.data_parallel_size > 1 :
-        max_capture_size = vllm_config.scheduler_config.cuda_graph_sizes[0]
-        vllm_config.compilation_config.cudagraph_capture_sizes = [
-            1, 2, 5, 10, 15, 20
-        ] + [i for i in range(24, max_capture_size + 1, 8)]
+        max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
+        new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [
+            i for i in range(24, max_capture_size + 1, 8)
+        ]
+
+        update_cudagraph_capture_sizes(vllm_config,
+                                       new_cudagraph_capture_sizes)
 
 
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
