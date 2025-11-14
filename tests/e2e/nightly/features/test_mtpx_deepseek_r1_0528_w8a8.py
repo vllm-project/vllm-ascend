@@ -28,7 +28,7 @@ MODELS = [
     "vllm-ascend/DeepSeek-R1-0528-W8A8",
 ]
 
-MODES = ["mtp2", "mtp3"]
+MODES = ["mtp3"]
 
 prompts = [
     "San Francisco is a",
