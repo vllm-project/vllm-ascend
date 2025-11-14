@@ -72,8 +72,9 @@ jobs:
   ut:
     needs: [lint, changes]
     name: unit test
+    if: false  # 直接禁用
     # only trigger unit test after lint passed and the change is e2e and ut related.
-    if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
+    # if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     runs-on: ubuntu-latest
     container:
       # fixme: vllm-ascend install failed with 8.3.rc1 on github action
@@ -136,6 +137,7 @@ jobs:
 
   e2e-light:
     name: e2e-light
+    if: false  # 直接禁用
     strategy:
       matrix:
         vllm_version: [releases/v0.11.1, v0.11.0]

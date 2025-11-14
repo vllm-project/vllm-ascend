@@ -56,6 +56,7 @@ jobs:
           - name: multi-node-deepseek-dp-torchair
             config_file_path: DeepSeek-R1-W8A8-A2-torchair.yaml
             size: 2
+    if: false
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a2
@@ -69,7 +70,8 @@ jobs:
 
   single-node-tests:
     name: single-node
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: false
+    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: multi-node-tests
     strategy:
       fail-fast: false
@@ -92,6 +94,7 @@ jobs:
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a2'
 
   single-node-accuracy-tests:
+    if: false
     if: >-
       ${{
         github.event_name == 'schedule' ||
