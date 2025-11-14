@@ -43,6 +43,7 @@ concurrency:
 jobs:
   multi-node-tests:
     name: multi-node
+    if: false
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
@@ -73,7 +74,6 @@ jobs:
           - name: multi-node-qwenw8a8-2node-eplb
             config_file_path: Qwen3-235B-W8A8-EPLB.yaml
             size: 2
-    if: false
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
@@ -88,7 +88,7 @@ jobs:
   single-node-tests:
     name: single-node
     if: false
-    # if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: multi-node-tests
     strategy:
       fail-fast: false
