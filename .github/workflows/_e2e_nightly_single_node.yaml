@@ -106,6 +106,19 @@ jobs:
           fi
           cd ..
 
+      - name: Install custom-ops (for DeepSeek-V3.2-Exp)
+        if: ${{ inputs.name == 'deepseek3_2-exp-w8a8' }}
+        shell: bash -l {0}
+        run: |
+          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run
+          chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+          ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+          export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+          export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+          wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+          pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+          . /usr/local/Ascend/ascend-toolkit/set_env.sh
+
       - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn

@@ -92,6 +92,31 @@ check_and_config() {
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 }
 
+install_extra_components() {
+    echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
+        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
+        return 1
+    fi
+    chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+    ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
+        echo "Failed to download custom_ops wheel"
+        return 1
+    fi
+    pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+    
+    export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    
+    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
+          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+    echo "====> Extra components installation completed"
+}
+
 kill_npu_processes() {
   pgrep python3 | xargs -r kill -9
   pgrep VLLM | xargs -r kill -9
@@ -123,6 +148,9 @@ main() {
     check_npu_info
     check_and_config
     show_vllm_info
+    if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
+        install_extra_components
+    fi
     cd "$WORKSPACE/vllm-ascend"
     run_tests_with_log
 }
