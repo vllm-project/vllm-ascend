@@ -54,9 +54,10 @@ from vllm_ascend.utils import vllm_version_is
 
 from vllm.model_executor.models.qwen3_next import (  # isort: skip
     Qwen3NextAttention, Qwen3NextDecoderLayer, Qwen3NextForCausalLM,
-    Qwen3NextGatedDeltaNet, Qwen3NextModel, Qwen3NextSparseMoeBlock,
-    fused_gdn_gating)
+    Qwen3NextGatedDeltaNet, Qwen3NextModel, Qwen3NextSparseMoeBlock)
 
+from vllm_ascend.ops.fla import fused_sigmoid_gating_delta_rule_update
+from vllm_ascend.ops.fused_gdn_gating import fused_gdn_gating
 
 class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
 
