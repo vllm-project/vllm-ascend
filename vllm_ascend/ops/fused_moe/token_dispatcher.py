@@ -95,19 +95,33 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
-        self.enable_dispatch_v2 = hasattr(torch_npu,
-                                          "npu_moe_distribute_dispatch_v2")
+        if is_A5():
+            self.enable_dispatch_v2 = False
+        else:
+            self.enable_dispatch_v2 = hasattr(torch_npu,
+                                            "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = (
             get_ascend_soc_version() == AscendSocVersion.A3)
 
         # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
         self.a3_need_extra_args = \
             get_ascend_soc_version() == AscendSocVersion.A3
+
+        self.a5_need_extra_args = is_A5()
         # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
         # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
         # improve communication performance.
         self.need_expert_scale = is_hierarchical_communication_enabled()
         self.with_quant = False
+        self.outpu = None
+        self.assist_info_for_combine = None
+        self.ep_recv_counts = None
+        self.share_act = None
+        self.topk_ids = None
+        self.topk_weights = None
+        self.shared_experts = None
+        self.mc2_mask = None
+        self.expand_scales = None
 
     def get_dispatch_mc2_kwargs(
         self,
@@ -149,7 +163,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             })
         if self.a3_need_extra_args and self.enable_dispatch_v2:
             stage1_kwargs.update({
-                "x_active_mask": mc2_mask,
+                "x_active_mask": self.mc2_mask,
             })
         if self.need_expert_scale:
             stage1_kwargs.update({
@@ -159,6 +173,55 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
 
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
+
+    def get_dispatch_mc2_kwargs_A5(self, 
+                        hidden_states: torch.Tensor,
+                        topk_weights: torch.Tensor,
+                        topk_ids: torch.Tensor,
+                        expert_map: torch.Tensor,
+                        mc2_mask: torch.Tensor,
+                        global_redundant_expert_num: int = 0,
+                        **kwargs):
+        if self.with_quant:
+            quant_mode = kwargs.get("comm_quant_mode", 2)
+            moe_expert_num = len(expert_map)
+            y_dtype = kwargs.get("y_dtype", torch.float8_e4m3fn)
+        else:
+            quant_mode = 0
+            moe_expert_num = len(expert_map)
+            y_dtype = None
+
+      kwargs_mc2 = {
+            "x": hidden_states,
+            "expert_ids": topk_ids,
+            "expert_shard_type": 0,
+            "shared_expert_rank_num": 0,
+            "moe_expert_num": moe_expert_num,
+            "global_bs": 0,
+            "expert_token_nums_type": 0,
+        }
+
+        stage1_kwargs = {
+            "scales": None,
+            "quant_mode": quant_mode,
+            "group_ep": self.moe_all_to_all_group_name,
+            "ep_world_size": self.ep_world_size,
+            "ep_rank_id": self.ep_rank_id,
+        }
+        stage1_kwargs.update({
+            "tp_world_size": 1,
+            "tp_rank_id": 0,
+            "y_dtype":y_dtype
+        })
+
+        stage1_kwargs.update({
+            "expert_scales": 
+                topk_weights.to(torch.float32),
+        })
+
+        kwargs_mc2.update(stage1_kwargs)
+        return kwargs_mc2
+
 
     def token_dispatch(self,
                        hidden_states: torch.Tensor,
@@ -174,17 +237,25 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                        apply_router_weight_on_input: bool = False,
                        with_quant: bool = False,
                        dynamic_eplb: bool = False,
-                       pertoken_scale: Optional[torch.Tensor] = None):
+                       pertoken_scale: Optional[torch.Tensor] = None,
+                       **kwargs):
         self.with_quant = with_quant
-
+        self.expert_map = expert_map
+        self.topk_ids= topk_ids
+        self.topk_weights = topk_weights
+        self.mc2_mask = mc2_mask
         # Apply log2phy if needed
         if log2phy is not None:
             topk_ids = log2phy[topk_ids]
-
-        kwargs_mc2 = self.get_dispatch_mc2_kwargs(hidden_states, topk_weights,
-                                                  topk_ids, expert_map,
-                                                  mc2_mask,
-                                                  global_redundant_expert_num)
+        if self.a5_need_extra_args:
+            kwargs_mc2 = self.get_dispatch_mc2_kwargs_A5(hidden_states, topk_weights,
+                                            topk_ids, expert_map,
+                                            global_redundant_expert_num)
+        else :
+            kwargs_mc2 = self.get_dispatch_mc2_kwargs(hidden_states, topk_weights,
+                                                    topk_ids, expert_map,
+                                                    mc2_mask,
+                                                    global_redundant_expert_num)
         output = torch_npu.npu_moe_distribute_dispatch_v2(
             **kwargs_mc2
         ) if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_dispatch(
@@ -231,11 +302,167 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "group_list_type": group_list_type,
             "hidden_states": expand_x,
             "group_list": expert_token_nums,
-            "dynamic_scale": dynamic_scale,
+            "dynamic_scale":dynamic_scale if self.with_quant else None
+            "context_metadata": context_metadata,
+        }
+
+    def token_dispatch_with_A5_quant(self,
+                       hidden_states: torch.Tensor,
+                       topk_weights: torch.Tensor,
+                       topk_ids: torch.Tensor,
+                       expert_map: Optional[torch.Tensor] = None,
+                       log2phy: Optional[torch.Tensor] = None,
+                       global_redundant_expert_num: int = 0,
+                       shared_experts: Optional[Any] = None,
+                       quantized_x_for_share: Optional[Any] = None,
+                       dynamic_scale_for_share: Optional[Any] = None,
+                       mc2_mask: Optional[torch.Tensor] = None,
+                       apply_router_weight_on_input: bool = False,
+                       with_quant: bool = False,
+                       dynamic_eplb: bool = False,
+                       pertoken_scale: Optional[torch.Tensor] = None,
+                       **kwargs):
+        self.with_quant = with_quant
+        self.expert_map =expert_map
+        self.topk_ids = topk_ids
+        self.topk_weights = topk_weights
+        self.shared_experts = shared_experts
+        self.mc2_mask = mc2_mask
+
+        kwargs_mc2 = self.get_dispatch_mc2_kwargs_A5(hidden_states, topk_weights,
+                                        topk_ids, expert_map,
+                                        global_redundant_expert_num,
+                                        comm_quant_mode=kwargs.get("comm_quant_mode", 2),
+                                        y_dtype=kwargs.get("y_dtype", torch.float8_e4m3fn))
+
+        self.output = torch.npu_moe_distribute_dispatch(**kwargs)
+
+        expand_x, dynamic_scale, self.assist_info_for_combine, expert_token_nums, \
+            self.ep_recv_counts, _, self.expand_scales = output[0:7]
+
+        if shared_experts is not None:
+            shared_up_out, _ = shared_experts.gate_up_proj(quantized_x_for_share, dynamic_scale_for_share)
+            shared_gate_up, shared_dequant_scale = shared_up_out[0], shared_up_out[1]
+            shared_act_out = shared_experts.act_fn((shared_gate_up, shared_dequant_scale))
+            self.share_act, self_swiglu_out_scale = shared_act_out[0], shared_act_out[1]
+
+        group_list_type = 0
+
+        return {
+            "group_list_type": group_list_type,
+            "hidden_states": expand_x,
+            "group_list": expert_token_nums,
+            "dynamic_scale":dynamic_scale if self.with_quant else None
+        }
+
+
+        self.original_shape = hidden_states.shape
+
+        num_tokens = hidden_states.shape[:-1].numel()
+        self.apply_router_weight_on_input = apply_router_weight_on_input
+        if self.apply_router_weight_on_input:
+            assert (topk_weights.dim() == 2
+                    ), "`topk_weights` should be in shape (num_tokens, topk)"
+            _, topk = topk_weights.shape
+            assert (
+                topk == 1
+            ), "Only support topk=1 when `apply_router_weight_on_input` is True"
+            hidden_states = hidden_states * \
+                topk_weights.to(hidden_states.dtype)
+        if expert_map is not None:
+            global_num_experts = len(expert_map)
+            mask = (expert_map[topk_ids] != -1)
+            topk_weights = topk_weights * mask
+            first_expert_idx = get_ep_group(
+            ).rank_in_group * self.num_experts_local
+            last_expert_idx = first_expert_idx + self.num_experts_local
+        else:
+            first_expert_idx = 0
+            last_expert_idx = self.num_experts_local
+            global_num_experts = self.num_experts_local
+
+        sorted_hidden_states, expanded_row_idx, expert_tokens, pertoken_scale = (
+            torch_npu.npu_moe_init_routing_v2(
+                hidden_states,
+                topk_ids,
+                scale=pertoken_scale,
+                active_num=num_tokens * self.top_k,
+                expert_num=global_num_experts,
+                expert_tokens_num_type=1,
+                expert_tokens_num_flag=True,
+                active_expert_range=[first_expert_idx, last_expert_idx],
+                quant_mode=1
+                if self.with_quant and pertoken_scale is None else -1,
+            ))
+        expert_tokens = expert_tokens.to(torch.int64)
+        group_list_type = 1  # `count` mode
+        context_metadata = {
+            "topk_weights": topk_weights,
+            "expanded_row_idx": expanded_row_idx
+        }
+        return {
+            "group_list_type": group_list_type,
+            "hidden_states": sorted_hidden_states,
+            "group_list": expert_tokens,
+            "dynamic_scale": pertoken_scale if self.with_quant else None,
             "context_metadata": context_metadata
         }
 
-    def get_combine_mc_kwargs(self, hidden_states: torch.Tensor,
+    def get_combine_mc_kwargs_A5(self, hidden_states: torch.Tensor, context_metadata: dict):
+        # expert_map = context_metadata["expert_map"]
+        # topk_ids = context_metadata["topk_ids"]
+        # topk_weights = context_metadata["topk_weights"]
+        # ep_recv_counts = context_metadata["ep_recv_counts"]
+        # tp_recv_counts = context_metadata["tp_recv_counts"]
+        # assist_info_for_combine = context_metadata["assist_info_for_combine"]
+        # mc2_mask = context_metadata["mc2_mask"]
+        # expand_scales = context_metadata["expand_scales"]
+
+        assert expert_map is not None
+        assert self.topk_weights is not None
+        assert self.topk_ids is not None
+        assert self.output is not None
+        moe_expert_num = len(expert_map)
+
+        kwargs_mc2 = {
+            "expand_x": hidden_states,
+            "expert_ids": self.topk_ids,
+            "expert_scales": self.topk_weights.to(torch.float32),
+            "expert_shard_type": 0,
+            "shared_expert_rank_num": 0,
+            "moe_expert_num": moe_expert_num,
+            "global_bs": 0,
+        }
+
+        if self.with_quant:
+            tp_recv_counts = torch.empty(1,
+                                         dtype=torch.int32,
+                                         device=hidden_states.device)
+    
+        stage3_kwargs = {
+            "ep_send_counts": self.ep_recv_counts,
+            "group_ep": self.moe_all_to_all_group_name,
+            "ep_world_size": self.ep_world_size,
+            "ep_rank_id": self.ep_rank_id,
+            "expand_scales": self.expand_scales,
+        }
+
+        if self.enable_dispatch_v2:
+            stage3_kwargs["assist_info_for_combine"] = assist_info_for_combine
+        else:
+            stage3_kwargs["expand_idx"] = assist_info_for_combine
+
+        if self.a5_need_extra_args:
+            stage3_kwargs.update({
+                "tp_send_counts": tp_recv_counts,
+                "tp_world_size": 1,
+                "tp_rank_id": 0,
+            })
+
+        kwargs_mc2.update(stage3_kwargs)
+        return kwargs_mc2
+
+ def get_combine_mc_kwargs(self, hidden_states: torch.Tensor,
                               context_metadata: dict):
         expert_map = context_metadata["expert_map"]
         topk_ids = context_metadata["topk_ids"]
@@ -299,8 +526,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
     ):
         assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
 
-        kwargs_mc2 = self.get_combine_mc_kwargs(hidden_states,
-                                                context_metadata)
+        if self.a5_need_extra_args:
+            kwargs_mc2 = self.get_combine_mc_kwargs_A5(hidden_states, context_metadata)
+        else :
+            kwargs_mc2 = self.get_combine_mc_kwargs(hidden_states,
+                                                    context_metadata)
         combined_output = torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2) \
             if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 

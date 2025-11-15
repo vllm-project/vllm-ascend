@@ -46,6 +46,8 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, flashcomm2_enable,
 
 from .utils import get_quant_method
 
+from .w8a8mxfp8 import (AscendW8A8MXFP8DynamicLinearMethod,
+                        AscendW8A8MXFP8DynamicFusedMoEMethod)
 
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
 class AscendQuantConfig(QuantizationConfig):
@@ -326,12 +328,14 @@ class AscendLinearMethod(LinearMethodBase):
             output_size_per_partition,
             params_dtype,
             layer_type=layer_type)
+        mx_type = (AscendW8A8MXFP8DynamicLinearMethod)
         for pergroup_name, pergroup_param in pergroup_dict.items():
             param = torch.nn.Parameter(pergroup_param, requires_grad=False)
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
-            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
+            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name
+                or isinstance(self.quant_method, mx_types):
                 setattr(param, "input_dim", 1)
                 param.input_dim = 1
 
@@ -414,6 +418,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
+        mx_type = (AscendW8A8MXFP8DynamicFusedMoEMethod)
         weight_param = self.quant_method.get_weight(
             num_experts, intermediate_size_per_partition, hidden_size,
             params_dtype)
@@ -434,7 +439,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             param = torch.nn.Parameter(param_value, requires_grad=False)
             layer.register_parameter(param_key, param)
             set_weight_attrs(param, extra_weight_attrs)
-            if any(fields in param_key for fields in per_group_param):
+            if any(fields in param_key for fields in per_group_param) 
+                or isinstance(self.quant_method, mx_types):
                 setattr(param, "quant_method",
                         FusedMoeWeightScaleSupported.GROUP.value)
 
