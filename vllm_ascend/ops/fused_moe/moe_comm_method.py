@@ -120,7 +120,7 @@ class MoECommMethod(ABC):
             dynamic_eplb: bool = False,
             mc2_mask: torch.Tensor = None,
             pertoken_scale: Optional[torch.Tensor] = None,
-            **Kwargs):
+            **kwargs):
         # Check constraints
         assert hidden_states.dtype in [
             torch.float32, torch.float16, torch.bfloat16, torch.int8
@@ -129,9 +129,9 @@ class MoECommMethod(ABC):
         moe_comm_method = get_forward_context().moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
-        usa_A5_quant = kwargs.get("use_A5_quant", False)
-        use_fp8_comm, act_quant_type, weight_quant_type, scal_type, per_token_scal_type = 
-            self.parse_a5_quant_extra_params(**Kwargs)
+        use_A5_quant = kwargs.get("use_A5_quant", False)
+        use_fp8_comm, act_quant_type, weight_quant_type, scal_type, per_token_scal_type = \
+            self.parse_a5_quant_extra_params(**kwargs)
         if isinstance(self.token_dispatcher, TokenDispatcherWithMC2) and use_fp8_comm:
             results = self.token_dispatcher.token_dispatch_with_A5_quant(
                 hidden_states=hidden_states,
@@ -185,7 +185,7 @@ class MoECommMethod(ABC):
                                        or use_int4_w4a8,
                                        fusion=use_int8_w8a8,
                                        need_trans=need_trans,
-                                       dynamic_eplb=dynamic_eplb
+                                       dynamic_eplb=dynamic_eplb,
                                        use_A5_quant=use_A5_quant,
                                        use_fp8_comm=use_fp8_comm, 
                                        act_quant_type=act_quant_type, 

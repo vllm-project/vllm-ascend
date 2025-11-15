@@ -191,7 +191,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             moe_expert_num = len(expert_map)
             y_dtype = None
 
-      kwargs_mc2 = {
+        kwargs_mc2 = {
             "x": hidden_states,
             "expert_ids": topk_ids,
             "expert_shard_type": 0,
@@ -302,7 +302,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
             "group_list_type": group_list_type,
             "hidden_states": expand_x,
             "group_list": expert_token_nums,
-            "dynamic_scale":dynamic_scale if self.with_quant else None
+            "dynamic_scale":dynamic_scale if self.with_quant else None,
             "context_metadata": context_metadata,
         }
 
@@ -338,7 +338,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.output = torch.npu_moe_distribute_dispatch(**kwargs)
 
         expand_x, dynamic_scale, self.assist_info_for_combine, expert_token_nums, \
-            self.ep_recv_counts, _, self.expand_scales = output[0:7]
+            self.ep_recv_counts, _, self.expand_scales = self.output[0:7]
 
         if shared_experts is not None:
             shared_up_out, _ = shared_experts.gate_up_proj(quantized_x_for_share, dynamic_scale_for_share)
@@ -409,14 +409,14 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         }
 
     def get_combine_mc_kwargs_A5(self, hidden_states: torch.Tensor, context_metadata: dict):
-        # expert_map = context_metadata["expert_map"]
-        # topk_ids = context_metadata["topk_ids"]
-        # topk_weights = context_metadata["topk_weights"]
-        # ep_recv_counts = context_metadata["ep_recv_counts"]
-        # tp_recv_counts = context_metadata["tp_recv_counts"]
-        # assist_info_for_combine = context_metadata["assist_info_for_combine"]
-        # mc2_mask = context_metadata["mc2_mask"]
-        # expand_scales = context_metadata["expand_scales"]
+        expert_map = context_metadata["expert_map"]
+        topk_ids = context_metadata["topk_ids"]
+        topk_weights = context_metadata["topk_weights"]
+        ep_recv_counts = context_metadata["ep_recv_counts"]
+        tp_recv_counts = context_metadata["tp_recv_counts"]
+        assist_info_for_combine = context_metadata["assist_info_for_combine"]
+        mc2_mask = context_metadata["mc2_mask"]
+        expand_scales = context_metadata["expand_scales"]
 
         assert expert_map is not None
         assert self.topk_weights is not None
@@ -462,7 +462,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
 
- def get_combine_mc_kwargs(self, hidden_states: torch.Tensor,
+    def get_combine_mc_kwargs(self, hidden_states: torch.Tensor,
                               context_metadata: dict):
         expert_map = context_metadata["expert_map"]
         topk_ids = context_metadata["topk_ids"]
