@@ -52,6 +52,87 @@ def cumsum_group_list(group_list: torch.Tensor,
 
     return cumsum_group_list
 
+def a5_quant_extra_args(act_quant_type, weight_quant_type, scale_type, per_token_scale_type):
+    x_type = act_quant_type if act_quant_type in [torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8] else None
+    weight_dtype = weight_quant_type if weight_quant_type in [torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8] else None
+    scale_type = scale_type if scale_type in [torch_npu.float8_e8m0fnu] else None
+    per_token_scale_type = per_token_scale_type if per_token_scale_type in [torch_npu.float8_e8m0fnu] else None
+    return x_data_type, weight_dtype, scale_type, per_token_scale_type
+
+def quant_apply_mlp_A5(hidden_states: torch.Tensor,
+                    w1: torch.Tensor,
+                    w1_scale: torch.Tensor,
+                    w2: torch.Tensor,
+                    w2_scale: torch.Tensor,
+                    group_list: torch.Tensor,
+                    group_list_type: int = 1,
+                    dynamic_scale: torch.Tensor = None,
+                    w1_scale_bias: torch.Tensor = None,
+                    w2_scale_bias: torch.Tensor = None,
+                    fusion: bool = False,
+                    dynamic_eplb: bool = False,
+                    **kwargs) -> torch.Tensor:
+     act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
+     weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn), 
+     scale_type  = kwargs.get("scale_type", None)
+     per_token_scale_type = kwargs.get("per_token_scale_type", None)
+     output_dtype = hidden_states.dtype if hidden_states.dtype in [torch.bfloat16, torch.float16] \
+        else (torch.bfloat16 if kwargs.get("use_bf16", True) else torch.float16)
+
+    if dynamic_scale is None:
+        unquantized_hidden_states = hidden_states
+        hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+            hidden_states, dst_type=act_quant_type)
+        # Dispose the original unquantized hidden states
+        # to save npu memory because they're no longer used.
+        dispose_tensor(unquantized_hidden_states)
+        quantized_hidden_states = None
+    else:
+        if dynamic_scale.ndim == 2:
+            dynamic_scale = dynamic_scale.reshape(dynamic_scale.shape[0], dynamic_scale.shape[1]//2, 2)
+        pertoken_scale = dynamic_scale
+        quantized_hidden_states = hidden_states
+
+    weight_prefetch_method = get_forward_context().weight_prefetch_method
+    if weight_prefetch_method:
+        weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(
+            hidden_states)
+
+    x_type, weight_dtype, scale_type, per_token_scale_type = 
+        a5_quant_extra_args(act_quant_type, weight_quant_type, scale_type, per_token_scale_type)
+
+    hidden_states = torch_npu.npu_grouped_matmul(
+        x=[hidden_states],
+        weight=[w1],
+        scale=[w1_scale],
+        scale_dtype=scale_dtype,
+        per_token_scale=[pertoken_scale],
+        per_token_scale_dtype=per_token_scale_dtype,
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=group_list,
+        x_dtype=x_dtype,
+        weight_dtype=weight_dtype,
+        output_dtype=output_dtype)[0]
+
+    hidden_states = torch_npu.npu_swiglu(hidden_states)
+    hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_mx_quant(hidden_states, dst_type=act_quant_type)
+    hidden_states = torch_npu.npu_grouped_matmul(
+        x=[hidden_states],
+        weight=[w2],
+        scale=[w2_scale],
+        scale_dtype=scale_dtype,
+        per_token_scale=[swiglu_out_scale],
+        per_token_scale_dtype=per_token_scale_dtype,
+        split_item=2,
+        group_list_type=group_list_type,
+        group_type=0,
+        group_list=group_list,
+        x_dtype=x_dtype,
+        weight_dtype=weight_dtype,
+        output_dtype=_output_dtype)[0]
+    return hidden_states
 
 def quant_apply_mlp(hidden_states: torch.Tensor,
                     w1: torch.Tensor,
@@ -244,7 +325,33 @@ def unified_apply_mlp(hidden_states: torch.Tensor,
                       with_quant: bool = False,
                       fusion: bool = False,
                       need_trans: bool = True,
-                      dynamic_eplb: bool = False) -> torch.Tensor:
+                      dynamic_eplb: bool = False,
+                      **kwargs) -> torch.Tensor:
+    use_A5_quant = kwargs.get("use_A5_quant", False)
+    act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
+    weight_quant_type =kwargs.get("weight_quant_type", torch.float8_e4m3fn)
+    scale_type =kwargs.get("scale_type", None)
+    per_token_scale_type =kwargs.get("per_token_scale_type", None)
+
+    if use_A5_quant:
+        return quant_apply_mlp_A5(hidden_states=hidden_states,
+                               w1=w1,
+                               w1_scale=w1_scale,
+                               w2=w2,
+                               w2_scale=w2_scale,
+                               group_list=group_list,
+                               dynamic_scale=dynamic_scale,
+                               group_list_type=group_list_type,
+                               w1_scale_bias=w1_scale_bias,
+                               w2_scale_bias=w2_scale_bias,
+                               fusion=fusion,
+                               dynamic_eplb=dynamic_eplb,
+                               act_quant_type=act_quant_type,
+                               weight_quant_type=weight_quant_type, 
+                               scale_type=scale_type, 
+                               per_token_scale_type=per_token_scale_type,
+                               use_bf16=kwargs.get("use_bf16", True)
+                            )
     if with_quant:
         return quant_apply_mlp(hidden_states=hidden_states,
                                w1=w1,
