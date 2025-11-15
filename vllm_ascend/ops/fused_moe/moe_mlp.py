@@ -57,7 +57,7 @@ def a5_quant_extra_args(act_quant_type, weight_quant_type, scale_type, per_token
     weight_dtype = weight_quant_type if weight_quant_type in [torch_npu.float4_e2m1fn_x2, torch_npu.hifloat8] else None
     scale_type = scale_type if scale_type in [torch_npu.float8_e8m0fnu] else None
     per_token_scale_type = per_token_scale_type if per_token_scale_type in [torch_npu.float8_e8m0fnu] else None
-    return x_data_type, weight_dtype, scale_type, per_token_scale_type
+    return x_type, weight_dtype, scale_type, per_token_scale_type
 
 def quant_apply_mlp_A5(hidden_states: torch.Tensor,
                     w1: torch.Tensor,
@@ -72,12 +72,12 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
                     fusion: bool = False,
                     dynamic_eplb: bool = False,
                     **kwargs) -> torch.Tensor:
-     act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
-     weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn), 
-     scale_type  = kwargs.get("scale_type", None)
-     per_token_scale_type = kwargs.get("per_token_scale_type", None)
-     output_dtype = hidden_states.dtype if hidden_states.dtype in [torch.bfloat16, torch.float16] \
-        else (torch.bfloat16 if kwargs.get("use_bf16", True) else torch.float16)
+    act_quant_type = kwargs.get("act_quant_type", torch.float8_e4m3fn)
+    weight_quant_type = kwargs.get("weight_quant_type", torch.float8_e4m3fn), 
+    scale_type  = kwargs.get("scale_type", None)
+    per_token_scale_type = kwargs.get("per_token_scale_type", None)
+    output_dtype = hidden_states.dtype if hidden_states.dtype in [torch.bfloat16, torch.float16] \
+    else (torch.bfloat16 if kwargs.get("use_bf16", True) else torch.float16)
 
     if dynamic_scale is None:
         unquantized_hidden_states = hidden_states
@@ -98,7 +98,7 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
         weight_prefetch_method.maybe_prefetch_moe_weight_postprocess(
             hidden_states)
 
-    x_type, weight_dtype, scale_type, per_token_scale_type = 
+    x_dtype, weight_dtype, scale_type, per_token_scale_type = \
         a5_quant_extra_args(act_quant_type, weight_quant_type, scale_type, per_token_scale_type)
 
     hidden_states = torch_npu.npu_grouped_matmul(
@@ -131,7 +131,7 @@ def quant_apply_mlp_A5(hidden_states: torch.Tensor,
         group_list=group_list,
         x_dtype=x_dtype,
         weight_dtype=weight_dtype,
-        output_dtype=_output_dtype)[0]
+        output_dtype=output_dtype)[0]
     return hidden_states
 
 def quant_apply_mlp(hidden_states: torch.Tensor,
