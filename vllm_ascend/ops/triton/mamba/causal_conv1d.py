@@ -1175,6 +1175,136 @@ def _causal_conv1d_update_kernel(
             if KERNEL_WIDTH >= 4:
                 tl.store(base_ptr + 2 * stride_inter_win, col2, mask=mask_w)
 
+@triton.jit()
+def _causal_conv1d_update_kernel_no_cache_len_no_mtp(
+        x_ptr,
+        conv_state_ptr,
+        weight_ptr,
+        bias_ptr,
+        conv_state_indices_ptr,
+        out_ptr,
+        pad_slot_id,
+        batch: tl.constexpr,
+        dim: tl.constexpr,
+        align_val: tl.constexpr,
+        state_len: tl.constexpr,  # 3 4 5
+        seq_len: tl.constexpr,  # 1 2
+        width: tl.constexpr,  # 4, <= seq_len + state_len
+        out_len: tl.constexpr,
+        x_batch_stride: tl.constexpr,
+        conv_batch_stride: tl.constexpr,
+        out_batch_stride: tl.constexpr,
+        DIM_BLOCK: tl.constexpr,  # dim % DIM_BLOCK must be 0
+        HAS_BIAS: tl.constexpr,
+        SILU_ACTIVATION: tl.constexpr,
+        IS_CONTINUOUS_BATCHING: tl.constexpr,
+        USE_PAD_SLOT: tl.constexpr):
+    pid = tl.program_id(0)
+    cat_len: tl.constexpr = state_len + seq_len  # 4
+    sub_state_len: tl.constexpr = state_len - seq_len  # 3
+    sub_align_dim: tl.constexpr = DIM_BLOCK // align_val
+
+    conv_begin: tl.constexpr = (cat_len - width + 1) - seq_len
+
+
+
+    if IS_CONTINUOUS_BATCHING:
+        conv_batch_offs = tl.load(conv_state_indices_ptr + pid)
+    else:
+        conv_batch_offs = pid
+
+    if USE_PAD_SLOT:
+        if conv_batch_offs == pad_slot_id:
+            # not processing as this is not the actual sequence
+            return
+
+    for doffs in range(0, dim, DIM_BLOCK):
+
+        conv_state = tl.load(conv_state_ptr +
+                             conv_batch_offs * conv_batch_stride +
+                             doffs * state_len +
+                             tl.arange(0, DIM_BLOCK * state_len))
+        conv_state_T = (conv_state.reshape(
+            sub_align_dim, align_val * state_len).trans().reshape(
+                align_val, state_len * sub_align_dim).trans().reshape(
+                    state_len * DIM_BLOCK, ))
+
+        x = tl.load(x_ptr + pid * x_batch_stride + doffs * seq_len +
+                    tl.arange(0, DIM_BLOCK * seq_len))
+        x_T = (x.reshape(sub_align_dim, align_val * seq_len).trans().reshape(
+            align_val,
+            seq_len * sub_align_dim).trans().reshape(seq_len * DIM_BLOCK, ))
+
+        x_new_T = tl.full([cat_len * DIM_BLOCK], 0, x_ptr.dtype.element_ty)
+        x_new_T = tl.insert_slice(
+            x_new_T,
+            conv_state_T,
+            offsets=(0, ),
+            sizes=(state_len * DIM_BLOCK, ),
+            strides=(1, ),
+        )  # [cat_len , DIM_BLOCK].view(-1)
+        x_new_T = tl.insert_slice(
+            x_new_T,
+            x_T,
+            offsets=(state_len * DIM_BLOCK, ),
+            sizes=(seq_len * DIM_BLOCK, ),
+            strides=(1, ),
+        )
+
+        new_conv_state_T = tl.extract_slice(
+            x_new_T, (seq_len * DIM_BLOCK, ), (state_len * DIM_BLOCK, ),
+            (1, ))  # [state_len, DIM_BLOCK].view(-1)
+        new_conv_state = (new_conv_state_T.reshape(
+            state_len * align_val, sub_align_dim).trans().reshape(
+                sub_align_dim * state_len,
+                align_val).trans().reshape(DIM_BLOCK * state_len, )
+                          )  # [DIM_BLOCK, state_len].view(-1)
+        tl.store(
+            conv_state_ptr + conv_batch_offs * conv_batch_stride +
+            doffs * state_len + tl.arange(0, DIM_BLOCK * state_len),
+            new_conv_state,
+        )
+
+        weight = tl.load(weight_ptr + doffs * width +
+                         tl.arange(0, DIM_BLOCK * width))
+        weight_T = (weight.reshape(sub_align_dim,
+                                   align_val * width).trans().reshape(
+                                       align_val,
+                                       width * sub_align_dim).trans().reshape(
+                                           width * DIM_BLOCK, )
+                    )  # [width, DIM_BLOCK].view(-1)
+
+        if HAS_BIAS:
+            bias = tl.load(bias_ptr + doffs + tl.arange(0, DIM_BLOCK))
+        else:
+            bias = 0
+
+        if width == cat_len:
+            result = (tl.sum((x_new_T.to(tl.float32) * weight_T).reshape(
+                width, DIM_BLOCK), 0) + bias)
+            if SILU_ACTIVATION:
+                result = result / (1 + tl.exp(-result))
+            tl.store(
+                out_ptr + pid * out_batch_stride +
+                (doffs + tl.arange(0, DIM_BLOCK)) * out_len,
+                result,
+            )
+        else:
+            for i in range(seq_len):
+                x_conv_part = tl.extract_slice(x_new_T,
+                                               ((conv_begin + i) * DIM_BLOCK),
+                                               (width * DIM_BLOCK),
+                                               (1, )).to(tl.float32)
+                result = (tl.sum(
+                    (x_conv_part * weight_T).reshape(width, DIM_BLOCK), 0) +
+                          bias)
+                if SILU_ACTIVATION:
+                    result = result / (1 + tl.exp(-result))
+                tl.store(
+                    out_ptr + pid * out_batch_stride +
+                    (doffs + tl.arange(0, DIM_BLOCK)) * out_len,
+                    result,
+                )
 
 def causal_conv1d_update_npu(
     x: torch.Tensor,
@@ -1295,54 +1425,81 @@ def causal_conv1d_update_npu(
     else:
         stride_inter_seq = stride_inter_step = stride_inter_dim = stride_inter_win = 0
 
-    _causal_conv1d_update_kernel[grid](
-        # Pointers to matrices
-        x,
-        weight,
-        bias,
-        conv_state,
-        cache_seqlens,
-        conv_state_indices,
-        num_accepted_tokens,
-        intermediate_conv_window
-        if intermediate_conv_window is not None else x,
-        out,
-        # Matrix dimensions
-        batch,
-        dim,
-        seqlen,
-        state_len,
-        num_cache_lines,
-        # stride
-        stride_x_seq,
-        stride_x_dim,
-        stride_x_token,
-        stride_w_dim,
-        stride_w_width,
-        stride_istate_seq,
-        stride_istate_dim,
-        stride_istate_token,
-        stride_state_indices,
-        stride_inter_seq,
-        stride_inter_step,
-        stride_inter_dim,
-        stride_inter_win,
-        stride_o_seq,
-        stride_o_dim,
-        stride_o_token,
-        # others
-        pad_slot_id,
-        # META
-        HAS_BIAS=bias is not None,
-        KERNEL_WIDTH=width,
-        SILU_ACTIVATION=activation in ["silu", "swish"],
-        IS_CONTINUOUS_BATCHING=conv_state_indices is not None,
-        IS_SPEC_DECODING=num_accepted_tokens is not None,
-        NP2_STATELEN=np2_statelen,
-        USE_PAD_SLOT=pad_slot_id is not None,
-        BLOCK_N=128,
-        SAVE_INTERMEDIATE=intermediate_conv_window is not None,
-    )
+    if cache_seqlens is None and num_accepted_tokens is None:
+        DIM_BLOCK = dim
+        _causal_conv1d_update_kernel_no_cache_len_no_mtp[(batch, 1, 1)](
+            x,
+            conv_state,
+            weight,
+            bias,
+            conv_state_indices,
+            out,
+            pad_slot_id,
+            batch=batch,
+            dim=dim,
+            align_val=16,
+            state_len=conv_state.shape[-1],  # 3 4 5
+            seq_len=x.shape[-1],  # 1 2
+            width=width,  # 4, <= seq_len + state_len
+            out_len=out.shape[-1],
+            x_batch_stride=x.stride()[0],
+            conv_batch_stride=conv_state.stride()[0],
+            out_batch_stride=out.stride()[0],
+            DIM_BLOCK=DIM_BLOCK,  # dim % DIM_BLOCK must be 0
+            HAS_BIAS=bias is not None,
+            SILU_ACTIVATION=activation in ["silu", "swish"],
+            IS_CONTINUOUS_BATCHING=conv_state_indices is not None,
+            USE_PAD_SLOT=pad_slot_id is not None,
+        )
+    else:
+        _causal_conv1d_update_kernel[grid](
+            # Pointers to matrices
+            x,
+            weight,
+            bias,
+            conv_state,
+            cache_seqlens,
+            conv_state_indices,
+            num_accepted_tokens,
+            intermediate_conv_window
+            if intermediate_conv_window is not None else x,
+            out,
+            # Matrix dimensions
+            batch,
+            dim,
+            seqlen,
+            state_len,
+            num_cache_lines,
+            # stride
+            stride_x_seq,
+            stride_x_dim,
+            stride_x_token,
+            stride_w_dim,
+            stride_w_width,
+            stride_istate_seq,
+            stride_istate_dim,
+            stride_istate_token,
+            stride_state_indices,
+            stride_inter_seq,
+            stride_inter_step,
+            stride_inter_dim,
+            stride_inter_win,
+            stride_o_seq,
+            stride_o_dim,
+            stride_o_token,
+            # others
+            pad_slot_id,
+            # META
+            HAS_BIAS=bias is not None,
+            KERNEL_WIDTH=width,
+            SILU_ACTIVATION=activation in ["silu", "swish"],
+            IS_CONTINUOUS_BATCHING=conv_state_indices is not None,
+            IS_SPEC_DECODING=num_accepted_tokens is not None,
+            NP2_STATELEN=np2_statelen,
+            USE_PAD_SLOT=pad_slot_id is not None,
+            BLOCK_N=128,
+            SAVE_INTERMEDIATE=intermediate_conv_window is not None,
+        )
     if unsqueeze:
         out = out.squeeze(-1)
     return out
