@@ -496,6 +496,10 @@ class AscendMLATorchairMetadataBuilder:
                     num_reqs_pad_size = (
                         graph_pad_size //
                         common_attn_metadata.decode_token_per_req - num_reqs)
+
+                    # fix for negative padding size issue
+                    num_reqs_pad_size = max(0, num_reqs_pad_size)
+
                     padded_seq_lens = seq_lens.tolist(
                     ) + [pad_value] * num_reqs_pad_size
                 else:
