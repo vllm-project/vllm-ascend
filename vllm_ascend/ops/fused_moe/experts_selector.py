@@ -19,7 +19,7 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 from vllm.forward_context import get_forward_context
-
+from vllm_ascend.utils import is_A5
 from vllm_ascend.ascend_config import get_ascend_config
 
 
@@ -195,7 +195,7 @@ def _select_experts_with_fusion_ops(
             # y2_flag=False, # old api; should the third output be output
             routed_scaling_factor=1,
             eps=float(1e-20))
-    if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax":
+    if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax" and not is_A5():
         topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
             x=router_logits, finished=None, k=top_k)
         topk_ids = topk_ids.to(torch.int32)
