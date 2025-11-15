@@ -376,9 +376,7 @@ class TestAscendScheduler(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -429,9 +427,7 @@ class TestAscendScheduler(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -481,9 +477,7 @@ class TestAscendScheduler(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -526,9 +520,7 @@ class TestAscendScheduler(TestBase):
             },
             num_common_prefix_blocks=0,
             finished_req_ids=set(),
-            free_encoder_mm_hashes=[],
-            structured_output_request_ids={},
-            grammar_bitmask=None)
+            free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[requests[0].request_id],
             req_id_to_index={requests[0].request_id: 0},
@@ -1069,9 +1061,7 @@ class TestSchedulerDynamicBatch(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -1122,9 +1112,7 @@ class TestSchedulerDynamicBatch(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -1174,9 +1162,7 @@ class TestSchedulerDynamicBatch(TestBase):
                                            },
                                            num_common_prefix_blocks=0,
                                            finished_req_ids=set(),
-                                           free_encoder_mm_hashes=[],
-                                           structured_output_request_ids={},
-                                           grammar_bitmask=None)
+                                           free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[req.request_id for req in requests],
             req_id_to_index={
@@ -1219,9 +1205,7 @@ class TestSchedulerDynamicBatch(TestBase):
             },
             num_common_prefix_blocks=0,
             finished_req_ids=set(),
-            free_encoder_mm_hashes=[],
-            structured_output_request_ids={},
-            grammar_bitmask=None)
+            free_encoder_mm_hashes=[])
         model_output = ModelRunnerOutput(
             req_ids=[requests[0].request_id],
             req_id_to_index={requests[0].request_id: 0},

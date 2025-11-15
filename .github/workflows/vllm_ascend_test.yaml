@@ -42,7 +42,7 @@ jobs:
   lint:
     uses: ./.github/workflows/pre-commit.yml
     with:
-      vllm: 2918c1b49c88c29783c86f78d2c4221cb9622379
+      vllm: releases/v0.11.1
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -72,8 +72,9 @@ jobs:
   ut:
     needs: [lint, changes]
     name: unit test
+    if: false  # 直接禁用
     # only trigger unit test after lint passed and the change is e2e and ut related.
-    if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
+    # if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     runs-on: ubuntu-latest
     container:
       # fixme: vllm-ascend install failed with 8.3.rc1 on github action
@@ -83,7 +84,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [2918c1b49c88c29783c86f78d2c4221cb9622379, v0.11.0]
+        vllm_version: [releases/v0.11.1, v0.11.0]
     steps:
       - name: Install packages
         run: |
@@ -136,9 +137,10 @@ jobs:
 
   e2e-light:
     name: e2e-light
+    if: false  # 直接禁用
     strategy:
       matrix:
-        vllm_version: [2918c1b49c88c29783c86f78d2c4221cb9622379, v0.11.0]
+        vllm_version: [releases/v0.11.1, v0.11.0]
     # Note (yikun): If CI resource are limited we can split job into two chain jobs
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.

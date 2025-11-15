@@ -147,8 +147,14 @@ class AscendQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(dim, num_heads, mlp_hidden_dim, act_fn, norm_layer,
-                         quant_config, prefix)
+        super().__init__(dim=dim,
+                         num_heads=num_heads,
+                         mlp_hidden_dim=mlp_hidden_dim,
+                         act_fn=act_fn,
+                         norm_layer=norm_layer,
+                         quant_config=quant_config,
+                         prefix=prefix)
+
         self.attn = AscendQwen2_5_VisionAttention(embed_dim=dim,
                                                   num_heads=num_heads,
                                                   projection_size=dim,

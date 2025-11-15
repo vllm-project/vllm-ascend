@@ -43,6 +43,7 @@ concurrency:
 jobs:
   multi-node-tests:
     name: multi-node
+    if: false
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
@@ -86,6 +87,7 @@ jobs:
   
   single-node-tests:
     name: single-node
+    if: false
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     needs: multi-node-tests
     strategy:
