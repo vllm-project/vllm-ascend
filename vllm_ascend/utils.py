@@ -465,7 +465,10 @@ def update_default_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     if vllm_config.model_config and vllm_config.model_config.hf_config.model_type == "qwen3_moe" \
         and vllm_config.parallel_config.tensor_parallel_size == 1 \
         and vllm_config.parallel_config.data_parallel_size > 1 :
-        max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
+        if vllm_version_is("0.11.0"):
+            max_capture_size = vllm_config.scheduler_config.cuda_graph_sizes[0]
+        else:
+            max_capture_size = vllm_config.compilation_config.max_cudagraph_capture_size
         new_cudagraph_capture_sizes = [1, 2, 5, 10, 15, 20] + [
             i for i in range(24, max_capture_size + 1, 8)
         ]
