@@ -19,14 +19,20 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch_npu
-from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.moe.experts_selector import select_experts
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, is_enable_nz,
+                               vllm_version_is)
+
+if vllm_version_is("0.11.0"):
+    from vllm.config import CompilationLevel
+else:
+    from vllm.config import CompilationMode
 
 
 class AscendW8A8DynamicLinearMethod:
@@ -62,8 +68,11 @@ class AscendW8A8DynamicLinearMethod:
                                                    dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
+                           params_dtype: torch.dtype,
+                           layer_type: Optional[str] = None) -> Dict[str, Any]:
         return {}
 
     @staticmethod
@@ -120,11 +129,21 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
-        self.use_aclgraph = (
-            vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
-            and not vllm_config.model_config.enforce_eager
-            and not ascend_config.torchair_graph_config.enabled)
+        if vllm_version_is("0.11.0"):
+            self.use_aclgraph = (
+                vllm_config.compilation_config.level
+                == CompilationLevel.PIECEWISE
+                and not vllm_config.model_config.enforce_eager
+                and not ascend_config.torchair_graph_config.enabled)
+        else:
+            self.use_aclgraph = (
+                vllm_config.compilation_config.mode
+                == CompilationMode.VLLM_COMPILE
+                and not vllm_config.model_config.enforce_eager
+                and not ascend_config.torchair_graph_config.enabled)
+
         self.dynamic_eplb = ascend_config.dynamic_eplb or ascend_config.expert_map_record_path
+        self.in_dtype = vllm_config.model_config.dtype
 
         try:
             device_group = get_mc2_group().device_group
@@ -200,6 +219,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         shared_experts: Optional[Any] = None,
         quantized_x_for_share: Optional[Any] = None,
         dynamic_scale_for_share: Optional[Any] = None,
+        pertoken_scale: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -224,27 +244,12 @@ class AscendW8A8DynamicFusedMoEMethod:
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
-        if self.use_aclgraph:
-            moe_comm_method = get_forward_context().moe_comm_method
-            return moe_comm_method.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                use_int8_w8a8=True,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                expert_map=expert_map,
-                dynamic_eplb=self.dynamic_eplb,
-                log2phy=log2phy,
-                global_redundant_expert_num=global_redundant_expert_num)
-
-        topk_weights = topk_weights.to(x.dtype)
+        topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
         return moe_comm_method.fused_experts(
             hidden_states=x,
+            pertoken_scale=pertoken_scale,
             w1=layer.w13_weight,
             w1_scale=layer.w13_weight_scale_fp32,
             w2=layer.w2_weight,
@@ -258,7 +263,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             shared_experts=shared_experts,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
-            dynamic_eplb=self.dynamic_eplb)
+            dynamic_eplb=self.dynamic_eplb,
+            mc2_mask=kwargs.get("mc2_mask", None))
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

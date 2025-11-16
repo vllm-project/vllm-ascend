@@ -1,4 +1,4 @@
-# Maintainers and contributors
+# Maintainers and Contributors
 
 ## Maintainers
 
@@ -17,7 +17,7 @@
 
 ## Contributors
 
-vLLM Ascend every release would not have been possible without the following contributors:
+Every release of vLLM Ascend would not have been possible without the following contributors:
 
 Updated on 2025-09-30:
 

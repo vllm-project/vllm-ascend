@@ -11,7 +11,8 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import enable_sp, is_moe_model, version_check
+from vllm_ascend.utils import (enable_sp, flashcomm2_enable, has_layer_idx,
+                               is_moe_model)
 
 if TYPE_CHECKING:
     from vllm_ascend.ops.weight_prefetch import WeightPrefetchMethod
@@ -87,7 +88,8 @@ def set_ascend_forward_context(
     ):
         forward_context = get_forward_context()
 
-        from vllm_ascend.ops.moe.moe_comm_method import get_moe_comm_method
+        from vllm_ascend.ops.fused_moe.moe_comm_method import \
+            get_moe_comm_method
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
 
@@ -112,20 +114,25 @@ def set_ascend_forward_context(
         # Currently, it is an empirical value. In normal scenarios, if the concurrency exceeds this threshold,
         # the performance benefits can be maximized. Conversely, if the concurrency is below the threshold,
         # the performance may degrade due to the switching of communication methods.
+        mmrs_fusion = True
         if is_moe_model(vllm_config):
-            sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and num_tokens is not None
+            sp_enabled = enable_sp(vllm_config) and num_tokens is not None
+            mmrs_fusion = False
         else:
             sp_enabled = enable_sp(vllm_config) and \
-                tp_world_size > 1 and \
                 num_tokens is not None and num_tokens > 1000
+        forward_context.mmrs_fusion = mmrs_fusion
+        forward_context.num_tokens = num_tokens
+        forward_context.sp_enabled = sp_enabled
+        #TODO(Levi-JQ): another PR to normalize the enabling logic for sp/fc2
+        forward_context.flashcomm_v2_enabled = flashcomm2_enable(
+        ) and tp_world_size > 1 and num_tokens is not None
 
-        if sp_enabled:
+        if (forward_context.sp_enabled
+                or forward_context.flashcomm_v2_enabled):
             pad_size = (tp_world_size -
                         (num_tokens % tp_world_size)) % tp_world_size
             forward_context.pad_size = pad_size
-        forward_context.sp_enabled = sp_enabled
-        forward_context.num_tokens = num_tokens
 
         # set this for rope forward_oot using
         forward_context.is_first_layer = True
@@ -133,9 +140,7 @@ def set_ascend_forward_context(
         # set layer_idx to enable optimization features that depend on this information.
         # This is only applicable to models that contain these necessary attributes.
         forward_context.layer_idx = None
-        if model_instance is not None and \
-            hasattr(model_instance, "model") and \
-            hasattr(model_instance.model, "start_layer"):
+        if has_layer_idx(model_instance):
             forward_context.layer_idx = model_instance.model.start_layer
 
         # TODO(rjg-lyh): refactor mlp weight prefetch method
@@ -160,9 +165,7 @@ def set_ascend_forward_context(
         # this optim now just support dense models due to the specific operators used.
         # Once the necessary conditions are met, support for MOE models will also be added.
         from vllm_ascend.quantization.quant_config import AscendQuantConfig
-        model_type_scope = ["llama", "qwen2", "qwen3"]
-        if version_check():
-            model_type_scope.append("qwen3_moe")
+        model_type_scope = ["llama", "qwen2", "qwen3", "qwen3_moe"]
         addrmsnorm_quant_fusion_enabled = isinstance(vllm_config.quant_config, AscendQuantConfig) and \
             vllm_config.model_config.hf_config.model_type in model_type_scope and \
             forward_context.layer_idx is not None
@@ -181,7 +184,8 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             max_tokens_across_dp = \
                 forward_context.dp_metadata.max_tokens_across_dp_cpu.item()
-            if sp_enabled:
+            if (forward_context.sp_enabled
+                    or forward_context.flashcomm_v2_enabled):
                 padded_length = (max_tokens_across_dp + tp_world_size -
                                  1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens

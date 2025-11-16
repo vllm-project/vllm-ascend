@@ -5,9 +5,16 @@ import torch
 import torch.nn as nn
 import vllm.v1.sample.rejection_sampler as rs
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.rejection_sampler import (RejectionSampler, compute_probs,
+from vllm.v1.sample.rejection_sampler import (RejectionSampler,
                                               generate_uniform_probs)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.v1.sample.rejection_sampler import compute_probs
+else:
+    from vllm.v1.sample.rejection_sampler import apply_sampling_constraints
 
 PLACEHOLDER_TOKEN_ID = -1
 GREEDY_TEMPERATURE = -1
@@ -82,11 +89,19 @@ class AscendRejectionSampler(RejectionSampler, nn.Module):
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `compute_probs` function.
-        target_probs = compute_probs(
-            target_logits,
-            metadata.cu_num_draft_tokens,
-            sampling_metadata,
-        )
+        if vllm_version_is("0.11.0"):
+            target_probs = compute_probs(
+                target_logits,
+                metadata.cu_num_draft_tokens,
+                sampling_metadata,
+            )
+        else:
+            target_logits = apply_sampling_constraints(
+                target_logits,
+                metadata.cu_num_draft_tokens,
+                sampling_metadata,
+            )
+            target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
@@ -305,7 +320,8 @@ def rejection_greedy_sample_spec_len_1_pytorch(
     accept_req_mask = draft_token_ids == target_argmax
     output_token_ids[:, 0] = target_argmax
     bonus_token_ids = bonus_token_ids.squeeze(1)
-    output_token_ids[accept_req_mask, 1] = bonus_token_ids[accept_req_mask]
+    output_token_ids[:, 1] = torch.where(accept_req_mask, bonus_token_ids,
+                                         output_token_ids[:, 1])
 
 
 def rejection_greedy_sample_pytorch(

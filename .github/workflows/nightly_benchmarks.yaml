@@ -46,17 +46,16 @@ jobs:
   test:
     if: ${{ contains(github.event.pull_request.labels.*.name, 'performance-test') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
-    name: Benchmarks/vLLM=${{ matrix.vllm_branch }}, vLLM-Ascend=${{ matrix.vllm_ascend_branch }}, use_v1=${{ matrix.vllm_use_v1 }}
+    name: Benchmarks/vLLM=${{ matrix.vllm_branch }}, vLLM-Ascend=${{ matrix.vllm_ascend_branch }}
     runs-on: 'linux-arm64-npu-static-8'
     strategy:
       matrix:
         include:
           - vllm_branch: v0.11.0
             vllm_ascend_branch: main
-            vllm_use_v1: 1
       max-parallel: 1
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
       volumes:
         - /usr/local/dcmi:/usr/local/dcmi
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
@@ -73,7 +72,6 @@ jobs:
         VLLM_USE_MODELSCOPE: True
         ES_OM_DOMAIN: ${{ secrets.ES_OM_DOMAIN }}
         ES_OM_AUTHORIZATION: ${{ secrets.ES_OM_AUTHORIZATION }}
-        VLLM_USE_V1: ${{ matrix.vllm_use_v1 }}
     steps:
       - name: Check npu and CANN info
         run: |
@@ -136,7 +134,7 @@ jobs:
 
       - name: Upload benchmark artifacts
         if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: "benchmark-performance-${{ matrix.vllm_branch }}-${{ matrix.vllm_ascend_branch }}-report"
           path: ./benchmarks/results/benchmark_results.md
@@ -200,7 +198,6 @@ jobs:
             --created_at "$commit_time_no_tz" \
             --res_dir ./benchmarks/results \
             --error "$ERROR_MSG" \
-            --extra_feat '{"VLLM_USE_V1": "${{ matrix.vllm_use_v1 }}"}'
             rm -rf ./benchmarks/results
             cd -
           done < commit_log.txt

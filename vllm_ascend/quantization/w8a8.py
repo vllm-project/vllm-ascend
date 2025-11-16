@@ -24,7 +24,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.ops.moe.experts_selector import select_experts
+from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p, is_enable_nz
 
 
@@ -86,8 +86,11 @@ class AscendW8A8LinearMethod:
                                                    dtype=params_dtype)
         return params_dict
 
-    def get_pergroup_param(self, input_size: int, output_size: int,
-                           params_dtype: torch.dtype) -> Dict[str, Any]:
+    def get_pergroup_param(self,
+                           input_size: int,
+                           output_size: int,
+                           params_dtype: torch.dtype,
+                           layer_type: Optional[str] = None) -> Dict[str, Any]:
         return {}
 
     @staticmethod
@@ -112,12 +115,30 @@ class AscendW8A8LinearMethod:
                     weight=layer.weight,
                     start_flag=x,
                 )
-            # quant
-            x = quant_per_tensor(
-                x,
-                layer.aclnn_input_scale_reciprocal,
-                layer.aclnn_input_offset,
-            )
+
+            quant_comm_config = getattr(layer, "_quant_comm_config", {})
+            comm_fn = quant_comm_config.get("communication_fn")
+            enable_flashcomm2_quant_comm = comm_fn is not None and (
+                "o_proj" in layer.prefix or "out_proj" in layer.prefix)
+            if enable_flashcomm2_quant_comm:
+                quant_input_x = x.contiguous().view(
+                    -1, layer.aclnn_input_scale_reciprocal.size(0))
+                quant_x = quant_per_tensor(
+                    quant_input_x,
+                    layer.aclnn_input_scale_reciprocal,
+                    layer.aclnn_input_offset,
+                )
+                comm_input = quant_x.view(x.size(0), -1)
+                assert comm_fn is not None
+                x = comm_fn(comm_input)
+            else:
+                # quant
+                x = quant_per_tensor(
+                    x,
+                    layer.aclnn_input_scale_reciprocal,
+                    layer.aclnn_input_offset,
+                )
+
             # prefetch qkvo_proj.weight postprocess
             if weight_prefetch_method:
                 weight_prefetch_method.maybe_prefetch_attn_weight_postprocess(

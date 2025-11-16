@@ -13,16 +13,19 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.utils import cdiv, round_down
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import cdiv, round_down
+else:
+    from vllm.utils.math_utils import cdiv, round_down
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
                                          split_decodes_and_prefills)
-from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
-from vllm_ascend.multistream.context import get_multistream_comm_context
-from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata,
                                         npu_stream_switch, npu_wait_tensor)
@@ -72,6 +75,7 @@ class AscendMLATorchairPrefillMetadata:
         max_seq_lens: list[int]
         workspace: torch.Tensor
         chunk_seq_lens: torch.Tensor
+        chunk_seq_lens_npu: torch.Tensor
 
     attn_mask: torch.Tensor
     query_lens: torch.Tensor
@@ -141,7 +145,6 @@ class AscendMLATorchairMetadata:
 
     decode: Optional[AscendMLATorchairDecodeMetadata] = None
     prefill: Optional[AscendMLATorchairPrefillMetadata] = None
-    enable_dbo_across_dp: bool = False
 
     def __post_init__(self):
         pass
@@ -151,17 +154,6 @@ class AscendMLATorchairMetadata:
         #     raise ValueError(
         #         f"Only {supported_head_sizes} are supported for head_dim,",
         #         f"received {self.head_dim}.")
-
-    def split_metadata_for_multistream(
-        self,
-        ms_split_config: MSAttentionMetadataSplitConfig,
-    ) -> list["AscendMLATorchairMetadata"]:
-        """Split metadata for multi-stream with AscendMLATorchairMetadata"""
-        return model_input_split_v1_mla_attn(
-            ms_split_config=ms_split_config,
-            attn_metadata=self,
-            _metadata_cls=AscendMLATorchairMetadata,
-        )
 
 
 M = TypeVar("M", bound=AscendMLATorchairMetadata)
@@ -426,8 +418,8 @@ class AscendMLATorchairMetadataBuilder:
         if num_prefills > 0:
             reqs_start = num_decodes  # prefill_start
             tokens_start = num_decode_tokens
-            max_query_len = query_lens[tokens_start:].max().item()
-            max_seq_lens = seq_lens[tokens_start:].max().item()
+            max_query_len = query_lens[reqs_start:].max().item()
+            max_seq_lens = seq_lens[reqs_start:].max().item()
             prefill_query_start_loc = query_start_loc[
                 reqs_start:] - query_start_loc[reqs_start]
 
@@ -462,6 +454,7 @@ class AscendMLATorchairMetadataBuilder:
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     chunk_seq_lens=chunk_seq_lens,
+                    chunk_seq_lens_npu=chunk_seq_lens.npu(),
                     workspace=self.chunked_prefill_workspace,
                 )
             prefill_input_positions = input_positions[tokens_start:]
@@ -473,9 +466,9 @@ class AscendMLATorchairMetadataBuilder:
                     1).unsqueeze(2)
             prefill_metadata = AscendMLATorchairPrefillMetadata(
                 attn_mask=common_attn_metadata.attn_mask,
-                query_lens=query_lens[tokens_start:].to(torch.int32),
+                query_lens=query_lens[reqs_start:].to(torch.int32),
                 seq_lens=seq_lens,
-                context_lens=seq_lens[tokens_start:],
+                context_lens=seq_lens[reqs_start:],
                 input_positions=prefill_input_positions,
                 block_table=block_table[reqs_start:, ...],
                 max_query_len=max_query_len,
@@ -576,7 +569,6 @@ class AscendMLATorchairMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
-            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
         )
 
     def pad_actual_seq_len_q(self, num_reqs_pad_size, num_reqs,
@@ -776,7 +768,8 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         q_pe = query[..., self.qk_nope_head_dim:]
         q_nope = query[..., :self.qk_nope_head_dim]
 
-        seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
+        current_seq_len = torch.tensor(prefill_metadata.query_lens,
+                                       dtype=torch.int32)
         cache_kv_c = kv_c_and_k_pe_cache[0]
         cache_k_pe = kv_c_and_k_pe_cache[1]
         num_heads = cache_k_pe.size(2)
@@ -784,8 +777,11 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
-            seq_len2 = prefill_metadata.chunked_context.chunk_seq_lens[i]
-            seq_len = torch.stack([seq_len1, seq_len2])
+            context_seq_len = prefill_metadata.chunked_context.chunk_seq_lens[
+                i]
+            context_seq_len_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[
+                i]
+            seq_len = torch.stack([current_seq_len, context_seq_len])
             kv_c_normed = torch.empty(toks,
                                       num_heads,
                                       latent_kv_dim,
@@ -801,7 +797,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
-                seq_len2.to(query.device),
+                context_seq_len_npu,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,
@@ -1072,15 +1068,8 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                     context_lens=attn_metadata.decode.seq_lens,  # type:ignore
                     mla_vheadsize=self.kv_lora_rank,
                     out=attn_output)
-        current_ms_metadata = get_multistream_comm_context()
-        if current_ms_metadata is None:
-            return self._v_up_proj_and_o_proj(attn_output,
-                                              enable_multistream_mla)
-        else:
-            current_ms_metadata.before_comm_event.record()
-            with torch.npu.stream(current_ms_metadata.comm_stream):
-                current_ms_metadata.before_comm_event.wait()
-                return self._v_up_proj_and_o_proj(attn_output)
+
+        return self._v_up_proj_and_o_proj(attn_output, enable_multistream_mla)
 
     def forward(
         self,
@@ -1097,7 +1086,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
         self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
@@ -1248,14 +1237,7 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                                                    prefill_k_c_normed,
                                                    prefill_k_pe, kv_cache,
                                                    attn_metadata)
-            current_ms_metadata = get_multistream_comm_context()
-            if current_ms_metadata is not None:
-                current_ms_metadata.before_comm_event.record()
-                with torch.npu.stream(current_ms_metadata.comm_stream):
-                    current_ms_metadata.before_comm_event.wait()
-                    o_proj_input[num_decode_tokens:] = output_prefill
-            else:
-                o_proj_input[num_decode_tokens:] = output_prefill
+            o_proj_input[num_decode_tokens:] = output_prefill
 
         if has_decode:
             if self.running_in_graph:
@@ -1269,35 +1251,19 @@ class AscendMLATorchairImpl(MLAAttentionImpl):
                                                      decode_k_nope,
                                                      decode_k_pe, kv_cache,
                                                      attn_metadata)
-            current_ms_metadata = get_multistream_comm_context()
-            if current_ms_metadata is not None:
-                with torch.npu.stream(current_ms_metadata.comm_stream):
-                    o_proj_input[:num_decode_tokens] = output_decode
-            else:
-                o_proj_input[:num_decode_tokens] = output_decode
+            o_proj_input[:num_decode_tokens] = output_decode
 
-        current_ms_metadata = get_multistream_comm_context()
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024  # 16MB
-        if current_ms_metadata is None:
-            maybe_npu_prefetch(self.o_proj.weight,
-                               o_proj_input,
-                               max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                               enabled=enable_multistream_mla)
 
-            output[...] = self.o_proj(
-                o_proj_input,
-                is_prefill=True,
-                is_force_scatter=self.enable_shared_expert_dp)[0]
-        else:
-            with torch.npu.stream(current_ms_metadata.comm_stream):
-                maybe_npu_prefetch(self.o_proj.weight,
-                                   o_proj_input,
-                                   max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                                   enabled=enable_multistream_mla)
-                output[...] = self.o_proj(
-                    o_proj_input,
-                    is_prefill=True,
-                    is_force_scatter=self.enable_shared_expert_dp)[0]
-                current_ms_metadata.after_comm_event.record()
+        maybe_npu_prefetch(self.o_proj.weight,
+                           o_proj_input,
+                           max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                           enabled=enable_multistream_mla)
+
+        output[...] = self.o_proj(
+            o_proj_input,
+            is_prefill=True,
+            is_force_scatter=self.enable_shared_expert_dp)[0]
+
         del o_proj_input
         return output_padded

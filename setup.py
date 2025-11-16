@@ -373,7 +373,6 @@ setup(
     },
     # TODO: Add 3.12 back when torch-npu support 3.12
     classifiers=[
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
         "License :: OSI Approved :: Apache Software License",
@@ -384,7 +383,7 @@ setup(
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
     packages=find_packages(exclude=("docs", "examples", "tests*", "csrc")),
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass=cmdclass,
@@ -393,7 +392,9 @@ setup(
         "vllm.platform_plugins": ["ascend = vllm_ascend:register"],
         "vllm.general_plugins": [
             "ascend_enhanced_model = vllm_ascend:register_model",
-            "ascend_kv_connector = vllm_ascend:register_connector"
+            "ascend_kv_connector = vllm_ascend:register_connector",
+            "ascend_model_loader = vllm_ascend:register_model_loader",
+            "ascend_service_profiling = vllm_ascend:register_service_profiling"
         ],
     },
 )

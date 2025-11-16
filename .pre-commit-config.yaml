@@ -68,13 +68,6 @@ repos:
   #   language: system
   #   types: [python]
   #   stages: [pre-commit] # Don't run in CI
-  - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
-    name: Run mypy for Python 3.9
-    entry: tools/mypy.sh 1 "3.9"
-    # Use system python because vllm installation is required
-    language: system
-    types: [python]
-    stages: [manual] # Only run in CI
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: tools/mypy.sh 1 "3.10"
@@ -128,13 +121,6 @@ repos:
     language: system
     always_run: true
     pass_filenames: false
-  - id: enforce-import-regex-instead-of-re
-    name: Enforce import regex as re
-    entry: python tools/enforce_regex_import.py
-    language: python
-    types: [python]
-    pass_filenames: false
-    additional_dependencies: [regex]
   - id: python-init
     name: Enforce __init__.py in Python packages
     entry: python tools/check_python_src_init.py

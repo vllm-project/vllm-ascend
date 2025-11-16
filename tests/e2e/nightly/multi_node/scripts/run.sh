@@ -1,7 +1,83 @@
 #!/bin/bash
 set -euo pipefail
 
-export SRC_DIR="$WORKSPACE/source_code"
+# Color definitions
+GREEN="\033[0;32m"
+BLUE="\033[0;34m"
+YELLOW="\033[0;33m"
+RED="\033[0;31m"
+NC="\033[0m" # No Color
+
+# Configuration
+LOG_DIR="/root/.cache/tests/logs"
+OVERWRITE_LOGS=true
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+export BENCHMARK_HOME=${WORKSPACE}/vllm-ascend/benchmark
+
+# Function to print section headers
+print_section() {
+    echo -e "\n${BLUE}=== $1 ===${NC}"
+}
+
+print_failure() {
+    echo -e "${RED}${FAIL_TAG} ✗ ERROR: $1${NC}"
+    exit 1
+}
+
+# Function to print success messages
+print_success() {
+    echo -e "${GREEN}✓ $1${NC}"
+}
+
+# Function to print error messages and exit
+print_error() {
+    echo -e "${RED}✗ ERROR: $1${NC}"
+    exit 1
+}
+
+show_vllm_info() {
+    cd "$WORKSPACE"
+    echo "Installed vLLM-related Python packages:"
+    pip list | grep vllm || echo "No vllm packages found."
+
+    echo ""
+    echo "============================"
+    echo "vLLM Git information"
+    echo "============================"
+    cd vllm
+    if [ -d .git ]; then
+    echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+    echo "Commit hash: $(git rev-parse HEAD)"
+    echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+    echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+    echo "Message:     $(git log -1 --pretty=format:'%s')"
+    echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+    echo "Remote:      $(git remote -v | head -n1)"
+    echo ""
+    else
+    echo "No .git directory found in vllm"
+    fi
+    cd ..
+
+    echo ""
+    echo "============================"
+    echo "vLLM-Ascend Git information"
+    echo "============================"
+    cd vllm-ascend
+    if [ -d .git ]; then
+    echo "Branch:      $(git rev-parse --abbrev-ref HEAD)"
+    echo "Commit hash: $(git rev-parse HEAD)"
+    echo "Author:      $(git log -1 --pretty=format:'%an <%ae>')"
+    echo "Date:        $(git log -1 --pretty=format:'%ad' --date=iso)"
+    echo "Message:     $(git log -1 --pretty=format:'%s')"
+    echo "Tags:        $(git tag --points-at HEAD || echo 'None')"
+    echo "Remote:      $(git remote -v | head -n1)"
+    echo ""
+    else
+    echo "No .git directory found in vllm-ascend"
+    fi
+    cd ..
+}
 
 check_npu_info() {
     echo "====> Check NPU info"
@@ -16,69 +92,29 @@ check_and_config() {
     export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 }
 
-checkout_src() {
-    echo "====> Checkout source code"
-    mkdir -p "$SRC_DIR"
-
-    # vllm-ascend
-    if [ ! -d "$SRC_DIR/vllm-ascend" ]; then
-        git clone --depth 1 -b $VLLM_ASCEND_VERSION https://github.com/vllm-project/vllm-ascend.git "$SRC_DIR/vllm-ascend"
+install_extra_components() {
+    echo "====> Installing extra components for DeepSeek-v3.2-exp-bf16"
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/CANN-custom_ops-sfa-linux.aarch64.run; then
+        echo "Failed to download CANN-custom_ops-sfa-linux.aarch64.run"
+        return 1
     fi
-
-    # vllm
-    if [ ! -d "$SRC_DIR/vllm" ]; then
-        git clone -b $VLLM_VERSION https://github.com/vllm-project/vllm.git "$SRC_DIR/vllm"
+    chmod +x ./CANN-custom_ops-sfa-linux.aarch64.run
+    ./CANN-custom_ops-sfa-linux.aarch64.run --quiet
+    
+    if ! wget -q https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_ops-1.0-cp311-cp311-linux_aarch64.whl; then
+        echo "Failed to download custom_ops wheel"
+        return 1
     fi
-
-    #mooncake
-    if [ ! -d "$SRC_DIR/Mooncake" ]; then
-        git clone -b pooling_async_memecpy_v1 https://github.com/AscendTransport/Mooncake "$SRC_DIR/Mooncake"
-    fi
-}
-
-install_sys_dependencies() {
-    echo "====> Install system dependencies"
-    apt-get update -y
-
-    DEP_LIST=()
-    while IFS= read -r line; do
-        [[ -n "$line" && ! "$line" =~ ^# ]] && DEP_LIST+=("$line")
-    done < "$SRC_DIR/vllm-ascend/packages.txt"
-
-    apt-get install -y "${DEP_LIST[@]}" gcc g++ cmake libnuma-dev iproute2
-}
-
-install_vllm() {
-    echo "====> Install vllm and vllm-ascend"
-    VLLM_TARGET_DEVICE=empty pip install -e "$SRC_DIR/vllm"
-    pip install -e "$SRC_DIR/vllm-ascend"
-    pip install modelscope
-    # Install for pytest
-    pip install -r "$SRC_DIR/vllm-ascend/requirements-dev.txt"
-}
-
-install_mooncake() {
-    echo "====> Install mooncake"
-    apt-get update -y
-    apt-get install -y --no-install-recommends mpich libmpich-dev
-    cd $SRC_DIR/Mooncake
-    bash dependencies.sh --yes
-    apt purge mpich libmpich-dev -y
-    apt purge openmpi-bin -y
-    apt purge openmpi-bin libopenmpi-dev -y
-    apt install mpich libmpich-dev -y
-    export CPATH=/usr/lib/aarch64-linux-gnu/mpich/include/:$CPATH
-    export CPATH=/usr/lib/aarch64-linux-gnu/openmpi/lib:$CPATH
-
-    mkdir build
-    cd -
-    cd $SRC_DIR/Mooncake/build
-    cmake ..
-    make -j
-    make install
-    cp mooncake-transfer-engine/src/transport/ascend_transport/hccl_transport/ascend_transport_c/libascend_transport_mem.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
-    cp mooncake-transfer-engine/src/libtransfer_engine.so /usr/local/Ascend/ascend-toolkit/latest/python/site-packages/
-    cd -
+    pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+    
+    export ASCEND_CUSTOM_OPP_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize:${ASCEND_CUSTOM_OPP_PATH}
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
+    source /usr/local/Ascend/ascend-toolkit/set_env.sh
+    
+    rm -f CANN-custom_ops-sfa-linux.aarch64.run \
+          custom_ops-1.0-cp311-cp311-linux_aarch64.whl
+    echo "====> Extra components installation completed"
 }
 
 kill_npu_processes() {
@@ -88,58 +124,35 @@ kill_npu_processes() {
   sleep 4
 }
 
-run_tests() {
-    echo "====> Run tests"
-
-    shopt -s nullglob
-    declare -A results
-    local total=0
-    local passed=0
-    local failed=0
-
-    local REPORT_FILE="/root/.cache/test_summary.md"
-    echo "#Nightly Multi-node Test Summary" > "$REPORT_FILE"
-    echo "" >> "$REPORT_FILE"
-    echo "| Config File | Result |" >> "$REPORT_FILE"
-    echo "|--------------|---------|" >> "$REPORT_FILE"
-
-    for file in tests/e2e/nightly/multi_node/config/models/*.yaml; do
-        export CONFIG_YAML_PATH="$file"
-        echo "Running test with config: $CONFIG_YAML_PATH"
-
-        if pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py; then
-            results["$file"]="✅ PASS"
-            ((passed++))
+run_tests_with_log() {
+    set +e
+    kill_npu_processes
+    BASENAME=$(basename "$CONFIG_YAML_PATH" .yaml)
+    # each worker should have log file
+    LOG_FILE="${RESULT_FILE_PATH}/${BASENAME}_worker_${LWS_WORKER_INDEX}.log"
+    mkdir -p ${RESULT_FILE_PATH}
+    pytest -sv tests/e2e/nightly/multi_node/test_multi_node.py 2>&1 | tee $LOG_FILE
+    ret=${PIPESTATUS[0]}
+    set -e
+    if [ "$LWS_WORKER_INDEX" -eq 0 ]; then
+        if [ $ret -eq 0 ]; then
+            print_success "All tests passed!"
         else
-            results["$file"]="❌ FAIL"
-            ((failed++))
+            print_failure "Some tests failed!"
+            mv LOG_FILE error_${LOG_FILE}
         fi
-        ((total++))
-
-        echo "| \`$file\` | ${results[$file]} |" >> "$REPORT_FILE"
-        echo "------------------------------------------"
-        kill_npu_processes
-    done
-    shopt -u nullglob
-
-    echo "" >> "$REPORT_FILE"
-    echo "## Summary" >> "$REPORT_FILE"
-    echo "- **Total:** $total" >> "$REPORT_FILE"
-    echo "- **Passed:** $passed ✅" >> "$REPORT_FILE"
-    echo "- **Failed:** $failed ❌" >> "$REPORT_FILE"
-
-    echo
-    echo "✅ Markdown report written to: $REPORT_FILE"
+    fi
 }
 
 main() {
     check_npu_info
     check_and_config
-    checkout_src
-    install_sys_dependencies
-    install_vllm
-    install_mooncake
-    run_tests
+    show_vllm_info
+    if [[ "$CONFIG_YAML_PATH" == *"DeepSeek-V3_2-Exp-bf16.yaml" ]]; then
+        install_extra_components
+    fi
+    cd "$WORKSPACE/vllm-ascend"
+    run_tests_with_log
 }
 
 main "$@"

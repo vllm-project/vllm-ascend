@@ -9,7 +9,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.forward_context import ForwardContext
-from vllm.utils import logger, make_zmq_socket
+from vllm.utils import logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
@@ -18,6 +18,12 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm_ascend.distributed.mooncake.config_data import (
     LoadSpec, MooncakeConnectorMetadata, ReqMeta, RequestTracker)
 from vllm_ascend.distributed.mooncake.mooncake_engine import MooncakeEngine
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import make_zmq_socket
+else:
+    from vllm.utils.network_utils import make_zmq_socket
 
 
 class MooncakeConnectorV1(KVConnectorBase_V1):
@@ -165,6 +171,8 @@ class MooncakeStoreConnectorV1Scheduler:
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "consumer_is_to_load", False)
+        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "load_async", False)
         # request_id -> (vllm cached tokes, mooncake cached tokens)
         self.load_specs: dict[str, LoadSpec] = {}
         self._block_size = vllm_config.cache_config.block_size
@@ -229,7 +237,7 @@ class MooncakeStoreConnectorV1Scheduler:
             can_load=False,
         )
 
-        return need_to_allocate, not self.use_layerwise
+        return need_to_allocate, self.load_async
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
@@ -284,7 +292,7 @@ class MooncakeStoreConnectorV1Scheduler:
         for finished_req_id in scheduler_output.finished_req_ids:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
-            self._unfinished_request_ids.remove(finished_req_id)
+            self._unfinished_request_ids.discard(finished_req_id)
 
         meta = MooncakeConnectorMetadata(self._unfinished_request_ids)
 
@@ -418,7 +426,8 @@ class MooncakeStoreConnectorV1Scheduler:
         """
         if self.kv_role == "kv_consumer":
             return False, None
-        if self._request_trackers[request.request_id].num_saved_tokens <= 0:
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is not None and tracker.num_saved_tokens <= 0:
             return False, None
         delay_free_blocks = len(block_ids) > 0
         if delay_free_blocks:
@@ -476,7 +485,8 @@ class MooncakeLookupServer:
             while self.running:
                 frames = self.socket.recv_multipart(copy=False)
                 token_ids = self.decoder.decode(frames)
-                result = self.mooncake_engine.lookup(token_ids, use_layerwise)
+                result = self.mooncake_engine.lookup_scheduler(
+                    token_ids, use_layerwise)
                 response = result.to_bytes(4, "big")
                 self.socket.send(response)
 

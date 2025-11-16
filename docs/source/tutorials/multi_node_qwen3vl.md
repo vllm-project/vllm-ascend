@@ -1,15 +1,15 @@
 # Multi-Node-DP (Qwen3-VL-235B-A22B)
 
 :::{note}
-Qwen3 VL rely on the newest version of `transformers`(>4.56.2). Please install it from source until it's released.
+Qwen3 VL relies on the newest version of `transformers` (>4.56.2). Please install it from source.
 :::
 
 ## Verify Multi-Node Communication Environment
 
-referring to [multi_node.md](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-process)
+Refer to [multi_node.md](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-process).
 
-## Run with docker
-Assume you have an Atlas 800 A3(64G*16) nodes(or 2 * A2), and want to deploy the `Qwen3-VL-235B-A22B-Instruct` model across multi-node.
+## Run with Docker
+Assume you have Atlas 800 A3 (64G*16) nodes (or 2 * A2), and want to deploy the `Qwen3-VL-235B-A22B-Instruct` model across multiple nodes.
 
 ```{code-block} bash
    :substitutions:
@@ -18,6 +18,7 @@ export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
 --net=host \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
@@ -48,13 +49,13 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Run the following scripts on two nodes respectively
+Run the following scripts on two nodes respectively.
 
 :::{note}
-Before launch the inference server, ensure the following environment variables are set for multi node communication
+Before launching the inference server, ensure the following environment variables are set for multi-node communication.
 :::
 
-node0
+Node 0
 
 ```shell
 #!/bin/sh
@@ -69,7 +70,6 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 
 vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
@@ -92,7 +92,7 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
 --gpu-memory-utilization 0.8 \
 ```
 
-node1
+Node 1
 
 ```shell
 #!/bin/sh
@@ -111,7 +111,6 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 
 vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
@@ -135,7 +134,7 @@ vllm serve Qwen/Qwen3-VL-235B-A22B-Instruct \
 --gpu-memory-utilization 0.8 \
 ```
 
-If the service starts successfully, the following information will be displayed on node0:
+If the service starts successfully, the following information will be displayed on node 0:
 
 ```shell
 INFO:     Started server process [44610]

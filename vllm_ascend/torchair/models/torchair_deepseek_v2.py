@@ -31,7 +31,7 @@ import torch
 import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -69,13 +69,68 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.models.layers.sfa import Indexer
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import TorchairAscendFusedMoE
 from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import \
     TorchairAscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import dispose_tensor, oproj_tp_enable
+from vllm_ascend.utils import dispose_tensor, oproj_tp_enable, vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.attention import Attention
+else:
+    from vllm.attention.layer import MLAAttention
+
+
+class Indexer(nn.Module):
+
+    def __init__(self,
+                 config,
+                 dim: int = 7168,
+                 n_heads: int = 64,
+                 head_dim: int = 128,
+                 index_topk: int = 2048,
+                 q_lora_rank: int = 1536,
+                 rope_head_dim: int = 64,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: Optional[str] = ""):
+        super().__init__()
+
+        self.dim: int = dim  # 7168
+        self.n_heads: int = n_heads  # 64
+        self.head_dim: int = head_dim  # 128
+        self.rope_head_dim: int = rope_head_dim  # 64
+        self.index_topk: int = index_topk  # 2048
+        self.q_lora_rank: int = q_lora_rank  # 1536
+        self.wq_b = ReplicatedLinear(
+            self.q_lora_rank,
+            self.n_heads * self.head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wq_b",
+            return_bias=False,
+        )
+        self.wk = ReplicatedLinear(
+            self.dim,
+            self.head_dim,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wk",
+            return_bias=False,
+        )
+        self.weights_proj = ReplicatedLinear(
+            self.dim,
+            self.n_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.weights_proj",
+            return_bias=False,
+        )
+        self.k_norm = nn.LayerNorm(self.head_dim)
+        self.softmax_scale = self.head_dim**-0.5
+
+    def forward(self):
+        return
 
 
 class TorchairDeepseekV2SiluAndMul(SiluAndMul):
@@ -328,14 +383,22 @@ class TorchairDeepseekV2MoE(nn.Module):
             ascend_config.multistream_overlap_shared_expert and \
             self.torchair_graph_enabled
 
+        self.enable_super_kernel = ascend_config.torchair_graph_config.enable_super_kernel
+        self.params_dtype = torch.float32 if self.enable_super_kernel else \
+            torch.get_default_dtype()
+        # Converting gate weight to fp32 is to adapt to the super kernel feature.
+        # Super kernel feature currently cannot fuse operators such as cast, stridedslice, and add.
+        # In the moe stage, Cast will interrupt the fusion of the super kernel. To avoid this problem,
+        # modifications will be made in the initialization stage.
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
                                      bias=False,
                                      quant_config=None,
+                                     params_dtype=self.params_dtype,
                                      prefix=f"{prefix}.gate")
         if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
+                torch.empty(config.n_routed_experts, dtype=self.params_dtype))
         else:
             self.gate.e_score_correction_bias = None
 
@@ -553,29 +616,67 @@ class TorchairDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         #     k_c.size(1) + k_pe.size(1) == kv_cache.size(2)
         # i.e.
         #     kv_lora_rank + qk_rope_head_dim == head_size
-        self.mla_attn = Attention(
-            num_heads=self.num_local_heads,
-            head_size=self.kv_lora_rank + self.qk_rope_head_dim,
-            scale=self.scaling,
-            num_kv_heads=1,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            use_mla=True,
-            # MLA Args
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            qk_head_dim=self.qk_head_dim,
-            v_head_dim=self.v_head_dim,
-            rotary_emb=self.rotary_emb,
-            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
-            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-            kv_a_layernorm=self.kv_a_layernorm,
-            kv_b_proj=self.kv_b_proj,
-            o_proj=self.o_proj,
-        )
+        if vllm_version_is("0.11.0"):
+            self.mla_attn = Attention(
+                num_heads=self.num_local_heads,
+                head_size=self.kv_lora_rank + self.qk_rope_head_dim,
+                scale=self.scaling,
+                num_kv_heads=1,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+                use_mla=True,
+                use_sparse=False,
+                indexer=None,
+                # SFA Args
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                qk_head_dim=self.qk_head_dim,
+                v_head_dim=self.v_head_dim,
+                rotary_emb=self.rotary_emb,
+                q_a_proj=self.q_a_proj
+                if self.q_lora_rank is not None else None,
+                q_a_layernorm=self.q_a_layernorm
+                if self.q_lora_rank is not None else None,
+                q_proj=self.q_proj
+                if self.q_lora_rank is None else self.q_b_proj,
+                kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
+                kv_a_layernorm=self.kv_a_layernorm,
+                kv_b_proj=self.kv_b_proj,
+                o_proj=self.o_proj,
+                decoder_layer=decoder_layer,
+            )
+        else:
+            self.mla_attn = MLAAttention(
+                num_heads=self.num_local_heads,
+                scale=self.scaling,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+                use_sparse=False,
+                indexer=None,
+                # MLA Args
+                rotary_emb=self.rotary_emb,
+                q_a_proj=self.q_a_proj
+                if self.q_lora_rank is not None else None,
+                q_a_layernorm=self.q_a_layernorm
+                if self.q_lora_rank is not None else None,
+                q_proj=self.q_proj
+                if self.q_lora_rank is None else self.q_b_proj,
+                q_b_proj=self.q_b_proj
+                if self.q_lora_rank is not None else None,
+                kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
+                kv_a_layernorm=self.kv_a_layernorm,
+                kv_b_proj=self.kv_b_proj,
+                o_proj=self.o_proj,
+            )
 
     def forward(
             self,
@@ -782,35 +883,65 @@ class TorchairDeepseekV2SFAAttention(DeepseekV2MLAAttention):
             prefix=f"{prefix}.indexer",
         )
 
-        self.sfa_attn = Attention(
-            num_heads=self.num_local_heads,
-            head_size=self.kv_lora_rank + self.qk_rope_head_dim,
-            scale=self.scaling,
-            num_kv_heads=1,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-            use_mla=True,
-            use_sparse=True,
-            # SFA Args
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            qk_head_dim=self.qk_head_dim,
-            v_head_dim=self.v_head_dim,
-            rotary_emb=self.rotary_emb,
-            q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
-            q_a_layernorm=self.q_a_layernorm
-            if self.q_lora_rank is not None else None,
-            q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
-            kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
-            kv_a_layernorm=self.kv_a_layernorm,
-            kv_b_proj=self.kv_b_proj,
-            o_proj=self.o_proj,
-            indexer=self.indexer,
-            decoder_layer=decoder_layer,
-        )
+        if vllm_version_is("0.11.0"):
+            self.sfa_attn = Attention(
+                num_heads=self.num_local_heads,
+                head_size=self.kv_lora_rank + self.qk_rope_head_dim,
+                scale=self.scaling,
+                num_kv_heads=1,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+                use_mla=True,
+                use_sparse=True,
+                indexer=self.indexer,
+                # SFA Args
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                qk_head_dim=self.qk_head_dim,
+                v_head_dim=self.v_head_dim,
+                rotary_emb=self.rotary_emb,
+                q_a_proj=self.q_a_proj
+                if self.q_lora_rank is not None else None,
+                q_a_layernorm=self.q_a_layernorm
+                if self.q_lora_rank is not None else None,
+                q_proj=self.q_proj
+                if self.q_lora_rank is None else self.q_b_proj,
+                kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
+                kv_a_layernorm=self.kv_a_layernorm,
+                kv_b_proj=self.kv_b_proj,
+                o_proj=self.o_proj,
+                decoder_layer=decoder_layer,
+            )
+        else:
+            self.sfa_attn = MLAAttention(
+                num_heads=self.num_local_heads,
+                scale=self.scaling,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+                use_sparse=True,
+                indexer=self.indexer,
+                # MLA Args
+                rotary_emb=self.rotary_emb,
+                q_a_proj=self.q_a_proj
+                if self.q_lora_rank is not None else None,
+                q_a_layernorm=self.q_a_layernorm
+                if self.q_lora_rank is not None else None,
+                q_proj=self.q_proj
+                if self.q_lora_rank is None else self.q_b_proj,
+                kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
+                kv_a_layernorm=self.kv_a_layernorm,
+                kv_b_proj=self.kv_b_proj,
+                o_proj=self.o_proj,
+            )
 
     def forward(
             self,

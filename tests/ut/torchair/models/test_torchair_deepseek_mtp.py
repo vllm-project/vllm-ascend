@@ -37,8 +37,11 @@ class TestTorchairDeepSeekMultiTokenPredictorLayer(PytestBase):
         mocker.patch(
             "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
             return_value=None)
+        ascend_config = mocker.MagicMock()
+        ascend_config.max_num_batched_tokens = 2048
+        ascend_config.max_model_len = 1024
         mocker.patch("vllm_ascend.utils.get_ascend_config",
-                     return_value=mocker.Mock())
+                     return_value=ascend_config)
 
         mtp_layer = TorchairDeepSeekMultiTokenPredictorLayer(config, "", None)
         mocker_deepseek_v2_decode_layer.assert_called_once()
@@ -96,8 +99,11 @@ class TestTorchairDeepSeekMultiTokenPredictor(PytestBase):
         mocker.patch(
             "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
             return_value=None)
+        ascend_config = mocker.MagicMock()
+        ascend_config.max_num_batched_tokens = 2048
+        ascend_config.max_model_len = 1024
         mocker.patch("vllm_ascend.utils.get_ascend_config",
-                     return_value=mocker.Mock())
+                     return_value=ascend_config)
 
         predictor = TorchairDeepSeekMultiTokenPredictor(
             vllm_config=mock_vllm_config)
@@ -145,8 +151,7 @@ class TestTorchairDeepSeekMultiTokenPredictor(PytestBase):
             return_value=None)
         predictor.logits_processor.return_value = torch.tensor([1.0, 2.0, 3.0])
 
-        result_logits = predictor.compute_logits(hidden_states=hidden_states,
-                                                 sampling_metadata=None)
+        result_logits = predictor.compute_logits(hidden_states=hidden_states)
         predictor.logits_processor.assert_called_once()
         assert torch.allclose(result_logits, torch.tensor([1.0, 2.0, 3.0]))
 
@@ -173,8 +178,11 @@ class TestTorchairDeepSeekMTP(PytestBase):
         mocker.patch(
             "vllm_ascend.ops.vocab_parallel_embedding.AscendVocabParallelEmbedding.__init__",
             return_value=None)
+        ascend_config = mocker.MagicMock()
+        ascend_config.max_num_batched_tokens = 2048
+        ascend_config.max_model_len = 1024
         mocker.patch("vllm_ascend.utils.get_ascend_config",
-                     return_value=mocker.Mock())
+                     return_value=ascend_config)
 
         mtp = TorchairDeepSeekMTP(vllm_config=vllm_config)
         return mtp

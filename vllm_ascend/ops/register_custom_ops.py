@@ -2,39 +2,22 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.distributed import (get_dp_group, get_ep_group,
-                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
-from vllm.utils import direct_register_custom_op
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.weight_prefetch import maybe_npu_prefetch
-from vllm_ascend.utils import npu_stream_switch, prefetch_stream
+from vllm_ascend.utils import (npu_stream_switch, prefetch_stream,
+                               vllm_version_is)
 
-
-def _maybe_chunk_residual_impl(x: torch.Tensor,
-                               residual: torch.Tensor) -> torch.Tensor:
-    try:
-        forward_context = get_forward_context()
-    except AssertionError:
-        return residual
-
-    if x.size(0) != residual.size(0):
-        sp_enabled = forward_context.sp_enabled
-        assert sp_enabled is True, ("Currently, this situation only occurs "
-                                    "when sp is enabled")
-        pad_size = forward_context.pad_size
-        if pad_size > 0:
-            residual = F.pad(residual, (0, 0, 0, pad_size))
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        residual = torch.chunk(residual, tp_size, dim=0)[tp_rank]
-
-    return residual
+if vllm_version_is("0.11.0"):
+    from vllm.utils import direct_register_custom_op
+else:
+    from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def _maybe_all_gather_and_maybe_unpad_impl(
@@ -53,7 +36,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(
             x = tensor_model_parallel_all_gather(x, 0)
             pad_size = forward_context.pad_size
             if pad_size > 0:
-                x = x[:-pad_size, :]
+                x = x[:-pad_size]
         else:
             x = get_ep_group().all_gather(x, 0)
             # unpad
@@ -67,8 +50,7 @@ def _maybe_all_gather_and_maybe_unpad_impl(
             offset = 0
             for idx in range(dp_size):
                 num_tokens_dp = num_tokens_across_dp_cpu[idx]
-                result[offset:offset +
-                       num_tokens_dp, :] = x[idx, :num_tokens_dp, :]
+                result[offset:offset + num_tokens_dp] = x[idx, :num_tokens_dp]
                 offset += num_tokens_dp
             x = result
 
@@ -257,11 +239,31 @@ def _maybe_all_reduce_tensor_model_parallel_impl(
         return tensor_model_parallel_all_reduce(final_hidden_states)
 
 
-direct_register_custom_op(op_name="maybe_chunk_residual",
-                          op_func=_maybe_chunk_residual_impl,
-                          fake_impl=lambda x, residual: x,
-                          mutates_args=[],
-                          dispatch_key="PrivateUse1")
+def _matmul_and_reduce_impl(input_parallel: torch.Tensor,
+                            layer_name: str) -> torch.Tensor:
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    assert self.custom_op is not None
+    bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+    output = self.custom_op.matmul_and_reduce(input_parallel, bias_)
+
+    return output
+
+
+def _matmul_and_reduce_impl_fake(input_parallel: torch.Tensor,
+                                 layer_name: str) -> torch.Tensor:
+    forward_context = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    num_tokens = input_parallel.size(0)
+    if forward_context.sp_enabled:
+        num_tokens = num_tokens // self.tp_size
+    output = torch.empty(size=(num_tokens, self.output_size_per_partition),
+                         device=input_parallel.device,
+                         dtype=input_parallel.dtype)
+
+    return output
+
+
 direct_register_custom_op(op_name="maybe_all_gather_and_maybe_unpad",
                           op_func=_maybe_all_gather_and_maybe_unpad_impl,
                           fake_impl=_maybe_all_gather_and_maybe_unpad_fake,
@@ -307,5 +309,11 @@ direct_register_custom_op(op_name="prefetch_postprocess",
 direct_register_custom_op(op_name="maybe_all_reduce_tensor_model_parallel",
                           op_func=_maybe_all_reduce_tensor_model_parallel_impl,
                           fake_impl=lambda x: x,
+                          mutates_args=[],
+                          dispatch_key="PrivateUse1")
+
+direct_register_custom_op(op_name="matmul_and_reduce",
+                          op_func=_matmul_and_reduce_impl,
+                          fake_impl=_matmul_and_reduce_impl_fake,
                           mutates_args=[],
                           dispatch_key="PrivateUse1")

@@ -20,6 +20,13 @@ import openai
 import pytest
 
 from tests.e2e.conftest import RemoteOpenAIServer
+from tools.aisbench import run_aisbench_cases
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import get_open_port
+else:
+    from vllm.utils.network_utils import get_open_port
 
 MODELS = [
     "Qwen/Qwen3-32B",
@@ -35,11 +42,34 @@ api_keyword_args = {
     "max_tokens": 10,
 }
 
+aisbench_cases = [{
+    "case_type": "accuracy",
+    "dataset_path": "vllm-ascend/gsm8k-lite",
+    "request_conf": "vllm_api_general_chat",
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_chat_prompt",
+    "max_out_len": 32768,
+    "batch_size": 32,
+    "baseline": 95,
+    "threshold": 5
+}, {
+    "case_type": "performance",
+    "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
+    "request_conf": "vllm_api_stream_chat",
+    "dataset_conf": "gsm8k/gsm8k_gen_0_shot_cot_str_perf",
+    "num_prompts": 80,
+    "max_out_len": 1500,
+    "batch_size": 20,
+    "request_rate": 0,
+    "baseline": 1,
+    "threshold": 0.97
+}]
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 async def test_models(model: str, tp_size: int) -> None:
+    port = get_open_port()
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
         "OMP_PROC_BIND": "false",
@@ -48,17 +78,18 @@ async def test_models(model: str, tp_size: int) -> None:
     }
     server_args = [
         "--no-enable-prefix-caching", "--tensor-parallel-size",
-        str(tp_size), "--port", "20002", "--max-model-len", "36864",
-        "--max-num-batched-tokens", "36864", "--block-size", "128",
-        "--trust-remote-code", "--gpu-memory-utilization", "0.9",
-        "--additional-config", '{"enable_weight_nz_layout":true}'
+        str(tp_size), "--port",
+        str(port), "--max-model-len", "36864", "--max-num-batched-tokens",
+        "36864", "--block-size", "128", "--trust-remote-code",
+        "--gpu-memory-utilization", "0.9", "--additional-config",
+        '{"enable_weight_nz_layout":true}'
     ]
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }
     with RemoteOpenAIServer(model,
                             server_args,
-                            server_port=20002,
+                            server_port=port,
                             env_dict=env_dict,
                             auto_port=False) as server:
         client = server.get_async_client()
@@ -69,3 +100,5 @@ async def test_models(model: str, tp_size: int) -> None:
         )
         choices: list[openai.types.CompletionChoice] = batch.choices
         assert choices[0].text, "empty response"
+        # aisbench test
+        run_aisbench_cases(model, port, aisbench_cases)

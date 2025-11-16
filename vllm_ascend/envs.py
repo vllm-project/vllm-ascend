@@ -63,7 +63,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "ASCEND_HOME_PATH":
     lambda: os.getenv("ASCEND_HOME_PATH", None),
     # The path for HCCL library, it's used by pyhccl communicator backend. If
-    # not set, the default value is libhccl.so。
+    # not set, the default value is libhccl.so.
     "HCCL_SO_PATH":
     lambda: os.environ.get("HCCL_SO_PATH", None),
     # The version of vllm is installed. This value is used for developers who
@@ -82,9 +82,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
     lambda: bool(int(os.getenv("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", '0'))
                  ),
-    # Whether to enable DBO feature for deepseek model.
-    "VLLM_ASCEND_ENABLE_DBO":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DBO", '0'))),
     # Whether to enable the model execute time observe profile. Disable it when
     # running vllm ascend in production environment.
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
@@ -135,6 +132,12 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # This feature will get better performance when concurrency is large.
     "VLLM_ASCEND_ENABLE_FLASHCOMM1":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))),
+    # Whether to enable FLASHCOMM2. Setting it to 0 disables the feature, while setting it to 1 or above enables it.
+    # The specific value set will be used as the O-matrix TP group size for flashcomm2.
+    # For a detailed introduction to the parameters and the differences and applicable scenarios
+    # between this feature and FLASHCOMM1, please refer to the feature guide in the documentation.
+    "VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE":
+    lambda: int(os.getenv("VLLM_ASCEND_FLASHCOMM2_PARALLEL_SIZE", 0)),
     # Whether to enable MLP weight prefetch, only used in small concurrency.
     "VLLM_ASCEND_ENABLE_PREFETCH_MLP":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_PREFETCH_MLP", '0'))),
@@ -172,6 +175,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable transpose weight and cast format to FRACTAL_NZ.
     "VLLM_ASCEND_ENABLE_NZ":
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
+    # Decide whether we should enable CP parallelism.
+    "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", '0')))
 }
 
 # end-env-vars-definition

@@ -19,21 +19,23 @@
 
 import math
 import types
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
+import numpy as np
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.spec_decode import get_spec_decode_method
 from vllm_ascend.torchair.utils import (
     TORCHAIR_CACHE_DIR, TorchairCommonAttentionMetadata,
     check_torchair_cache_exist, converting_weight_acl_format,
@@ -57,6 +59,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                       self.decode_token_per_req))
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             None, None, vllm_config, device)
+        self.use_sparse = hasattr(self.model_config.hf_config, "index_topk")
 
         register_torchair_model()
         torchair_ops_patch()
@@ -82,10 +85,25 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         self._check_batch_sizes_consistency()
 
+    def _set_up_drafter(self):
+        super()._set_up_drafter()
+        if self.speculative_config:
+            # Torchair do not support disable_padded_drafter_batch
+            # Enforce to disable this feature
+            self.speculative_config.disable_padded_drafter_batch = True
+
+    def _get_drafter(self):
+        return get_spec_decode_method(self.speculative_config.method,
+                                      self.vllm_config,
+                                      self.device,
+                                      self,
+                                      is_torchair_graph=True)
+
     def _may_pad_kv_consumer_num_seq(self):
         # pd disaggregation scenario need redundant_batch_sizes to avoid each batch's seq_len exceed 16 tokens
         # self.max_num_reqs here is greater than the actual maximum request number
-        if self.is_kv_consumer:
+        if self.decode_token_per_req > 1 and self.is_kv_consumer:
+            # applied only when speculative decoding is active
             FIA_SEQ_LEN_LIMIT = 16
             new_max_num_reqs = self.max_num_reqs + math.ceil(
                 self.max_num_reqs / FIA_SEQ_LEN_LIMIT) + math.ceil(
@@ -103,35 +121,44 @@ class NPUTorchairModelRunner(NPUModelRunner):
         max_num_tokens = self.max_num_reqs * self.uniform_decode_query_len
         tp_size = self.parallel_config.tensor_parallel_size
         # Use integer arithmetic for ceiling division.
-        num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-        # maintain the same calculation logic as the function _align_graph_size_divisible_by_tp_size()
-        self.mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+        max_graph_batch_size = self.calculate_new_torchair_graph_batch_size(
+            max_num_tokens, tp_size)
+        self.mc2_tokens_capacity = max_graph_batch_size
+
+        if get_ascend_soc_version(
+        ) == AscendSocVersion.A3 and self.mc2_tokens_capacity > 512:
+            logger.error(
+                f"A3: the max number of tokens must smaller then 512, but now is {self.mc2_tokens_capacity}"
+            )
+        if get_ascend_soc_version(
+        ) == AscendSocVersion.A2 and self.mc2_tokens_capacity > 256:
+            logger.error(
+                f"A2: the max number of tokens must smaller then 256, but now is {self.mc2_tokens_capacity}"
+            )
 
     def _sync_metadata_across_dp(
-            self, num_tokens: int, with_prefill: bool, enable_dbo: bool
-    ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
+            self, num_tokens: int,
+            with_prefill: bool) -> tuple[int, Optional[torch.Tensor], bool]:
         """Override from NPUModelRunner to pad num_tokens"""
         if self.enable_shared_expert_dp:
             # Padding is not required for shared_expert_dp cases in eager mode.
-            return num_tokens, None, with_prefill, enable_dbo
+            return num_tokens, None, with_prefill
         if self.dp_size == 1:
             if not with_prefill:
                 maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
                     num_tokens)
-                return maybe_padded_num_tokens, None, with_prefill, enable_dbo
-            return num_tokens, None, with_prefill, enable_dbo
+                return maybe_padded_num_tokens, None, with_prefill
+            return num_tokens, None, with_prefill
 
-        num_tokens_across_dp = torch.zeros(self.dp_size + 2,
+        num_tokens_across_dp = torch.zeros(self.dp_size + 1,
                                            dtype=torch.int32,
                                            device="npu")
         num_tokens_across_dp[self.dp_rank] = num_tokens
-        num_tokens_across_dp[-2] = int(with_prefill)
-        num_tokens_across_dp[-1] = int(not enable_dbo)
+        num_tokens_across_dp[-1] = int(with_prefill)
         dist.all_reduce(num_tokens_across_dp,
                         group=get_dp_group().device_group)
-        with_prefill = bool(num_tokens_across_dp[-2])
-        enable_dbo = not bool(num_tokens_across_dp[-1])
-        num_tokens_across_dp = num_tokens_across_dp[:-2]
+        with_prefill = bool(num_tokens_across_dp[-1])
+        num_tokens_across_dp = num_tokens_across_dp[:-1]
 
         if not with_prefill:
             max_num_token = num_tokens_across_dp.max().item()
@@ -144,16 +171,24 @@ class NPUTorchairModelRunner(NPUModelRunner):
         else:
             maybe_padded_num_tokens = num_tokens
 
-        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
+        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill
 
-    def _build_attention_metadata(self, with_prefill, num_reqs, num_tokens,
-                                  max_query_len, force_attention):
+    def _build_dummy_attn_metadata(
+        self,
+        with_prefill: bool,
+        num_reqs: int,
+        num_tokens: int,
+        max_query_len: int,
+        num_scheduled_tokens: np.ndarray,
+        aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
+        force_attention: bool = False,
+    ) -> Optional[dict[str, Any]]:
         # NOTE: If torchair graph mode and not with_prefill,
         # we can't skip_attn, it will cause graph recompile.
         if with_prefill or self.enable_shared_expert_dp:
-            attn_metadata = super()._build_attention_metadata(
+            attn_metadata = super()._build_dummy_attn_metadata(
                 with_prefill, num_reqs, num_tokens, max_query_len,
-                force_attention)
+                num_scheduled_tokens, aclgraph_runtime_mode, force_attention)
         else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
@@ -382,7 +417,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         if is_310p():
             # on 300I Duo platform, we need to patch broadcast. however, this patch will be
             # overwritten by patch_for_hcom in torchair. so we need to re-patch it here.
-            from vllm_ascend.patch.platform.patch_common.patch_distributed import \
+            from vllm_ascend.patch.platform.patch_distributed import \
                 communication_adaptation_310p
             communication_adaptation_310p()
 
@@ -442,6 +477,17 @@ class NPUTorchairModelRunner(NPUModelRunner):
             self.torchair_graph_batch_sizes.append(start_graph_batch_size)
             start_graph_batch_size *= 2
 
+    def calculate_new_torchair_graph_batch_size(self, old_graph_batch_size,
+                                                tp_size):
+        cur_graph_batch_size = (old_graph_batch_size + tp_size -
+                                1) // tp_size * tp_size
+        # MTP > 1: Cal LCMLeast Common Multiple with graph_batch_size and tp_size,
+        # Both adapter multi-dp and FIA operator
+        if self.speculative_config is not None and self.speculative_config.num_speculative_tokens > 1:
+            cur_graph_batch_size = (tp_size * old_graph_batch_size) \
+                                    // math.gcd(tp_size, old_graph_batch_size)
+        return cur_graph_batch_size
+
     def select_torchair_padded_batch_size(self, batch_size: int):
         for padded_batch_size in self.torchair_graph_batch_sizes:
             if batch_size <= padded_batch_size:
@@ -459,7 +505,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             # pd disaggregation scenario may incorrectly calculate the batch in mtp scenario, so we force set it to max_num_reqs
             self.torchair_graph_batch_sizes = [self.max_num_reqs]
             logger.warning(
-                "is kv_consumer, torch_graph_batch_sizes sets to [max_num_seqs]"
+                f"is kv_consumer, torch_graph_batch_sizes sets to [max_num_seqs] {[self.max_num_reqs]}"
             )
         elif len(self.torchair_graph_batch_sizes) == 0:
             self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
@@ -493,13 +539,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
         tp_size = self.parallel_config.tensor_parallel_size
         new_graph_batch_sizes = []
         for graph_batch_size in self.torchair_graph_batch_sizes:
-            cur_graph_batch_size = (graph_batch_size + tp_size -
-                                    1) // tp_size * tp_size
-            # MTP > 1: Cal LCMLeast Common Multiple with graph_batch_size and tp_size,
-            # Both adapter multi-dp and FIA operator
-            if self.speculative_config is not None and self.speculative_config.num_speculative_tokens > 1:
-                cur_graph_batch_size = (tp_size * graph_batch_size) \
-                                       // math.gcd(tp_size, graph_batch_size)
+            cur_graph_batch_size = self.calculate_new_torchair_graph_batch_size(
+                graph_batch_size, tp_size)
             if cur_graph_batch_size not in new_graph_batch_sizes and \
                 cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
                 new_graph_batch_sizes.append(cur_graph_batch_size)
@@ -509,11 +550,16 @@ class NPUTorchairModelRunner(NPUModelRunner):
                     f"torchair_graph_batch_sizes {cur_graph_batch_size} is bigger than max_num_batched_tokens",
                     f"{self.scheduler_config.max_num_batched_tokens} will skip this batch size."
                 )
-        new_max_num_reqs = max(new_graph_batch_sizes)
+        new_max_num_reqs = math.ceil(
+            max(new_graph_batch_sizes) / self.decode_token_per_req)
         if self.max_num_reqs != new_max_num_reqs:
             logger.warning(f"max_num_reqs is updated to {new_max_num_reqs}")
             self.max_num_reqs = new_max_num_reqs
-            self.scheduler_config.max_num_seqs = new_max_num_reqs
+            if not (self.decode_token_per_req > 1 and self.is_kv_consumer):
+                # Do not update scheduler_config.max_num_seqs in KV consumer + MTP
+                # Since FIA need extra space for padding
+                # Enforce self.max_num_seqs > self.scheduler_config.max_num_seqs in KV consumer + MTP
+                self.scheduler_config.max_num_seqs = new_max_num_reqs
 
         if new_graph_batch_sizes != self.torchair_graph_batch_sizes:
             logger.warning(

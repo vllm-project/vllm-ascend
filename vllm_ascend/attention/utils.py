@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -10,11 +10,45 @@ from vllm.forward_context import ForwardContext, get_forward_context
 
 
 @dataclass
+# class AscendCommonLongSequenceMetadata:
+class AscendPrefillContextParallelMetadata:
+    pcp_allgather_restore_idx: torch.Tensor = None
+
+    cp_kv_recover_idx_for_chunk: torch.Tensor = None
+
+    num_actual_tokens_pcp_padded: Optional[int] = None
+
+    num_computed_tokens_of_pcp_dcp: Optional[list[list[list[int]]]] = None
+
+    q_head_idx_tensor: torch.Tensor = None
+
+    q_tail_idx_tensor: torch.Tensor = None
+
+    kv_with_q_head_nomask_idx_tensor: torch.Tensor = None
+
+    kv_with_q_head_mask_idx_tensor: torch.Tensor = None
+
+    kv_with_q_tail_nomask_idx_tensor: torch.Tensor = None
+
+    kv_with_q_tail_mask_idx_tensor: torch.Tensor = None
+
+    attn_mask_seqlens: torch.Tensor = None
+
+    head_attn_nomask_seqlens: torch.Tensor = None
+
+    tail_attn_nomask_seqlens: torch.Tensor = None
+
+    q_full_idx: torch.Tensor = None
+
+    pcp_prefill_mask: torch.Tensor = None
+
+
+@dataclass
 class AscendCommonAttentionMetadata:
     """
     Per-batch attention metadata, shared across layers and backends.
     AttentionMetadataBuilder instances use it to construct per-layer metadata.
-    
+
     For many of the tensors we keep both GPU and CPU versions.
     """
 
@@ -58,8 +92,6 @@ class AscendCommonAttentionMetadata:
 
     attn_state: Any = None
 
-    enable_dbo_across_dp: bool = False
-
     is_only_prefill: bool = False
 
     graph_pad_size: int = -1
@@ -71,6 +103,33 @@ class AscendCommonAttentionMetadata:
     # NOTE: This is a temporary solution for rotary embedding in MLA
     cos: torch.Tensor = None
     sin: torch.Tensor = None
+
+    prefill_context_parallel_metadata: Optional[
+        AscendPrefillContextParallelMetadata] = None
+
+
+def filter_chunked_req_indices(
+    seq_len: torch.Tensor,
+    mask_for_non_zero_chunk: Optional[List[bool]],
+) -> torch.Tensor:
+    """
+    filter the reqs which are doing real chunk_prefill.
+
+    Args:
+        seq_len: contains multi-req length: [req0_len, req1_len, ...]
+        mask_for_non_zero_chunk: [True, False, True, False, ...]
+    Returns:
+        filtered_indices: the real chunked req's indices
+    """
+    assert mask_for_non_zero_chunk is not None and len(seq_len) == len(
+        mask_for_non_zero_chunk)
+    offsets = torch.cumsum(torch.cat([torch.tensor([0]), seq_len[:-1]]), dim=0)
+    filtered_indices = torch.cat([
+        torch.arange(offsets[i], offsets[i] + seq_len[i])
+        for i in range(len(mask_for_non_zero_chunk))
+        if mask_for_non_zero_chunk[i]
+    ])
+    return filtered_indices
 
 
 def split_decodes_and_prefills(

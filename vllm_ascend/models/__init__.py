@@ -29,28 +29,16 @@ def register_model():
             "vllm_ascend.models.qwen2_5_vl_without_padding:AscendQwen2_5_VLForConditionalGeneration_Without_Padding"
         )
 
-    ModelRegistry.register_model(
-        "DeepseekV2ForCausalLM",
-        "vllm_ascend.models.deepseek_v2:CustomDeepseekV2ForCausalLM")
-
-    ModelRegistry.register_model(
-        "DeepseekV3ForCausalLM",
-        "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
-
-    ModelRegistry.register_model(
-        "DeepseekV32ForCausalLM",
-        "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
-
-    ModelRegistry.register_model(
-        "DeepSeekMTPModel",
-        "vllm_ascend.models.deepseek_mtp:CustomDeepSeekMTP")
-
     # There is no PanguProMoEForCausalLM in vLLM, so we should register it before vLLM config initialization
     # to make sure the model can be loaded correctly. This register step can be removed once vLLM support PanguProMoEForCausalLM.
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "vllm_ascend.torchair.models.torchair_pangu_moe:PanguProMoEForCausalLM"
     )
+
     ModelRegistry.register_model(
         "Qwen3NextForCausalLM",
         "vllm_ascend.models.qwen3_next:CustomQwen3NextForCausalLM")
+
+    ModelRegistry.register_model(
+        "Qwen3NextMTP", "vllm_ascend.models.qwen3_next_mtp:CustomQwen3NextMTP")

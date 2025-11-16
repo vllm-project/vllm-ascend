@@ -2,7 +2,7 @@
 -r requirements.txt
 modelscope
 openai
-pytest >= 6.0
+pytest >= 6.0,<9.0.0
 pytest-asyncio
 pytest-mock
 lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d 
@@ -13,8 +13,9 @@ types-psutil
 pytest-cov
 regex
 sentence_transformers
-ray>=2.47.1
+ray>=2.47.1,<=2.48.0
 protobuf>3.20.0
 librosa 
 soundfile
 pytest_mock
+msserviceprofiler>=1.2.2

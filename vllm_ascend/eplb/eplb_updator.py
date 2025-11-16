@@ -21,6 +21,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import logger
 
+from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 
 
@@ -44,6 +45,7 @@ class EplbUpdator:
         self.num_expert_load_gather = 10
         self.periodic_load_gather = True
         self.num_iterations_eplb_update: torch.int64 = self.ascend_config.num_iterations_eplb_update
+        EPLBParamUtils.check_iterations(self.num_iterations_eplb_update)
         self.expert_map_path = expert_map_path
         self.expert_map_record_path = self.ascend_config.expert_map_record_path
 
@@ -64,6 +66,7 @@ class EplbUpdator:
         self.cur_iterations: torch.int64 = 0
 
         self.num_wait_worker_iterations: torch.int64 = self.ascend_config.num_wait_worker_iterations
+        EPLBParamUtils.check_iterations(self.num_wait_worker_iterations)
 
         self.process = process
 
@@ -74,6 +77,7 @@ class EplbUpdator:
         self.cur_iterations += 1
         if self.cur_iterations == (self.num_iterations_eplb_update + \
                                    self.num_wait_worker_iterations + self.num_moe_layers):
+            logger.info("Finish expert parallel load balancing.")
             if self.expert_map_record_path is not None:
                 self.adaptor._export_tensor_to_file(
                     self.shared_dict["expert_maps"],

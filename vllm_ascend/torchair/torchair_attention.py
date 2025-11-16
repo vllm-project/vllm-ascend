@@ -26,7 +26,13 @@ from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
                                               AttentionType)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig
-from vllm.utils import cdiv
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import cdiv
+else:
+    from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendAttentionMetadataBuilder,
@@ -264,8 +270,7 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
             max_query_len=common_attn_metadata.max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
-            attn_state=attn_state,
-            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp)
+            attn_state=attn_state)
         return attn_metadata
 
 
@@ -314,7 +319,6 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: AscendTorchairMetadata,
         output: Optional[torch.Tensor] = None,
-        trace_flag: bool = False,
     ) -> torch.Tensor:
         """Forward pass with Ascend attention.
         Args:
@@ -350,7 +354,7 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             return output.view(num_tokens, self.hidden_size)
 
         if attn_metadata is None:
-            return output.view(num_tokens, self.hidden_size)
+            return output.view(num_tokens, self.hidden_size).fill_(0)
 
         output = output.view(-1, self.num_heads, self.head_size)
 

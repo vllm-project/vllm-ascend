@@ -1,4 +1,4 @@
-# Single NPU (Qwen3 8B)
+# Single NPU (Qwen3-8B)
 
 ## Run vllm-ascend on Single NPU
 
@@ -12,6 +12,7 @@ Run docker container:
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
@@ -26,7 +27,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Load model from ModelScope to speed up download
@@ -43,7 +44,10 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 Run the following script to execute offline inference on a single NPU:
 
 :::::{tab-set}
+:sync-group: inference
+
 ::::{tab-item} Graph Mode
+:sync: graph mode
 
 ```{code-block} python
    :substitutions:
@@ -70,6 +74,7 @@ for output in outputs:
 ::::
 
 ::::{tab-item} Eager Mode
+:sync: eager mode
 
 ```{code-block} python
    :substitutions:
@@ -109,7 +114,10 @@ Prompt: 'The future of AI is', Generated text: ' following you. As the technolog
 Run docker container to start the vLLM server on a single NPU:
 
 :::::{tab-set}
+:sync-group: inference
+
 ::::{tab-item} Graph Mode
+:sync: graph mode
 
 ```{code-block} bash
    :substitutions:
@@ -117,6 +125,7 @@ Run docker container to start the vLLM server on a single NPU:
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
@@ -137,12 +146,14 @@ vllm serve Qwen/Qwen3-8B --max_model_len 26240
 ::::
 
 ::::{tab-item} Eager Mode
+:sync: eager mode
 
 ```{code-block} bash
    :substitutions:
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
@@ -164,7 +175,7 @@ vllm serve Qwen/Qwen3-8B --max_model_len 26240 --enforce-eager
 :::::
 
 :::{note}
-Add `--max_model_len` option to avoid ValueError that the Qwen2.5-7B model's max seq len (32768) is larger than the maximum number of tokens that can be stored in KV cache (26240). This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
+Add `--max_model_len` option to avoid ValueError that the Qwen2.5-7B model's max seq len (32768) is larger than the maximum number of tokens that can be stored in KV cache (26240). This will differ with different NPU series based on the HBM size. Please modify the value according to a suitable value for your NPU series.
 :::
 
 If your service start successfully, you can see the info shown below:

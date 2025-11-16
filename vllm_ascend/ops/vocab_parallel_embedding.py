@@ -51,7 +51,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
                  prefix: str = ""):
         nn.Module.__init__(self)
 
-        if lmhead_tp_enable() and prefix.find("lm_head") != -1:
+        if lmhead_tp_enable() and prefix.find("head") != -1:
             self.comm_group = get_lmhead_tp_group()
         else:
             self.comm_group = get_tp_group()
