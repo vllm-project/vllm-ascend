@@ -32,13 +32,21 @@ vllm serve model_path \
     --quantization ascend \
     --speculative-config '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}' \
     --kv-transfer-config \
-    '{"kv_connector": "LLMDataDistCMgrConnector",
-      "kv_buffer_device": "npu",
-      "kv_role": "kv_consumer",
-      "kv_parallel_size": "1",
-      "kv_port": "20001",
-      "engine_id": "0",
-      "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
+    '{"kv_connector": "MooncakeLayerwiseConnector",
+    "kv_role": "kv_consumer",
+    "kv_port": "30200",
+    "engine_id": "2",
+    "kv_connector_module_path": "vllm_ascend.distributed.mooncake_layerwise_connector",
+    "kv_connector_extra_config": {
+              "prefill": {
+                      "dp_size": 2,
+                      "tp_size": 8
+              },
+              "decode": {
+                      "dp_size": '"$3"',
+                      "tp_size": '"$7"'
+              }
+        }
     }' \
     --additional-config \
     '{"ascend_scheduler_config": {"enabled": true}, "torchair_graph_config":{"enabled":true,"enable_kv_nz":false, "graph_batch_size":[28]}, "enable_weight_nz_layout":true, "enable_multistream_moe":false}'
