@@ -3060,11 +3060,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                     # NOTE: In hybrid attention model, we use an unified kv cache tensor
                     if self.use_hybrid_blocks:
-                        assert raw_kv_tensor is not None
-                        kv_cache = raw_kv_tensor.view(dtype).view(
-                            kv_cache_shape)
-                        kv_cache = self._convert_torch_format(kv_cache)
-                        kv_caches[layer_name] = kv_cache
+                        k_cache = raw_kv_tensor[:int(sum_page_size_bytes //
+                                                     2)].view(dtype).view(
+                                                         kv_cache_shape[1:])
+                        k_cache = self._convert_torch_format(k_cache)
+                        v_cache = raw_kv_tensor[int(sum_page_size_bytes //
+                                                    2):].view(dtype).view(
+                                                        kv_cache_shape[1:])
+                        v_cache = self._convert_torch_format(v_cache)
+                        kv_caches[layer_name] = (k_cache, v_cache)
                         continue
 
                     k_cache = raw_k_tensor.view(dtype).view(kv_cache_shape[1:])
