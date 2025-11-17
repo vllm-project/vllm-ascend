@@ -67,8 +67,7 @@ def test_determine_default_log2phy_map_world_size_1():
     log2phy = eplb_utils.determine_default_log2phy_map(
         global_expert_num=3,
         world_size=1,
-        rank_id=0,
-        global_redundant_expert_num=0)
+        rank_id=0)
     assert log2phy.shape == (3, )
     assert (log2phy >= 0).all()
 
@@ -77,8 +76,7 @@ def test_determine_default_log2phy_map_world_size_multiple():
     log2phy = eplb_utils.determine_default_log2phy_map(
         global_expert_num=6,
         world_size=2,
-        rank_id=1,
-        global_redundant_expert_num=1)
+        rank_id=1)
     assert log2phy.shape == (6, )
     assert (log2phy >= 0).all()
 
