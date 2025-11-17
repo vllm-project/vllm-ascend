@@ -985,10 +985,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
         # Chunk Prefill situation.
-        elif (
-                attn_state == AscendAttentionState.ChunkedPrefill
-                or attn_state == AscendAttentionState.SpecDecoding
-        ) and not self.vllm_config.model_config.use_mla and not self.use_sparse:
+        elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
             if self.dcp_size > 1:
                 max_seq_len = max(seq_lens.max().item(), 0)
                 return self.attn_mask_builder.get_attn_mask(
@@ -1006,6 +1003,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return self.attn_mask_builder.get_attn_mask(
                 2048, self.dtype, self.device)
         # Decode-only situation.
+        elif attn_state == AscendAttentionState.SpecDecoding:
+            return self.attn_mask_builder.get_splitfuse_attn_mask(
+                                seq_lens, position, self.dtype, self.device)
         else:
             return None
 
@@ -2311,7 +2311,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         moe_comm_type = self._select_moe_comm_method(num_input_tokens,
                                                      self.with_prefill)
 
-        uniform_decode = (max_query_len <= self.uniform_decode_query_len) and (
+        uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
             scheduler_output.total_num_scheduled_tokens
             == self.input_batch.num_reqs * max_query_len)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
