@@ -2299,7 +2299,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
 
-    def _select_moe_comm_method(self, num_tokens: int) -> Optional[MoECommType]:
+    def _select_moe_comm_method(self,
+                                num_tokens: int) -> Optional[MoECommType]:
         """1. If expert parallel is not enabled, we use all-gather since MC2 and all-to-all
         are designed for expert parallelism.
         2. If expert parallel is enabled, we need to consider the soc version and the
