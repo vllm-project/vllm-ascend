@@ -510,7 +510,7 @@ class MooncakeEngine:
             self.kv_send_thread.
             get_and_clear_finished_requests(  # type: ignore[union-attr]
             ) if self.kv_role in ['kv_producer', 'kv_both']
-            or not not self.consumer_is_to_load else
+            or not self.consumer_is_to_load else
             self.decode_get_finished(finished_req_ids))
         done_recving = self.kv_recv_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
         )
