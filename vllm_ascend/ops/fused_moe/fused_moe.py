@@ -207,6 +207,14 @@ class AscendFusedMoE(FusedMoE):
             vllm_config = get_current_vllm_config()
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype)
+            
+        # init moe.
+        if vllm_version_is("0.11.0"):
+            self.local_num_experts, self.expert_map = determine_expert_map(
+                self.ep_size, self.ep_rank, self.global_num_experts)
+        else:
+            self.local_num_experts, self.expert_map, _ = determine_expert_map(
+                self.ep_size, self.ep_rank, self.global_num_experts)
         # static eplb initializing with expert_map_path
         if self.expert_map_path and os.path.exists(
                 self.expert_map_path) and os.access(self.expert_map_path,
@@ -216,22 +224,20 @@ class AscendFusedMoE(FusedMoE):
             self.expert_load_balancer.check_expert_map_tensor()
             self.global_redundant_expert_num = (
                 self.expert_load_balancer.get_global_redundant_expert_num())
-            
-            self.local_num_experts, self.expert_map = (
-                self.expert_load_balancer.get_rank_placement_map(
-                    self.moe_instance_id, self.ep_rank))
-            self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id, self.ep_rank).npu()
-            self.global_num_experts = num_experts + self.global_redundant_expert_num
-            
+        
+            try:
+                self.local_num_experts, self.expert_map = (
+                    self.expert_load_balancer.get_rank_placement_map(
+                        self.moe_instance_id, self.ep_rank))
+                self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
+                    self.moe_instance_id, self.ep_rank).npu()
+                self.global_num_experts = num_experts + self.global_redundant_expert_num
+            except Exception as e:
+                logger.warning(
+                    f"Init expert map of mtp/eagle when using sample.{e}")
+                self.log2phy = determine_default_log2phy_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank).npu()
         else:
-            # init moe.
-            if vllm_version_is("0.11.0"):
-                self.local_num_experts, self.expert_map = determine_expert_map(
-                    self.ep_size, self.ep_rank, self.global_num_experts)
-            else:
-                self.local_num_experts, self.expert_map, _ = determine_expert_map(
-                    self.ep_size, self.ep_rank, self.global_num_experts)
             # dynamic eplb initializing with not expert_map_path
             if self.dynamic_eplb:
                 self.log2phy = determine_default_log2phy_map(
