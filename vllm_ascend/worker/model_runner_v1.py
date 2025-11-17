@@ -2351,12 +2351,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             raise ValueError(f"Unsupported soc_version: {soc_version}")
 
-        if moe_comm_type == MoECommType.ALLGATHER and with_prefill:
-            if enable_sp():
-                moe_comm_type = MoECommType.ALLGATHER
-            else:
-                moe_comm_type = MoECommType.NAIVE_MULTICAST
-
         # PanguProMoE only supports allgather
         if model_type == "PanguProMoE":
             moe_comm_type = MoECommType.ALLGATHER

@@ -25,11 +25,11 @@ from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.torchair.ops.torchair_fused_moe import torchair_select_experts
 from vllm_ascend.torchair.quantization.torchair_w8a8_dynamic import (
     torchair_fused_experts_with_all2all, torchair_fused_experts_with_mc2)
+from vllm_ascend.torchair.torchair_forward_context import FusedMoEState
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 
 
