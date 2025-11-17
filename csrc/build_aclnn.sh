@@ -1,6 +1,17 @@
 ROOT_DIR=$1
 
-source $(dirname $ASCEND_HOME_PATH)/set_env.sh
+if [[ -z "${ASCEND_HOME_PATH:-}" ]]; then
+  echo "[build_aclnn] ASCEND_HOME_PATH is not set; CANN toolkit/driver not found. Stop building."
+  exit 0
+fi
+
+ASCEND_SET_ENV="$(dirname "$ASCEND_HOME_PATH")/set_env.sh"
+if [[ ! -f "$ASCEND_SET_ENV" ]]; then
+  echo "[build_aclnn] Cannot find CANN environment script at $ASCEND_SET_ENV. Stop building."
+  exit 0
+fi
+
+source "$ASCEND_SET_ENV"
 
 cd csrc/dispatch_ffn_combine
 

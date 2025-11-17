@@ -182,6 +182,8 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
+          . CANN/vendors/hwcomputing/bin/set_env.bash
+          pytest -sv tests/e2e/multicard/test_dispatch_ffn_combine.py
           pytest -sv tests/e2e/multicard/test_aclgraph_capture_replay.py
           pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
           pytest -sv tests/e2e/multicard/test_full_graph_mode.py

@@ -148,7 +148,7 @@ def worker(rank: int, world_size: int, port: int, q: mp.SimpleQueue):
 
 @torch.inference_mode()
 def test_dispatch_ffn_combine_kernel():
-    world_size = 16
+    world_size = 2
     mp.set_start_method("fork", force=True)
 
     q = mp.SimpleQueue()

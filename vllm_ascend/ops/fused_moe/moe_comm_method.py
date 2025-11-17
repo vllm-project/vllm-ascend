@@ -241,7 +241,7 @@ class FusedMC2CommImpl(MoECommMethod):
         return TokenDispatcherWithMC2()
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithMC2(self.moe_config, self.quant_type)
+        return PrepareAndFinalizeWithMC2(self.moe_config)
 
     def fused_experts(
             self,
@@ -252,6 +252,8 @@ class FusedMC2CommImpl(MoECommMethod):
             topk_ids: torch.Tensor,
             activation: str = "silu",
             apply_router_weight_on_input: bool = False,
+            use_int8_w8a8: bool = False,
+            use_int4_w4a8: bool = False,
             global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
             w1_scale: Optional[torch.Tensor] = None,
@@ -325,7 +327,7 @@ class FusedAlltoAllCommImpl(MoECommMethod):
             num_local_experts=self.moe_config.num_local_experts)
 
     def _get_prepare_finalize(self):
-        return PrepareAndFinalizeWithAll2All(self.moe_config, self.quant_type)
+        return PrepareAndFinalizeWithAll2All(self.moe_config)
 
     def fused_experts(
             self,
@@ -336,6 +338,8 @@ class FusedAlltoAllCommImpl(MoECommMethod):
             topk_ids: torch.Tensor,
             activation: str = "silu",
             apply_router_weight_on_input: bool = False,
+            use_int8_w8a8: bool = False,
+            use_int4_w4a8: bool = False,
             global_num_experts: Optional[int] = None,
             expert_map: Optional[torch.Tensor] = None,
             w1_scale: Optional[torch.Tensor] = None,
