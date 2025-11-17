@@ -23,7 +23,8 @@ from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
-from vllm_ascend.utils import (npu_stream_switch, moe_load_async_stream)
+from vllm_ascend.utils import moe_load_async_stream, npu_stream_switch
+
 
 class EplbUpdator:
 

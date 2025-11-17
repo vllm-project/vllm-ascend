@@ -44,7 +44,7 @@ from vllm_ascend.quantization.w8a8_dynamic import \
     AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, moe_load_async_stream,
-                               npu_stream_switch,shared_expert_dp_enabled,
+                               npu_stream_switch, shared_expert_dp_enabled,
                                shared_experts_calculation_stream,
                                vllm_version_is)
 
