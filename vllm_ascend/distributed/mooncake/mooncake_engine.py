@@ -43,6 +43,8 @@ class MooncakeEngine:
         self.tp_rank = parallel_config.rank
         self.tp_size = parallel_config.tensor_parallel_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        self.consumer_is_to_load = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "consumer_is_to_load", False)
         self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "load_async", False)
         self.save_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
@@ -507,7 +509,8 @@ class MooncakeEngine:
         done_sending = (
             self.kv_send_thread.
             get_and_clear_finished_requests(  # type: ignore[union-attr]
-            ) if self.kv_role in ['kv_producer', 'kv_both'] else
+            ) if self.kv_role in ['kv_producer', 'kv_both']
+            or not not self.consumer_is_to_load else
             self.decode_get_finished(finished_req_ids))
         done_recving = self.kv_recv_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
         )
