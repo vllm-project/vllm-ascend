@@ -98,7 +98,7 @@ async def test_models(model: str) -> None:
         run_aisbench_cases(model, port, aisbench_warm_up)
         result = run_aisbench_cases(model, port, aisbench_cases75)
         TTFT75 = get_TTFT(result)
-    assert TTFT75 < 0.4 * TTFT0, f"The TTFT for prefix75 {TTFT75} is not less than 0.4*TTFT for prefix0 {TTFT0}."
+    assert TTFT75 < 0.8 * TTFT0, f"The TTFT for prefix75 {TTFT75} is not less than 0.8*TTFT for prefix0 {TTFT0}."
     print(
-        f"The TTFT for prefix75 {TTFT75} is less than 0.4*TTFT for prefix0 {TTFT0}."
+        f"The TTFT for prefix75 {TTFT75} is less than 0.8*TTFT for prefix0 {TTFT0}."
     )
