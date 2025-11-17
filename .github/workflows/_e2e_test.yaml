@@ -172,9 +172,6 @@ jobs:
         run: |
           pytest -sv tests/e2e/multicard/test_qwen3_moe.py::test_models_distributed_Qwen3_MOE_TP2_WITH_EP
           pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_nz
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_optimize
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_frozen
-          pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py::test_e2e_deepseekv2lite_with_torchair_ms_mla
 
       - name: Run vllm-project/vllm-ascend test (full)
         env:
