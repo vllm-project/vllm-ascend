@@ -669,7 +669,9 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
             "remote_block_ids": [1, 2, 3],
             "remote_engine_id": "remote",
             "remote_host": "localhost",
-            "remote_port": 5000
+            "remote_port": 5000,
+            "remote_pcp_size": 1,
+            "remote_dcp_size": 1
         }
 
         meta = self.scheduler.build_connector_meta(MagicMock())
