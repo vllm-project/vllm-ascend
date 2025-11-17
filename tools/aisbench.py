@@ -28,9 +28,12 @@ import huggingface_hub
 import pandas as pd
 from modelscope import snapshot_download  # type: ignore
 
-DATASET_CONF_DIR = "benchmark/ais_bench/benchmark/configs/datasets"
-REQUEST_CONF_DIR = "benchmark/ais_bench/benchmark/configs/models/vllm_api"
-DATASET_DIR = "benchmark/ais_bench/datasets"
+BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("."))
+DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark",
+                                "configs", "datasets")
+REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark",
+                                "configs", "models", "vllm_api")
+DATASET_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "datasets")
 
 
 class AisbenchRunner:

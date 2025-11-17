@@ -1,4 +1,4 @@
-# User stories
+# User Stories
 
 Read case studies on how users and developers solve real, everyday problems with vLLM Ascend
 

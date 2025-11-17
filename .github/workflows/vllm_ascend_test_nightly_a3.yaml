@@ -41,9 +41,53 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  multi-node-tests:
+    name: multi-node
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        test_config:
+          - name: multi-node-deepseek-pd
+            config_file_path: DeepSeek-V3.yaml
+            size: 2
+          - name: multi-node-qwen3-dp
+            config_file_path: Qwen3-235B-A3B.yaml
+            size: 2
+          - name: multi-node-dpsk-4node-pd
+            config_file_path: DeepSeek-R1-W8A8.yaml
+            size: 4
+          - name: multi-node-qwenw8a8-2node
+            config_file_path: Qwen3-235B-W8A8.yaml
+            size: 2
+          - name: multi-node-glm-2node
+            config_file_path: GLM-4_5.yaml
+            size: 2
+          - name: multi-node-dpsk3.2-exp-2node
+            config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
+            size: 2
+          - name: multi-node-deepseek-r1-w8a8-eplb
+            config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
+            size: 4
+          - name: multi-node-qwenw8a8-2node-eplb
+            config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+            size: 2
+    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
+    with:
+      soc_version: a3
+      runner: linux-aarch64-a3-0
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
+      replicas: 1
+      size: ${{ matrix.test_config.size }}
+      config_file_path: ${{ matrix.test_config.config_file_path }}
+    secrets:
+      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
+  
   single-node-tests:
     name: single-node
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: multi-node-tests
     strategy:
       fail-fast: false
       matrix:
@@ -94,45 +138,6 @@ jobs:
     with:
       vllm: v0.11.0
       runner: ${{ matrix.test_config.os }}
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-a3-ubuntu22.04-py3.11
+      image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
       tests: ${{ matrix.test_config.tests }}
       name: ${{ matrix.test_config.name }}
-
-  multi-node-tests:
-    name: multi-node
-    needs: single-node-tests
-    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        test_config:
-          - name: multi-node-deepseek-pd
-            config_file_path: DeepSeek-V3.yaml
-            size: 2
-          - name: multi-node-qwen3-dp
-            config_file_path: Qwen3-235B-A3B.yaml
-            size: 2
-          - name: multi-node-dpsk-4node-pd
-            config_file_path: DeepSeek-R1-W8A8.yaml
-            size: 4
-          - name: multi-node-qwenw8a8-2node
-            config_file_path: Qwen3-235B-W8A8.yaml
-            size: 2
-          - name: multi-node-glm-2node
-            config_file_path: GLM-4_5.yaml
-            size: 2
-          - name: multi-node-dpsk3.2-exp-2node
-            config_file_path: DeepSeek-V3_2-Exp-bf16.yaml
-            size: 2
-    uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
-    with:
-      soc_version: a3
-      runner: linux-aarch64-a3-0
-      image: m.daocloud.io/quay.io/ascend/cann:8.3.rc1-a3-ubuntu22.04-py3.11
-      replicas: 1
-      size: ${{ matrix.test_config.size }}
-      config_file_path: ${{ matrix.test_config.config_file_path }}
-    secrets:
-      KUBECONFIG_B64: ${{ secrets.KUBECONFIG_B64 }}
-  

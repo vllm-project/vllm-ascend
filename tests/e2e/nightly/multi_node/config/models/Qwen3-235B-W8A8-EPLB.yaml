@@ -1,16 +1,5 @@
-# For disaggregated mode, set is_disaggregated: true, and set the following parameters:
-# Prefiller_index: the hosts index of the node running prefiller
-# Decoder_index: the hosts index of the node running decoder
-# Suppose we have **4 nodes** running a 2P1D setup (2 Prefillers + 1 Decoder):
-#   ┌───────────────┬───────────────┬───────────────┬───────────────┐
-#   │   node0       │   node1       │   node2       │   node3       │
-#   │ Prefiller #1  │ Prefiller #2  │   Decoder     │   Decoder     │
-#   └───────────────┴───────────────┴───────────────┴───────────────┘
-# For the prefiller nodes. the hosts should be node0 and node1
-# For the decoder nodes. we only have 1 decoder node(dp+tp+ep across node2 and node3. Where node3 is running with headless mode)
-# So the prefiller_host_index is [0, 1], and the decoder_host_index is [2]
-test_name: "test DeepSeek-V3 disaggregated_prefill"
-model: "vllm-ascend/DeepSeek-V3-W8A8"
+test_name: "test Qwen3-235B-A22B-W8A8 disaggregated_prefill"
+model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
 num_nodes: 2
 npu_per_node: 16
 env_common:
@@ -19,7 +8,7 @@ env_common:
   OMP_NUM_THREADS: 100
   HCCL_BUFFSIZE: 1024
   SERVER_PORT: 8080
-  NUMEXPR_MAX_THREADS: 128
+  DYNAMIC_EPLB: true
 disaggregated_prefill:
   enabled: true
   prefiller_host_index: [0]
@@ -28,14 +17,13 @@ disaggregated_prefill:
 deployment:
   -
     server_cmd: >
-        vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
+        vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 2
         --data-parallel-size-local 2
         --tensor-parallel-size 8
         --seed 1024
-        --enforce-eager
         --enable-expert-parallel
         --max-num-seqs 16
         --max-model-len 8192
@@ -61,10 +49,12 @@ deployment:
                   }
             }
         }'
+        --additional-config
+        '{"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
 
   -
     server_cmd: >
-        vllm serve "vllm-ascend/DeepSeek-V3-W8A8"
+        vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
         --host 0.0.0.0
         --port $SERVER_PORT
         --data-parallel-size 2
@@ -79,7 +69,6 @@ deployment:
         --trust-remote-code
         --no-enable-prefix-caching
         --gpu-memory-utilization 0.9
-        --additional-config '{"torchair_graph_config":{"enabled":true}}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnector",
         "kv_role": "kv_consumer",
@@ -97,13 +86,6 @@ deployment:
                   }
             }
         }'
+        --additional-config
+        '{"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
 benchmarks:
-  acc:
-    case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k-lite
-    request_conf: vllm_api_general_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
-    max_out_len: 4096
-    batch_size: 512
-    baseline: 95
-    threshold: 5

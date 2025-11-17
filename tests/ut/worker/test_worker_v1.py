@@ -8,6 +8,9 @@ from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from tests.ut.base import TestBase
 from vllm_ascend.utils import vllm_version_is
 
+init_cached_hf_modules_path = "vllm.utils.init_cached_hf_modules" if vllm_version_is(
+    "0.11.0") else "vllm.utils.import_utils.init_cached_hf_modules"
+
 
 class TestNPUWorker(TestBase):
 
@@ -53,7 +56,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_normal_case(
         self,
@@ -115,7 +118,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_trust_remote_code(
         self,
@@ -160,7 +163,7 @@ class TestNPUWorker(TestBase):
     @patch("vllm_ascend.worker.worker_v1.init_ascend_config")
     @patch("vllm_ascend.worker.worker_v1.init_ascend_soc_version")
     @patch("vllm_ascend.worker.worker_v1.try_register_lib")
-    @patch("vllm.utils.init_cached_hf_modules")
+    @patch(init_cached_hf_modules_path)
     @patch("vllm_ascend.worker.worker_v1.NPUWorker._init_profiler")
     def test_init_npu_worker_with_custom_cache_dtype(
         self,

@@ -233,7 +233,8 @@ class NPUPlatform(Platform):
                     "vllm.mla_forward"
                 ])
                 update_aclgraph_sizes(vllm_config)
-            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
+                compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
                 logger.info(
                     "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
                     "using only ACL Graph mode")
@@ -270,7 +271,8 @@ class NPUPlatform(Platform):
                 compilation_config.use_inductor = False
                 compilation_config.splitting_ops.extend(["vllm::mla_forward"])
                 update_aclgraph_sizes(vllm_config)
-            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
+                compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
                 logger.info(
                     "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
                     "using only ACL Graph mode")
@@ -369,6 +371,17 @@ class NPUPlatform(Platform):
                 f"and block_size({cache_config.block_size}) "
                 "needs to be equal if use cp or dcp > 1 in P/D disaggregate scenario."
             )
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        # Directly importing vllm_ascend_C prevents ASCEND_RT_VISIBLE_DEVICES
+        # from being applied during runtime initialization, which causes bugs
+        # in the RL module. Therefore, we currently use lazy initialization
+        # to avoid this issue. See https://github.com/vllm-project/vllm-ascend/pull/884.
+        # TODO: when the above issue is fixed, we can uncomment the following lines.
+        # from vllm_ascend.utils import enable_custom_op
+        # enable_custom_op()
+        pass
 
     @classmethod
     def get_attn_backend_cls(
