@@ -144,7 +144,7 @@ class EPLBParamUtils:
             "true", "1"
         ):
             raise ValueError(
-                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+                'Can not enable dynamic_eplb when DYNAMIC_EPLB is not set to "true" or "1".'
             )
 
     @staticmethod
