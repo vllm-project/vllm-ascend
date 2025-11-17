@@ -243,4 +243,3 @@ class AlltoAllCommImpl(MoECommMethod):
 
     def _get_prepare_finalize(self):
         return PrepareAndFinalizeWithAll2All(self.moe_config)
-
