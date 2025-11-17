@@ -404,7 +404,7 @@ class AscendFusedMoE(FusedMoE):
 
     def transpose_weight(self, loaded_weight, expert_data, shard_dim):
         # Ensure training and inference weight shapes match during RL weight updates
-        if (
+        if (len(loaded_weight.shape) >= 2 and len(expert_data.shape) >= 2 and \
             loaded_weight.shape[1] != expert_data.shape[1] and \
             loaded_weight.shape[0] != expert_data.shape[0]
         ):

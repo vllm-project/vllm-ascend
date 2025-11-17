@@ -9,6 +9,8 @@ from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
                    AscendW8A8LinearMethod)
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
                            AscendW8A8DynamicLinearMethod)
+from .w8a8_pdmix import (AscendW8A8PDMixFusedMoeMethod,
+                         AscendW8A8PDMixLinearMethod)
 
 ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     "W4A8_DYNAMIC": {
@@ -26,6 +28,10 @@ ASCEND_QUANTIZATION_METHOD_MAP: Dict[str, Dict[str, Type[Any]]] = {
     "W8A8_DYNAMIC": {
         "linear": AscendW8A8DynamicLinearMethod,
         "moe": AscendW8A8DynamicFusedMoEMethod,
+    },
+    "W8A8_MIX": {
+        "linear": AscendW8A8PDMixLinearMethod,
+        "moe": AscendW8A8PDMixFusedMoeMethod,
     },
     "C8": {
         "attention": AscendC8KVCacheMethod,
