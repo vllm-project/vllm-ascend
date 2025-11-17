@@ -108,14 +108,14 @@ class MooncakeConnectorV1(KVConnectorBase_V1):
         if not self.use_layerwise:
             return
 
-        if self.kv_role == "kv_consumer" and not self.consumer_is_to_save:
+        if self.kv_role == "kv_consumer":
             # Don't do save if the role is kv_consumer
             return
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
         """MooncakeStoreConnector does not save explicitly."""
-        if self.kv_role == "kv_consumer":
+        if self.kv_role == "kv_consumer" and not self.consumer_is_to_save:
             # Don't do save if the role is kv_consumer
             return
 
