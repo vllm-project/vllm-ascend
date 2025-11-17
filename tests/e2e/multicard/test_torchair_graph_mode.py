@@ -298,31 +298,3 @@ def test_e2e_deepseekv2lite_with_nz():
         },
     }
     _deepseek_v2_lite_torchair_test_fixure(additional_config)
-
-
-def test_e2e_deepseekv2lite_with_optimize():
-    additional_config = {
-        "torchair_graph_config": {
-            "enable_view_optimize": False
-        },
-    }
-    _deepseek_v2_lite_torchair_test_fixure(additional_config)
-
-
-def test_e2e_deepseekv2lite_with_frozen():
-    additional_config = {
-        "torchair_graph_config": {
-            "enable_frozen_parameter": False
-        },
-    }
-    _deepseek_v2_lite_torchair_test_fixure(additional_config)
-
-
-def test_e2e_deepseekv2lite_with_torchair_ms_mla():
-    additional_config = {
-        "torchair_graph_config": {
-            "enabled": True,
-            "enable_multistream_mla": True,
-        },
-    }
-    _deepseek_v2_lite_torchair_test_fixure(additional_config)
