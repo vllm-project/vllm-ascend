@@ -140,9 +140,8 @@ class EPLBParamUtils:
             return
         if not isinstance(dynamic_eplb, bool):
             raise TypeError("The dynamic_eplb is not bool.")
-        if dynamic_eplb and os.getenv("DYNAMIC_EPLB", "false").lower() not in (
-            "true", "1"
-        ):
+        if dynamic_eplb and os.getenv("DYNAMIC_EPLB",
+                                      "false").lower() not in ("true", "1"):
             raise ValueError(
                 'Can not enable dynamic_eplb when DYNAMIC_EPLB is not set to "true" or "1".'
             )
