@@ -1278,8 +1278,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs)
-                update_graph_params_workspaces(num_tokens,
-                                               weak_ref_tensors(workspace))
+                update_graph_params_workspaces(num_tokens, workspace)
 
             attn_output = torch.empty_like(q_nope)
             softmax_lse = torch.empty(num_tokens,
@@ -1779,8 +1778,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_nope, q_pe, k_nope, k_pe, decode_meta.block_table,
                     seq_len, num_heads, self.scale, self.num_kv_heads,
                     **common_kwargs)
-                update_graph_params_workspaces(num_tokens,
-                                               weak_ref_tensors(workspace))
+                update_graph_params_workspaces(num_tokens, workspace)
             attn_output = torch.empty_like(q_nope)
             softmax_lse = torch.empty((num_tokens, num_heads, 1),
                                       dtype=q_nope.dtype,
