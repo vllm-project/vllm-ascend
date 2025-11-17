@@ -46,6 +46,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
                                shared_expert_dp_enabled,
                                shared_experts_calculation_stream,
+                               moe_load_async_stream,
                                vllm_version_is)
 
 if vllm_version_is("0.11.0"):
@@ -392,8 +393,10 @@ class AscendFusedMoE(FusedMoE):
         if isinstance(final_hidden_states, tuple):
             final_hidden_states, group_list_type, expert_tokens = final_hidden_states
             if self.dynamic_eplb:
-                self.moe_load += expert_tokens if group_list_type == 1 else \
-                    torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
+                with npu_stream_switch(moe_load_async_stream()):
+                    moe_load_async_stream().wait_stream(torch.npu.current_stream(device=expert_tokens.device))
+                    self.moe_load += expert_tokens if group_list_type == 1 else \
+                        torch.cat([expert_tokens[:1], expert_tokens[1:] - expert_tokens[:-1]])
 
         final_hidden_states = forward_context.moe_comm_method.finalize(
             hidden_states=final_hidden_states,
