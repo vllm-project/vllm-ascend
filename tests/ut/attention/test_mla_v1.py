@@ -259,6 +259,57 @@ class TestAscendMLAMetadataBuilder(TestBase):
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
            return_value=1)
+    def test_ascend_mla_metadata_builder_build_full_graph(
+            self, mock_get_dcp_size, mock_dcp, mock_get_dcp_group):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
+
+        mock_spec_config = MagicMock()
+        mock_spec_config.num_speculative_tokens = 1
+        mock_spec_config.disable_padded_drafter_batch = True
+        mock_vllm_config.speculative_config = mock_spec_config
+
+        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                           mock_device)
+        common_metadata = MagicMock()
+        model = MagicMock()
+        common_metadata.graph_pad_size = 8
+        common_metadata.num_reqs = 4
+        common_metadata.num_actual_tokens = 5
+        common_metadata.max_query_len = 5
+        common_metadata.seq_lens_cpu = torch.Tensor([9, 10, 8, 8]).int()
+        common_metadata.query_start_loc = torch.Tensor([0, 1, 2, 4, 5]).int()
+        common_metadata.query_start_loc_cpu = torch.Tensor([0, 1, 2, 4,
+                                                            5]).int()
+        common_metadata.positions = torch.Tensor([1, 2, 3, 4, 5, 6]).int()
+        block_table = torch.Tensor([[1, 0], [2, 0], [3, 0], [4, 0]]).int()
+        common_metadata.block_table_tensor = block_table
+        common_metadata.prefill_context_parallel_metadata = None
+        metadata = builder.build(0, common_metadata, model)
+
+        self.assertEqual(metadata.decode.actual_seq_lengths_q,
+                         [1, 2, 4, 5, 6, 6, 7, 8])
+        self.assertEqual(metadata.decode.block_table.shape[0], 8)
+
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
     def test_reorder_batch(self, mock_get_dcp_size, mock_dcp,
                            mock_get_dcp_group):
         ascend_config = MagicMock()
@@ -304,6 +355,80 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
         self.assertTrue(modified)
         input_batch.swap_states.assert_called_once_with(1, 2)
+
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_pad_actual_seq_lens_q_mtp_disable_pad(self, mock_get_dcp_size,
+                                                   mock_dcp,
+                                                   mock_get_dcp_group):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+        mock_vllm_config.speculative_config = None
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
+
+        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                           mock_device)
+        input_seq_lens = [1, 2, 4, 5]
+        expect_output = [1, 2, 4, 5, 6, 6, 7, 8]
+        num_reqs = 4
+        num_reqs_pad_size = 4
+        output_seq_lens = builder.pad_actual_seq_len_q_mtp_disable_pad(
+            num_reqs_pad_size, num_reqs, input_seq_lens)
+        self.assertEqual(output_seq_lens, expect_output)
+
+    @patch('vllm.distributed.parallel_state.get_dcp_group')
+    @patch('vllm.distributed.parallel_state._DCP',
+           new_callable=lambda: MagicMock(spec=GroupCoordinator))
+    @patch("vllm.distributed.get_decode_context_model_parallel_world_size",
+           return_value=1)
+    def test_pad_actual_seq_lens_q_mtp_enable_pad(self, mock_get_dcp_size,
+                                                  mock_dcp,
+                                                  mock_get_dcp_group):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.decode_max_num_seqs = 4
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+        mock_vllm_config.speculative_config = None
+
+        mock_dcp.world_size = 1
+        dcp_group = MagicMock(spec=GroupCoordinator)
+        dcp_group.rank_in_group = 0
+        dcp_group.world_size = 1
+        dcp_group.device_group = MagicMock()
+        mock_get_dcp_group.return_value = dcp_group
+        common_metadata = MagicMock()
+        common_metadata.actual_seq_lengths_q = [2, 4, 6, 8]
+
+        builder = AscendMLAMetadataBuilder(None, None, mock_vllm_config,
+                                           mock_device)
+        input_seq_lens = [2, 4, 6]
+        expect_output = [2, 4, 6, 8]
+        num_reqs = 3
+        num_reqs_pad_size = 1
+        output_seq_lens = builder.pad_actual_seq_len_q_mtp_enable_pad(
+            num_reqs_pad_size, num_reqs, input_seq_lens, common_metadata)
+        self.assertEqual(output_seq_lens, expect_output)
 
 
 class TestAscendMLAImpl(TestBase):

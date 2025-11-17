@@ -434,11 +434,13 @@ class AscendMLAMetadataBuilder:
 
         # If graph_pad_size > -1, mean is running in fullgraph mode.
         graph_pad_size = common_attn_metadata.graph_pad_size
+        # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
         if graph_pad_size > num_reqs and self.speculative_config.disable_padded_drafter_batch:
             block_table = (
                 common_attn_metadata.block_table_tensor[:graph_pad_size])
         else:
             block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
+        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         if self.pcp_size > 1:
             num_decodes_flatten = num_decodes * self.decode_threshold
             block_table = common_attn_metadata.block_table_tensor[:
@@ -448,6 +450,7 @@ class AscendMLAMetadataBuilder:
         if num_actual_tokens_pcp_padded is None:
             num_actual_tokens_pcp_padded = num_actual_tokens
 
+        # NOTE: Currently, MTP-fullgraph is incompatibility pcp
         slot_mapping = common_attn_metadata.slot_mapping[:
                                                          num_actual_tokens_pcp_padded]
         input_positions = common_attn_metadata.positions[:
@@ -640,8 +643,10 @@ class AscendMLAMetadataBuilder:
                 block_table = block_table[:num_decodes_flatten, ...]
             else:
                 block_table = block_table[:num_decodes, ...]
-            # NOTE: Currently, MTP-fullgraph is incompatibility pcp 
-            if graph_pad_size > num_decodes and self.speculative_config.disable_padded_drafter_batch:
+            # NOTE: Currently, MTP-fullgraph is incompatibility pcp
+            # NOTE: Maybe this block_table change can be removed when graph_pad_size > 1.
+            if graph_pad_size > num_decodes and \
+                    self.speculative_config.disable_padded_drafter_batch:
                 block_table = block_table[:graph_pad_size, ...]
             seq_lens_list = seq_lens.tolist()
 
@@ -663,7 +668,7 @@ class AscendMLAMetadataBuilder:
                 cp_seq_len = torch.where(cp_seq_len == 0, 1, cp_seq_len)
             else:
                 cp_seq_len, batch_seq_mask = None, None
-            
+
             if graph_pad_size > num_reqs:
                 if self.speculative_config.disable_padded_drafter_batch:
                     num_reqs_pad_size = graph_pad_size - num_reqs
@@ -677,8 +682,8 @@ class AscendMLAMetadataBuilder:
                             (num_block_pad_size, ) + block_table.shape[1:],
                             dtype=block_table.dtype,
                             device=block_table.device)
-                        block_table = torch.cat([block_table, block_table_padding],
-                                                dim=0)
+                        block_table = torch.cat(
+                            [block_table, block_table_padding], dim=0)
                 else:
                     num_token_pad_size = graph_pad_size - num_decode_tokens
                     num_reqs_pad_size = (
@@ -686,13 +691,13 @@ class AscendMLAMetadataBuilder:
                         common_attn_metadata.decode_token_per_req - num_reqs)
                     num_block_table_pad_size = (
                         graph_pad_size //
-                        common_attn_metadata.decode_token_per_req - num_decodes)
-                    seq_lens_list = seq_lens.tolist(
-                    ) + [0] * num_reqs_pad_size
+                        common_attn_metadata.decode_token_per_req -
+                        num_decodes)
+                    seq_lens_list = seq_lens.tolist() + [0] * num_reqs_pad_size
                     slot_padding = torch.full((num_token_pad_size, ),
-                                            PAD_SLOT_ID,
-                                            dtype=slot_mapping.dtype,
-                                            device=slot_mapping.device)
+                                              PAD_SLOT_ID,
+                                              dtype=slot_mapping.dtype,
+                                              device=slot_mapping.device)
                     slot_mapping = torch.cat([slot_mapping, slot_padding])
                     block_table_padding = torch.zeros(
                         (num_block_table_pad_size, ) + block_table.shape[1:],
@@ -700,9 +705,10 @@ class AscendMLAMetadataBuilder:
                         device=block_table.device)
                     block_table = torch.cat([block_table, block_table_padding],
                                             dim=0)
-                    position_padding = torch.zeros(num_token_pad_size,
-                                                dtype=input_positions.dtype,
-                                                device=input_positions.device)
+                    position_padding = torch.zeros(
+                        num_token_pad_size,
+                        dtype=input_positions.dtype,
+                        device=input_positions.device)
                     input_positions = torch.cat(
                         [input_positions, position_padding])
                     actual_seq_lengths_q = self.pad_actual_seq_len_q_mtp_enable_pad(

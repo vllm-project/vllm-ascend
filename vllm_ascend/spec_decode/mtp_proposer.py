@@ -1,5 +1,5 @@
 import importlib
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -56,9 +56,14 @@ logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
 
+_deepseek_mtp_path = "vllm.model_executor.models.deepseek_mtp"
+_deepseek_mtp_model = "DeepSeekMTP"
+if vllm_version_is("0.11.0"):
+    _deepseek_mtp_path = "vllm_ascend.patch.worker.patch_deepseek_mtp"
+    _deepseek_mtp_model = "AscendDeepSeekMTP"
+
 _MTP_MODELS = {
-    "DeepseekV3ForCausalLM":
-    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
+    "DeepseekV3ForCausalLM": (_deepseek_mtp_path, _deepseek_mtp_model),
     "Qwen3NextForCausalLM":
     ("vllm_ascend.models.qwen3_next_mtp", "CustomQwen3NextMTP")
 }
@@ -78,6 +83,9 @@ def _load_model(architecture):
 
 
 class MtpProposer(Proposer):
+
+    # TODO: Find out why ModelRunner does not this explicit typing?
+    model: Union[nn.Module, ACLGraphWrapper]
 
     def __init__(
         self,
@@ -238,15 +246,14 @@ class MtpProposer(Proposer):
         if skip_attn:
             attn_metadata = None
         elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
-            max_seq_lens = self.runner.model_config.max_model_len
             if len(self.runner.attn_groups) > 0:
                 num_computed_tokens_cpu = (
                     self.runner.input_batch.
                     num_computed_tokens_cpu_tensor[:num_reqs])
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=self.runner.query_start_loc[:num_reqs + 1],
-                    query_start_loc_cpu=self.runner.query_start_loc_cpu[
-                        :num_reqs + 1],
+                    query_start_loc_cpu=self.runner.
+                    query_start_loc_cpu[:num_reqs + 1],
                     seq_lens_cpu=self.runner.seq_lens_cpu,
                     seq_lens=self.runner.seq_lens_cpu[:num_reqs],
                     num_reqs=num_reqs,
@@ -256,7 +263,8 @@ class MtpProposer(Proposer):
                     actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
                     block_table_tensor=self.runner.input_batch.block_table[0].
                     get_device_tensor()[:num_reqs],
-                    slot_mapping=self.runner.input_batch.block_table[0].slot_mapping,
+                    slot_mapping=self.runner.input_batch.block_table[0].
+                    slot_mapping,
                     positions=self.runner.positions,
                     attn_mask=self.runner.attn_mask,
                     spec_attn_mask=self.runner.spec_attn_mask,
@@ -298,8 +306,8 @@ class MtpProposer(Proposer):
                     batch_descriptor=batch_descriptor,
                     is_mtp_model=True):
                 self.model(input_ids=input_ids,
-                            positions=positions,
-                            hidden_states=previous_hidden_states)
+                           positions=positions,
+                           hidden_states=previous_hidden_states)
                 forward_context = get_forward_context()
                 if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and \
                     not forward_context.capturing:
@@ -532,10 +540,13 @@ class MtpProposer(Proposer):
             common_attn_metadata.slot_mapping[token_indices])
         common_attn_metadata.slot_mapping[token_indices.shape[0]:].fill_(-1)
 
+        # NOTE: Currently positions and seq_lens are not used in mla_v1 forward
+        # so we do not need to fixed them. But if they are used in the future,
+        # we should fixed them.
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
-            query_start_loc=new_query_start_loc_cpu.to(device, ## Address is ok?
+            query_start_loc=new_query_start_loc_cpu.to(device,
                                                        non_blocking=True),
-            query_start_loc_cpu=new_query_start_loc_cpu,  ## Address is ok?
+            query_start_loc_cpu=new_query_start_loc_cpu,
             seq_lens=new_seq_lens_cpu.to(device, non_blocking=True),
             seq_lens_cpu=new_seq_lens_cpu,
             num_computed_tokens_cpu=common_attn_metadata.
@@ -546,7 +557,6 @@ class MtpProposer(Proposer):
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
-            # Looks like we do not need to fixed the address of positions in common_attn_metadata
             positions=common_attn_metadata.positions[token_indices],
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
@@ -685,10 +695,10 @@ class MtpProposer(Proposer):
         if scheduler_output:
             max_query_len = common_attn_metadata.max_query_len
             uniform_decode = (max_query_len in list(
-                range(1, self.num_speculative_tokens + 2))) and (
-                    scheduler_output.total_num_scheduled_tokens ==
-                    self.runner.input_batch.num_reqs *
-                    (self.num_speculative_tokens + 1))
+                range(1, self.num_speculative_tokens +
+                      2))) and (scheduler_output.total_num_scheduled_tokens
+                                == self.runner.input_batch.num_reqs *
+                                (self.num_speculative_tokens + 1))
             batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                                uniform_decode=uniform_decode)
         else:
@@ -736,8 +746,7 @@ class MtpProposer(Proposer):
                     hidden_states = self.model(
                         input_ids=self.input_ids[:num_input_tokens],
                         positions=self.positions[:num_input_tokens],
-                        hidden_states=self.hidden_states[:num_input_tokens]
-                    )
+                        hidden_states=self.hidden_states[:num_input_tokens])
                     forward_context = get_forward_context()
                     if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
                         if self.vllm_config.model_config.use_mla:
@@ -1036,6 +1045,9 @@ class MtpProposer(Proposer):
         total_num_tokens = query_start_loc_cpu[-1].item()
         token_indices = self.arange[:total_num_tokens]
 
+        # NOTE: Currently positions and seq_lens are not used in mla_v1 forward
+        # so we do not need to fixed them. But if they are used in the future,
+        # we should fixed them.
         spec_common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,

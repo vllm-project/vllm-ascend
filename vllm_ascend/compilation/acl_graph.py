@@ -274,9 +274,10 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
             elif forward_context.is_mtp_model:
                 actual_seq_lengths = forward_context.attn_metadata[
                     key].decode.actual_seq_lengths_q
-                block_table = forward_context.attn_metadata[key].decode.block_table
-                seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) -
-                                                       len(seq_lens_list))
+                block_table = forward_context.attn_metadata[
+                    key].decode.block_table
+                seq_lens_list = seq_lens_list + [0] * (
+                    len(actual_seq_lengths) - len(seq_lens_list))
             else:
                 seq_lens_list = seq_lens_list + [0] * (runtime_shape -
                                                        len(seq_lens_list))
