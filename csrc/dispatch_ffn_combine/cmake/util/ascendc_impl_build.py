@@ -156,9 +156,9 @@ def {}({}, kernel_name="{}", impl_mode=""):
         bisheng_path = os.path.dirname(bisheng)
         tikcpp_path = os.path.realpath(os.path.join(bisheng_path, "..", "..", "tikcpp"))
     else:
-        tikcpp_path = os.path.realpath("/usr/local/Ascend/latest/compiler/tikcpp")
+        tikcpp_path = os.path.realpath("/usr/local/Ascend/ascend-toolkit/latest/compiler/tikcpp")
 
-    hccl_path = os.path.realpath(os.path.join(tikcpp_path, "..", "ascendc/include/highlevel_api/impl"))
+    hccl_path = os.path.realpath("/usr/local/Ascend/ascend-toolkit/latest/compiler/ascendc/include/highlevel_api/impl")
     options.append("-I" + hccl_path)
 
     options.append("-I" + tikcpp_path)
