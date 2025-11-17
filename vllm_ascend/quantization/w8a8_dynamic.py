@@ -247,13 +247,14 @@ class AscendW8A8DynamicFusedMoEMethod:
         topk_weights = topk_weights.to(self.in_dtype)
 
         moe_comm_method = get_forward_context().moe_comm_method
-        return moe_comm_method.fused_experts(
+        if self.dynamic_eplb:
+            return moe_comm_method.fused_experts(
             hidden_states=x,
             pertoken_scale=pertoken_scale,
-            w1=layer.w13_weight,
-            w1_scale=layer.w13_weight_scale_fp32,
-            w2=layer.w2_weight,
-            w2_scale=layer.w2_weight_scale,
+            w1=layer.w13_weight_list,
+            w1_scale=layer.w13_weight_scale_fp32_list,
+            w2=layer.w2_weight_list,
+            w2_scale=layer.w2_weight_scale_list,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             use_int8_w8a8=True,
@@ -265,6 +266,25 @@ class AscendW8A8DynamicFusedMoEMethod:
             dynamic_scale_for_share=dynamic_scale_for_share,
             dynamic_eplb=self.dynamic_eplb,
             mc2_mask=kwargs.get("mc2_mask", None))
+        else:
+            return moe_comm_method.fused_experts(
+                hidden_states=x,
+                pertoken_scale=pertoken_scale,
+                w1=layer.w13_weight,
+                w1_scale=layer.w13_weight_scale_fp32,
+                w2=layer.w2_weight,
+                w2_scale=layer.w2_weight_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                use_int8_w8a8=True,
+                expert_map=expert_map,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+                shared_experts=shared_experts,
+                quantized_x_for_share=quantized_x_for_share,
+                dynamic_scale_for_share=dynamic_scale_for_share,
+                dynamic_eplb=self.dynamic_eplb,
+                mc2_mask=kwargs.get("mc2_mask", None))
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
@@ -285,3 +305,14 @@ class AscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
+        if self.dynamic_eplb:
+            layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+            layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+            layer.w13_weight_scale_fp32_list = [weight.clone() for weight in layer.w13_weight_scale.data.unbind(dim=0)]
+            layer.w2_weight_scale_list = [weight.clone() for weight in layer.w2_weight_scale.data.unbind(dim=0)]
+            del layer.w13_weight
+            del layer.w2_weight
+            del layer.w13_weight_scale
+            del layer.w13_weight_scale_fp32
+            del layer.w2_weight_scale
+            torch.npu.empty_cache()
