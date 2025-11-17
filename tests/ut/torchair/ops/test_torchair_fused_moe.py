@@ -26,7 +26,7 @@ import vllm_ascend
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
     TorchairAscendFusedMoE, TorchairAscendUnquantizedFusedMoEMethod)
-from vllm_ascend.torchair.torchair_forward_context import get_fused_moe_state
+from vllm_ascend.torchair.torchair_fused_moe_state import get_fused_moe_state
 from vllm_ascend.utils import adapt_patch  # noqa E402
 from vllm_ascend.utils import AscendSocVersion
 

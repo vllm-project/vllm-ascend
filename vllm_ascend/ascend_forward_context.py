@@ -11,7 +11,7 @@ from vllm.forward_context import (BatchDescriptor, get_forward_context,
                                   set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.torchair.torchair_forward_context import get_fused_moe_state
+from vllm_ascend.torchair.torchair_fused_moe_state import get_fused_moe_state
 from vllm_ascend.utils import (enable_sp, flashcomm2_enable, has_layer_idx,
                                is_moe_model)
 

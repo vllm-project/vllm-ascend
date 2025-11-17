@@ -2925,7 +2925,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
          with_prefill) = self._sync_metadata_across_dp(num_tokens,
                                                        with_prefill)
 
-        moe_comm_type = self._select_moe_comm_method(num_tokens, with_prefill)
+        moe_comm_type = self._select_moe_comm_method(num_tokens)
 
         # If cudagraph_mode.decode_mode() == FULL and
         # cudagraph_mode.seperate_routine(). This means that we are using
@@ -3102,8 +3102,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # allowing vLLM to correctly estimate the maximum memory required.
             if self.max_num_tokens > self.mc2_tokens_capacity and \
                 self._select_moe_comm_method(
-                    self.mc2_tokens_capacity,
-                    with_prefill=True) == MoECommType.MC2:
+                    self.mc2_tokens_capacity) == MoECommType.MC2:
                 self._dummy_run(self.mc2_tokens_capacity, with_prefill=True)
 
         output = None

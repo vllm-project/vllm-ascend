@@ -47,7 +47,7 @@ from vllm_ascend.eplb.core.eplb_utils import (determine_default_expert_map,
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.sequence_parallel import MetadataForPadding
-from vllm_ascend.torchair.torchair_forward_context import FusedMoEState
+from vllm_ascend.torchair.torchair_fused_moe_state import FusedMoEState
 from vllm_ascend.torchair.utils import (get_all_reduce_merge_state,
                                         get_rm_router_logits_state,
                                         npu_stream_switch, npu_wait_tensor,

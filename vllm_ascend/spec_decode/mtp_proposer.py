@@ -219,8 +219,7 @@ class MtpProposer(Proposer):
             with_prefill,
         ) = self.runner._sync_metadata_across_dp(num_tokens, with_prefill)
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
 
         attn_metadata = None
 
@@ -607,8 +606,7 @@ class MtpProposer(Proposer):
          with_prefill) = self.runner._sync_metadata_across_dp(
              num_input_tokens, self.runner.with_prefill)
 
-        moe_comm_type = self.runner._select_moe_comm_method(
-            num_input_tokens, with_prefill)
+        moe_comm_type = self.runner._select_moe_comm_method(num_input_tokens)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=False)
         aclgraph_runtime_mode, batch_descriptor = \
