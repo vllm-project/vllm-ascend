@@ -145,7 +145,7 @@ class MtpProposer(Proposer):
         if skip_attn:
             attn_metadata = None
         elif is_running_torchair:
-            common_attn_metadata = TorchairCommonAttentionMetadata(
+            torchair_common_attn_metadata = TorchairCommonAttentionMetadata(
                 num_reqs=num_reqs,
                 num_actual_tokens=1,
                 actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
@@ -154,26 +154,19 @@ class MtpProposer(Proposer):
                 decode_token_per_req=self.runner.decode_token_per_req,
             )
             attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
-                common_attn_metadata)
+                torchair_common_attn_metadata)
         elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
-            # assert with_prefill is False, \
-            #     "Full decode graph only supports uniform batch now."
-            max_seq_lens = self.runner.model_config.max_model_len
             if len(self.runner.attn_groups) > 0:
                 num_computed_tokens_cpu = (
                     self.runner.input_batch.
                     num_computed_tokens_cpu_tensor[:num_reqs])
-                query_start_loc = torch.tensor(
-                    [0] + self.runner.actual_seq_lengths_q[:num_reqs],
-                    device=self.runner.device,
-                    dtype=torch.int32)
                 common_attn_metadata = AscendCommonAttentionMetadata(
                     query_start_loc=torch.tensor(
                         [0] + self.runner.actual_seq_lengths_q[:num_reqs],
                         device=self.device,
                         dtype=torch.int32),
-                    query_start_loc_cpu=self.runner.query_start_loc_cpu[
-                        :num_reqs + 1],
+                    query_start_loc_cpu=self.runner.
+                    query_start_loc_cpu[:num_reqs + 1],
                     seq_lens_cpu=self.runner.seq_lens_cpu,
                     seq_lens=self.runner.seq_lens_cpu[:num_reqs],
                     num_reqs=num_reqs,
@@ -183,7 +176,8 @@ class MtpProposer(Proposer):
                     actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
                     block_table_tensor=self.runner.input_batch.block_table[0].
                     get_device_tensor()[:num_reqs],
-                    slot_mapping=self.runner.input_batch.block_table[0].slot_mapping,
+                    slot_mapping=self.runner.input_batch.block_table[0].
+                    slot_mapping,
                     positions=self.runner.positions,
                     attn_mask=self.runner.attn_mask,
                     spec_attn_mask=self.runner.spec_attn_mask,
@@ -466,7 +460,6 @@ class MtpProposer(Proposer):
 
         seq_lens = target_positions[last_token_indices] + 1
         seq_lens = seq_lens.int()
-        seq_lens_len = seq_lens.shape[0]
 
         if not self.torchair_graph_enabled:
             # torch mode need to update num_tokens_across_dp
@@ -481,10 +474,10 @@ class MtpProposer(Proposer):
 
         if scheduler_output:
             uniform_decode = (max_query_len in list(
-                range(1, self.num_speculative_tokens + 2))) and (
-                    scheduler_output.total_num_scheduled_tokens ==
-                    self.runner.input_batch.num_reqs *
-                    (self.num_speculative_tokens + 1))
+                range(1, self.num_speculative_tokens +
+                      2))) and (scheduler_output.total_num_scheduled_tokens
+                                == self.runner.input_batch.num_reqs *
+                                (self.num_speculative_tokens + 1))
             batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                                uniform_decode=uniform_decode)
         else:
@@ -500,9 +493,12 @@ class MtpProposer(Proposer):
             # Currently, if not torchair, runner.graph_pad_size will always be -1.
             graph_pad_size = self.runner.graph_pad_size
 
-        runner_slot_mapping = self.runner.input_batch.block_table[0].slot_mapping
-        runner_slot_mapping[:target_slot_mapping.shape[0]].copy_(target_slot_mapping)
-        runner_slot_mapping[target_slot_mapping.shape[0]:num_input_tokens].fill_(0)
+        runner_slot_mapping = self.runner.input_batch.block_table[
+            0].slot_mapping
+        runner_slot_mapping[:target_slot_mapping.shape[0]].copy_(
+            target_slot_mapping)
+        runner_slot_mapping[target_slot_mapping.
+                            shape[0]:num_input_tokens].fill_(0)
 
         # NOTE: Currently, just positions, slot_mapping, block_table and
         # seq_lens will be sent into MLAMetadata.
