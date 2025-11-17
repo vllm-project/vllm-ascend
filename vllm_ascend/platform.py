@@ -32,7 +32,7 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
-                               update_aclgraph_sizes,
+                               is_vl_model, update_aclgraph_sizes,
                                update_default_aclgraph_sizes)
 
 if TYPE_CHECKING:
@@ -302,6 +302,14 @@ class NPUPlatform(Platform):
             recompute_scheduler_config = RecomputeSchedulerConfig.initialize_from_config(
                 vllm_config.scheduler_config)
             vllm_config.scheduler_config = recompute_scheduler_config
+
+        if is_vl_model(vllm_config):
+            if bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))) or \
+               bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", '0'))):
+                raise ValueError(
+                    "Currently, VL models doesn't support "
+                    "FLASHCOMM in vllm-ascend. We will fix this in the future. "
+                    "Please set VLLM_ASCEND_ENABLE_FLASHCOMM1=0.")
 
     @classmethod
     def get_attn_backend_cls(
