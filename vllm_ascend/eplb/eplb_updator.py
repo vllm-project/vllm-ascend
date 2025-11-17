@@ -168,7 +168,7 @@ class EplbUpdator:
                 self.shared_dict["moe_load"] = moe_load.cpu()
                 logger.debug(
                     f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-            )
+                )
         else:
             moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()
