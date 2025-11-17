@@ -88,8 +88,7 @@ def generate_log2phy_map(expert_map):
     return log2phy_map
 
 
-def determine_default_log2phy_map(global_expert_num, world_size, rank_id,
-                                  global_redundant_expert_num):
+def determine_default_log2phy_map(global_expert_num, world_size, rank_id):
     if world_size == 1:
         local_ids = torch.arange(global_expert_num, dtype=torch.int32)
         expert_map_all = local_ids.unsqueeze(0).expand(world_size, -1)
