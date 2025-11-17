@@ -93,7 +93,7 @@ class AscendW8A8MXFP8DynamicLinearMethod:
             layer.weight_scale,
             scale_dtype=torch_npu.float8_e8m0fnu,
             pertoken_scale=pertoken_scale,
-            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+            pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
             bias=bias,
             output_dtype=output_dtype,
             group_sizes=[1,1,GROUP_SIZE]
@@ -229,7 +229,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod:
             act_quant_type = torch.float8_e4m3fn,
             weight_quant_type=torch.float8_e4m3fn,
             scale_type=torch.float8_e8m0fnu,
-            per_token_scale_type=torch_npu.float8_e8m0fnu,
+        per_token_scale_type=torch_npu.float8_e8m0fnu
             comm_quant_mode=4)
 
     def process_weights_after_loading(self, layer):

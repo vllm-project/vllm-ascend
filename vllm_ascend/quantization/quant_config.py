@@ -335,7 +335,7 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
             if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name \
-                or isinstance(self.quant_method, mx_types):
+                or isinstance(self.quant_method, mx_type):
                 setattr(param, "input_dim", 1)
                 param.input_dim = 1
 

@@ -31,7 +31,8 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.comm_utils import (
     async_all_to_all, gather_from_sequence_parallel_region)
 from vllm_ascend.utils import (AscendSocVersion, get_ascend_soc_version,
-                               is_hierarchical_communication_enabled)
+                               is_hierarchical_communication_enabled,
+                               is_A5)
 
 
 class MoETokenDispatcher(ABC):
