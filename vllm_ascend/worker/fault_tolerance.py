@@ -1,166 +1,181 @@
 import queue
 from memory_block_info import MemoryBlockInfo
+from vllm_ascend.worker.common import FaultAction
 from vllm_ascend.worker.recovery_context import RecoveryContext
 from vllm_ascend.worker.recovery_strategy import FaultStatus
 
 class FaultToleranceLevel(Enum):
-    """容错级别配置"""
+    """
+    Fault tolerance level
+    level 0: disable fault tolerance
+    level 1: enable base fault tolerance for weight UCE/Activation UCE/Network Error
+    level 2: enable all fault tolerance for weight UCE/Activation UCE/KVCache UCE/Network Error
+    """
     OFF = 0      # 关闭容错
     BASIC = 1    # 基础容错（KV Cache UCE不恢复）
     FULL = 2     # 完整容错（KV Cache实时备份恢复）
 
 class FaultTolerance:
-    """容错管理主类"""
-
     def __init__(self, level: FaultToleranceLevel = FaultToleranceLevel.OFF):
         self.level = level
         self.fault_queue = queue.Queue()
-
-        # 初始化内存信息
-        self.memory_info = MemoryBlockInfo()
-
-        # 构建责任链
-        self.chain = ForceStopHandler()
-        self.chain.set_next(UCEHandler(self.memory_info, self.uce_classifier))
-
+        self.memory_info = None
+        self.recovery_chain = self._build_recovery_chain()
         self.current_batch_context = None
 
-        logger.info(f"FaultTolerance initialized with level: {level.name}")
+        # 分布式属性初始化
+        self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+        self.rank = dist.get_rank() if dist.is_initialized() else 0
+
+    def _build_recovery_chain(self) -> RecoveryHandler:
+        """initialize recovery chain"""
+        pass
 
     def fault_tolerance_decorator(self, func: Callable) -> Callable:
-        """容错装饰器"""
+        """fault tolerance decorator"""
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            # Level 0: 直接执行，不进行容错
+            # disable fault tolerance
             if self.level == FaultToleranceLevel.OFF:
                 return func(*args, **kwargs)
-
-            while True:  # 无限循环，直到成功或决定退出
+            # enable fault tolerance
+            while True:
                 try:
-                    output = func(*args,**kwargs)
-                    # 执行原始函数
+                    output = func(*args, **kwargs)
                     return output
                 except Exception as e:
-                    logger.error(f"Exception caught in decorated function: {e}")
-                    recovery_context = RecoveryContext(e,memory_block_info=self.memory_info)
+                    recovery_context = RecoveryContext(
+                        e,
+                        memory_block_info=self.memory_info,
+                        rank=self.rank,
+                        level=self.level,
+                        fault_queue=self.fault_queue
+                    )
                     should_continue = self._handle_exception(recovery_context)
-
-                    # 根据结果决定是否继续循环
                     if not should_continue:
                         return None
 
         return wrapper
 
-    def _handle_exception(self, recovery_context: RecoveryContext) -> bool:
-        """统一异常处理逻辑，返回是否继续循环"""
-        rank = dist.get_rank() if dist.is_initialized() else 0
-
+    def _handle_exception(self, ctx: RecoveryContext) -> bool:
         try:
-            # 1. 责任链处理异常（入队逻辑在handler内部完成）
-            local_recovery_status = self.chain.handle(
-                recovery_context
-            )
-            logger.info(f"Rank {rank} local recovery status: {local_recovery_status.name}")
+            # 1. 责任链处理异常,并返回故障恢复状态
+            local_recovery_status = self.recovery_chain.handle(ctx)  # 返回Tensor
 
-            # 3. 收集所有rank恢复状态
-            global_decision = self._coordinate_recovery(local_recovery_status)
-            logger.info(f"Rank {rank} global decision: {global_decision.name}")
+            # 2. 故障恢复状态上报，请求决策获取
+            global_action = self._coordinate_recovery(local_recovery_status)
 
-            # 4. 根据全局决策执行动作
-            return self._execute_global_decision(global_decision)
+            # 3. 根据决策执行
+            return self._execute_global_decision(global_action, ctx)
 
         except Exception as inner_e:
-            logger.error(f"Error during exception handling: {inner_e}")
-            # 严重错误，退出循环
+            logger.error(f"Error in exception handling: {inner_e}")
             return False
-        finally:
-            self.current_batch_context = None
 
-    def _coordinate_recovery(self, local_status: RecoveryStatus) -> GlobalDecision:
-        """分布式协调恢复状态，使用scatter操作分发不同指令"""
-        if not dist.is_initialized():
-            # 单机模式，直接根据本地状态决策
-            if local_status == RecoveryStatus.SUCCESS:
-                return GlobalDecision.RETRY_TOKEN
+    def _coordinate_recovery(self, local_status: torch.Tensor) -> torch.Tensor:
+        """
+        Rank 0 Gather Recovery Status and decide global fault action
+        """
+        if not dist.is_initialized() or self.world_size == 1:
+            return self._single_node_decision(local_status)
+
+        # 确保Tensor在GPU上
+        local_tensor = local_status.npu() if local_status.device.type != 'npu' else local_status
+
+        # 收集所有rank的状态
+        all_status_tensors = self._gather_recovery_statuses(local_tensor)
+
+        if self.rank == 0:
+            decisions = self._analyze_global_status(all_status_tensors)
+            return self._scatter_decisions(decisions)
+        else:
+            return self._receive_decision()
+
+    def _single_node_decision(self, local_status: torch.Tensor) -> torch.Tensor:
+        """单机决策"""
+        if torch.equal(local_status, RecoveryStatus.SUCCESS_RECOMPUTE):
+            return FaultAction.RECOMPUTE
+        else:
+            return FaultAction.RAISE_EXCEPTION
+
+    def _gather_recovery_statuses(self, local_tensor: torch.Tensor) -> List[torch.Tensor]:
+        """使用gather收集恢复状态"""
+        if self.rank == 0:
+            # Rank 0准备接收缓冲区
+            gather_list = [torch.zeros_like(local_tensor) for _ in range(self.world_size)]
+            dist.gather(local_tensor, gather_list=gather_list, dst=0)
+            return gather_list
+        else:
+            # 其他rank只发送，不接收
+            dist.gather(local_tensor, gather_list=None, dst=0)
+            return []  # 非rank0返回空列表
+
+    def _analyze_global_status(self, all_status_tensors: List[torch.Tensor]) -> List[torch.Tensor]:
+        """
+        Analyze global status and generate decisions
+        """
+        success_ranks = []
+        failure_ranks = []
+
+        for rank, status_tensor in enumerate(all_status_tensors):
+            if torch.equal(status_tensor, RecoveryStatus.SUCCESS_RECOMPUTE):
+                success_ranks.append(rank)
+            elif torch.equal(status_tensor, RecoveryStatus.FAILED_ABORT):
+                failure_ranks.append(rank)
             else:
-                return GlobalDecision.THROW_EXCEPTION
+                logger.warning(f"Unknown status tensor from rank {rank}: {status_tensor}")
+                failure_ranks.append(rank)
 
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
+        logger.info(f"Global recovery: {len(success_ranks)} success, {len(failure_ranks)} failure")
 
-        # 1. 将本地状态转换为tensor
-        status_tensor = torch.tensor([local_status.value], dtype=torch.int32)
-
-        # 2. 收集所有rank的状态
-        all_statuses = torch.zeros(world_size, dtype=torch.int32)
-        dist.all_gather_into_tensor(all_statuses, status_tensor)
-
-        # 3. Rank0分析全局状态
-        if rank == 0:
-            # 转换回RecoveryStatus
-            all_recovery_statuses = [
-                RecoveryStatus(int(val)) for val in all_statuses.tolist()
-            ]
-
-            # 分析全局状态
-            success_ranks = []
-            failure_ranks = []
-
-            for i, status in enumerate(all_recovery_statuses):
-                if status == RecoveryStatus.SUCCESS:
-                    success_ranks.append(i)
+        decisions = []
+        if not failure_ranks:  # 全部恢复成功，执行重推
+            logger.info("All ranks recovered, issuing RECOMPUTE to all")
+            decisions = [FaultAction.RECOMPUTE] * self.world_size
+        elif not success_ranks:  # 全部恢复失败，均抛出异常
+            logger.warning("All ranks failed, issuing RAISE_EXCEPTION to all")
+            decisions = [FaultAction.RAISE_EXCEPTION] * self.world_size
+        else:  # 一部分恢复成功，一部分恢复失败
+            logger.warning(f"Partial recovery - success ranks: {success_ranks}")
+            for rank in range(self.world_size):
+                if rank in success_ranks:
+                    decisions.append(FaultAction.RETURN)
                 else:
-                    failure_ranks.append(i)
+                    decisions.append(FaultAction.RAISE_EXCEPTION)
 
-            # 决策逻辑
-            decisions = [GlobalDecision.RETURN] * world_size  # 默认RETURN
+        return decisions
 
-            if len(failure_ranks) == 0:  # 全部成功
-                # 所有rank都重推
-                for i in range(world_size):
-                    decisions[i] = GlobalDecision.RETRY_TOKEN
-            elif len(success_ranks) == 0:  # 全部失败
-                # 所有rank都抛出异常
-                for i in range(world_size):
-                    decisions[i] = GlobalDecision.THROW_EXCEPTION
-            else:  # 部分失败
-                # 成功的rank RETURN，失败的rank THROW_EXCEPTION
-                for i in success_ranks:
-                    decisions[i] = GlobalDecision.RETURN
-                for i in failure_ranks:
-                    decisions[i] = GlobalDecision.THROW_EXCEPTION
+    def _scatter_decisions(self, decisions: List[torch.Tensor]) -> torch.Tensor:
+        """分发决策"""
+        # 确保所有决策Tensor在GPU上
+        decisions_tensors = [decision.npu() for decision in decisions]
 
-            # 创建scatter buffer
-            decision_tensors = [torch.tensor([decisions[i].value], dtype=torch.int32) for i in range(world_size)]
-            # Rank0发送自己的决策
-            recv_tensor = torch.tensor([decisions[rank].value], dtype=torch.int32)
+        # Rank 0分发决策
+        recv_tensor = torch.tensor([0], dtype=torch.int32, device='npu')
+        dist.scatter(recv_tensor, scatter_list=decisions_tensors, src=0)
+        return recv_tensor
 
-            # Scatter决策
-            dist.scatter(recv_tensor, scatter_list=decision_tensors if rank == 0 else None, src=0)
-            return GlobalDecision(recv_tensor.item())
-        else:
-            # 非Rank0接收scatter
-            recv_tensor = torch.tensor([0], dtype=torch.int32)
-            dist.scatter(recv_tensor, scatter_list=None, src=0)
-            return GlobalDecision(recv_tensor.item())
+    def _receive_decision(self) -> torch.Tensor:
+        """非Rank 0接收决策"""
+        recv_tensor = torch.tensor([0], dtype=torch.int32, device='npu')
+        dist.scatter(recv_tensor, scatter_list=None, src=0)
+        return recv_tensor
 
-    def _execute_global_decision(self, decision: GlobalDecision) -> bool:
+    def _execute_global_decision(self, decision: torch.Tensor, ctx: RecoveryContext) -> bool:
         """根据全局决策执行相应动作，返回是否继续循环"""
-        if decision == GlobalDecision.RETRY_TOKEN:
-            logger.info("Global decision: RETRY_TOKEN - will retry current batch in loop")
-            # 继续循环，重新执行func(*args, **kwargs)
+        if torch.equal(decision, FaultAction.RECOMPUTE):
+            logger.info("Retrying current batch with RECOMPUTE")
             return True
-        elif decision == GlobalDecision.THROW_EXCEPTION:
-            logger.warning("Global decision: THROW_EXCEPTION - re-raising exception")
-            if self.current_batch_context and 'exception' in self.current_batch_context:
-                raise self.current_batch_context['exception']
+        elif torch.equal(decision, FaultAction.RAISE_EXCEPTION):
+            logger.warning("Raising exception due to recovery failure")
+            if ctx is not None and ctx.exception is not None:
+                raise ctx.exception
             else:
-                raise RuntimeError("Recovery failed, aborting request")
-        elif decision == GlobalDecision.RETURN:
-            logger.info("Global decision: RETURN - terminating inference loop")
-            # 退出循环
+                raise RuntimeError("No exception in RecoveryContext")
+        elif torch.equal(decision, FaultAction.RETURN):
+            logger.info("Terminating inference loop with RETURN")
             return False
         else:
-            logger.error(f"Unknown global decision: {decision}")
-            # 未知决策，退出循环
+            logger.error(f"Unknown decision: {decision}")
             return False

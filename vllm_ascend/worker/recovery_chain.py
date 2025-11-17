@@ -1,3 +1,6 @@
+from common import FaultStatus,UCEType
+from vllm_ascend.worker.recovery_context import RecoveryContext
+
 class UCEClassifier:
     """
     HBM UCE错误分类器，用于在UCEHandler中执行对应恢复手段
@@ -6,78 +9,41 @@ class UCEClassifier:
     def __init__(self, memory_info: MemoryBlockInfo):
         self.memory_info = memory_info
 
-    def classify_uce_error(self, exception: Exception, fault_context: Dict) -> Tuple[UCEErrorType, Optional[int]]:
-        """
-        分类UCE错误类型和提取地址
-        返回: (错误类型, 地址)
-        """
-        try:
-            error_str = str(exception).lower()
+    def classify_uce_error(self, ctx:RecoveryContext) -> Tuple[UCEType, Optional[int]]:
 
-            # 1. 从异常信息中提取HBM地址
-            address = self._extract_address_from_exception(error_str, fault_context)
+        error_str = str(ctx.exception).lower()
 
-            if address is None:
-                logger.warning("Cannot extract HBM address from exception")
-                return UCEErrorType.UNKNOWN, None
-
-            # 2. 使用MemoryBlockInfo进行地址映射
-            error_type = self.memory_info.classify_address(address)
-
-            return error_type, address
-
-        except Exception as e:
-            logger.error(f"Error classifying UCE: {e}")
-            return UCEErrorType.UNKNOWN, None
-
-    def _extract_address_from_exception(self, error_str: str, fault_context: Dict) -> Optional[int]:
-        """从异常信息中提取HBM地址"""
-        # 优先从fault_context获取
-        if 'hbm_address' in fault_context.get('metadata', {}):
-            return int(fault_context['metadata']['hbm_address'])
-
-        # 从异常字符串中解析地址
-        import re
-
-        # 匹配十六进制地址
-        hex_match = re.search(r'0x([0-9a-fA-F]+)', error_str)
-        if hex_match:
-            return int(hex_match.group(0), 16)
-
-        # 匹配十进制地址
-        dec_match = re.search(r'address\s+(\d+)', error_str)
-        if dec_match:
-            return int(dec_match.group(1))
-
-        return None
+        # 1. 调用PTA API获取发生UCE错误的地址
 
 
-class RecoveryHandler:
+        # 2. 错误地址匹配，判断是哪类的UCE错误
+        error_type = self.classify_address(address)
+
+        return error_type, address
+
+class RecoveryHandler(ABC):
     """责任链处理器基类"""
-
-    def __init__(self, next_handler: Optional['RecoveryHandler'] = None):
-        self.next_handler = next_handler
+    def __init__(self):
+        self.next_handler = None
 
     def set_next(self, handler: 'RecoveryHandler') -> 'RecoveryHandler':
-        """设置下一个处理器"""
+        """Set next handler"""
         self.next_handler = handler
         return handler
+    @abstractmethod
+    def can_handle(self, ctx:RecoveryContext) -> bool:
+        pass
+    @abstractmethod
+    def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
+        """Specific recovery function"""
+        pass
 
-    def can_handle(self, exception: Exception, fault_context: Dict, fault_queue: queue.Queue) -> bool:
-        """判断是否能处理该异常，如果能处理则将状态入队"""
-        raise NotImplementedError
-
-    def recover(self, fault_context: Dict, config: Any) -> RecoveryStatus:
-        """执行恢复逻辑，返回本地恢复状态"""
-        raise NotImplementedError
-
-    def handle(self, exception: Exception, fault_context: Dict, config: Any,
-               fault_queue: queue.Queue) -> RecoveryStatus:
-        """责任链处理入口"""
-        if self.can_handle(exception, fault_context, fault_queue):
-            return self.recover(fault_context, config)
+    def handle(self, ctx:RecoveryContext) -> RecoveryStatus:
+        """ Entry point for RecoveryHandler """
+        if self.can_handle(ctx):
+            return self.recover(ctx)
         elif self.next_handler:
-            return self.next_handler.handle(exception, fault_context, config, fault_queue)
+            return self.next_handler.handle(ctx)
         else:
             logger.warning("No handler can process the exception")
             return RecoveryStatus.FAILURE
@@ -86,74 +52,48 @@ class RecoveryHandler:
 class ForceStopHandler(RecoveryHandler):
     """处理Force Stop异常的处理器"""
 
-    def can_handle(self, exception: Exception, fault_context: Dict, fault_queue: queue.Queue) -> bool:
+    def can_handle(self, ctx:RecoveryContext) -> bool:
         """判断是否为Force Stop异常，如果是则入队"""
-        error_str = str(exception).lower()
-        is_force_stop = ('force stop' in error_str or 'device stopped' in error_str or
-                         'stop_device' in error_str)
+        error_str = str(ctx.exception).lower()
+        return 'force stop' in error_str
 
-        if is_force_stop:
-            # 构建fault_context
-            rank = dist.get_rank() if dist.is_initialized() else 0
-            fault_context.update({
-                'exception': exception,
-                'rank': rank,
-                'timestamp': time.time(),
-                'fault_type': 'force_stop'
-            })
 
-            # 创建FaultStatus并入队
-            fault_status = FaultStatus.from_context(fault_context)
-            fault_queue.put(fault_status)
-            logger.info(f"ForceStopHandler: Enqueued force stop fault status for rank {rank}")
-
-            return True
-
-        return False
-
-    def recover(self, fault_context: Dict, config: Any) -> RecoveryStatus:
+    def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
         """处理Force Stop异常，仅返回状态"""
-        logger.info("ForceStopHandler: Detected Force Stop exception")
-        # Force Stop异常不需要特殊恢复，直接返回成功状态
-        return RecoveryStatus.SUCCESS
+        return RecoveryStatus.SUCCESS_RECOMPUTE
 
+class NetworkHandler(RecoveryHandler):
+
+    def can_handle(self, ctx:RecoveryContext) -> bool:
+        error_str = str(ctx.exception).lower()
+        if 'remote' in error_str:
+            ctx.fault_queue.put_nowait(FaultType.UCE)
+            return true
+        return false
+
+    def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
+        """恢复Network Error,无特殊操作"""
+        return RecoveryStatus.SUCCESS_RECOMPUTE
 
 class UCEHandler(RecoveryHandler):
     """统一处理UCE异常的处理器"""
 
-    def __init__(self, model_engine: Any, memory_info: MemoryBlockInfo, uce_classifier: UCEClassifier):
+    def __init__(self, uce_classifier: UCEClassifier):
         super().__init__()
-        self.memory_info = memory_info
         self.uce_classifier = uce_classifier
 
-    def can_handle(self, exception: Exception, fault_context: Dict, fault_queue: queue.Queue) -> bool:
+    def can_handle(self, ctx:RecoveryContext) -> bool:
         """判断是否为UCE异常，如果是则入队"""
-        error_str = str(exception).lower()
-        is_uce = 'uce' in error_str
-
-        if is_uce:
-            # 构建fault_context
-            rank = dist.get_rank() if dist.is_initialized() else 0
-            fault_context.update({
-                'exception': exception,
-                'rank': rank,
-                'timestamp': time.time(),
-                'fault_type': 'uce_error'
-            })
-
-            # 创建FaultStatus并入队
-            fault_status = FaultStatus.from_context(fault_context)
-            fault_queue.put(fault_status)
-            logger.info(f"UCEHandler: Enqueued UCE fault status for rank {rank}")
-
-            return True
-
-        return False
+        error_str = str(ctx.exception).lower()
+        if 'uce' in error_str:
+            ctx.fault_queue.put_nowait(FaultType.UCE)
+            return true
+        return false
 
     def recover(self, fault_context: Dict, config: Any) -> RecoveryStatus:
         """处理UCE异常，内部判断具体类型并执行恢复"""
         try:
-            exception = fault_context.get('exception')
+            exception = ctx.exception
             if not exception:
                 logger.error("Missing exception in fault context")
                 return RecoveryStatus.FAILURE
