@@ -103,6 +103,7 @@ jobs:
               - Qwen3-VL-30B-A3B-Instruct
               - DeepSeek-V2-Lite
               - Qwen3-30B-A3B-W8A8
+              - ERNIE-4.5-21B-A3B-PT
           - os: linux-aarch64-a2-4
             model_list:
               - Qwen3-Next-80B-A3B-Instruct
