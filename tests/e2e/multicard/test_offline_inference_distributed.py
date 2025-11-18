@@ -181,8 +181,11 @@ def test_sp_for_qwen3_moe() -> None:
                     distributed_executor_backend="mp",
                     compilation_config={
                         "pass_config": {
-                            "enable_sequence_parallelism": True
-                        }
+                            "enable_sequence_parallelism": True,
+                        },
+                        # FIXME: When check the splitting_ops list is empyt should first check it is not none
+                        #  issue has been fixed which imported in PR:https://github.com/vllm-project/vllm/pull/27126
+                        "splitting_ops": splitting_ops
                     },
                     enable_expert_parallel=True,
                     enforce_eager=True) as vllm_model:
