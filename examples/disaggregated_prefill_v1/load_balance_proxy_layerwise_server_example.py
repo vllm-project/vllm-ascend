@@ -88,6 +88,7 @@ import argparse
 import asyncio
 import functools
 import heapq
+import ipaddress
 import os
 import sys
 import threading
@@ -115,7 +116,13 @@ class ServerState:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        self.url = f'http://{host}:{port}/v1'
+        ip = ipaddress.ip_address(self.host)
+        if isinstance(ip, ipaddress.IPv4Address):
+            self.url = f'http://{host}:{port}/v1'
+        elif isinstance(ip, ipaddress.IPv6Address):
+            self.url = f'http://[{host}]:{port}/v1'
+        else:
+            raise RuntimeError(f"Invild host IP address {ip}")
         self.client = httpx.AsyncClient(timeout=None,
                                         base_url=self.url,
                                         limits=httpx.Limits(
@@ -356,6 +363,9 @@ async def send_request_to_service(client: httpx.AsyncClient,
     req_data = req_data.copy()
     req_data["stream"] = False
     req_data["max_tokens"] = 1
+    req_data["min_tokens"] = 1
+    if "max_completion_tokens" in req_data:
+        req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
         del req_data["stream_options"]
     headers = {
