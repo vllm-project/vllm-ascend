@@ -318,9 +318,9 @@ you may encounter the following error:
 AISBench - ERROR - /vllm-workspace/benchmark/ais_bench/benchmark/clients/base_client.py - raise_error - 35 - [AisBenchClientException] Request failed: HTTP status 400. Server response: {"error":{"message":"1 validation error for ChatCompletionContentPartImageParam\nimage_url\n  Input should be a valid dictionary [type=dict_type, input_value='data/textvqa/train_images/b2ae0f96dfbea5d8.jpg', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.12/v/dict_type None","type":"BadRequestError","param":null,"code":400}}
 ```
 
-You need to manually replace the dataset image paths with absolute paths, changing `/path/to/benchmark/ais_bench/datasets/textvqa/train_images` to the actual absolute directory where the images are stored:
+You need to manually replace the dataset image paths with absolute paths, changing `/path/to/benchmark/ais_bench/datasets/textvqa/train_images/` to the actual absolute directory where the images are stored:
 
 ```bash
 cd ais_bench/datasets/textvqa/textvqa_json
-sed -i 's#data/textvqa/train_images/#/path/to/benchmark/ais_bench/datasets/textvqa/train_images#g' textvqa_val.json
+sed -i 's#data/textvqa/train_images/#/path/to/benchmark/ais_bench/datasets/textvqa/train_images/#g' textvqa_val.json
 ```
