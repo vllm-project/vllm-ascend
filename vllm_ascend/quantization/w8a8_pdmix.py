@@ -41,8 +41,7 @@ class AscendW8A8PDMixLinearMethod(AscendW8A8DynamicLinearMethod):
             layer.input_scale.data.repeat(expanding_factor),
             requires_grad=False)
         layer.aclnn_input_scale_reciprocal = torch.nn.Parameter(
-            1.0 / layer.aclnn_input_scale.data,
-            requires_grad=False)
+            1.0 / layer.aclnn_input_scale.data, requires_grad=False)
         layer.aclnn_input_offset = torch.nn.Parameter(
             layer.input_offset.data.repeat(expanding_factor),
             requires_grad=False).to(layer.aclnn_input_scale.dtype)
