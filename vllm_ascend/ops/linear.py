@@ -37,7 +37,8 @@ from vllm.model_executor.layers.quantization.base_config import \
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_enable_nz, is_first_k_dense
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, is_enable_nz,
+                               is_first_k_dense)
 
 
 class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):

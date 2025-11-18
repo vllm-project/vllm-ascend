@@ -36,14 +36,15 @@ from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import (get_flashcomm2_otp_group,
+from vllm_ascend.distributed.parallel_state import (get_dftp_group,
+                                                    get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
-                                                    get_otp_group,
-                                                    get_dftp_group)
+                                                    get_otp_group)
 from vllm_ascend.ops.fused_moe.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, flashcomm2_enable,
-                               mlp_tp_enable, oproj_tp_enable, denseffn_tp_enable)
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, denseffn_tp_enable,
+                               flashcomm2_enable, mlp_tp_enable,
+                               oproj_tp_enable)
 
 from .utils import get_quant_method
 
@@ -349,7 +350,9 @@ class AscendLinearMethod(LinearMethodBase):
         if isinstance(layer, RowParallelLinear):
             if layer.prefix.find("o_proj") != -1 and oproj_tp_enable():
                 tp_rank = get_otp_group().rank_in_group
-            elif layer.prefix.find("down_proj") != -1 and (mlp_tp_enable() or (denseffn_tp_enable() and layer.is_first_k_dense)):
+            elif layer.prefix.find("down_proj") != -1 and (
+                    mlp_tp_enable() or
+                (denseffn_tp_enable() and layer.is_first_k_dense)):
                 if denseffn_tp_enable() and layer.is_first_k_dense:
                     tp_rank = get_dftp_group().rank_in_group
                 else:

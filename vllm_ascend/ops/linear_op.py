@@ -52,17 +52,17 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import (get_flashcomm2_odp_group,
+from vllm_ascend.distributed.parallel_state import (get_dftp_group,
+                                                    get_flashcomm2_odp_group,
                                                     get_flashcomm2_otp_group,
                                                     get_mlp_tp_group,
-                                                    get_otp_group,
-                                                    get_dftp_group)
-from vllm_ascend.utils import (dense_optim_enable, enable_sp,
-                               flashcomm2_enable,
+                                                    get_otp_group)
+from vllm_ascend.utils import (dense_optim_enable, denseffn_tp_enable,
+                               enable_sp, flashcomm2_enable,
                                get_flashcomm2_reorgnized_batch_ids,
-                               matmul_allreduce_enable, mlp_tp_enable,
-                               oproj_tp_enable, shared_expert_dp_enabled,
-                               denseffn_tp_enable, is_first_k_dense)
+                               is_first_k_dense, matmul_allreduce_enable,
+                               mlp_tp_enable, oproj_tp_enable,
+                               shared_expert_dp_enabled)
 
 
 class CustomLinearOp:
@@ -161,10 +161,10 @@ class MLPColumnParallelOp(CustomColumnParallelOp):
 
     @property
     def comm_group(self):
-        if denseffn_tp_enable():
-            return get_dftp_group()
-        else:
+        if mlp_tp_enable():
             return get_mlp_tp_group()
+        else:
+            return get_dftp_group()
 
     def apply_impl(
         self,
@@ -187,10 +187,10 @@ class MLPRowParallelOp(CustomRowParallelOp):
 
     @property
     def comm_group(self):
-        if denseffn_tp_enable():
-            return get_dftp_group()
-        else:
+        if mlp_tp_enable():
             return get_mlp_tp_group()
+        else:
+            return get_dftp_group()
 
     def apply_impl(
         self, input_: torch.Tensor
@@ -613,7 +613,9 @@ class SequenceRowParallelOp(CustomRowParallelOp):
 def _get_column_parallel_op(
         prefix, layer
 ) -> Optional[Union[MLPColumnParallelOp, SequenceColumnParallelOp]]:
-    if (mlp_tp_enable() or (denseffn_tp_enable() and is_first_k_dense(prefix))) and "gate_up_proj" in prefix:
+    if (mlp_tp_enable() or
+        (denseffn_tp_enable()
+         and is_first_k_dense(prefix))) and "gate_up_proj" in prefix:
         return MLPColumnParallelOp(layer)
     if enable_sp():
         if "shared_expert" in prefix:
@@ -633,7 +635,9 @@ def _get_row_parallel_op(
 ) -> Optional[Union[MLPRowParallelOp, OProjRowParallelOp,
                     Flashcomm2OProjRowParallelOp, MatmulAllreduceRowParallelOp,
                     SequenceRowParallelOp]]:
-    if "down_proj" in prefix and (mlp_tp_enable() or (denseffn_tp_enable() and is_first_k_dense(prefix))):
+    if "down_proj" in prefix and (mlp_tp_enable() or
+                                  (denseffn_tp_enable()
+                                   and is_first_k_dense(prefix))):
         return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
