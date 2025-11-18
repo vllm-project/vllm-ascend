@@ -23,27 +23,7 @@ from vllm.model_executor.models.roberta import (
     replace_roberta_positions)
 from vllm.sequence import IntermediateTensors
 
-# aclgraph does not support shift operator for now
-# TODO: revert me when aclgraph supports shift operator
-TOKEN_TYPE_SHIFT = 30
-TOKEN_TYPE_MULTIPLIER = 1 << 30
-TOKEN_MASK = TOKEN_TYPE_MULTIPLIER - 1
-
-
-def _encode_token_type_ids(input_ids: torch.Tensor,
-                           token_type_ids: torch.Tensor) -> None:
-    # input_ids can be padded to the right
-    input_ids[:token_type_ids.shape[0]].bitwise_or_(token_type_ids *
-                                                    TOKEN_TYPE_MULTIPLIER)
-
-
-def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
-
-    token_type_ids = input_ids // TOKEN_TYPE_MULTIPLIER
-
-    input_ids.bitwise_and_(TOKEN_MASK)
-
-    return token_type_ids
+from vllm_ascend.patch.worker.patch_bert import TOKEN_TYPE_SHIFT, _decode_token_type_ids, _encode_token_type_ids
 
 
 def roberta_for_sequence_classification_forward(

@@ -47,3 +47,30 @@ def test_bge_model_correctness():
         name_1="vllm",
         tol=1e-2,
     )
+
+
+def test_bge_large_model_correctness():
+    queries = ['What is the capital of China?', 'Explain gravity']
+
+    model_name = snapshot_download("BAAI/bge-large-zh-v1.5")
+    with VllmRunner(
+            model_name,
+            task="embed",
+            enforce_eager=True,
+    ) as vllm_runner:
+        vllm_outputs = vllm_runner.encode(queries)
+
+    with HfRunner(
+            model_name,
+            dtype="float32",
+            is_sentence_transformer=True,
+    ) as hf_runner:
+        hf_outputs = hf_runner.encode(queries)
+
+    check_embeddings_close(
+        embeddings_0_lst=hf_outputs,
+        embeddings_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+        tol=1e-2,
+    )
