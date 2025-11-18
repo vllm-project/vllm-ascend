@@ -100,6 +100,24 @@ class AscendConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
+        self.denseffn_tensor_parallel_size = additional_config.get(
+            "denseffn_tensor_parallel_size", None)
+        if self.denseffn_tensor_parallel_size is not None:
+            logger.info(
+                f"Enable denseffn_tensor_parallel_size={self.denseffn_tensor_parallel_size} in pure DP scenario"
+            )
+            if vllm_config.parallel_config.tensor_parallel_size != 1:
+                raise AssertionError(
+                    "denseffn_tensor_parallel_size is only supported in the pure DP scenario"
+                )
+            if not self.torchair_graph_config.enabled:
+                raise AssertionError(
+                    "denseffn_tensor_parallel_size is only supported in graph mode"
+                )
+            if vllm_config.kv_transfer_config is None or not vllm_config.kv_transfer_config.is_kv_consumer:
+                raise AssertionError(
+                    "denseffn_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+                )
         self.enable_cpu_binding = additional_config.get(
             "enable_cpu_binding", False)
         self.pd_tp_ratio = 1

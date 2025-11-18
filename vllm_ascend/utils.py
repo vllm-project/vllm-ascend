@@ -21,6 +21,7 @@ import atexit
 import functools
 import math
 import os
+import re
 from contextlib import contextmanager, nullcontext
 from enum import Enum
 from threading import Lock
@@ -767,6 +768,8 @@ def lmhead_tp_enable() -> bool:
 def oproj_tp_enable() -> bool:
     return get_ascend_config().oproj_tensor_parallel_size is not None
 
+def denseffn_tp_enable() -> bool:
+    return get_ascend_config().denseffn_tensor_parallel_size is not None
 
 def mlp_tp_enable() -> bool:
     return envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMIZE
@@ -1014,3 +1017,25 @@ def get_flashcomm2_reorgnized_batch_ids(global_tp_size) -> list[list[int]]:
         reorgnized_batch_ids.append(ranks)
 
     return reorgnized_batch_ids
+
+def is_first_k_dense(prefix: str) -> bool:
+    from vllm.config import get_current_vllm_config
+    match = re.search(r'layers\.(\d+)\.', prefix)
+    if not match:
+        return False
+
+    layer_idx = int(match.group(1))
+    
+    vllm_config = get_current_vllm_config()
+    if vllm_config is None:
+        raise ValueError("get_current_vllm_config() returned None. "
+                            "Ensure this function is called within the model initialization context.")
+    config = vllm_config.model_config.hf_config
+
+    is_moe_layer = (
+        config.n_routed_experts is not None and
+        layer_idx >= config.first_k_dense_replace and
+        layer_idx % config.moe_layer_freq == 0
+    )
+
+    return not is_moe_layer

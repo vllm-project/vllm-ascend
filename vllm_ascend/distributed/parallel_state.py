@@ -17,6 +17,7 @@ _MLP_TP: Optional[GroupCoordinator] = None
 _OTP: Optional[GroupCoordinator] = None
 _LMTP: Optional[GroupCoordinator] = None
 _P_TP: Optional[GroupCoordinator] = None
+_DFTP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_OTP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_ODP: Optional[GroupCoordinator] = None
 
@@ -37,6 +38,10 @@ def get_lmhead_tp_group() -> GroupCoordinator:
         "lm head tensor parallel group is not initialized")
     return _LMTP
 
+def get_dftp_group() -> GroupCoordinator:
+    assert _DFTP is not None, (
+        "denseffn tensor parallel group is not initialized")
+    return _DFTP
 
 def get_flashcomm2_otp_group() -> GroupCoordinator:
     return _FLASHCOMM2_OTP
@@ -178,6 +183,22 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                           get_world_group().local_rank,
                                           backend,
                                           group_name="lmheadtp")
+    
+    denseffn_tensor_parallel_size = get_ascend_config().denseffn_tensor_parallel_size
+    if denseffn_tensor_parallel_size is not None:
+        group_ranks = []
+        global _DFTP
+        num_denseffn_tensor_parallel_groups: int = (world_size //
+                                                    denseffn_tensor_parallel_size)
+        for i in range(num_denseffn_tensor_parallel_groups):
+            ranks = list(
+                range(i * denseffn_tensor_parallel_size,
+                     (i + 1) * denseffn_tensor_parallel_size))
+            group_ranks.append(ranks)
+        _DFTP = init_model_parallel_group(group_ranks,
+                                          get_world_group().local_rank,
+                                          backend,
+                                          group_name="denseffntp")
 
     # TODO: Extract and unify the logic across different communication group.
     if flashcomm2_enable():
@@ -257,6 +278,11 @@ def destroy_ascend_model_parallel():
     if _P_TP:
         _P_TP.destroy()
     _P_TP = None
+
+    global _DFTP
+    if _DFTP:
+        _DFTP.destroy()
+    _DFTP = None
 
     global _FLASHCOMM2_OTP
     if _FLASHCOMM2_OTP and get_ascend_config(
