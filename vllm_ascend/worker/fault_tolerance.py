@@ -1,6 +1,7 @@
 import queue
 from memory_block_info import MemoryBlockInfo
 from vllm_ascend.worker.common import FaultAction
+from vllm_ascend.worker.recovery_chain import UCEHandler
 from vllm_ascend.worker.recovery_context import RecoveryContext
 from vllm_ascend.worker.recovery_strategy import FaultStatus
 
@@ -16,24 +17,50 @@ class FaultToleranceLevel(Enum):
     FULL = 2     # 完整容错（KV Cache实时备份恢复）
 
 class FaultTolerance:
+    _recovery_group = None
     def __init__(self, level: FaultToleranceLevel = FaultToleranceLevel.OFF):
         self.level = level
         self.fault_queue = queue.Queue()
         self.memory_info = None
         self.recovery_chain = self._build_recovery_chain()
-        self.current_batch_context = None
 
         # 分布式属性初始化
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.rank = dist.get_rank() if dist.is_initialized() else 0
 
+        self._init_recovery_group()
+    #TODO: 不同并行策略下，通信组的初始化方式待调整（所需参数待确认）
+    def _init_recovery_group(self):
+        """初始化恢复专用进程组（与FaultAware类似）"""
+        if not dist.is_initialized() or self.world_size == 1:
+            return
+
+        logger.info(
+            f"Initializing recovery process group: "
+            f"rank={self.rank}, world_size={self.world_size}, backend=gloo"
+        )
+
+        # 创建恢复专用进程组
+        FaultTolerance._recovery_group = dist.new_group(
+            ranks=None,  # 包含所有rank
+            timeout=timedelta(minutes=5),
+            backend="gloo",  # 使用gloo后端
+        )
+
+        logger.info("Recovery process group initialized successfully")
+
     def _build_recovery_chain(self) -> RecoveryHandler:
         """initialize recovery chain"""
-        pass
+        force_stop_handler = ForceStopHandler()
+        network_handler = NetworkHandler()
+        uce_handler = UCEHandler()
+
+        force_stop_handler.set_next(network_handler).set_next(uce_handler)
+
+        return force_stop_handler
 
     def fault_tolerance_decorator(self, func: Callable) -> Callable:
         """fault tolerance decorator"""
-
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             # disable fault tolerance
@@ -52,22 +79,28 @@ class FaultTolerance:
                         level=self.level,
                         fault_queue=self.fault_queue
                     )
-                    should_continue = self._handle_exception(recovery_context)
-                    if not should_continue:
+                    ft_action = self._handle_exception(recovery_context)
+                    if torch.equal(ft_action,FaultAction.RECOMPUTE):
+                        continue
+                    elif torch.equal(ft_action,FaultAction.RAISE_EXCEPTION):
+                        raise e
+                    elif torch.equal(ft_action,FaultAction.FAILED_ABORT):
                         return None
+                    else:
+                        raise e
 
         return wrapper
 
-    def _handle_exception(self, ctx: RecoveryContext) -> bool:
+    def _handle_exception(self, ctx: RecoveryContext) -> torch.Tensor:
         try:
             # 1. 责任链处理异常,并返回故障恢复状态
             local_recovery_status = self.recovery_chain.handle(ctx)  # 返回Tensor
 
             # 2. 故障恢复状态上报，请求决策获取
-            global_action = self._coordinate_recovery(local_recovery_status)
+            ft_action = self._coordinate_recovery(local_recovery_status)
 
-            # 3. 根据决策执行
-            return self._execute_global_decision(global_action, ctx)
+            # 3. 返回请求处理操作
+            return ft_action
 
         except Exception as inner_e:
             logger.error(f"Error in exception handling: {inner_e}")
@@ -80,7 +113,7 @@ class FaultTolerance:
         if not dist.is_initialized() or self.world_size == 1:
             return self._single_node_decision(local_status)
 
-        # 确保Tensor在GPU上
+        # 确保Tensor在NPU上
         local_tensor = local_status.npu() if local_status.device.type != 'npu' else local_status
 
         # 收集所有rank的状态
@@ -104,7 +137,12 @@ class FaultTolerance:
         if self.rank == 0:
             # Rank 0准备接收缓冲区
             gather_list = [torch.zeros_like(local_tensor) for _ in range(self.world_size)]
-            dist.gather(local_tensor, gather_list=gather_list, dst=0)
+            dist.gather(
+                local_tensor,
+                gather_list=gather_list,
+                dst=0,
+                group=FaultTolerance._recovery_group
+            )
             return gather_list
         else:
             # 其他rank只发送，不接收
@@ -148,18 +186,28 @@ class FaultTolerance:
 
     def _scatter_decisions(self, decisions: List[torch.Tensor]) -> torch.Tensor:
         """分发决策"""
-        # 确保所有决策Tensor在GPU上
+        # 确保所有决策Tensor在NPU上
         decisions_tensors = [decision.npu() for decision in decisions]
 
         # Rank 0分发决策
         recv_tensor = torch.tensor([0], dtype=torch.int32, device='npu')
-        dist.scatter(recv_tensor, scatter_list=decisions_tensors, src=0)
+        dist.scatter(
+            recv_tensor,
+            scatter_list=decisions_tensors,
+            src=0,
+            group=FaultTolerance._recovery_group
+        )
         return recv_tensor
 
     def _receive_decision(self) -> torch.Tensor:
         """非Rank 0接收决策"""
         recv_tensor = torch.tensor([0], dtype=torch.int32, device='npu')
-        dist.scatter(recv_tensor, scatter_list=None, src=0)
+        dist.scatter(
+            recv_tensor,
+            scatter_list=None,
+            src=0,
+            group=FaultTolerance._recovery_group
+        )
         return recv_tensor
 
     def _execute_global_decision(self, decision: torch.Tensor, ctx: RecoveryContext) -> bool:
@@ -179,3 +227,16 @@ class FaultTolerance:
         else:
             logger.error(f"Unknown decision: {decision}")
             return False
+
+    def destroy_recovery_group(self):
+        """销毁恢复进程组（与FaultAware对称）"""
+        if FaultTolerance._recovery_group is None:
+            return
+
+        logger.info("Destroying recovery process group")
+        try:
+            dist.destroy_process_group(FaultTolerance._recovery_group)
+            FaultTolerance._recovery_group = None
+            logger.info("Successfully destroyed recovery process group")
+        except Exception as e:
+            logger.error(f"Failed to destroy recovery process group: {e}")

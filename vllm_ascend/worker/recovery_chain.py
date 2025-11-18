@@ -1,25 +1,25 @@
 from common import FaultStatus,UCEType
 from vllm_ascend.worker.recovery_context import RecoveryContext
 
-class UCEClassifier:
-    """
-    HBM UCE错误分类器，用于在UCEHandler中执行对应恢复手段
-    """
-
-    def __init__(self, memory_info: MemoryBlockInfo):
-        self.memory_info = memory_info
-
-    def classify_uce_error(self, ctx:RecoveryContext) -> Tuple[UCEType, Optional[int]]:
-
-        error_str = str(ctx.exception).lower()
-
-        # 1. 调用PTA API获取发生UCE错误的地址
+all_err = [
+    "UCE ERROR",
+    "HBM MULTI BIT ECC ERROR",
+    "FORCE STOP",
+    "SUSPECT MEM ERROR",
+    "HCCS LINK ERROR",
+    "HCCL OP RETRY FAILED",
+    "SUSPECT REMOTE ERROR"
+]
 
 
-        # 2. 错误地址匹配，判断是哪类的UCE错误
-        error_type = self.classify_address(address)
+uce_error = ["UCE ERROR"]
+force_stop_error = ["FORCE STOP"]
+network_error = [
+    "SUSPECT REMOTE ERROR",
+    "HCCS LINK ERROR",
+    "HCCL OP RETRY FAILED"
+]
 
-        return error_type, address
 
 class RecoveryHandler(ABC):
     """责任链处理器基类"""
@@ -30,9 +30,11 @@ class RecoveryHandler(ABC):
         """Set next handler"""
         self.next_handler = handler
         return handler
+
     @abstractmethod
     def can_handle(self, ctx:RecoveryContext) -> bool:
         pass
+
     @abstractmethod
     def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
         """Specific recovery function"""
@@ -67,7 +69,7 @@ class NetworkHandler(RecoveryHandler):
     def can_handle(self, ctx:RecoveryContext) -> bool:
         error_str = str(ctx.exception).lower()
         if 'remote' in error_str:
-            ctx.fault_queue.put_nowait(FaultType.UCE)
+            ctx.fault_queue.put_nowait(FaultStatus.NETWORK_ERR)
             return true
         return false
 
@@ -77,20 +79,15 @@ class NetworkHandler(RecoveryHandler):
 
 class UCEHandler(RecoveryHandler):
     """统一处理UCE异常的处理器"""
-
-    def __init__(self, uce_classifier: UCEClassifier):
-        super().__init__()
-        self.uce_classifier = uce_classifier
-
     def can_handle(self, ctx:RecoveryContext) -> bool:
         """判断是否为UCE异常，如果是则入队"""
         error_str = str(ctx.exception).lower()
         if 'uce' in error_str:
-            ctx.fault_queue.put_nowait(FaultType.UCE)
+            ctx.fault_queue.put_nowait(FaultStatus.UCE_ERR)
             return true
         return false
 
-    def recover(self, fault_context: Dict, config: Any) -> RecoveryStatus:
+    def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
         """处理UCE异常，内部判断具体类型并执行恢复"""
         try:
             exception = ctx.exception
