@@ -231,7 +231,7 @@ def test_e2e_qwen3_moe_with_torchair():
 def _deepseek_v2_lite_torchair_test_fixure(
     additional_config: Dict,
     *,
-    tensor_parallel_size=1,
+    tensor_parallel_size=2,
     use_v1_schduler=False,
 ):
     example_prompts = [
