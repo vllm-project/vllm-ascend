@@ -25,10 +25,181 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
 from vllm.platforms import CpuArchEnum
+from vllm.triton_utils import tl, triton
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (AscendDeviceType, enable_custom_op,
                                get_ascend_device_type)
+
+
+@triton.jit
+def _triton_rope(
+    q_ptr,
+    q_row_stride,
+    k_ptr,
+    k_row_stride,
+    cos,
+    cos_row_stride,
+    sin,
+    sin_row_stride,
+    num_tokens,
+    n_qh: tl.constexpr,
+    n_kh: tl.constexpr,
+    hd: tl.constexpr,
+    rope_dim: tl.constexpr,
+    pad_n_qh: tl.constexpr,
+    pad_n_kh: tl.constexpr,
+    pad_rope_dim: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    IS_NEOX_STYLE: tl.constexpr,
+):
+    """
+    This triton kernel applies rotary embedding on q and k.
+    It supports rope_dim != head_dim scenario.
+    It supports both neox style and non-neox style rope computation.
+    
+    Input tensor layout assumptions:
+    
+    q size: (num_tokens, num_q_heads, head_dim)
+    q stride: (num_q_heads * head_dim, head_dim, 1)
+    k size: (num_tokens, num_kv_heads, head_dim)
+    k stride: (num_kv_heads * head_dim, head_dim, 1)
+    cos/sin size: (num_tokens, rope_dim/2)
+    cos/sin stride: (rope_dim/2, 1)
+    
+    Different compute pattern of IS_NEOX_STYLE:
+
+    if IS_NEOX_STYLE:
+        x1, x2 = torch.chunk(x, 2, dim=-1)
+    else:
+        x1 = x[..., ::2]
+        x2 = x[..., 1::2]
+    o1 = x1 * cos - x2 * sin
+    o2 = x2 * cos + x1 * sin
+    if IS_NEOX_STYLE:
+        return torch.cat((o1, o2), dim=-1)
+    else:
+        return torch.stack((o1, o2), dim=-1).flatten(-2)
+    """
+    pid = tl.program_id(0).to(tl.int64)
+    row_idx = pid
+
+    # locate start address
+    q_ptr = q_ptr + row_idx * q_row_stride
+    k_ptr = k_ptr + row_idx * k_row_stride
+
+    # ####################################################################
+    # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
+    # m of this program instance
+    # ####################################################################
+    cos = cos + row_idx * cos_row_stride
+    sin = sin + row_idx * sin_row_stride
+
+    cos_offsets = tl.arange(0, pad_rope_dim // 2)
+    cos_mask = cos_offsets < (rope_dim // 2)
+    cos_row = tl.load(cos + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+    sin_row = tl.load(sin + cos_offsets, mask=cos_mask, other=0).to(tl.float32)
+
+    # ####################################################################
+    # Load the left and right half of q and k for the current
+    # program instance (i.e. for the current token) separately
+    # ####################################################################
+    # left half of the head
+    if IS_NEOX_STYLE:
+        first_half_q_offsets = tl.arange(0,
+                                         pad_n_qh)[:, None] * hd + tl.arange(
+                                             0, pad_rope_dim // 2)[None, :]
+        first_half_k_offsets = tl.arange(0,
+                                         pad_n_kh)[:, None] * hd + tl.arange(
+                                             0, pad_rope_dim // 2)[None, :]
+        first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(
+            0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+        first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(
+            0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+    else:
+        first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + (
+            2 * tl.arange(0, pad_rope_dim // 2)[None, :])
+        first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + (
+            2 * tl.arange(0, pad_rope_dim // 2)[None, :])
+        first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(
+            0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+        first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(
+            0, pad_rope_dim // 2)[None, :] < (rope_dim // 2))
+    q_tile_1 = tl.load(q_ptr + first_half_q_offsets,
+                       mask=first_q_mask,
+                       other=0).to(sin_row.dtype)
+    k_tile_1 = tl.load(k_ptr + first_half_k_offsets,
+                       mask=first_k_mask,
+                       other=0).to(sin_row.dtype)
+
+    # right half of the head
+    if IS_NEOX_STYLE:
+        second_half_q_offsets = first_half_q_offsets + (rope_dim // 2)
+        second_half_k_offsets = first_half_k_offsets + (rope_dim // 2)
+    else:
+        second_half_q_offsets = first_half_q_offsets + 1
+        second_half_k_offsets = first_half_k_offsets + 1
+    second_q_mask = first_q_mask
+    second_k_mask = first_k_mask
+    q_tile_2 = tl.load(q_ptr + second_half_q_offsets,
+                       mask=second_q_mask,
+                       other=0).to(sin_row.dtype)
+    k_tile_2 = tl.load(k_ptr + second_half_k_offsets,
+                       mask=second_k_mask,
+                       other=0).to(sin_row.dtype)
+
+    # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
+    new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
+    tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
+    new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
+    tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
+
+    new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
+    tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
+    new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
+    tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
+
+
+def rope_forward_triton(q, k, cos, sin, is_neox_style: bool = True):
+    if not q.is_contiguous():
+        q = q.contiguous()
+    if not k.is_contiguous():
+        k = k.contiguous()
+
+    num_tokens, n_q_head, head_dim = q.shape
+    n_kv_head = k.shape[1]
+    cos = cos.view(num_tokens, -1)
+    sin = sin.view(num_tokens, -1)
+    rope_dim = cos.shape[-1] * 2
+    assert rope_dim <= head_dim
+    pad_rope_dim = triton.next_power_of_2(rope_dim)
+    pad_n_q_head = triton.next_power_of_2(n_q_head)
+    pad_n_kv_head = triton.next_power_of_2(n_kv_head)
+    BLOCK_SIZE = max(pad_n_q_head, pad_n_kv_head)
+
+    n_row = num_tokens
+
+    _triton_rope[(n_row, )](
+        q,
+        q.stride(0),
+        k,
+        k.stride(0),
+        cos,
+        cos.stride(0),
+        sin,
+        sin.stride(0),
+        num_tokens,
+        n_q_head,
+        n_kv_head,
+        head_dim,
+        rope_dim,
+        pad_n_q_head,
+        pad_n_kv_head,
+        pad_rope_dim,
+        BLOCK_SIZE=BLOCK_SIZE,
+        IS_NEOX_STYLE=is_neox_style,
+    )
+    return q, k
 
 
 def _custom_rotary_embedding_enabled(query, neox_style, head_size):
