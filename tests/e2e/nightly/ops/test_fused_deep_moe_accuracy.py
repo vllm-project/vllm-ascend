@@ -238,7 +238,7 @@ def test():
     print(f"{fused_op_output= }\n {fused_op_output.abs().mean()=}, {fused_op_output.abs().max()=}")
 
     diff = (small_op_output - fused_op_output).abs()
-    print(f"[info-{global_rank_id}] fused deep moe: {diff.max()= }, {diff.mean()= }")
+    print(f"[info-{global_rank_id}] dispatch gmm combine decode: {diff.max()= }, {diff.mean()= }")
 
 def test_diff_data():
     diff_test_time = 10
