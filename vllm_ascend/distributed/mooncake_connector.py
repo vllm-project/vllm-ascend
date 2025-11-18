@@ -891,17 +891,18 @@ class MooncakeConnectorWorker:
         # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940
         # introducing some changes
         device_ids_str = envs_ascend.PHYSICAL_DEVICES
+        local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         if device_ids_str is None:
             device_ids = list(
-                range(self.dp_rank * self.tp_size,
-                      (self.dp_rank + 1) * self.tp_size))
+                range(local_dp_rank * self.tp_size,
+                      (local_dp_rank + 1) * self.tp_size))
         else:
             device_ids = list(map(int, device_ids_str.split(',')))
-            start_index = self.dp_rank * self.tp_size
+            start_index = local_dp_rank * self.tp_size
             end_index = start_index + self.tp_size
             if len(device_ids) < end_index:
                 raise ValueError(
-                    f"Not enough physical devices available for DP rank {self.dp_rank}. "
+                    f"Not enough physical devices available for DP rank {local_dp_rank}. "
                     f"Expected at least {end_index} devices, but found {len(device_ids)} "
                     "in PHYSICAL_DEVICES.")
             device_ids = device_ids[start_index:end_index]
