@@ -3631,7 +3631,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
-                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                    num_blocks = raw_tensor.numel(
+                    ) // kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
 
                     state_tensors = []
