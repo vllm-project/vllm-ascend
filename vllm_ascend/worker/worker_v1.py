@@ -143,7 +143,11 @@ class NPUWorker(WorkerBase):
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            if vllm_version_is("0.11.0"):
+                from vllm.utils import init_cached_hf_modules
+            else:
+                from vllm.utils.import_utils import init_cached_hf_modules
+
             init_cached_hf_modules()
 
         self.profiler = self._init_profiler()

@@ -71,7 +71,7 @@ Get the latest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | LLaVA-Next-Video               | ✅            |                                                                      |||||||||||||||||||
 | MiniCPM-V                      | ✅            |                                                                      |||||||||||||||||||
 | Mistral3                       | ✅            |                                                                      |||||||||||||||||||
-| Phi-3-Vison/Phi-3.5-Vison      | ✅            |                                                                      |||||||||||||||||||
+| Phi-3-Vision/Phi-3.5-Vision      | ✅            |                                                                      |||||||||||||||||||
 | Gemma3                         | ✅            |                                                                      |||||||||||||||||||
 | Llama4                         | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |||||||||||||||||||
 | Llama3.2                       | ❌            | [1972](https://github.com/vllm-project/vllm-ascend/issues/1972)      |||||||||||||||||||

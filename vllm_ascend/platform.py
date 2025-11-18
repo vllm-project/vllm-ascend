@@ -20,7 +20,6 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-import vllm.envs as envs_vllm
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -34,7 +33,8 @@ from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
 from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
                                prefill_context_parallel_enable,
                                update_aclgraph_sizes,
-                               update_cudagraph_capture_sizes, vllm_version_is)
+                               update_cudagraph_capture_sizes,
+                               update_default_aclgraph_sizes, vllm_version_is)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -117,8 +117,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        if not envs_vllm.VLLM_USE_V1:
-            raise ValueError("vLLM Ascend does not support V0 engine.")
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 
@@ -196,6 +194,10 @@ class NPUPlatform(Platform):
 
         # set cudaprah sizes before extending `compilation_config.splitting_ops`
         vllm_config._set_cudagraph_sizes()
+        # There are cases where default cudagraph_capture_sizes are not friendly
+        # to ascend ops && hardwares. We update these sizes here to improve
+        # default performance.
+        update_default_aclgraph_sizes(vllm_config)
         # TODO delete graph size update here when compilation_config.pass_config.enable_sequence_parallelism
         # is supported by vllm-ascend.
         if vllm_config.parallel_config.tensor_parallel_size > 1 and not vllm_config.model_config.enforce_eager and \
@@ -236,7 +238,8 @@ class NPUPlatform(Platform):
                     "vllm.mla_forward"
                 ])
                 update_aclgraph_sizes(vllm_config)
-            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
+                compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
                 logger.info(
                     "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
                     "using only ACL Graph mode")
@@ -273,7 +276,8 @@ class NPUPlatform(Platform):
                 compilation_config.use_inductor = False
                 compilation_config.splitting_ops.extend(["vllm::mla_forward"])
                 update_aclgraph_sizes(vllm_config)
-            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
+                compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
                 logger.info(
                     "FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - "
                     "using only ACL Graph mode")
@@ -311,7 +315,10 @@ class NPUPlatform(Platform):
 
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
-            os.environ["VLLM_ALL2ALL_BACKEND"] = "flashinfer_all2allv"
+            if vllm_version_is("0.11.0"):
+                os.environ["VLLM_ALL2ALL_BACKEND"] = "flashinfer_all2allv"
+            else:
+                parallel_config.all2all_backend = "flashinfer_all2allv"
             if ascend_config.torchair_graph_config.enabled or ascend_config.enable_shared_expert_dp:
                 parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
@@ -372,6 +379,17 @@ class NPUPlatform(Platform):
                 f"and block_size({cache_config.block_size}) "
                 "needs to be equal if use cp or dcp > 1 in P/D disaggregate scenario."
             )
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        # Directly importing vllm_ascend_C prevents ASCEND_RT_VISIBLE_DEVICES
+        # from being applied during runtime initialization, which causes bugs
+        # in the RL module. Therefore, we currently use lazy initialization
+        # to avoid this issue. See https://github.com/vllm-project/vllm-ascend/pull/884.
+        # TODO: when the above issue is fixed, we can uncomment the following lines.
+        # from vllm_ascend.utils import enable_custom_op
+        # enable_custom_op()
+        pass
 
     @classmethod
     def get_attn_backend_cls(

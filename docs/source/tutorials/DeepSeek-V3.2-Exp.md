@@ -6,8 +6,6 @@ DeepSeek-V3.2-Exp is a sparse attention model. The main architecture is similar 
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-The `DeepSeek-V3.2-Exp` model is first supported in `vllm-ascend:v0.11.0rc0`.
-
 ## Supported Features
 
 Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -29,28 +27,17 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 ### Installation
 
-:::::{tab-set}
-::::{tab-item} Use deepseek-v3.2 docker image
-
-In `vllm-ascend:v0.11.0rc0` release, we provide the all-in-one images `quay.io/ascend/vllm-ascend:v0.11.0rc0-deepseek-v3.2-exp`(for Atlas 800 A2) and `quay.io/ascend/vllm-ascend:v0.11.0rc0-a3-deepseek-v3.2-exp`(for Atlas 800 A3).
-
-Refer to [using docker](../installation.md#set-up-using-docker) to set up environment using Docker, remember to replace the image with deepseek-v3.2 docker image.
-
-:::{note}
-- The image is based on a specific version `vllm-ascend:v0.11.0rc0` and will not continue to release new version. Move to another tab `Use vllm-ascend docker image` for latest support of deepseek-v3.2 on vllm-ascend.
-- Only AArch64 architecture are supported currently due to extra operator's installation limitations.
-:::
-
-::::
-::::{tab-item} Use vllm-ascend docker image
-
 You can using our official docker image and install extra operator for supporting `DeepSeek-V3.2-Exp`.
 
 :::{note}
 Only AArch64 architecture are supported currently due to extra operator's installation limitations.
 :::
 
-For `A3` image:
+:::::{tab-set}
+:sync-group: install
+
+::::{tab-item} A3 series
+:sync: A3
 
 1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -66,7 +53,9 @@ wget https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/a3/custom_
 pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 ```
 
-For `A2` image:
+::::
+::::{tab-item} A2 series
+:sync: A2
 
 1. Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
@@ -83,15 +72,13 @@ pip install custom_ops-1.0-cp311-cp311-linux_aarch64.whl
 ```
 
 ::::
-::::{tab-item} Build from source
-
-You can build all from source.
-
-- Install `vllm-ascend`, refer to [set up using python](../installation.md#set-up-using-python).
-- Install extra operator for supporting `DeepSeek-V3.2-Exp`, refer to `Use vllm-ascend docker image` tab.
-
-::::
 :::::
+
+In addition, if you don't want to use the docker image as above, you can also build all from source:
+
+- Install `vllm-ascend` from source, refer to [installation](../installation.md).
+
+- Install extra operator for supporting `DeepSeek-V3.2-Exp`, refer to the above tab.
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -130,7 +117,10 @@ vllm serve vllm-ascend/DeepSeek-V3.2-Exp-W8A8 \
 - `DeepSeek-V3.2-Exp-w8a8`: require 2 Atlas 800 A2 (64G × 8).
 
 :::::{tab-set}
+:sync-group: install
+
 ::::{tab-item} DeepSeek-V3.2-Exp A3 series
+:sync: A3
 
 Run the following scripts on two nodes respectively.
 
@@ -219,6 +209,7 @@ vllm serve /root/.cache/Modelers_Park/DeepSeek-V3.2-Exp \
 
 ::::
 ::::{tab-item} DeepSeek-V3.2-Exp-W8A8 A2 series
+:sync: A2
 
 Run the following scripts on two nodes respectively.
 
