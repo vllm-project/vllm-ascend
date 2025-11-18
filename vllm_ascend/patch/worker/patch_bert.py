@@ -45,31 +45,32 @@ def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
 
 
 def bert_embedding_forward(
-        self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        token_type_ids = _decode_token_type_ids(input_ids)
+    self,
+    input_ids: torch.Tensor,
+    position_ids: torch.Tensor,
+    inputs_embeds: torch.Tensor | None = None,
+) -> torch.Tensor:
+    token_type_ids = _decode_token_type_ids(input_ids)
 
-        if inputs_embeds is None:
-            inputs_embeds = self.word_embeddings(input_ids)
+    if inputs_embeds is None:
+        inputs_embeds = self.word_embeddings(input_ids)
 
-        position_embeddings = self.position_embeddings(position_ids)
+    position_embeddings = self.position_embeddings(position_ids)
 
-        token_type_embeddings = self.token_type_embeddings(token_type_ids)
+    token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
-        embeddings = inputs_embeds + token_type_embeddings + position_embeddings
-        embeddings = self.LayerNorm(embeddings)
-        return embeddings
+    embeddings = inputs_embeds + token_type_embeddings + position_embeddings
+    embeddings = self.LayerNorm(embeddings)
+    return embeddings
+
 
 def bert_for_sequence_classification_forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        token_type_ids: torch.Tensor | None = None,
+    self,
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+    token_type_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if token_type_ids is not None:
         assert self.bert.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
@@ -85,12 +86,12 @@ def bert_for_sequence_classification_forward(
 
 
 def bert_for_token_classification_forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-        token_type_ids: torch.Tensor | None = None,
+    self,
+    input_ids: torch.Tensor | None,
+    positions: torch.Tensor,
+    intermediate_tensors: IntermediateTensors | None = None,
+    inputs_embeds: torch.Tensor | None = None,
+    token_type_ids: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if token_type_ids is not None:
         assert self.bert.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
