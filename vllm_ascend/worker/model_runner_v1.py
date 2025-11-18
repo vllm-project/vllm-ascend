@@ -1000,10 +1000,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def _make_attention_mask(self, seq_lens, position,
                              attn_state) -> torch.Tensor:
+        # pcp situation.
         if self.pcp_size > 1:
             return None
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
+        # dcp situation.
         if self.dcp_size > 1:
             return self.attn_mask_builder.get_splitfuse_attn_mask()
         # Pooling situation.
@@ -1027,6 +1029,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return None
 
     def _make_fia_attention_mask(self) -> torch.Tensor:
+        # pcp situation.
         if self.pcp_size > 1:
             return None
         if self.attn_mask_builder is None:
