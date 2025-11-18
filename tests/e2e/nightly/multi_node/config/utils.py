@@ -7,8 +7,6 @@ from typing import Callable, Optional
 
 import psutil
 
-# import torch.distributed as dist
-
 
 @contextmanager
 def temp_env(env_dict):
