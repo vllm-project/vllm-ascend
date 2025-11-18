@@ -3,7 +3,7 @@ import os
 import socket
 import time
 from contextlib import contextmanager
-from typing import Callable, Optional
+from typing import Optional
 
 import psutil
 
@@ -24,8 +24,7 @@ def temp_env(env_dict):
                 os.environ[k] = v
 
 
-def dns_resolver(retries: int = 20,
-                 base_delay: float = 0.5) -> Callable[[str], str]:
+def dns_resolver(retries: int = 20, base_delay: float = 0.5):
     # We should resolve DNS with retries to avoid transient network issues.
     # When the pod is just started, DNS resolution may fail.
     def resolve(dns: str) -> str:
@@ -68,7 +67,7 @@ def get_avaliable_port(start_port: int = 6000, end_port: int = 7000) -> int:
     raise RuntimeError("No available port found")
 
 
-def get_cur_ip(retries: int = 20, base_delay: float = 0.5) -> str:
+def get_cur_ip(retries: int = 20, base_delay: float = 0.5):
     """
     Returns the pod/machine's primary IP address with retry.
     This is necessary because network interfaces may not be ready
