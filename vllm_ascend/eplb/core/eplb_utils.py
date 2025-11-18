@@ -24,6 +24,7 @@ from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
 
+
 def determine_default_expert_map(global_expert_num, world_size, rank_id,
                                  global_redundant_expert_num):
     if world_size == 1:
@@ -141,7 +142,7 @@ class EPLBParamUtils:
             return
         if not isinstance(dynamic_eplb, bool):
             raise TypeError("The dynamic_eplb is not bool.")
-        
+
         if dynamic_eplb and envs_ascend.DYNAMIC_EPLB not in ("true", "1"):
             raise ValueError(
                 'Can not enable dynamic_eplb when DYNAMIC_EPLB is not set to "true" or "1".'
