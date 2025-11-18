@@ -21,7 +21,7 @@
 Run `pytest tests/e2e/multicard/test_qwen3_next.py`.
 """
 
-import os 
+import os
 from unittest.mock import patch
 
 from modelscope import snapshot_download  # type: ignore
