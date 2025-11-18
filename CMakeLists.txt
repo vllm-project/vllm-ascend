@@ -20,6 +20,13 @@ set(VLLM_ASCEND_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}")
 
 find_package(Torch REQUIRED)
 
+run_python(TORCH_VERSION
+  "import torch; print(torch.__version__)" "Failed to locate torch path")
+# check torch version is 2.7.1
+if(NOT ${TORCH_VERSION} VERSION_EQUAL "2.7.1")
+  message(FATAL_ERROR "Expected PyTorch version 2.7.1, but found ${TORCH_VERSION}")
+endif()
+
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
 set(SOC_VERSION ${SOC_VERSION})
 message(STATUS "Detected SOC version: ${SOC_VERSION}")
@@ -44,11 +51,13 @@ else()
 endif()
 
 include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
+
 file(GLOB KERNEL_FILES
 ${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
 ascendc_library(vllm_ascend_kernels SHARED
     ${KERNEL_FILES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
 )
 
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
@@ -90,7 +99,11 @@ target_link_libraries(
   libtorch_npu.so
   vllm_ascend_kernels
   ascendcl
+  tiling_api
+  register
   platform
+  ascendalog
+  dl
 )
 
 target_link_options(vllm_ascend_C PRIVATE "-Wl,-rpath,$ORIGIN:$ORIGIN/lib")

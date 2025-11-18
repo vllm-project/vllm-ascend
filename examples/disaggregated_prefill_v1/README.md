@@ -41,8 +41,7 @@ export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5559
+export VLLM_ASCEND_LLMDD_RPC_PORT=5559
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
@@ -70,9 +69,7 @@ vllm serve /models/deepseek_r1_w8a8 \
   "kv_port": "20001",
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
-  }'  \
-  --additional-config \
-  '{"chunked_prefill_for_mla":true}' 
+  }'
 ```
 
 Run prefill server P2 on second node:
@@ -84,8 +81,7 @@ export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5659
+export VLLM_ASCEND_LLMDD_RPC_PORT=5659
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
@@ -114,9 +110,7 @@ vllm serve /models/deepseek_r1_w8a8 \
   "kv_port": "20001",
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
-  }'  \
-  --additional-config \
-  '{"chunked_prefill_for_mla":true}'
+  }'
 ```
 
 Run decode server d1 on third node:
@@ -130,8 +124,7 @@ export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5759
+export VLLM_ASCEND_LLMDD_RPC_PORT=5759
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
@@ -172,8 +165,7 @@ export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
-export VLLM_LLMDD_RPC_PORT=5859
+export VLLM_ASCEND_LLMDD_RPC_PORT=5859
 
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
@@ -209,7 +201,7 @@ vllm serve /models/deepseek_r1_w8a8 \
 Run proxy server on the first node:
 ```shell
 cd /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1
-python toy_proxy_server.py --host 172.19.32.175 --port 1025 --prefiller-hosts 172.19.241.49 --prefiller-port 20002 --decoder-hosts 172.19.123.51 --decoder-ports 20002
+python load_balance_proxy_server_example.py --host 172.19.32.175 --port 1025 --prefiller-hosts 172.19.241.49 --prefiller-port 20002 --decoder-hosts 172.19.123.51 --decoder-ports 20002
 ```
 
 Verification

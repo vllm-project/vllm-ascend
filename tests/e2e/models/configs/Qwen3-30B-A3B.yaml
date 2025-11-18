@@ -1,4 +1,5 @@
 model_name: "Qwen/Qwen3-30B-A3B"
+hardware: "Atlas A2 Series"
 tasks:
 - name: "gsm8k"
   metrics:

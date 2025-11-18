@@ -49,7 +49,7 @@ jobs:
     runs-on: linux-arm64-npu-static-8
 
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-910b-ubuntu22.04-py3.11
       volumes:
         - /usr/local/dcmi:/usr/local/dcmi
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
@@ -108,4 +108,5 @@ jobs:
 
       - name: Run vllm-project/vllm-ascend PD Disaggregation edge test
         run: |
+          git config --global --add safe.directory/__w/vllm-ascend/vllm-ascend
           bash tests/e2e/pd_disaggreate/run_edge_case_test.sh

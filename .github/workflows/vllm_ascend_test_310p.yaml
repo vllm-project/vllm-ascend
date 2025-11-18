@@ -53,12 +53,12 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-310p-1, linux-aarch64-310p-4]
-        vllm_version: [main]
+        vllm_version: [v0.11.0]
     name: 310p e2e test
     runs-on: ${{ matrix.os }}
     container:
       # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-310p-ubuntu22.04-py3.11
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.3.rc1-310p-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True

@@ -10,6 +10,7 @@ Run docker container:
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
@@ -27,7 +28,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Load model from ModelScope to speed up download
@@ -41,13 +42,13 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 
 Run the following script to start the vLLM server on Multi-NPU:
 
-For an Atlas A2 with 64GB of NPU card memory, tensor-parallel-size should be at least 2, and for 32GB of memory, tensor-parallel-size should be at least 4.
+For an Atlas A2 with 64 GB of NPU card memory, tensor-parallel-size should be at least 2, and for 32 GB of memory, tensor-parallel-size should be at least 4.
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 4 --enable_expert_parallel
 ```
 
-Once your server is started, you can query the model with input prompts
+Once your server is started, you can query the model with input prompts.
 
 ```bash
 curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{

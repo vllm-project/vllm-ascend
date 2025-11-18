@@ -21,7 +21,6 @@ from typing import Any, List, Optional, Union
 import torch
 import torch.nn.functional as F
 import vllm
-import vllm.envs as envs
 from torch import nn
 from transformers import Qwen2Config
 from vllm.attention import AttentionMetadata, AttentionType
@@ -40,7 +39,6 @@ from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM  # noqa: F401
 from vllm.model_executor.models.qwen2 import Qwen2MLP, Qwen2Model
 from vllm.model_executor.models.utils import (AutoWeightsLoader,
                                               PPMissingLayer, maybe_prefix)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -113,12 +111,9 @@ class CustomQwen2Attention(Qwen2Attention):
                                    is_prefill=False,
                                    is_qwen_torchair=True)
             forward_kwargs = {}
-            if envs.VLLM_USE_V1:
-                output_shape = q.shape
-                output = torch.empty(output_shape,
-                                     dtype=q.dtype,
-                                     device=q.device)
-                forward_kwargs['output'] = output
+            output_shape = q.shape
+            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+            forward_kwargs['output'] = output
 
             attn_output = self.attn.impl.forward(self.attn,
                                                  q,
@@ -126,7 +121,6 @@ class CustomQwen2Attention(Qwen2Attention):
                                                  v,
                                                  kv_cache=kv_cache,
                                                  attn_metadata=attn_metadata,
-                                                 trace_flag=False,
                                                  **forward_kwargs)
             output, _ = self.o_proj(attn_output)
             return output
@@ -343,9 +337,9 @@ class CustomQwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return hidden_states
 
     def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+            self,
+            hidden_states: torch.Tensor,
+            sampling_metadata=None,  # type: ignore
     ) -> Optional[torch.Tensor]:
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)

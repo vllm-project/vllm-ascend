@@ -19,8 +19,14 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.utils import sha256
+else:
+    from vllm.utils.hashing import sha256
+
 EOS_TOKEN_ID = 50256
-os.environ["VLLM_USE_V1"] = "1"
 
 
 def assert_scheduler_empty(scheduler: Scheduler):
@@ -101,16 +107,25 @@ def create_scheduler(
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(block_size, 1, 1, torch.float16,
-                                               False))
+                                               False, False))
         ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    return Scheduler(
-        vllm_config=vllm_config,
-        kv_cache_config=kv_cache_config,
-        log_stats=True,
-        structured_output_manager=StructuredOutputManager(vllm_config),
-    )
+    if vllm_version_is("0.11.0"):
+        return Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+        )
+    else:
+        return Scheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            log_stats=True,
+            block_size=block_size,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+        )
 
 
 _none_hash_initialized = False
@@ -129,10 +144,10 @@ def create_request(
     """Make dummy request for testing."""
     global _none_hash_initialized
     if not _none_hash_initialized:
-        init_none_hash(hash)
+        init_none_hash(sha256)
         _none_hash_initialized = True
 
-    block_hasher = get_request_block_hasher(block_size, hash)
+    block_hasher = get_request_block_hasher(block_size, sha256)
 
     kv_transfer_params: Optional[dict[str, Any]] = None
 
@@ -148,7 +163,9 @@ def create_request(
                                       range(num_remote_blocks)),
                                   remote_host="my-host",
                                   remote_port=1234,
-                                  remote_tp_size=1)
+                                  remote_tp_size=1,
+                                  remote_pcp_size=1,
+                                  remote_dcp_size=1)
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)

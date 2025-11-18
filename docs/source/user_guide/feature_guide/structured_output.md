@@ -2,34 +2,34 @@
 
 ## Overview
 
-### What is Structured Output?
+### What is structured output?
 
-LLMs can be unpredictable when you need output in specific formats. Think of asking a model to generate JSON - without guidance, it might produce valid text that breaks JSON specification. **Structured Output (also called Guided Decoding)** enables LLMs to generate outputs that follow a desired structure while preserving the non-deterministic nature of the system.
+LLMs can be unpredictable when you need output in specific formats. Think of asking a model to generate JSON without guidance, it might produce valid text that breaks JSON specification. **Structured Output (also known as Guided Decoding)** enables LLMs to generate outputs that follow a desired structure while preserving the non-deterministic nature of the system.
 
-In simple terms, structured decoding gives LLMs a “template” to follow. Users provide a schema that “influences” the model’s output, ensuring compliance with the desired structure.
+In simple terms, structured decoding gives LLMs a "template" to follow. Users provide a schema that "influences" the model output, ensuring compliance with the desired structure.
 
 ![structured decoding](./images/structured_output_1.png)
 
-### Structured Output in vllm-ascend
+### Structured output in vllm-ascend
 
-Currently, vllm-ascend supports **xgrammar** and **guidance** backend for structured output with vllm v1 engine.
+Currently, vllm-ascend supports **xgrammar** and **guidance** backends for structured output with vllm v1 engine.
 
-XGrammar introduces a new technique that batch constrained decoding via pushdown automaton (PDA). You can think of a PDA as a “collection of FSMs, and each FSM represents a context-free grammar (CFG).” One significant advantage of PDA is its recursive nature, allowing us to execute multiple state transitions. They also include additional optimisation (for those who are interested) to reduce grammar compilation overhead. Besides, you can also find more details about guidance by yourself.
+XGrammar introduces a new technique that batch constrained decoding through pushdown automaton (PDA). You can think of a PDA as a "collection of FSMs, and each FSM represents a context-free grammar (CFG)." One significant advantage of PDA is its recursive nature, allowing us to execute multiple state transitions. They also include additional optimizations (for those who are interested) to reduce grammar compilation overhead. Besides, you can also find more details about guidance by yourself.
 
-## How to Use Structured Output?
+## How to use structured output?
 
-### Online Inference
+### Online inference
 
-You can also generate structured outputs using the OpenAI's Completions and Chat API. The following parameters are supported, which must be added as extra parameters:
+You can also generate structured outputs using the Completions and Chat API of OpenAI. The following parameters are supported, which must be added as extra parameters:
 
 - `guided_choice`: the output will be exactly one of the choices.
 - `guided_regex`: the output will follow the regex pattern.
 - `guided_json`: the output will follow the JSON schema.
 - `guided_grammar`: the output will follow the context free grammar.
 
-Structured outputs are supported by default in the OpenAI-Compatible Server. You can choose to specify the backend to use by setting the `--guided-decoding-backend` flag to vllm serve. The default backend is `auto`, which will try to choose an appropriate backend based on the details of the request. You may also choose a specific backend, along with some options.
+Structured outputs are supported by default in an OpenAI-Compatible Server. You can choose to specify the backend by setting the `--guided-decoding-backend` flag to vLLM serve. The default backend is `auto`, which will try to choose an appropriate backend based on the details of the request. You may also choose a specific backend, along with some options.
 
-Now let´s see an example for each of the cases, starting with the guided_choice, as it´s the easiest one:
+The following are examples for each of the cases, starting with the guided_choice, as it's the easiest one:
 
 ```python
 from openai import OpenAI
@@ -64,7 +64,7 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-One of the most relevant features in structured text generation is the option to generate a valid JSON with pre-defined fields and formats. For this we can use the guided_json parameter in two different ways:
+One of the most relevant features in structured text generation is the option to generate a valid JSON with pre-defined fields and formats. To achieve this, we can use the guided_json parameter in two different ways:
 
 - Using a JSON Schema.
 - Defining a Pydantic model and then extracting the JSON Schema from it.
@@ -101,7 +101,7 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-Finally we have the guided_grammar option, which is probably the most difficult to use, but it´s really powerful. It allows us to define complete languages like SQL queries. It works by using a context free EBNF grammar. As an example, we can use to define a specific format of simplified SQL queries:
+Finally we have the guided_grammar option, which is probably the most difficult to use, but it´s really powerful. It allows us to define complete languages like SQL queries. It works by using a context free EBNF grammar. As an example, we can define a specific format of simplified SQL queries:
 
 ```python
 simplified_sql_grammar = """
@@ -133,16 +133,16 @@ print(completion.choices[0].message.content)
 
 Find more examples [here](https://github.com/vllm-project/vllm/blob/main/examples/offline_inference/structured_outputs.py).
 
-### Offline Inference
+### Offline inference
 
-To use Structured Output, we'll need to configure the guided decoding using the class `GuidedDecodingParams` inside `SamplingParams`. The main available options inside `GuidedDecodingParams` are:
+To use structured output, we need to configure the guided decoding using the class `GuidedDecodingParams` inside `SamplingParams`. The main available options inside `GuidedDecodingParams` are:
 
 - json
 - regex
 - choice
 - grammar
 
-One example for the usage of the choice parameter is shown below:
+One example for using the choice parameter is shown below:
 
 ```python
 from vllm import LLM, SamplingParams

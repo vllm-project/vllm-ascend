@@ -1,7 +1,7 @@
 # Performance Benchmark
 This document details the benchmark methodology for vllm-ascend, aimed at evaluating the performance under a variety of workloads. To maintain alignment with vLLM, we use the [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) script provided by the vllm project.
 
-**Benchmark Coverage**: We measure offline e2e latency and throughput, and fixed-QPS online serving benchmarks, for more details see [vllm-ascend benchmark scripts](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
+**Benchmark Coverage**: We measure offline E2E latency and throughput, and fixed-QPS online serving benchmarks. For more details, see [vllm-ascend benchmark scripts](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
 
 ## 1. Run docker container
 
@@ -12,6 +12,7 @@ export DEVICE=/dev/davinci7
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device $DEVICE \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
@@ -37,7 +38,7 @@ pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/si
 pip install -r benchmarks/requirements-bench.txt
 ```
 
-## 3. (Optional)Prepare model weights
+## 3. (Optional) Prepare model weights
 For faster running speed, we recommend downloading the model in advance：
 
 ```bash
@@ -68,7 +69,7 @@ Run benchmark script:
 bash benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
-After about 10 mins, the output is as shown below:
+After about 10 mins, the output is shown below:
 
 ```bash
 online serving:
@@ -180,7 +181,7 @@ Total num prompt tokens:  42659
 Total num output tokens:  43545
 ```
 
-The result json files are generated into the path `benchmark/results`
+The result json files are generated into the path `benchmark/results`.
 These files contain detailed benchmarking results for further analysis.
 
 ```bash

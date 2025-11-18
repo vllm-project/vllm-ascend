@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -295,7 +297,11 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         mock_group.rank_in_group = 0
         mock_group.world_size = 2
         mocker.patch(
-            "vllm_ascend.ops.linear.get_tp_group",
+            "vllm_ascend.ops.linear_op.get_tp_group",
+            return_value=mock_group,
+        )
+        mocker.patch(
+            "vllm.distributed.parallel_state.get_tp_group",
             return_value=mock_group,
         )
 
@@ -352,6 +358,56 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
         vision_transformer.hidden_size_per_attention_head = 4
         cos_new, _ = vision_transformer.cal_cos_sin(self.input_data)
         assert cos_new.shape == (1, 32, 1, 2)
+
+    def test_pad_qkv_bias(self, mocker: MockerFixture):
+        attention = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        res = attention.pad_qkv_bias(torch.rand((300)))
+        assert res.shape[0] == 384
+
+    @patch('vllm_ascend.utils._ENABLE_NZ', True)
+    def test_pad_qkv_weight(self, mocker: MockerFixture):
+        attention = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        mocker.patch(
+            "torch_npu.npu_format_cast",
+            return_value=torch.rand((384, 300)),
+        )
+        res = attention.pad_qkv_weight(torch.rand((300, 300)))
+        assert res.shape == (384, 300)
+
+    @patch('vllm_ascend.utils._ENABLE_NZ', True)
+    def test_pad_proj_weight(self, mocker: MockerFixture):
+        attention = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        mocker.patch(
+            "torch_npu.npu_format_cast",
+            return_value=torch.rand((300, 384)),
+        )
+        res = attention.pad_proj_weight(torch.rand((300, 300)))
+        assert res.shape == (300, 384)
+
+    def test_pad_qkv_weight_scale_offset(self, mocker: MockerFixture):
+        attention = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        res = attention.pad_qkv_weight_scale_offset(torch.rand((300, 1)))
+        assert res.shape == (384, 1)
+
+    def test_pad_qkv_deq_scale_quant_bias(self, mocker: MockerFixture):
+        attention = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        res = attention.pad_qkv_deq_scale_quant_bias(torch.rand((300)))
+        assert res.shape[0] == 384
 
     def test_forward(self, mocker: MockerFixture):
         vision_transformer = self.init_vision_transformer(mocker)

@@ -20,8 +20,6 @@
 
 Run `pytest tests/test_offline_inference.py`.
 """
-import os
-
 import pytest
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
@@ -29,10 +27,7 @@ from vllm.assets.image import ImageAsset
 
 from tests.e2e.conftest import VllmRunner
 
-os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
-
-@pytest.mark.skip(reason="fix me")
 def test_multimodal_vl(prompt_template):
     image = ImageAsset("cherry_blossom") \
         .pil_image.convert("RGB")
@@ -51,10 +46,47 @@ def test_multimodal_vl(prompt_template):
                         "max_pixels": 1280 * 28 * 28,
                         "fps": 1,
                     },
+                    enforce_eager=False) as vllm_model:
+        outputs = vllm_model.generate_greedy(prompts=prompts,
+                                             images=images,
+                                             max_tokens=64)
+        assert len(outputs) == len(prompts)
+        for _, output_str in outputs:
+            assert output_str, "Generated output should not be empty."
+
+
+@pytest.mark.skip(reason="This e2e test will stuck in multi-batch scenario. "
+                  "Add this back after fixing the issue.")
+def test_multimodal_ascend_scheduler(prompt_template):
+    image = ImageAsset("cherry_blossom") \
+        .pil_image.convert("RGB")
+    img_questions = [
+        "What is the content of this image?",
+        "Describe the content of this image in detail.",
+        "What's in the image?",
+        "Where is this image taken?",
+    ]
+    images = [image] * len(img_questions)
+    prompts = prompt_template(img_questions)
+    with VllmRunner("Qwen/Qwen2.5-VL-3B-Instruct",
+                    max_model_len=4096,
+                    additional_config={
+                        'ascend_scheduler_config': {
+                            'enabled': True,
+                        },
+                    },
+                    mm_processor_kwargs={
+                        "min_pixels": 28 * 28,
+                        "max_pixels": 1280 * 28 * 28,
+                        "fps": 1,
+                    },
                     enforce_eager=True) as vllm_model:
-        vllm_model.generate_greedy(prompts=prompts,
-                                   images=images,
-                                   max_tokens=64)
+        outputs = vllm_model.generate_greedy(prompts=prompts,
+                                             images=images,
+                                             max_tokens=64)
+        assert len(outputs) == len(prompts)
+        for _, output_str in outputs:
+            assert output_str, "Generated output should not be empty."
 
 
 def test_multimodal_audio():
@@ -86,4 +118,7 @@ def test_multimodal_audio():
                     dtype="bfloat16",
                     limit_mm_per_prompt={"audio": 2},
                     gpu_memory_utilization=0.9) as runner:
-        runner.generate(inputs, sampling_params=sampling_params)
+        outputs = runner.generate(inputs, sampling_params=sampling_params)
+
+        assert outputs is not None, "Generated outputs should not be None."
+        assert len(outputs) > 0, "Generated outputs should not be empty."

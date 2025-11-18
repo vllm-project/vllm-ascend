@@ -1,20 +1,23 @@
-# Single Node (Atlas 300I series)
+# Single Node (Atlas 300I Series)
 
 ```{note}
-1. This Atlas 300I series is currently experimental. In future versions, there may be behavioral changes around model coverage, performance improvement.
-2. Currently, the 310I series only supports eager mode and the data type is float16.
+1. This Atlas 300I series is currently experimental. In future versions, there may be behavioral changes related to model coverage and performance improvement.
+2. Currently, the 310I series only supports eager mode and the float16 data type.
+3. There are some known issues for running vLLM on 310p series, you can refer to vllm-ascend [<u>#3316</u>](https://github.com/vllm-project/vllm-ascend/issues/3316) and 
+ [<u>#2795</u>](https://github.com/vllm-project/vllm-ascend/issues/2795). You can use v0.10.0rc1 version first.
 ```
 
-## Run vLLM on Altlas 300I series
+## Run vLLM on Atlas 300I Series
 
 Run docker container:
 
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
+export IMAGE=quay.io/ascend/vllm-ascend:v0.10.0rc1-310p
 docker run --rm \
 --name vllm-ascend \
+--shm-size=1g \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
@@ -36,7 +39,7 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-Setup environment variables:
+Set up environment variables:
 
 ```bash
 # Load model from ModelScope to speed up download
@@ -48,7 +51,7 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 
 ### Online Inference on NPU
 
-Run the following script to start the vLLM server on NPU(Qwen3-0.6B:1 card, Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):
+Run the following script to start the vLLM server on NPU (Qwen3-0.6B:1 card, Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):
 
 :::::{tab-set}
 :sync-group: inference
@@ -168,7 +171,7 @@ vllm serve /home/pangu-pro-moe-mode/ \
 
 ```
 
-Once your server is started, you can query the model with input prompts
+Once your server is started, you can query the model with input prompts.
 
 ```bash
 export question="你是谁？"
