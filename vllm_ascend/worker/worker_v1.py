@@ -18,7 +18,7 @@
 #
 
 import copy
-from typing import Optional, Union
+from typing import Optional, Union, Any
 
 import torch
 import torch.nn as nn
@@ -461,3 +461,6 @@ class NPUWorker(WorkerBase):
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         return self.model_runner.take_draft_token_ids()
+
+    def update_config(self, overrides: dict[str, Any]) -> None:
+        self.model_runner.update_config(overrides)

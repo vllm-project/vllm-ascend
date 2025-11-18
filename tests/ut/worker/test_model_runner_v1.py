@@ -18,6 +18,12 @@ import pytest
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import AscendSocVersion
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm.platforms import current_platform
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, VllmConfig, set_current_vllm_config)
+
+DEVICE = current_platform.device_type
+BLOCK_SIZE = 16
 
 
 # yapf: disable
@@ -109,3 +115,43 @@ def test_select_moe_comm_method_unsupported_soc():
          pytest.raises(ValueError, match=f"Unsupported soc_version: {unsupported_soc}"):
 
         NPUModelRunner._select_moe_comm_method(mock_runner, 100, False)
+
+
+def get_vllm_config():
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=10,
+        max_num_batched_tokens=512,
+        max_model_len=512,
+    )
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        dtype="float16",
+        seed=42,
+    )
+    cache_config = CacheConfig(
+        block_size=BLOCK_SIZE,
+        gpu_memory_utilization=0.9,
+        swap_space=0,
+        cache_dtype="auto",
+    )
+    parallel_config = ParallelConfig()
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        cache_config=cache_config,
+        scheduler_config=scheduler_config,
+        parallel_config=parallel_config,
+    )
+    return vllm_config
+
+@pytest.fixture
+def model_runner():
+    vllm_config = get_vllm_config()
+    return NPUModelRunner(vllm_config, DEVICE)
+
+def test_update_config(model_runner):
+    # Simple update
+    model_runner.update_config({"load_config": {"load_format": "dummy"}})
+    assert model_runner.load_config.load_format == "dummy"
+    # Raise error on non-existing config
+    with pytest.raises(AssertionError):
+        model_runner.update_config({"do_not_exist_config": "dummy"})
