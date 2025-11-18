@@ -23,9 +23,9 @@ from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.torchair.ops.torchair_fused_moe import torchair_select_experts
-from vllm_ascend.torchair.torchair_fused_moe_state import FusedMoEState
 from vllm_ascend.torchair.utils import (npu_stream_switch, npu_wait_tensor,
                                         super_kernel)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,

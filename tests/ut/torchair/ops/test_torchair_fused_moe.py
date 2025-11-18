@@ -23,10 +23,10 @@ from pytest_mock import MockerFixture
 from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 import vllm_ascend
+from vllm_ascend.ascend_forward_context import get_fused_moe_state
 from vllm_ascend.quantization.quant_config import AscendFusedMoEMethod
 from vllm_ascend.torchair.ops.torchair_fused_moe import (
     TorchairAscendFusedMoE, TorchairAscendUnquantizedFusedMoEMethod)
-from vllm_ascend.torchair.torchair_fused_moe_state import get_fused_moe_state
 from vllm_ascend.utils import adapt_patch  # noqa E402
 from vllm_ascend.utils import AscendSocVersion
 
