@@ -105,9 +105,10 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         # mode
         current_layer_idx = self._get_current_layer_idx()
         try:
-            # AFDConnectorMetadata
-            if current_layer_idx < 1:
+            # skip dense layer
+            if current_layer_idx < self.first_k_dense_replace:
                 return
+            
             if self.connector_name == "m2nconnector":
                 # TODO metadata
                 m2n_afdconnector_data = M2NAFDConnectorMetadata()
@@ -141,19 +142,13 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
             num_tokens = hidden_states.shape[0]
 
             # Try to use ACL graph if available
+            # TODO(yxj):move layer
             acl_graph_info = self._find_cuda_graph(current_layer_idx,
                                                     num_tokens)
             # print(f'acl_graph_info is {acl_graph_info}')
             # print(f'current_layer_idx is {current_layer_idx},num_tokens is {num_tokens}')
             print(f'self._forword_cnt is {self._forword_cnt},num_tokens is {num_tokens}')
-            # if cuda_graph_info is not None:
-            # uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
-            # scheduler_output.total_num_scheduled_tokens
-            # == self.input_batch.num_reqs * max_query_len)
-            # batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-            #                                 uniform_decode=uniform_decode)
-            # aclgraph_runtime_mode, batch_descriptor = \
-            # self.aclgraph_dispatcher.dispatch(batch_descriptor)
+           
             if acl_graph_info is not None:
                 # Use captured ACL graph for computation
                 with set_ascend_forward_context(
@@ -194,8 +189,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                             )
             else:
                 # Fallback to eager mode
-                # TODO(yxj):
-                if self.connector_name == "p2pconnector":
+                if afdConnectorMetadata is not None:
                     ffn_need_forward_data = afdConnectorMetadata.ffn_need_forward_data
                     with_prefill = ffn_need_forward_data.with_prefill
                     moe_comm_type = ffn_need_forward_data.moe_comm_type
@@ -205,12 +199,12 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 with set_ascend_forward_context(
                         attn_metadata=None,
                         vllm_config=self.vllm_config,
-                        num_tokens=num_input_tokens if self.connector_name == "p2pconnector" else None,
-                        with_prefill=with_prefill if self.connector_name == "p2pconnector" else None,
+                        num_tokens=num_input_tokens,
+                        with_prefill=with_prefill,
                         reserved_mc2_mask=self.reserved_mc2_mask,
-                        moe_comm_type=moe_comm_type if self.connector_name == "p2pconnector" else None,
+                        moe_comm_type=moe_comm_type,
                         prefetch_stream=self.prefetch_stream,
-                        num_actual_tokens=total_num_scheduled_tokens if self.connector_name == "p2pconnector" else None,
+                        num_actual_tokens=total_num_scheduled_tokens,
                         model_instance=self.model):
                     if self.connector_name == "m2nconnector":
                         # 未combine hidden

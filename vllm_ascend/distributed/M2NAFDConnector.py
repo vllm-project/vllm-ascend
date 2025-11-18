@@ -22,7 +22,7 @@ from vllm.distributed.afd_transfer.afd_connector.metadata import (
     M2NAFDConnectorMetadata)
 
 from vllm.logger import init_logger
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig,CUDAGraphMode,CompilationLevel
 logger = init_logger(__name__)
 
 
@@ -55,6 +55,11 @@ class M2NAFDConnector(AFDConnectorBase):
         self.config = config
         self.attn_size = 0
         self.ffn_size = 0
+        self.use_aclgraph = self._use_aclgraph()
+        print(f'self.use_aclgraph in M2NAFDConnector is {self.use_aclgraph}')
+        
+    def _use_aclgraph(self) -> bool:
+        return self.config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE and self.config.compilation_config.level == CompilationLevel.PIECEWISE and not self.config.model_config.enforce_eager
     
     def close(self) -> None:
         """Close the connector and release resources."""
@@ -120,10 +125,11 @@ class M2NAFDConnector(AFDConnectorBase):
                          topk_ids:torch.Tensor, 
                          metadata: AFDConnectorMetadata) -> Any:
         # TODO():move to support aclgraph
-        dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
-        print(f'send_attn_output dst is {dst}')
-        self.process_group.send_object(metadata,dst)
-        print(f'send_attn_output metadata success')
+        if not self.use_aclgraph:
+            dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
+            print(f'send_attn_output dst is {dst}')
+            self.process_group.send_object(metadata,dst)
+            print(f'send_attn_output metadata success')
         dynamic_scales = metadata.m2n_afdconnector_data.scale
         # moe_expert_num
         moe_expert_num = metadata.m2n_afdconnector_data.moe_expert_num
@@ -198,11 +204,13 @@ class M2NAFDConnector(AFDConnectorBase):
     # ATTN发给MOE(MOE接收)
     def recv_attn_output(self, metadata: M2NAFDConnectorMetadata) -> Any: 
         
-        print(f'before recv_attn_output metadata is {metadata}') 
-        src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
-        afdConnectorMetadata = self.process_group.recv_object(src)
-        print(f'recv_attn_output afdConnectorMetadata success')
-        print(f'after recv_attn_output afdConnectorMetadata is {afdConnectorMetadata}') 
+        afdConnectorMetadata = None
+        if not self.use_aclgraph:
+            print(f'before recv_attn_output metadata is {metadata}') 
+            src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
+            afdConnectorMetadata = self.process_group.recv_object(src)
+            print(f'recv_attn_output afdConnectorMetadata success')
+            print(f'after recv_attn_output afdConnectorMetadata is {afdConnectorMetadata}') 
         # TODO(yxj): 对比
         x_type = torch.int8
         if metadata.quant_mode == 0 :
@@ -231,4 +239,4 @@ class M2NAFDConnector(AFDConnectorBase):
                                                                                 aiv_num=aiv_num)
         
         # recv_counts 返程路由
-        return expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales,None
+        return expand_x, dynamic_scales, expert_token_nums, recv_counts, expand_scales,afdConnectorMetadata

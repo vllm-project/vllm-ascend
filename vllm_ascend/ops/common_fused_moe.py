@@ -637,9 +637,9 @@ class AscendSharedFusedMoE(SharedFusedMoE, AscendFusedMoE):
         shared_out = self._shared_experts(hidden_states)
         from vllm_ascend.ops.moe.moe_mlp import unified_apply_mlp
         if connector_name == "m2nconnector":
-            group_list_type = 1
-        else:
             group_list_type = 0
+        else:
+            group_list_type = 1
         
         permuted_hidden_states, expert_tokens = hidden_states, group_list
         
