@@ -361,7 +361,6 @@ class AscendFusedMoE(FusedMoE):
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
             shared_experts=None,
-            enable_force_load_balance=enable_force_load_balance,
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
             mc2_mask=mc2_mask)
