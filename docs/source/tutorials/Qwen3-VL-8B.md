@@ -1,4 +1,4 @@
-# Single NPU (Qwen3-VL 8B)
+# Single NPU (Qwen3-VL-8B)
 
 ## Introduction
 
@@ -17,6 +17,10 @@ Refer to [supported features](../user_guide/support_matrix/supported_models.md) 
 Refer to [feature guide](../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
+
+### Model Weight
+
+- `Qwen3-VL-8B-Instruct`: require 1 Atlas 800 A3 (64G × 16) nodes or 1 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 
 ### Installation
 
@@ -196,21 +200,9 @@ INFO:     127.0.0.1:54004 - "POST /v1/chat/completions HTTP/1.1" 200 OK
 
 ## Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
-
-### Using AISBench
-
-1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
-
-2. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
-
-| dataset | version | metric | mode | vllm-api-general-chat |
-|----- | ----- | ----- | ----- | -----|
-| cevaldataset | - | accuracy | gen | 92.20 |
-
 ### Using Language Model Evaluation Harness
 
-As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in online mode.
+As an example, take the `mmmu_val` dataset as a test dataset, and run accuracy evaluation of `Qwen3-VL-8B-Instruct` in offline mode.
 
 1. Refer to [Using lm_eval](../developer_guide/evaluation/using_lm_eval.md) for `lm_eval` installation.
 
@@ -222,20 +214,18 @@ lm_eval \
     --model_args pretrained=/root/.cache/modelscope/hub/models/Qwen/Qwen3-VL-8B-Instruct,max_model_len=8192,gpu_memory_utilization=0.7 \
     --tasks mmmu_val \
     --batch_size 32 \
+    --apply_chat_template \
+    --trust_remote_code \
     --output_path ./results
 ```
 
 3. After execution, you can get the result, here is the result of `Qwen3-VL-8B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
 
-|Task    |Metric  |Value |Stderr |
-|--------|--------|-----:|------:|
-|mmmu_val|acc,none|0.5378|±0.0158|
+|  Tasks  |Version|Filter|n-shot|Metric|   |Value |   |Stderr|
+|---------|------:|------|-----:|------|---|-----:|---|-----:|
+|mmmu_val |      0|none  |      |acc   |↑  |0.5389|±  |0.0159|
 
 ## Performance
-
-### Using AISBench
-
-Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
 
 ### Using vLLM Benchmark
 
@@ -251,8 +241,7 @@ There are three `vllm bench` subcommand:
 Take the `serve` as an example. Run the code as follows.
 
 ```shell
-export VLLM_USE_MODELSCOPE=true
-vllm bench serve --model vllm-ascend/Qwen3-VL-8B-Instruct  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
+vllm bench serve --model Qwen/Qwen3-VL-8B-Instruct  --dataset-name random --random-input 200 --num-prompt 200 --request-rate 1 --save-result --result-dir ./
 ```
 
 After about several minutes, you can get the performance evaluation result.
