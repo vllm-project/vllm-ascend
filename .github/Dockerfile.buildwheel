@@ -42,12 +42,4 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     python3 setup.py bdist_wheel && \
     ls -l dist 
 
-RUN bash -c 'f=/workspace/vllm-ascend/CANN/vendors/hwcomputing/bin/set_env.bash; \
-    if [ -f "$f" ]; then \
-        echo "Sourcing $f"; \
-        source "$f"; \
-    else \
-        echo "File not found: $f"; \
-    fi'
-
 CMD ["/bin/bash"]

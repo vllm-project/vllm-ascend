@@ -13,6 +13,11 @@ fi
 
 source "$ASCEND_SET_ENV"
 
+if ! find /usr/local/Ascend | grep -q "hccl_inner_def.h"; then
+  echo "[build_aclnn] Cannot find HCCL headers under /usr/local/Ascend. Stop building."
+  exit 0
+fi
+
 cd csrc/dispatch_ffn_combine
 
 # Clean
@@ -25,5 +30,5 @@ bash build.sh
 rm -rf $ROOT_DIR/CANN
 mkdir $ROOT_DIR/CANN
 
-bash ./build_out/custom_opp_dispatch_ffn_combine.run  --install-path=$ROOT_DIR/CANN
-source $ROOT_DIR/CANN/vendors/hwcomputing/bin/set_env.bash
+bash ./build_out/custom_opp_dispatch_ffn_combine.run  --install-path=$ROOT_DIR/vllm_ascend/CANN
+echo "[build_aclnn] Finished building and installing ACLNN custom op."
