@@ -2973,6 +2973,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     return self.model.compute_logits(
                         hidden_states[dummy_indices])
 
+                def dummy_drafter_compute_logits(hidden_states):
+                    return self.drafter.compute_logits(
+                        hidden_states[dummy_indices])
+
+            else:
+                dummy_compute_logits = lambda hidden_states: None
+                dummy_drafter_compute_logits = lambda hidden_states: None
+
             with set_ascend_forward_context(
                     attn_metadata,
                     self.vllm_config,
@@ -2992,8 +3000,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     with_prefill, is_torchair_compile, input_ids, positions,
                     attn_metadata, num_tokens, intermediate_tensors,
                     inputs_embeds)
-                if need_dummy_logits:
-                    dummy_compute_logits(hidden_states)
+                dummy_compute_logits(hidden_states)
 
             if self.drafter:
                 self.drafter.dummy_run(
@@ -3002,10 +3009,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp,
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
-                    batch_descriptor=batch_descriptor)
-                if need_dummy_logits:
-                    self.drafter.model.compute_logits(
-                        hidden_states[dummy_indices])
+                    batch_descriptor=batch_descriptor,
+                    dummy_compute_logits=dummy_drafter_compute_logits)
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
             if not self.in_profile_run and self.dynamic_eplb:

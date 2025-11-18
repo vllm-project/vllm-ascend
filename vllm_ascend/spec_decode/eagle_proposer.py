@@ -123,7 +123,8 @@ class EagleProposer(Proposer):
                   num_reqs: int = 0,
                   num_tokens_across_dp: Optional[torch.Tensor] = None,
                   aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-                  batch_descriptor=None):
+                  batch_descriptor=None,
+                  dummy_compute_logits=lambda hidden_states: None):
         moe_comm_type = self.runner._select_moe_comm_method(num_tokens)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
@@ -134,6 +135,7 @@ class EagleProposer(Proposer):
                 positions=self.positions[:num_tokens],
                 hidden_states=self.hidden_states[:num_tokens],
             )
+            dummy_compute_logits(self.hidden_states)
 
     def generate_token_ids(self,
                            valid_sampled_token_ids: list[list[int]],
