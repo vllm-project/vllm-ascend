@@ -350,7 +350,7 @@ class AscendLinearMethod(LinearMethodBase):
             if layer.prefix.find("o_proj") != -1 and oproj_tp_enable():
                 tp_rank = get_otp_group().rank_in_group
             elif layer.prefix.find("down_proj") != -1 and (mlp_tp_enable() or (denseffn_tp_enable() and layer.is_first_k_dense)):
-                if denseffn_tp_enable():
+                if denseffn_tp_enable() and layer.is_first_k_dense:
                     tp_rank = get_dftp_group().rank_in_group
                 else:
                     tp_rank = get_mlp_tp_group().rank_in_group
