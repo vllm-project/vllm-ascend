@@ -278,7 +278,7 @@ def shared_experts_compute_stream() -> torch.npu.Stream:
     return _SHARED_EXPERTS_COMPUTE_STREAM
 
 
-def moe_load_async_stream() -> torch.npu.Stream: 
+def moe_load_async_stream() -> torch.npu.Stream:
     global _MOE_LOAD_ASYNC_STREAM
     if _MOE_LOAD_ASYNC_STREAM is None:
         # when this function is called before any stream is set,

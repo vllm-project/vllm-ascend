@@ -23,7 +23,7 @@ from vllm.logger import logger
 
 from vllm_ascend.eplb.core.eplb_utils import EPLBParamUtils
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
-from vllm_ascend.utils import (npu_stream_switch, moe_load_async_stream)
+from vllm_ascend.utils import moe_load_async_stream, npu_stream_switch
 
 
 class EplbUpdator:
@@ -158,8 +158,8 @@ class EplbUpdator:
                 if self._gather_buffer is None:
                     shape = (self.world_size, *local_load.shape)
                     self._gather_buffer = torch.empty(shape,
-                                                    dtype=local_load.dtype,
-                                                    device=self.device)
+                                                      dtype=local_load.dtype,
+                                                      device=self.device)
 
                 dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
