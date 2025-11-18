@@ -1002,10 +1002,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                              attn_state) -> torch.Tensor:
         if self.pcp_size > 1:
             return None
-        if self.dcp_size > 1:
-            return self.attn_mask_builder.get_splitfuse_attn_mask()
         if self.attn_mask_builder is None:
             raise ValueError("Attn mask builder is None")
+        if self.dcp_size > 1:
+            return self.attn_mask_builder.get_splitfuse_attn_mask()
         # Pooling situation.
         if self.model_config.runner_type == "pooling" and self.model_config.pooler_config.pooling_type == "CLS":
             return self.attn_mask_builder.get_pooling_mask(self.device)
