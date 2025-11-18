@@ -13,7 +13,7 @@ def get_global_te(hostname: str, device_name: Optional[str]):
         ip = ipaddress.ip_address(hostname)
         if isinstance(ip, ipaddress.IPv6Address):
             raise RuntimeError(
-                "The backend if mooncake's Ascend Direct Xfer Library currcenly dose not support IPv6."
+                "The backend of mooncake's Ascend Direct Xfer Library currently does not support IPv6."
             )
     except ValueError:
         pass

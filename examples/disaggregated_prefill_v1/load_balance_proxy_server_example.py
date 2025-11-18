@@ -118,13 +118,13 @@ class ServerState:
     def __init__(self, host, port):
         self.host = host
         self.port = port
-        ip = ipaddress.ip_address(self.host)
-        if isinstance(ip, ipaddress.IPv4Address):
-            self.url = f'http://{host}:{port}/v1'
-        elif isinstance(ip, ipaddress.IPv6Address):
-            self.url = f'http://[{host}]:{port}/v1'
-        else:
-            raise RuntimeError(f"Invild host IP address {ip}")
+        self.url = f'http://{host}:{port}/v1'
+        try:
+            ip = ipaddress.ip_address(self.host)
+            if isinstance(ip, ipaddress.IPv6Address):
+                self.url = f'http://[{host}]:{port}/v1'
+        except Exception:
+            pass
         self.client = httpx.AsyncClient(timeout=None,
                                         base_url=self.url,
                                         limits=httpx.Limits(
