@@ -1380,7 +1380,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             prefix_chunk_output = torch.where(out_mask, 0, prefix_chunk_output)
             lse_mask = batch_chunk_seq_mask[:, None,
                                             None].expand_as(prefix_chunk_lse)
-            prefix_chunk_lse = torch.where(out_mask, -torch.inf, prefix_chunk_lse)
+            prefix_chunk_lse = torch.where(lse_mask, -torch.inf, prefix_chunk_lse)
 
         prefix_output, prefix_lse = self._update_chunk_attn_out_lse(
             prefix_chunk_output, prefix_chunk_lse)
