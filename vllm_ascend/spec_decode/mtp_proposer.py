@@ -32,7 +32,8 @@ from vllm_ascend.compilation.acl_graph import (ACLGraphWrapper,
                                                update_mla_attn_params)
 from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 from vllm_ascend.utils import (ProfileExecuteDuration, lmhead_tp_enable,
-                               prefill_context_parallel_enable)
+                               prefill_context_parallel_enable,
+                               shared_expert_dp_enabled)
 
 if prefill_context_parallel_enable():
     from vllm.distributed import get_pcp_group
@@ -94,6 +95,7 @@ class MtpProposer(Proposer):
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
         self.hidden_size = self.draft_model_config.get_hidden_size()
+        self.enable_shared_expert_dp = shared_expert_dp_enabled()
 
         self.pcp_size = self.runner.pcp_size
         self.dcp_size = self.runner.dcp_size
@@ -286,6 +288,12 @@ class MtpProposer(Proposer):
                     aclgraph_runtime_mode=aclgraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
                     is_mtp_model=True):
+                if self.enable_shared_expert_dp:
+                    positions = positions.unsqueeze(-1)
+                    positions = torch.ops.vllm.maybe_pad_and_reduce(positions)
+                    positions = positions.squeeze(-1)
+                    previous_hidden_states = torch.ops.vllm.maybe_pad_and_reduce(
+                        previous_hidden_states)
                 self.model(input_ids=input_ids,
                            positions=positions,
                            hidden_states=previous_hidden_states)
@@ -725,11 +733,22 @@ class MtpProposer(Proposer):
                 with ProfileExecuteDuration().capture_async('mtp_forward'):
                     model_kwargs = {}
                     model_kwargs["attn_metadata"] = attn_metadata
+                    input_ids = self.input_ids[:num_input_tokens]
+                    positions = self.positions[:num_input_tokens]
+                    hidden_states = self.hidden_states[:num_input_tokens]
 
-                    hidden_states = self.model(
-                        input_ids=self.input_ids[:num_input_tokens],
-                        positions=self.positions[:num_input_tokens],
-                        hidden_states=self.hidden_states[:num_input_tokens])
+                    if self.enable_shared_expert_dp:
+                        # positions [N] -> [N, 1] for padding
+                        positions = positions.unsqueeze(-1)
+                        positions = torch.ops.vllm.maybe_pad_and_reduce(
+                            positions)
+                        positions = positions.squeeze(-1)
+
+                    hidden_states = self.model(input_ids=input_ids,
+                                               positions=positions,
+                                               hidden_states=hidden_states)
+                    hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
+                        hidden_states.contiguous(), True)
                     forward_context = get_forward_context()
                     if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
                         if self.vllm_config.model_config.use_mla:
