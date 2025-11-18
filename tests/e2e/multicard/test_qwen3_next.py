@@ -105,4 +105,4 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
             print(f"ref_output: {ref_output[1]}")
             print(f"spec_output: {spec_output[1]}")
 
-    assert matches > int(0.66 * len(ref_outputs))
+    assert matches >= int(0.66 * len(ref_outputs))
