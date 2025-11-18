@@ -90,7 +90,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
 
     if w1_scale_bias is None and is_mc2:
         if fusion:
-            if dynamic_eplb and isinstance(w1, list[torch.Tensor]):
+            if dynamic_eplb and isinstance(w1, list):
                 # gmm1: gate_up_proj & act_fn: swiglu
                 hidden_states, swiglu_out_scale, _ = (
                     torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
@@ -173,7 +173,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
             _output_dtype = torch.bfloat16
 
         if fusion:
-            if dynamic_eplb and isinstance(w1, list[torch.Tensor]):
+            if dynamic_eplb and isinstance(w1, list):
                 # gmm1: gate_up_proj & act_fn: swiglu
                 hidden_states, swiglu_out_scale, _ = (
                     torch.ops._C_ascend.grouped_matmul_swiglu_quant_weight_nz_tensor_list(
@@ -184,6 +184,7 @@ def quant_apply_mlp(hidden_states: torch.Tensor,
                         group_list=cumsum_group_list(group_list, group_list_type),
                         bias=bias1,
                     )
+                )
             else:
                 # gmm1: gate_up_proj & act_fn: swiglu
                 hidden_states, swiglu_out_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
