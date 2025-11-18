@@ -1,6 +1,8 @@
 from common import FaultStatus,UCEType
+from vllm_ascend.worker.common import RecoveryStatus
 from vllm_ascend.worker.recovery_context import RecoveryContext
-
+from torch_npu.npu.utils import _get_uce_addr
+"""
 all_err = [
     "UCE ERROR",
     "HBM MULTI BIT ECC ERROR",
@@ -10,13 +12,15 @@ all_err = [
     "HCCL OP RETRY FAILED",
     "SUSPECT REMOTE ERROR"
 ]
+"""
 
-
-uce_error = ["UCE ERROR"]
+uce_error = [
+    "UCE ERROR",
+    "HBM MULTI BIT ECC ERROR"
+]
 force_stop_error = ["FORCE STOP"]
 network_error = [
     "SUSPECT REMOTE ERROR",
-    "HCCS LINK ERROR",
     "HCCL OP RETRY FAILED"
 ]
 
@@ -57,8 +61,10 @@ class ForceStopHandler(RecoveryHandler):
     def can_handle(self, ctx:RecoveryContext) -> bool:
         """判断是否为Force Stop异常，如果是则入队"""
         error_str = str(ctx.exception).lower()
-        return 'force stop' in error_str
-
+        for error in force_stop_error:
+            if error in error_str:
+                return True
+        return False
 
     def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
         """处理Force Stop异常，仅返回状态"""
@@ -68,10 +74,11 @@ class NetworkHandler(RecoveryHandler):
 
     def can_handle(self, ctx:RecoveryContext) -> bool:
         error_str = str(ctx.exception).lower()
-        if 'remote' in error_str:
-            ctx.fault_queue.put_nowait(FaultStatus.NETWORK_ERR)
-            return true
-        return false
+        for error in network_error:
+            if error in error_str:
+                ctx.fault_queue.put_nowait(FaultStatus.NETWORK_ERR)
+                return True
+        return False
 
     def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
         """恢复Network Error,无特殊操作"""
@@ -82,42 +89,47 @@ class UCEHandler(RecoveryHandler):
     def can_handle(self, ctx:RecoveryContext) -> bool:
         """判断是否为UCE异常，如果是则入队"""
         error_str = str(ctx.exception).lower()
-        if 'uce' in error_str:
-            ctx.fault_queue.put_nowait(FaultStatus.UCE_ERR)
-            return true
-        return false
+        for error in uce_error:
+            if error in error_str:
+                ctx.fault_queue.put_nowait(FaultStatus.UCE_ERR)
+                return True
+        return False
 
     def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
         """处理UCE异常，内部判断具体类型并执行恢复"""
+        #1.判断类型
+        uce_result = self.classify_uce_type(ctx)
+        #2.根据类型执行恢复策略
+        if uce_type == UCEType.KVCACHE_UCE:
+            return self._recover_kv_cache_uce(ctx)
+        elif uce_type == UCEType.WEIGHTS_UCE:
+            return self._recover_weight_uce(ctx)
+        elif uce_type == UCEType.ACTIVATION_UCE:
+            return self._recover_activation_uce(ctx)
+        else:
+            logger.error(f"UCEHandler: Unknown UCE type: {uce_type}")
+            return RecoveryStatus.FAILED_ABORT
+
+    def classify_uce_type(self,ctx:RecoveryContext) -> List[Tuple[UCEType,List[str]]]:
+        #1.获取出现uce的地址信息
         try:
-            exception = ctx.exception
-            if not exception:
-                logger.error("Missing exception in fault context")
-                return RecoveryStatus.FAILURE
-
-            # 1. 分类UCE错误类型和地址
-            error_type, address = self.uce_classifier.classify_uce_error(exception, fault_context)
-            fault_context['uce_type'] = error_type.value
-            fault_context['hbm_address'] = address
-
-            logger.info(f"UCEHandler: UCE error classified as {error_type.value} at address {address}")
-
-            # 2. 根据错误类型执行恢复
-            if error_type == UCEErrorType.WEIGHT_UCE:
-                return self._recover_weight_uce(fault_context, config)
-            elif error_type == UCEErrorType.KV_CACHE_UCE:
-                return self._recover_kv_cache_uce(fault_context, config)
-            elif error_type == UCEErrorType.ACTIVATION_UCE:
-                return self._recover_activation_uce(fault_context, config)
-            else:
-                logger.warning(f"UCEHandler: Unknown UCE type: {error_type.value}")
-                return RecoveryStatus.FAILURE
-
+            memory_block_info = ctx.memory_block_info
+            if not memory_block_info.initialized:
+                memory_block_info.initialize()
+            uce_ptrs = _get_uce_addr()
+            if not uce_ptr:
+                logger.error(f"UCEHandler: No UCE addr found")
+                return [(UCEType.UNKNOWN_UCE,[])]
+            uce_results = []
+            for uceptr in uce_ptrs:
+                uce_type,layer_names = ctx.memory_block_info.category_address(uceptr)
+                uce_results.append(uce_type,layer_names)
+            return uce_results
         except Exception as e:
-            logger.error(f"UCEHandler: UCE recovery failed: {e}")
-            return RecoveryStatus.FAILURE
+            logger.error(f"UCEHandler:Failed to classify UCE type，{e}")
+            return [(UCEType.UNKNOWN_UCE,[])]
 
-    def _recover_weight_uce(self, fault_context: Dict, config: Any) -> RecoveryStatus:
+    def _recover_weight_uce(self, ctx:RecoveryContext) -> RecoveryStatus:
         """恢复权重UCE错误"""
         address = fault_context.get('hbm_address')
         if address is None:
@@ -151,7 +163,7 @@ class UCEHandler(RecoveryHandler):
             logger.error(f"UCEHandler: Weight reload failed: {e}")
             return RecoveryStatus.FAILURE
 
-    def _recover_kv_cache_uce(self, fault_context: Dict, config: Any) -> RecoveryStatus:
+    def _recover_kv_cache_uce(self, ctx:RecoveryContext) -> RecoveryStatus:
         """恢复KV Cache UCE错误"""
         level = getattr(config, 'level', FaultToleranceLevel.OFF)
 
@@ -181,7 +193,7 @@ class UCEHandler(RecoveryHandler):
         logger.warning(f"UCEHandler: Unsupported fault tolerance level: {level}")
         return RecoveryStatus.FAILURE
 
-    def _recover_activation_uce(self, fault_context: Dict, config: Any) -> RecoveryStatus:
+    def _recover_activation_uce(self, ctx:RecoveryContext) -> RecoveryStatus:
         """恢复激活值UCE错误"""
         logger.info("UCEHandler: Activation UCE detected, no special recovery needed")
         # 激活值UCE无需特殊恢复，直接返回成功

@@ -23,6 +23,7 @@ class UCEType():
     WEIGHTS_UCE = "WEIGHTS_UCE"
     KVCACHE_UCE = "KVCACHE_UCE"
     ACTIVATION_UCE = "ACTIVATION_UCE"
+    UNKNOWN_UCE = "UNKNOWN_UCE"
 
 class RecoveryStatus():
     """

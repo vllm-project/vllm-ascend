@@ -240,3 +240,17 @@ class FaultTolerance:
             logger.info("Successfully destroyed recovery process group")
         except Exception as e:
             logger.error(f"Failed to destroy recovery process group: {e}")
+
+    def _get_current_weight_memory_info(self):
+        memory_block = {}
+        state_dict = self.model_runner.model.state_dict()
+        for name,param in state_dict.items():
+            start_address = param.data_ptr()
+            size_bytes = param.numel() * param.element_size()
+            end_address = start_address + max(0,size_bytes-1)
+            memory_block[name] = {
+                'name':name,
+                'start_address':start_address,
+                'end_address':end_address,
+            }
+        return memory_block
