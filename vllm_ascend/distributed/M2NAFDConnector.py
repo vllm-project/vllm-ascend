@@ -120,10 +120,10 @@ class M2NAFDConnector(AFDConnectorBase):
                          topk_ids:torch.Tensor, 
                          metadata: AFDConnectorMetadata) -> Any:
         # TODO():move to support aclgraph
-        # dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
-        # print(f'send_attn_output dst is {dst}')
-        # self.process_group.send_object(metadata,dst)
-        # print(f'send_attn_output metadata success')
+        dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
+        print(f'send_attn_output dst is {dst}')
+        self.process_group.send_object(metadata,dst)
+        print(f'send_attn_output metadata success')
         dynamic_scales = metadata.m2n_afdconnector_data.scale
         # moe_expert_num
         moe_expert_num = metadata.m2n_afdconnector_data.moe_expert_num
@@ -198,11 +198,11 @@ class M2NAFDConnector(AFDConnectorBase):
     # ATTN发给MOE(MOE接收)
     def recv_attn_output(self, metadata: M2NAFDConnectorMetadata) -> Any: 
         
-        # print(f'before recv_attn_output metadata is {metadata}') 
-        # src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
-        # afdConnectorMetadata = self.process_group.recv_object(src)
-        # print(f'recv_attn_output metadata success')
-        # print(f'after recv_attn_output metadata is {metadata}') 
+        print(f'before recv_attn_output metadata is {metadata}') 
+        src = (self.process_group.rank_in_group - 1) % self.process_group.world_size
+        afdConnectorMetadata = self.process_group.recv_object(src)
+        print(f'recv_attn_output afdConnectorMetadata success')
+        print(f'after recv_attn_output afdConnectorMetadata is {afdConnectorMetadata}') 
         # TODO(yxj): 对比
         x_type = torch.int8
         if metadata.quant_mode == 0 :
