@@ -18,11 +18,11 @@
 from typing import Optional, Union
 
 import torch
-from vllm.model_executor.models.roberta import (RobertaEmbedding,
-                                                RobertaForSequenceClassification,
-                                                replace_roberta_positions)
-from vllm.sequence import IntermediateTensors
 
+from vllm.model_executor.models.roberta import (
+    RobertaEmbedding, RobertaForSequenceClassification,
+    replace_roberta_positions)
+from vllm.sequence import IntermediateTensors
 from vllm_ascend.patch.worker.patch_bert import (TOKEN_TYPE_SHIFT,
                                                  _decode_token_type_ids,
                                                  _encode_token_type_ids)
