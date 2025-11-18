@@ -152,6 +152,9 @@ rm gsm8k.zip
 Update the file `benchmark/ais_bench/benchmark/configs/models/vllm_api/vllm_api_general_chat.py`.
 There are several arguments that you should update according to your environment.
 
+- `attr`: Identifier for the inference backend type, fixed as `service` (serving-based inference) or `local` (local model).
+- `type`: Used to select different backend API types.
+- `abbr`: Unique identifier for a local task, used to distinguish between multiple tasks.
 - `path`: Update to your model weight path.
 - `model`: Update to your model name in vLLM.
 - `host_ip` and `host_port`: Update to your vLLM server ip and port.
@@ -242,6 +245,8 @@ After each dataset execution, you can get the result from saved files such as `o
 
 #### Execute Performance Evaluation
 
+Text-only benchmarks:
+
 ```shell
 # run C-Eval dataset
 ais_bench --models vllm_api_general_chat --datasets ceval_gen_0_shot_cot_chat_prompt.py --summarizer default_perf --mode perf
@@ -262,6 +267,14 @@ ais_bench --models vllm_api_general_chat --datasets livecodebench_code_generate_
 ais_bench --models vllm_api_general_chat --datasets aime2024_gen_0_shot_chat_prompt.py --summarizer default_perf --mode perf
 ```
 
+Multi-modal benchmarks (text + images):
+
+```shell
+# run textvqa dataset
+ais_bench --models vllm_api_stream_chat --datasets textvqa_gen_base64 --summarizer default_perf --mode perf
+```
+
+
 After execution, you can get the result from saved files, there is an example as follows:
 
 ```
@@ -280,4 +293,34 @@ After execution, you can get the result from saved files, there is an example as
         |-- cevaldataset_details.json # Final performance results in details
         |-- cevaldataset_plot.html # Final performance results (in html format)
         `-- cevaldataset_rps_distribution_plot_with_actual_rps.html # Final performance results (in html format)
+```
+
+
+### 3. Troubleshooting
+
+#### FileNotFoundError
+
+If you download the TextVQA dataset following the AISBench documentation:
+
+```bash
+cd ais_bench/datasets
+git lfs install
+git clone https://huggingface.co/datasets/maoxx241/textvqa_subset
+mv textvqa_subset/ textvqa/
+mkdir textvqa/textvqa_json/
+mv textvqa/*.json textvqa/textvqa_json/
+mv textvqa/*.jsonl textvqa/textvqa_json/
+```
+
+you may encounter the following error:
+
+```bash
+AISBench - ERROR - /vllm-workspace/benchmark/ais_bench/benchmark/clients/base_client.py - raise_error - 35 - [AisBenchClientException] Request failed: HTTP status 400. Server response: {"error":{"message":"1 validation error for ChatCompletionContentPartImageParam\nimage_url\n  Input should be a valid dictionary [type=dict_type, input_value='data/textvqa/train_images/b2ae0f96dfbea5d8.jpg', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.12/v/dict_type None","type":"BadRequestError","param":null,"code":400}}
+```
+
+You need to manually replace the dataset image paths with absolute paths, changing `/path/to/benchmark/ais_bench/datasets/textvqa/train_images` to the actual absolute directory where the images are stored:
+
+```bash
+cd ais_bench/datasets/textvqa/textvqa_json
+sed -i 's#data/textvqa/train_images/#/path/to/benchmark/ais_bench/datasets/textvqa/train_images#g' textvqa_val.json
 ```
