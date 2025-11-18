@@ -19,3 +19,4 @@ librosa
 soundfile
 pytest_mock
 msserviceprofiler>=1.2.2
+mindstudio-probe>=8.3.0
