@@ -298,7 +298,7 @@ After execution, you can get the result from saved files, there is an example as
 
 ### 3. Troubleshooting
 
-#### FileNotFoundError
+#### Invalid Image Path Error
 
 If you download the TextVQA dataset following the AISBench documentation:
 
