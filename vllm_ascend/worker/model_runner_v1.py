@@ -2974,7 +2974,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         hidden_states[dummy_indices])
 
                 def dummy_drafter_compute_logits(hidden_states):
-                    return self.drafter.compute_logits(
+                    return self.drafter.model.compute_logits(
                         hidden_states[dummy_indices])
 
             else:
