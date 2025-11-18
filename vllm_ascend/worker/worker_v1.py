@@ -301,16 +301,21 @@ class NPUWorker(WorkerBase):
                                         all_gather_group=get_tp_group())
 
         kv_connector_output = output.kv_connector_output
-        if not kv_connector_output:
+        ec_connector_output = getattr(output, "ec_connector_output", None)
+
+        if not kv_connector_output and not ec_connector_output:
             return None
 
         # In case of PP with kv transfer, we need to pass through the
         # kv_connector_output
         if (not kv_connector_output.finished_sending
-                and not kv_connector_output.finished_recving):
+                and not kv_connector_output.finished_recving
+                and not ec_connector_output.finished_sending
+                and not ec_connector_output.finished_recving):
             return EMPTY_MODEL_RUNNER_OUTPUT
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.kv_connector_output = kv_connector_output
+        output.ec_connector_output = ec_connector_output
         return output
 
     def load_model(self) -> None:
