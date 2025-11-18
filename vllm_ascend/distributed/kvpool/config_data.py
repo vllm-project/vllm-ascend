@@ -1,31 +1,17 @@
 import array
 import hashlib
-import json
-import os
-import re
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from vllm.distributed.kv_transfer.kv_connector.v1.base import \
     KVConnectorMetadata
-from vllm.utils import logger
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.11.0"):
-    from vllm.utils import cdiv
-else:
-    from vllm.utils.math_utils import cdiv
-
+from vllm.utils import cdiv, logger
 from vllm.v1.core.sched.output import NewRequestData
-
-DEFAULT_GLOBAL_SEGMENT_SIZE = 3355443200  # 3.125 GiB
-DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
 
 
 @dataclass
-class MooncakeEngineMetadata:
+class KeyMetadata:
     """name of the LLM model"""
 
     model_name: str
@@ -33,44 +19,37 @@ class MooncakeEngineMetadata:
     world_size: int
     """ worker id when running under a distributed setting """
     worker_id: int
-    """ the format of kv tensors """
-    kv_dtype: torch.dtype
-    """ the shape of kv tensors """
-    """ (num_layer, 2, metadata.block_size, num_kv_head, head_size) """
-    kv_shape: tuple[int, int, int, int, int]
+
     block_size: int = 128
-    """ whether use MLA"""
-    use_mla: bool = False
 
 
 @dataclass(order=True)
-class MooncakeEngineKey:
-    model_name: str
-    world_size: int
-    worker_id: int
+class PoolKey:
+    # model_name: str
+    # world_size: int
+    # worker_id: int
+    key_metadata: KeyMetadata
     chunk_hash: str
 
     def __hash__(self):
         return hash((
-            self.model_name,
-            self.world_size,
-            self.worker_id,
+            self.key_metadata.model_name,
+            self.key_metadata.world_size,
+            self.key_metadata.worker_id,
             self.chunk_hash,
         ))
 
     def to_string(self):
-        return (f"{self.model_name}@{self.world_size}"
-                f"@{self.worker_id}@{self.chunk_hash}")
+        return (f"{self.key_metadata.model_name}@{self.key_metadata.world_size}"
+                f"@{self.key_metadata.worker_id}@{self.chunk_hash}")
 
-    def split_layers(self, num_layers: int) -> List["LayerMooncakeEngineKey"]:
+    def split_layers(self, num_layers: int) -> List["LayerPoolKey"]:
         """Split the key into multiple keys for each layer"""
         keys = []
         for layer_id in range(num_layers):
             keys.append(
-                LayerMooncakeEngineKey(
-                    self.model_name,
-                    self.world_size,
-                    self.worker_id,
+                LayerPoolKey(
+                    self.key_metadata,
                     self.chunk_hash,
                     layer_id,
                 ))
@@ -80,15 +59,15 @@ class MooncakeEngineKey:
         # Note(Kuntai): this is used for serializing CacheEngineKey via msgpack.
         return {
             "__type__": "CacheEngineKey",
-            "model_name": self.model_name,
-            "world_size": self.world_size,
-            "worker_id": self.worker_id,
+            "model_name": self.key_metadata.model_name,
+            "world_size": self.key_metadata.world_size,
+            "worker_id": self.key_metadata.worker_id,
             "chunk_hash": self.chunk_hash,
         }
 
     @staticmethod
     def from_dict(d):
-        return MooncakeEngineKey(
+        return PoolKey(
             model_name=d["model_name"],
             world_size=d["world_size"],
             worker_id=d["worker_id"],
@@ -97,30 +76,30 @@ class MooncakeEngineKey:
 
 
 @dataclass(order=True)
-class LayerMooncakeEngineKey(MooncakeEngineKey):
+class LayerPoolKey(PoolKey):
     """A key for the layer cache engine"""
 
     layer_id: int
 
     def __hash__(self):
         return hash((
-            self.model_name,
-            self.world_size,
-            self.worker_id,
+            self.key_metadata.model_name,
+            self.key_metadata.world_size,
+            self.key_metadata.worker_id,
             self.chunk_hash,
             self.layer_id,
         ))
 
     def to_string(self):
-        return (f"{self.model_name}@{self.world_size}"
-                f"@{self.worker_id}@{self.chunk_hash}@{self.layer_id}")
+        return (f"{self.key_metadata.model_name}@{self.key_metadata.world_size}"
+                f"@{self.key_metadata.worker_id}@{self.chunk_hash}@{self.layer_id}")
 
 
 class ChunkedTokenDatabase():
 
     def __init__(
         self,
-        metadata: MooncakeEngineMetadata,
+        metadata: KeyMetadata,
     ):
         self.metadata = metadata
 
@@ -128,10 +107,11 @@ class ChunkedTokenDatabase():
                           chunk_hash: str,
                           layer_id: Optional[int] = None):
         assert self.metadata is not None
-        return MooncakeEngineKey(
-            self.metadata.model_name,
-            self.metadata.world_size,
-            self.metadata.worker_id,
+        return PoolKey(
+            # self.metadata.model_name,
+            # self.metadata.world_size,
+            # self.metadata.worker_id,
+            self.metadata,
             chunk_hash,
         )
 
@@ -177,7 +157,7 @@ class ChunkedTokenDatabase():
         self,
         tokens: Union[torch.Tensor, List[int]],
         mask: Optional[torch.Tensor] = None,
-    ) -> Iterable[Tuple[int, int, MooncakeEngineKey]]:
+    ) -> Iterable[Tuple[int, int, PoolKey]]:
         """Process the tokens and return the corresponding cache engine keys.
 
         :param Union[torch.Tensor, List[int]] tokens: The tokens to process.
@@ -226,8 +206,8 @@ class ChunkedTokenDatabase():
 class LoadSpec:
     # Number of tokens cached in vLLM
     vllm_cached_tokens: int
-    # Number of tokens that are cached in mooncake
-    mooncake_cached_tokens: int
+    # Number of tokens that are cached in kvpool
+    kvpool_cached_tokens: int
     # Whether the scheduler allow us to load the tokens
     can_load: bool
 
@@ -383,7 +363,7 @@ class ReqMeta:
         if load_spec is not None and load_spec.can_load:
             logger.debug(
                 "Scheduled to load %d tokens for request %s",
-                load_spec.mooncake_cached_tokens,
+                load_spec.kvpool_cached_tokens,
                 tracker.req_id,
             )
         else:
@@ -402,7 +382,7 @@ class ReqMeta:
         )
 
 
-class MooncakeConnectorMetadata(KVConnectorMetadata):
+class AscendConnectorMetadata(KVConnectorMetadata):
 
     def __init__(self, unfinished_request_ids):
         self.requests = []
@@ -420,122 +400,9 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 @dataclass
 class LasyerMultiBlockReqMeta:
     req_id: str
-    keys: List[LayerMooncakeEngineKey]
+    keys: List[LayerPoolKey]
     starts: List[int]
     ends: list[int]
     block_ids: list[int]
     layer_id: int
-
-
-@dataclass
-class MooncakeStoreConfig:
-    local_hostname: str
-    metadata_server: str
-    global_segment_size: Union[int, str]
-    local_buffer_size: int
-    protocol: str
-    device_name: str
-    master_server_address: str
-    use_ascend_direct: bool
-
-    @staticmethod
-    def from_file(file_path: str) -> "MooncakeStoreConfig":
-        with open(file_path) as file:
-            config = json.load(file)
-        return MooncakeStoreConfig(
-            local_hostname=config.get("local_hostname"),
-            metadata_server=config.get("metadata_server"),
-            global_segment_size=_parse_global_segment_size(
-                config.get("global_segment_size",
-                           DEFAULT_GLOBAL_SEGMENT_SIZE)),
-            local_buffer_size=(config.get("local_buffer_size",
-                                          DEFAULT_LOCAL_BUFFER_SIZE)),
-            protocol=config.get("protocol", "tcp"),
-            device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address"),
-            use_ascend_direct=config.get("use_ascend_direct", False))
-
-    @staticmethod
-    def load_from_env() -> "MooncakeStoreConfig":
-        config_path = os.getenv("MOONCAKE_CONFIG_PATH")
-        if not config_path:
-            raise ValueError(
-                "The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
-        return MooncakeStoreConfig.from_file(config_path)
-
-
-def _parse_global_segment_size(value) -> int:
-    """
-    Parse storage size strings with support for units: GB, MB, KB, B
-    
-    Args:
-        value: Input value (int, str, or other convertible types)
-        
-    Returns:
-        int: Size in bytes
-        
-    Raises:
-        ValueError: For invalid format, missing number, or negative values
-        TypeError: For unsupported input types
-    """
-
-    if isinstance(value, int):
-        return value
-    elif not isinstance(value, str):
-        try:
-            return int(value)
-        except (TypeError, ValueError) as e:
-            raise TypeError(
-                f"Unsupported type for global_segment_size: {type(value)}"
-            ) from e
-
-    cleaned_input = value.strip().lower()
-    if not cleaned_input:
-        raise ValueError("global segment size cannot be empty.")
-
-    UNIT_MULTIPLIERS = {
-        'gb': 1024**3,  # 1 GB = 1024^3 bytes
-        'mb': 1024**2,  # 1 MB = 1024^2 bytes
-        'kb': 1024,  # 1 KB = 1024 bytes
-        'b': 1  # 1 B = 1 byte
-    }
-    pattern = r'^\s*([\d.]+)\s*(gb|mb|kb|b)?\s*$'
-    match = re.match(pattern, cleaned_input)
-
-    if not match:
-        raise ValueError(f"Invalid format: '{value}'")
-
-    number_str = match.group(1)
-    unit = match.group(2) or 'b'
-
-    multiplier = UNIT_MULTIPLIERS[unit]
-    return _convert_to_bytes(number_str, multiplier, value)
-
-
-def _convert_to_bytes(number_str: str, multiplier: int,
-                      original_input: str) -> int:
-    """
-    Convert numeric string to byte count
-    
-    Args:
-        number_str: Numeric portion of input
-        multiplier: Unit conversion factor
-        original_input: Original input string (for error messages)
-        
-    Returns:
-        int: Byte count
-        
-    Raises:
-        ValueError: For invalid numbers or negative results
-    """
-    try:
-        numeric_value = float(number_str)
-    except ValueError:
-        raise ValueError(
-            f"Invalid numeric value '{number_str}' in: '{original_input}'")
-    # Calculate byte count
-    try:
-        byte_count = int(numeric_value * multiplier)
-    except OverflowError:
-        raise ValueError(f"Storage size too large: '{original_input}'")
-    return byte_count
+    is_last_chunk: bool = True
