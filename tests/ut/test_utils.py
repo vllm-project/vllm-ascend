@@ -47,10 +47,10 @@ class TestUtils(TestBase):
 
     def test_is_enable_nz(self):
         with mock.patch("vllm_ascend.utils.envs_ascend.VLLM_ASCEND_ENABLE_NZ",
-                        "1"):
+                        1):
             self.assertTrue(utils.is_enable_nz())
         with mock.patch("vllm_ascend.utils.envs_ascend.VLLM_ASCEND_ENABLE_NZ",
-                        "0"):
+                        0):
             self.assertFalse(utils.is_enable_nz())
 
     def test_sleep_mode_enabled(self):
