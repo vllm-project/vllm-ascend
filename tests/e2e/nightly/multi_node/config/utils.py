@@ -27,7 +27,7 @@ def temp_env(env_dict):
 def dns_resolver(retries: int = 20, base_delay: float = 0.5):
     # We should resolve DNS with retries to avoid transient network issues.
     # When the pod is just started, DNS resolution may fail.
-    def resolve(dns: str) -> str:
+    def resolve(dns: str):
         delay = base_delay
         for attempt in range(retries):
             try:
