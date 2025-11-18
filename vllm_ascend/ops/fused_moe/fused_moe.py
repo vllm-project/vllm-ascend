@@ -328,13 +328,6 @@ class AscendFusedMoE(FusedMoE):
         quantized_x_for_share, dynamic_scale_for_share = None, None
 
         forward_context = get_forward_context()
-
-        # Load balancing for token distribution among experts in dummy_run
-        # TODO: The community only considers load balancing when DP > 1.
-        # This approach may overlook some extreme scenarios.
-        enable_force_load_balance = forward_context.in_profile_run
-
-        forward_context = get_forward_context()
         hidden_states, router_logits, mc2_mask, context_metadata = forward_context.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
