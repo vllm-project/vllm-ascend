@@ -35,7 +35,7 @@
 # ------------------------------
 # Run the proxy server, specifying the host/port for each vLLM DP Instance:
 #
-#   python load_balance_proxy_server_example.py \
+#   python dp_load_balance_proxy_server.py \
 #     --host 0.0.0.0 --port 9000 \
 #     --dp-hosts 127.0.0.1 127.0.0.1 \
 #     --dp-ports 8100 8101 \
