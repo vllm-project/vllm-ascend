@@ -1,20 +1,14 @@
+import functools
 import queue
+from datetime import timedelta
+
+import torch.distributed as dist
+
 from memory_block_info import MemoryBlockInfo
 from vllm_ascend.worker.common import FaultAction
-from vllm_ascend.worker.recovery_chain import UCEHandler
+from vllm_ascend.worker.recovery_chain import UCEHandler, RecoveryHandler, ForceStopHandler, NetworkHandler
 from vllm_ascend.worker.recovery_context import RecoveryContext
-from vllm_ascend.worker.recovery_strategy import FaultStatus
-
-class FaultToleranceLevel(Enum):
-    """
-    Fault tolerance level
-    level 0: disable fault tolerance
-    level 1: enable base fault tolerance for weight UCE/Activation UCE/Network Error
-    level 2: enable all fault tolerance for weight UCE/Activation UCE/KVCache UCE/Network Error
-    """
-    OFF = 0      # 关闭容错
-    BASIC = 1    # 基础容错（KV Cache UCE不恢复）
-    FULL = 2     # 完整容错（KV Cache实时备份恢复）
+from common import FaultToleranceLevel,FaultStatus
 
 class FaultTolerance:
     _recovery_group = None
@@ -34,11 +28,6 @@ class FaultTolerance:
         """初始化恢复专用进程组（与FaultAware类似）"""
         if not dist.is_initialized() or self.world_size == 1:
             return
-
-        logger.info(
-            f"Initializing recovery process group: "
-            f"rank={self.rank}, world_size={self.world_size}, backend=gloo"
-        )
 
         # 创建恢复专用进程组
         FaultTolerance._recovery_group = dist.new_group(
@@ -84,7 +73,7 @@ class FaultTolerance:
                         continue
                     elif torch.equal(ft_action,FaultAction.RAISE_EXCEPTION):
                         raise e
-                    elif torch.equal(ft_action,FaultAction.FAILED_ABORT):
+                    elif torch.equal(ft_action,FaultAction.RETURN):
                         return None
                     else:
                         raise e
@@ -240,17 +229,3 @@ class FaultTolerance:
             logger.info("Successfully destroyed recovery process group")
         except Exception as e:
             logger.error(f"Failed to destroy recovery process group: {e}")
-
-    def _get_current_weight_memory_info(self):
-        memory_block = {}
-        state_dict = self.model_runner.model.state_dict()
-        for name,param in state_dict.items():
-            start_address = param.data_ptr()
-            size_bytes = param.numel() * param.element_size()
-            end_address = start_address + max(0,size_bytes-1)
-            memory_block[name] = {
-                'name':name,
-                'start_address':start_address,
-                'end_address':end_address,
-            }
-        return memory_block
