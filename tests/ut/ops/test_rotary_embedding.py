@@ -5,9 +5,9 @@ from unittest.mock import MagicMock, PropertyMock, patch
 import torch
 from transformers.configuration_utils import PretrainedConfig
 from vllm.config import ModelConfig, VllmConfig
-from vllm.platforms import CpuArchEnum
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding)
+from vllm.platforms import CpuArchEnum
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
