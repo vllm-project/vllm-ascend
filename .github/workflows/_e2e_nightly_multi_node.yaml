@@ -66,7 +66,6 @@ concurrency:
 jobs:
   e2e:
     name: ${{ inputs.config_file_path }}
-    # if: false
     # This is the runner with no NPU for k8s controller
     runs-on: ${{ inputs.runner }}
     container:
