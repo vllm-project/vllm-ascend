@@ -260,10 +260,10 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
                 requires_grad=False)
         return layer
 
-    @patch('vllm_ascend.utils._ENABLE_NZ', False)
     @patch('torch_npu.npu_format_cast')
     @patch('torch_npu.npu_quantize')
     @patch('torch.Tensor.npu')
+    @patch.dict("os.environ", {"VLLM_ASCEND_ENABLE_NZ": "0"})
     def test_process_weights_after_loading(self, mock_npu, mock_npu_quantize,
                                            mock_npu_format_cast):
         mock_npu.return_value = torch.Tensor()

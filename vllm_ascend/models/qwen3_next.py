@@ -119,6 +119,7 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             output_size=self.conv_dim,
             bias=False,
             prefix=f"{prefix}.conv1d",
+            use_nz=False,
         )
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 

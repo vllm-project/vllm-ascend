@@ -45,7 +45,8 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        if (is_enable_nz() and layer.weight.data.dtype
+        use_nz = getattr(layer, "use_nz", True) and is_enable_nz()
+        if (use_nz and layer.weight.data.dtype
                 in [torch.float16, torch.bfloat16]):
             layer.weight.data = torch_npu.npu_format_cast(
                 layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
@@ -325,6 +326,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         *,
         return_bias: bool = True,
         disable_tp: bool = False,
+        use_nz: bool = True,
     ):
         self.custom_op, self.tp_rank, self.tp_size = get_parallel_op(
             disable_tp, prefix, self, "column")
@@ -332,6 +334,7 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
+        self.use_nz = use_nz
         # If QKV or MergedColumn, use output size of each partition.
         if hasattr(self, "output_sizes"):
             self.output_partition_sizes = [
