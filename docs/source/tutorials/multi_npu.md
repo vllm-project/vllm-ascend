@@ -1,4 +1,4 @@
-# Multi-NPU (QwQ 32B)
+# Multi-NPU (QwQ-32B)
 
 ## Run vllm-ascend on Multi-NPU
 

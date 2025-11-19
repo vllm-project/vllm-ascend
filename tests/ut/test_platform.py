@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import PlatformEnum
 
 from tests.ut.base import TestBase
@@ -329,6 +330,7 @@ class TestNPUPlatform(TestBase):
         )
 
     @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch("vllm_ascend.utils.update_default_aclgraph_sizes")
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -336,7 +338,8 @@ class TestNPUPlatform(TestBase):
     )
     def test_check_and_update_config_unsupported_compilation_level(
             self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            mock_update_default, mock_is_310p):
+        mock_update_default.return_value = MagicMock()
         mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config(
         )
         vllm_config = TestNPUPlatform.mock_vllm_config()
@@ -409,6 +412,7 @@ class TestNPUPlatform(TestBase):
             )
 
     @patch("vllm_ascend.utils.is_310p", return_value=False)
+    @patch("vllm_ascend.utils.update_default_aclgraph_sizes")
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch(
@@ -416,7 +420,8 @@ class TestNPUPlatform(TestBase):
     )
     def test_check_and_update_config_torchair_enabled_compilation(
             self, mock_init_recompute, mock_init_ascend, mock_check_ascend,
-            mock_is_310p):
+            mock_update_default, mock_is_310p):
+        mock_update_default.return_value = MagicMock()
         mock_ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
         mock_ascend_config.torchair_graph_config.enabled = True
         mock_init_ascend.return_value = mock_ascend_config
@@ -722,3 +727,32 @@ class TestNPUPlatform(TestBase):
             self.platform.get_static_graph_wrapper_cls(),
             "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
+
+    def test_aclgraph_enable(self):
+        config = EngineArgs()
+        VllmConfig = config.create_engine_config()
+        self.assertEqual(VllmConfig.compilation_config.cudagraph_mode,
+                         CUDAGraphMode.PIECEWISE)
+
+        with self.assertLogs(logger="vllm", level="INFO") as cm:
+            from vllm_ascend import platform
+
+            importlib.reload(platform)
+            self.platform.check_and_update_config(VllmConfig)
+            self.assertTrue(
+                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
+                "using only ACL Graph mode" in cm.output[0])
+            if vllm_version_is("0.11.0"):
+                self.assertEqual(
+                    VllmConfig.compilation_config.level,
+                    CompilationLevel.PIECEWISE,
+                )
+            else:
+                self.assertEqual(
+                    VllmConfig.compilation_config.mode,
+                    CompilationMode.VLLM_COMPILE,
+                )
+            self.assertEqual(
+                VllmConfig.compilation_config.cudagraph_mode,
+                CUDAGraphMode.PIECEWISE,
+            )

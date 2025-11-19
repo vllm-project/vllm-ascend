@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.9.1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2643)
-- [[v0.11.0rc0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/3222)
+- [[v0.11.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/3222)
 
 ## General FAQs
 
@@ -15,13 +15,14 @@ Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b)，Atlas A3 series(
 - Atlas 800I A2 Inference series (Atlas 800I A2)
 - Atlas A3 Training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 Inference series (Atlas 800I A3)
-- [Experimental] Atlas 300I Inference series (Atlas 300I Duo). Currently for 310I Duo the stable version is vllm-ascend v0.10.0rc1.
+- [Experimental] Atlas 300I Inference series (Atlas 300I Duo).
+- [Experimental] Currently for 310I Duo the stable version is vllm-ascend v0.10.0rc1.
 
 Below series are NOT supported yet:
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet
 - Ascend 910, Ascend 910 Pro B (Ascend-cann-kernels-910) unplanned yet
 
-From a technical view, vllm-ascend support would be possible if the torch-npu is supported. Otherwise, we have to implement it by using custom ops. We are also welcome to join us to improve together.
+From a technical view, vllm-ascend support would be possible if the torch-npu is supported. Otherwise, we have to implement it by using custom ops. We also welcome you to join us to improve together.
 
 ### 2. How to get our docker containers?
 
@@ -38,7 +39,7 @@ docker pull quay.nju.edu.cn/ascend/vllm-ascend:$TAG
 ```
 
 #### Load Docker Images for offline environment
-If you want to use container image for offline environments (no internet connection), you need to download container image in a environment with internet access:
+If you want to use container image for offline environments (no internet connection), you need to download container image in an environment with internet access:
 
 **Exporting Docker images:**
 
@@ -74,7 +75,7 @@ There are many channels that you can communicate with our community developers /
 
 - Submit a GitHub [<u>issue</u>](https://github.com/vllm-project/vllm-ascend/issues?page=1).
 - Join our [<u>weekly meeting</u>](https://docs.google.com/document/d/1hCSzRTMZhIB8vRq1_qOOjx4c9uYUxvdQvDsMV2JcSrw/edit?tab=t.0#heading=h.911qu8j8h35z) and share your ideas.
-- Join our [<u>WeChat</u>](https://github.com/vllm-project/vllm-ascend/issues/227) group and ask your quenstions.
+- Join our [<u>WeChat</u>](https://github.com/vllm-project/vllm-ascend/issues/227) group and ask your questions.
 - Join our ascend channel in [<u>vLLM forums</u>](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support/6) and publish your topics.
 
 ### 5. What features does vllm-ascend V1 supports?
@@ -135,14 +136,14 @@ OOM errors typically occur when the model exceeds the memory capacity of a singl
 
 In scenarios where NPUs have limited high bandwidth memory (HBM) capacity, dynamic memory allocation/deallocation during inference can exacerbate memory fragmentation, leading to OOM. To address this:
 
-- **Limit --max-model-len**:  It can save the HBM usage for kv cache initialization step.
+- **Limit `--max-model-len`**:  It can save the HBM usage for kv cache initialization step.
 
 - **Adjust `--gpu-memory-utilization`**: If unspecified, the default value is `0.9`. You can decrease this value to reserve more memory to reduce fragmentation risks. See details in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/serving/engine_args.html#vllm.engine.arg_utils-_engine_args_parser-cacheconfig).
 
 - **Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to optimize NPU memory management. For example, you can use `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory feature to mitigate memory fragmentation caused by frequent dynamic memory size adjustments during runtime. See details in: [PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html).
 
 ### 14. Failed to enable NPU graph mode when running DeepSeek.
-You may encounter the following error if running DeepSeek with NPU graph mode is enabled. The allowed number of queries per KV when enabling both MLA and Graph mode is {32, 64, 128}. **Thus this is not supported for DeepSeek-V2-Lite**, as it only has 16 attention heads. The NPU graph mode support on DeepSeek-V2-Lite will be implemented in the future.
+Enabling NPU graph mode for DeepSeek may trigger an error. This is because when both MLA and NPU graph mode are active, the number of queries per KV head must be 32, 64, or 128. However, DeepSeek-V2-Lite has only 16 attention heads, which results in 16 queries per KV—a value outside the supported range. Support for NPU graph mode on DeepSeek-V2-Lite will be added in a future update.
 
 And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, num_heads/num_kv_heads is {32, 64, 128}.
 

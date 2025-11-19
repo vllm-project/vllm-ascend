@@ -29,7 +29,10 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
-from vllm_ascend.utils import enable_sp
+from vllm_ascend.utils import enable_sp, prefill_context_parallel_enable
+
+if prefill_context_parallel_enable():
+    from vllm.distributed import get_pcp_group
 
 
 class QuantType(Enum):
@@ -50,11 +53,8 @@ class PrepareAndFinalize(ABC):
                                      sizes, ranks, and communication settings.
     """
 
-    def __init__(self,
-                 moe_config: FusedMoEConfig,
-                 quant_type: QuantType = QuantType.NONE):
+    def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
-        self.quant_type = quant_type
 
     @abstractmethod
     def prepare(
@@ -62,7 +62,8 @@ class PrepareAndFinalize(ABC):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False
+        replace_allreduce: bool = False,
+        quant_type: QuantType = QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -76,6 +77,7 @@ class PrepareAndFinalize(ABC):
             router_logits (torch.Tensor): Router outputs, shape [num_tokens, num_experts]
             enable_shared_expert_dp (bool): Skip DP communication for shared experts
             replace_allreduce (bool): Bypass default all-reduce behavior
+            quant_type: none, w8a8 or w4a8
 
         Returns:
             Tuple of:
@@ -114,10 +116,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
     Will be used when num_tokens exceed mc2's limitation (512 tokens/rank).
     """
 
-    def __init__(self,
-                 moe_config: FusedMoEConfig,
-                 quant_type: QuantType = QuantType.NONE):
-        super().__init__(moe_config, quant_type)
+    def __init__(self, moe_config: FusedMoEConfig):
+        super().__init__(moe_config)
         self._restore_tp_across_dp()
 
     def _restore_tp_across_dp(self):
@@ -130,7 +130,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False
+        replace_allreduce: bool = False,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -208,10 +209,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     Relies on `mc2_mask` and `padded_num_tokens` from forward_context for alignment.
     """
 
-    def __init__(self,
-                 moe_config: FusedMoEConfig,
-                 quant_type: QuantType = QuantType.NONE):
-        super().__init__(moe_config, quant_type)
+    def __init__(self, moe_config: FusedMoEConfig):
+        super().__init__(moe_config)
         self._restore_tp_across_dp()
 
     def _restore_tp_across_dp(self):
@@ -228,7 +227,8 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False
+        replace_allreduce: bool = False,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -309,6 +309,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -319,7 +320,8 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             Tuple of (global_hidden_states, global_router_logits, None)
         """
         if enable_sp():
-            return self._prepare_with_ep_group(hidden_states, router_logits)
+            return self._prepare_with_ep_group(hidden_states, router_logits,
+                                               quant_type)
 
         return self._prepare_with_dp_group(hidden_states, router_logits,
                                            enable_shared_expert_dp,
@@ -329,10 +331,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         pertoken_scale = None
-        if self.quant_type == QuantType.W8A8:
+        if quant_type == QuantType.W8A8:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
                 hidden_states)
             pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(
@@ -353,6 +356,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -382,6 +386,17 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 hidden_states, 0)
             router_logits = self.moe_config.dp_group.all_gather(
                 router_logits, 0)
+
+        if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
+            hidden_states = get_pcp_group().all_gather(
+                hidden_states,
+                dim=0,
+            )
+            router_logits = get_pcp_group().all_gather(
+                router_logits,
+                dim=0,
+            )
+
         return hidden_states, router_logits, None, None
 
     def finalize(self,
@@ -431,6 +446,9 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
             hidden_states = hidden_states[:self.num_tokens]
 
+        if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
+            hidden_states = get_pcp_group().reduce_scatter(hidden_states,
+                                                           dim=0)
         if reduce_results and (self.moe_config.tp_size > 1
                                or self.moe_config.ep_size > 1):
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
@@ -483,7 +501,8 @@ class PrepareAndFinalizeWithNaiveMulticast(PrepareAndFinalize):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         enable_shared_expert_dp: bool = False,
-        replace_allreduce: bool = False
+        replace_allreduce: bool = False,
+        quant_type=QuantType.NONE
     ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor],
                Optional[torch.Tensor]]:
         """
@@ -503,6 +522,16 @@ class PrepareAndFinalizeWithNaiveMulticast(PrepareAndFinalize):
                                                   self.cu_tokens_across_dp_cpu)
             router_logits = self._naive_multicast(router_logits,
                                                   self.cu_tokens_across_dp_cpu)
+
+        if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
+            hidden_states = get_pcp_group().all_gather(
+                hidden_states,
+                dim=0,
+            )
+            router_logits = get_pcp_group().all_gather(
+                router_logits,
+                dim=0,
+            )
 
         return hidden_states, router_logits, None, None
 
@@ -527,6 +556,10 @@ class PrepareAndFinalizeWithNaiveMulticast(PrepareAndFinalize):
             hidden_states = get_dp_group().all_reduce(
                 hidden_states)  # Sum across DP
             hidden_states = hidden_states[start:end, :]
+
+        if prefill_context_parallel_enable() and self.moe_config.pcp_size > 1:
+            hidden_states = get_pcp_group().reduce_scatter(hidden_states,
+                                                           dim=0)
 
         if reduce_results and (self.moe_config.tp_size > 1
                                or self.moe_config.ep_size > 1):

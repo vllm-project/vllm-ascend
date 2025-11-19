@@ -9,7 +9,6 @@ import torch
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
-from vllm import envs
 from vllm.attention import AttentionBackend, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, ModelConfig, SpeculativeConfig,
@@ -259,6 +258,24 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
         else:
             mixed_qkv_spec = None
             mixed_qkv_non_spec = mixed_qkv
+
+        # 2.1: process the mutli-query part
+        if spec_sequence_masks is not None:
+            mixed_qkv_spec = mixed_qkv_spec.view(
+                attn_metadata.num_spec_decodes, -1, mixed_qkv_spec.size(-1))
+            mixed_qkv_spec = rearrange(mixed_qkv_spec, 'b l d -> b d l')
+            mixed_qkv_spec = causal_conv1d_update(
+                mixed_qkv_spec,
+                conv_state,
+                conv_weights,
+                self.conv1d.bias,
+                self.activation,
+                conv_state_indices=spec_state_indices_tensor[:, 0]
+                [:attn_metadata.num_spec_decodes],
+                num_accepted_tokens=num_accepted_tokens,
+                validate_data=False,
+            )
+            mixed_qkv_spec = rearrange(mixed_qkv_spec, 'b d l -> (b l) d')
 
         # 2.2: process the remaining part
         if attn_metadata.num_prefills > 0:
@@ -650,7 +667,6 @@ class CustomQwen3NextForCausalLM(Qwen3NextForCausalLM):
         scheduler_config = vllm_config.scheduler_config
         assert not cache_config.enable_prefix_caching, \
             "Qwen3Next currently does not support prefix caching"
-        assert envs.VLLM_USE_V1, "Qwen3Next requires VLLM_USE_V1"
         self.quant_config = vllm_config.quant_config
         self.config = config
         self.scheduler_config = scheduler_config

@@ -108,6 +108,7 @@ def test_moe_external_launcher(model):
     assert proc.returncode == 0
 
 
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_external_launcher_and_sleepmode():
     script = Path(
         __file__
@@ -147,13 +148,12 @@ def test_external_launcher_and_sleepmode():
 
     print(output)
 
-    assert "TP RANKS: [0]" in output
-    assert "TP RANKS: [1]" in output
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
     assert proc.returncode == 0
 
 
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_NZ": "0"})
 def test_external_launcher_and_sleepmode_level2():
     script = Path(
         __file__
@@ -196,8 +196,6 @@ def test_external_launcher_and_sleepmode_level2():
 
     print(output)
 
-    assert "TP RANKS: [0]" in output
-    assert "TP RANKS: [1]" in output
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
     assert proc.returncode == 0

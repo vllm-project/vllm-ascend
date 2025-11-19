@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import json
 import os
 from typing import Any
 
@@ -44,8 +45,8 @@ api_keyword_args = {
 }
 
 batch_size_dict = {
-    "linux-aarch64-a2-4": 44,
-    "linux-aarch64-a3-4": 46,
+    "linux-aarch64-a2-4": 72,
+    "linux-aarch64-a3-4": 76,
 }
 VLLM_CI_RUNNER = os.getenv("VLLM_CI_RUNNER", "linux-aarch64-a2-4")
 performance_batch_size = batch_size_dict.get(VLLM_CI_RUNNER, 1)
@@ -58,7 +59,7 @@ aisbench_cases = [{
     "max_out_len": 32768,
     "batch_size": 32,
     "baseline": 83.33,
-    "threshold": 17
+    "threshold": 7
 }, {
     "case_type": "performance",
     "dataset_path": "vllm-ascend/GSM8K-in3500-bs400",
@@ -80,21 +81,32 @@ async def test_models(model: str, mode: str, tp_size: int) -> None:
     port = get_open_port()
     env_dict = {
         "TASK_QUEUE_ENABLE": "1",
-        "OMP_PROC_BIND": "false",
+        "VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE": "1",
         "HCCL_OP_EXPANSION_MODE": "AIV",
-        "PAGED_ATTENTION_MASK_LEN": "5500"
+        "VLLM_ASCEND_ENABLE_FLASHCOMM": "1",
+        "VLLM_ASCEND_ENABLE_PREFETCH_MLP": "1"
+    }
+    compilation_config = {
+        "cudagraph_mode":
+        "FULL_DECODE_ONLY",
+        "cudagraph_capture_sizes":
+        [1, 12, 16, 20, 24, 32, 48, 60, 64, 68, 72, 76, 80]
     }
     server_args = [
         "--quantization", "ascend", "--no-enable-prefix-caching",
         "--tensor-parallel-size",
         str(tp_size), "--port",
-        str(port), "--max-model-len", "36864", "--max-num-batched-tokens",
-        "36864", "--block-size", "128", "--trust-remote-code",
-        "--gpu-memory-utilization", "0.9", "--additional-config",
-        '{"enable_weight_nz_layout":true}'
+        str(port), "--max-model-len", "40960", "--max-num-batched-tokens",
+        "40960", "--block-size", "128", "--trust-remote-code",
+        "--reasoning-parser", "qwen3", "--gpu-memory-utilization", "0.9",
+        "--async-scheduling"
     ]
     if mode == "single":
         server_args.append("--enforce-eager")
+    if mode == "aclgraph":
+        server_args.extend(
+            ["--compilation-config",
+             json.dumps(compilation_config)])
     request_keyword_args: dict[str, Any] = {
         **api_keyword_args,
     }

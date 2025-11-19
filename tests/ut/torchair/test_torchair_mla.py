@@ -86,7 +86,8 @@ class TestAscendMLATorchairPrefillMetadata(TestBase):
             seq_tot=seq_tot,
             max_seq_lens=max_seq_lens,
             workspace=workspace,
-            chunk_seq_lens=chunk_seq_lens)
+            chunk_seq_lens=chunk_seq_lens,
+            chunk_seq_lens_npu=chunk_seq_lens)
 
         metadata = AscendMLATorchairPrefillMetadata(
             attn_mask=torch.tensor([[1, 0], [1, 1]], dtype=torch.bool),
@@ -107,6 +108,8 @@ class TestAscendMLATorchairPrefillMetadata(TestBase):
         self.assertEqual(metadata.chunked_context.max_seq_lens, max_seq_lens)
         self.assertIs(metadata.chunked_context.workspace, workspace)
         self.assertIs(metadata.chunked_context.chunk_seq_lens, chunk_seq_lens)
+        self.assertIs(metadata.chunked_context.chunk_seq_lens_npu,
+                      chunk_seq_lens)
 
 
 class TestAscendMLATorchairDecodeMetadata(TestBase):
@@ -661,6 +664,7 @@ class TestAscendMLATorchairImpl(TestBase):
         chunk_ctx = MagicMock()
         chunk_ctx.seq_tot = [8]
         chunk_ctx.chunk_seq_lens = [torch.tensor([8])]
+        chunk_ctx.chunk_seq_lens_npu = [torch.tensor([8])]
         chunk_ctx.starts = [torch.tensor([0])]
 
         prefill_meta = MagicMock()

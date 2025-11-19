@@ -47,7 +47,7 @@ from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (init_ascend_soc_version,
+from vllm_ascend.utils import (init_ascend_soc_version, is_enable_nz,
                                prefill_context_parallel_enable,
                                register_ascend_customop, sleep_mode_enabled,
                                try_register_lib, vllm_version_is)
@@ -87,6 +87,7 @@ class NPUWorker(WorkerBase):
         # register patch for vllm
         from vllm_ascend.utils import adapt_patch
         adapt_patch()
+        is_enable_nz(vllm_config)
         # Register ops when worker init.
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
@@ -141,7 +142,11 @@ class NPUWorker(WorkerBase):
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            if vllm_version_is("0.11.0"):
+                from vllm.utils import init_cached_hf_modules
+            else:
+                from vllm.utils.import_utils import init_cached_hf_modules
+
             init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
@@ -184,6 +189,11 @@ class NPUWorker(WorkerBase):
             raise ValueError(
                 "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
             )
+
+        if is_enable_nz():
+            raise ValueError(
+                "FRACTAL_NZ mode is enabled. This may cause model parameter precision issues "
+                "in the RL scenarios. Please set VLLM_ASCEND_ENABLE_NZ=0.")
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
