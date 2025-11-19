@@ -16,10 +16,11 @@
 #
 
 import torch
-from vllm.sequence import IntermediateTensors
 
-from vllm.model_executor.models.bert import BertEmbedding, BertForSequenceClassification, \
-    BertForTokenClassification
+from vllm.model_executor.models.bert import (BertEmbedding,
+                                             BertForSequenceClassification,
+                                             BertForTokenClassification)
+from vllm.sequence import IntermediateTensors
 
 # aclgraph does not support shift operator for now
 # TODO: revert me when aclgraph supports shift operator
