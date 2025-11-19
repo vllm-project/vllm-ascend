@@ -137,7 +137,6 @@ jobs:
 
   e2e-light:
     name: e2e-light
-    if: false  # 直接禁用
     strategy:
       matrix:
         vllm_version: [releases/v0.11.1, v0.11.0]
