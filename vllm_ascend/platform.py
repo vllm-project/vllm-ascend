@@ -31,7 +31,8 @@ from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         delete_torchair_cache_file)
-from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
+from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD,
+                               AWQ_QUANTIZATION_METHOD, enable_sp, is_310p,
                                update_aclgraph_sizes)
 
 if TYPE_CHECKING:
@@ -53,7 +54,9 @@ class NPUPlatform(Platform):
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
 
-    supported_quantization: list[str] = [ASCEND_QUANTIZATION_METHOD]
+    supported_quantization: list[str] = [
+        ASCEND_QUANTIZATION_METHOD, AWQ_QUANTIZATION_METHOD
+    ]
 
     def is_sleep_mode_available(self) -> bool:
         return True
@@ -78,6 +81,8 @@ class NPUPlatform(Platform):
 
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
+        from vllm_ascend.quantization.awq.awq import \
+            AWQQuantConfig  # noqa: F401
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
