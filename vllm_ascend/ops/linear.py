@@ -45,7 +45,7 @@ class AscendUnquantizedLinearMethod(UnquantizedLinearMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
-        if "conv" not in layer.prefix and (is_enable_nz()
+        if "conv1d" not in layer.prefix and (is_enable_nz()
                                            and layer.weight.data.dtype
                                            in [torch.float16, torch.bfloat16]):
             layer.weight.data = torch_npu.npu_format_cast(
