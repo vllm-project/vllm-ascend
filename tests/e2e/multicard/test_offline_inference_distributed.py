@@ -21,6 +21,7 @@
 Run `pytest tests/test_offline_inference.py`.
 """
 import os
+from typing import List
 from unittest.mock import patch
 
 import pytest
@@ -175,6 +176,7 @@ def test_sp_for_qwen3_moe() -> None:
                                      top_k=50,
                                      top_p=0.9)
 
+    splitting_ops: List[str] = []
     with VllmRunner(snapshot_download("Qwen/Qwen3-30B-A3B"),
                     dtype="auto",
                     tensor_parallel_size=2,
