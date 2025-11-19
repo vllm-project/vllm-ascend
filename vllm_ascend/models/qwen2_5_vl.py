@@ -139,26 +139,6 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         self.hidden_size_per_attention_head = dist_utils.divide(
             self.hidden_size, self.num_heads)
 
-    def cal_cos_sin(self, rotary_pos_emb):
-        cos = rotary_pos_emb.cos()  # [seqlen, rotary_dim / 2]
-        sin = rotary_pos_emb.sin()
-
-        if not self.interleaved:
-            cos_new = torch.cat((cos, cos), dim=-1)
-            sin_new = torch.cat((sin, sin), dim=-1)
-        else:
-            cos_new = rearrange(torch.stack((cos, cos), dim=-1),
-                                "... d two -> ...(d two)",
-                                two=2)
-            sin_new = rearrange(torch.stack((sin, sin), dim=-1),
-                                "... d two -> ...(d two)",
-                                two=2)
-        cos_new = cos_new.reshape(1, -1, 1,
-                                  self.hidden_size_per_attention_head)
-        sin_new = sin_new.reshape(1, -1, 1,
-                                  self.hidden_size_per_attention_head)
-        return cos_new, sin_new
-
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping: list[tuple[str, str, Union[str, int]]] = [
