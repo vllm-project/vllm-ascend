@@ -7,9 +7,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from torch import nn
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata,
-                                              MLAAttentionImpl)
+from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
@@ -68,10 +66,6 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_MLA"
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return AscendMLAMetadata
 
     @staticmethod
     def get_builder_cls():
@@ -369,6 +363,12 @@ class AscendMLAMetadataBuilder:
         device = self.device
 
         block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
+        if self.pcp_size > 1:
+            num_decodes_flatten = num_decodes * self.decode_threshold
+            block_table = common_attn_metadata.block_table_tensor[:
+                                                                  num_decodes_flatten
+                                                                  +
+                                                                  num_prefills]
 
         if num_actual_tokens_pcp_padded is None:
             num_actual_tokens_pcp_padded = num_actual_tokens
@@ -546,6 +546,9 @@ class AscendMLAMetadataBuilder:
                 cos=cos,
                 pcp_metadata=pcp_metadata,
             )
+            if self.pcp_size > 1:
+                prefill_metadata.block_table = block_table[
+                    num_decodes_flatten:, ...]
 
         decode_metadata = None
         if num_decodes > 0:
@@ -556,12 +559,12 @@ class AscendMLAMetadataBuilder:
             max_seq_lens = seq_lens[:num_decodes].max().item()
             seq_lens = seq_lens[:num_decodes]
             input_positions = input_positions[:num_decode_tokens]
-            block_table = block_table[:num_decodes, ...]
-            # For pcp + spec decode, we flatten seq_lens and block_table
-            # to avoid irregular spec_attn_mask shape
-            if self.pcp_size > 1 and self.decode_threshold > 1:
-                block_table = block_table.repeat_interleave(
-                    self.decode_threshold, dim=0)
+            if self.pcp_size > 1:
+                # For pcp + spec decode, we flatten seq_lens and block_table
+                # to avoid irregular spec_attn_mask shape
+                block_table = block_table[:num_decodes_flatten, ...]
+            else:
+                block_table = block_table[:num_decodes, ...]
             seq_lens_list = seq_lens.tolist()
 
             if num_computed_tokens_of_pcp_dcp is not None:
@@ -1278,8 +1281,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             if workspace is None:
                 workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs)
-                update_graph_params_workspaces(num_tokens,
-                                               weak_ref_tensors(workspace))
+                update_graph_params_workspaces(num_tokens, workspace)
 
             attn_output = torch.empty_like(q_nope)
             softmax_lse = torch.empty(num_tokens,
@@ -1779,8 +1781,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     q_nope, q_pe, k_nope, k_pe, decode_meta.block_table,
                     seq_len, num_heads, self.scale, self.num_kv_heads,
                     **common_kwargs)
-                update_graph_params_workspaces(num_tokens,
-                                               weak_ref_tensors(workspace))
+                update_graph_params_workspaces(num_tokens, workspace)
             attn_output = torch.empty_like(q_nope)
             softmax_lse = torch.empty((num_tokens, num_heads, 1),
                                       dtype=q_nope.dtype,

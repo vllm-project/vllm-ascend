@@ -331,6 +331,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.attn_groups: list[list[AttentionGroup]] = []
         self.encoder_cache: Dict[str, torch.Tensor] = {}
         self.attn_mask = None
+        self.fia_attn_mask = None
         self.attn_state = None
         self.requests: Dict[str, CachedRequestState] = {}
         self.intermediate_tensors: Optional[IntermediateTensors] = None
@@ -520,8 +521,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.speculative_config else 0)
 
         self.use_aclgraph = self._use_aclgraph()
-        self.aclgraph_batch_sizes = list(
-            reversed(self.compilation_config.cudagraph_capture_sizes))
+
+        # self.aclgraph_batch_sizes sorts in ascending order.
+        if (self.compilation_config.cudagraph_capture_sizes and
+                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE):
+            self.aclgraph_batch_sizes = sorted(
+                self.compilation_config.cudagraph_capture_sizes)
 
         self.uniform_decode_query_len = 1 if not self.speculative_config else \
             1 + self.speculative_config.num_speculative_tokens
@@ -591,6 +596,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
+            num_speculative_tokens=(
+                self.vllm_config.speculative_config.num_speculative_tokens
+                if self.vllm_config.speculative_config else 0),
             kernel_block_sizes=[[self.vllm_config.cache_config.block_size]],
             cp_kv_cache_interleave_size=self.parallel_config.
             cp_kv_cache_interleave_size
@@ -1029,6 +1037,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Decode-only situation.
         else:
             return None
+
+    def _make_fia_attention_mask(self) -> torch.Tensor:
+        if self.attn_mask_builder is None:
+            raise ValueError("Attn mask builder is None")
+        return self.attn_mask_builder.get_splitfuse_attn_mask()
 
     def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
         mrope_pos_ptr = 0
@@ -1667,6 +1680,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.attn_mask = self._make_attention_mask(seq_lens=seq_lens_cpu,
                                                    position=positions_cpu,
                                                    attn_state=attn_state)
+        self.fia_attn_mask = self._make_fia_attention_mask()
         self.attn_state = attn_state  # type: ignore
 
         self.with_prefill = with_prefill
@@ -1899,6 +1913,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
                 positions=self.positions,
                 attn_mask=self.attn_mask,
+                fia_attn_mask=self.fia_attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
                 is_only_prefill=bool(np.all(num_valid_tokens != 1)),
@@ -1909,6 +1924,31 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 sin=self.sin,
                 prefill_context_parallel_metadata=long_seq_metadata,
             )
+
+            if self.speculative_config and self.pcp_size > 1:
+                # For pcp + spec decode, we flatten block_table
+                # to avoid irregular spec_attn_mask shape, e.g.,
+                # num_decode_req=2, num_prefill_req=3, num_speculative_tokens=1,
+                # ori block_table: # [d0, d1, p0, p1, p2]
+                # (num_reqs_d + num_reqs_p, max_num_blocks),
+                # flattened block_table: [d0, d0, d1, d1, p0, p1, p2]
+                # (num_reqs_d * decode_threshold + num_reqs_p, max_num_blocks),
+                ori_query_lens = self.query_start_loc_pcp_full_cpu[1:num_reqs+1] - \
+                    self.query_start_loc_pcp_full_cpu[:num_reqs]
+                num_prefill_reqs = (ori_query_lens
+                                    > self.decode_threshold).sum().item()
+                num_decode_reqs = num_reqs - num_prefill_reqs
+                num_decode_reqs_flatten = num_decode_reqs * self.decode_threshold
+                blk_table_tensor[
+                    num_decode_reqs_flatten:num_decode_reqs_flatten +
+                    num_prefill_reqs].copy_(
+                        blk_table_tensor[num_decode_reqs:num_decode_reqs +
+                                         num_prefill_reqs].clone())
+                blk_table_tensor[:num_decode_reqs_flatten].copy_(
+                    blk_table_tensor[:num_decode_reqs].repeat_interleave(
+                        self.decode_threshold, dim=0))
+                common_attn_metadata.block_table_tensor = \
+                    blk_table_tensor[:num_decode_reqs_flatten + num_prefill_reqs]
 
             if self.speculative_config and \
                 self.spec_decode_common_attn_metadata is None:
@@ -2756,12 +2796,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             cu_num_tokens, arange = self._get_cumsum_and_arange(
                 num_scheduled_tokens)
-            query_start_loc_tensor = torch.Tensor(cu_num_tokens).to(
-                self.device).to(torch.int32)
-            self.query_start_loc[1:num_reqs + 1] = query_start_loc_tensor
+
+            self.query_start_loc[1:num_reqs + 1] = torch.Tensor(cu_num_tokens)
             self.query_start_loc_cpu[1:num_reqs +
                                      1] = torch.Tensor(cu_num_tokens)
             self.query_lens = torch.from_numpy(num_scheduled_tokens)
+
+            assigned_mask_dim = 2048
+            self.fia_attn_mask = torch.triu(torch.ones(assigned_mask_dim,
+                                                       assigned_mask_dim),
+                                            diagonal=1).to(torch.int8).to(
+                                                self.device)
 
             num_computed_tokens_cpu = (
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
@@ -2805,6 +2850,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_computed_tokens_cpu=num_computed_tokens_cpu,
                     positions=self.positions,
                     attn_mask=self.attn_mask,
+                    fia_attn_mask=self.fia_attn_mask,
                     spec_attn_mask=self.spec_attn_mask,
                     attn_state=self.attn_state,
                     max_query_len=max_query_len,
@@ -2813,6 +2859,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     sin=self.sin,
                     prefill_context_parallel_metadata=long_seq_metadata,
                 )
+                if self.pcp_size > 1:
+                    common_attn_metadata.block_table_tensor = \
+                        block_table_tensor[:num_reqs * self.decode_threshold]
                 attn_state = AscendAttentionState.DecodeOnly
                 if self.speculative_config and \
                         self.speculative_config.method == "deepseek_mtp":
@@ -3978,10 +4027,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             graph_support = None
             if hasattr(builder, 'aclgraph_support'):
                 graph_support = builder.aclgraph_support.value
+                builder_aclgraph = builder.aclgraph_support
             else:
                 graph_support = builder.cudagraph_support.value
+                builder_aclgraph = builder.cudagraph_support
             if graph_support < min_ag_support.value:
-                min_ag_support = builder.aclgraph_support
+                min_ag_support = builder_aclgraph
                 min_ag_builder_name = builder.__class__.__name__
 
         # This is an imitation of compilation_config.splitting_ops_contain_attention()
@@ -4085,7 +4136,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if aclgraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 aclgraph_runtime_mode = aclgraph_mode.mixed_mode()
 
-                compilation_cases = sorted(self.aclgraph_batch_sizes)
+                # make sure we capture the largest batch size first
+                compilation_cases = list(reversed(self.aclgraph_batch_sizes))
 
                 try:
                     self._capture_aclgraphs(

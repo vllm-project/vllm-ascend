@@ -84,7 +84,7 @@ Compile and install
 ```shell
 mkdir build
 cd build
-cmake .. -USE_ASCEND_DIRECT=ON
+cmake .. -DUSE_ASCEND_DIRECT=ON
 make -j
 make install
 ```
