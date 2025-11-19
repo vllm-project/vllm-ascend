@@ -278,7 +278,8 @@ def update_mla_attn_params(update_stream, forward_context, runtime_shape,
             else:
                 seq_lens_list = seq_lens_list + [0] * (runtime_shape -
                                                        len(seq_lens_list))
-                torch.npu.graph_task_update_begin(update_stream, handle)
+
+            torch.npu.graph_task_update_begin(update_stream, handle)
 
             torch_npu.npu_fused_infer_attention_score.out(
                 q_nope,
