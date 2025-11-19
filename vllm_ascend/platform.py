@@ -393,6 +393,7 @@ class NPUPlatform(Platform):
         use_mla,
         has_sink=False,
         use_sparse=False,
+        attn_type: str | None = None,
     ):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
