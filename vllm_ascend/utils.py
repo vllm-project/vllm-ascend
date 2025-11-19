@@ -698,6 +698,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
     from vllm_ascend.ops.vocab_parallel_embedding import (
         AscendLogitsProcessor, AscendParallelLMHead,
         AscendVocabParallelEmbedding)
+    from vllm_ascend.ops.multi_modal.mm_encoder_attention import AscendMMEncoderAttention
 
     global REGISTERED_ASCEND_OPS
     REGISTERED_ASCEND_OPS = {
@@ -719,6 +720,7 @@ def register_ascend_customop(vllm_config: Optional[VllmConfig] = None):
         "GemmaRMSNorm": AscendGemmaRMSNorm,
         "FusedMoE": AscendFusedMoE,
         "SharedFusedMoE": AscendSharedFusedMoE,
+        "MMEncoderAttention": AscendMMEncoderAttention,
     }
     mla_to_register = "MultiHeadLatentAttention" if vllm_version_is(
         "0.11.0") else "MultiHeadLatentAttentionWrapper"
