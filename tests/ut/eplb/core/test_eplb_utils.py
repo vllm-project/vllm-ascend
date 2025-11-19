@@ -128,7 +128,7 @@ class TestEPLBParamUtils:
         with pytest.raises(
                 ValueError,
                 match=
-                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+                'Can not enable dynamic_eplb when DYNAMIC_EPLB is not set to "true" or "1".'
         ):
             EPLBParamUtils.check_dynamic_eplb(True)
 
@@ -136,7 +136,7 @@ class TestEPLBParamUtils:
         with pytest.raises(
                 ValueError,
                 match=
-                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+                'Can not enable dynamic_eplb when DYNAMIC_EPLB is not set to "true" or "1".'
         ):
             EPLBParamUtils.check_dynamic_eplb(True)
 
@@ -144,12 +144,18 @@ class TestEPLBParamUtils:
         with pytest.raises(
                 ValueError,
                 match=
-                'Can not enable dynamic_eplb when not export DYNAMIC_EPLB="true".'
+                'Can not enable dynamic_eplb when DYNAMIC_EPLB is not set to "true" or "1".'
         ):
             EPLBParamUtils.check_dynamic_eplb(True)
 
     def test_check_dynamic_eplb_valid_with_env_set(self, monkeypatch):
         monkeypatch.setenv("DYNAMIC_EPLB", "true")
+        EPLBParamUtils.check_dynamic_eplb(True)
+
+        monkeypatch.setenv("DYNAMIC_EPLB", "True")
+        EPLBParamUtils.check_dynamic_eplb(True)
+
+        monkeypatch.setenv("DYNAMIC_EPLB", "1")
         EPLBParamUtils.check_dynamic_eplb(True)
 
     def test_check_expert_map_path_none(self):
