@@ -777,10 +777,10 @@ class TestSelectExperts(TestBase):
         mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
                                   torch.zeros(self.num_tokens,
                                               self.top_k,
-                                              dtype=torch.int32),
+                                              dtype=torch.long),
                                   torch.arange(0,
                                                self.num_tokens * self.top_k,
-                                               dtype=torch.float).view(
+                                               dtype=torch.int32).view(
                                                    self.top_k,
                                                    -1).permute(1,
                                                                0).contiguous())
@@ -887,10 +887,10 @@ class TestSelectExperts(TestBase):
         mock_topk.return_value = (torch.ones(self.num_tokens, self.top_k),
                                   torch.zeros(self.num_tokens,
                                               self.top_k,
-                                              dtype=torch.int32),
+                                              dtype=torch.long),
                                   torch.arange(0,
                                                self.num_tokens * self.top_k,
-                                               dtype=torch.float).view(
+                                               dtype=torch.int32).view(
                                                    self.top_k,
                                                    -1).permute(1,
                                                                0).contiguous())
@@ -916,7 +916,7 @@ class TestSelectExperts(TestBase):
                                               dtype=torch.int32),
                                   torch.arange(0,
                                                self.num_tokens * self.top_k,
-                                               dtype=torch.float).view(
+                                               dtype=torch.int32).view(
                                                    self.top_k,
                                                    -1).permute(1,
                                                                0).contiguous())
