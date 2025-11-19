@@ -114,6 +114,7 @@ def test_models_distributed_Qwen3_NEXT_MTP_TP4_SIMILARITY():
     assert matches > int(0.66 * len(ref_outputs))
 
 
+# TODO: will conduct accuracy verification after the subsequent version becomes stable
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
 def test_models_distributed_Qwen3_NEXT_W8A8DYNAMIC_WITH_EP():
     example_prompts = [
@@ -121,10 +122,11 @@ def test_models_distributed_Qwen3_NEXT_W8A8DYNAMIC_WITH_EP():
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8-Pruning"),
+            snapshot_download(
+                "vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8-Pruning"),
             max_model_len=4096,
             tensor_parallel_size=2,
-            gpu_memory_utilization=0.8,
+            gpu_memory_utilization=0.4,
             max_num_seqs=1,
             enable_expert_parallel=True,
             quantization="ascend",
