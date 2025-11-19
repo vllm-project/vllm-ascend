@@ -14,7 +14,8 @@ class ExpertLoadBalancer(object):
         self.tensor_data = []
         self.expert_map_tensor, self.layers_num, self.ranks_num = (
             self._expert_file_to_tensor())
-        self.global_expert_num = num_experts + self.get_global_redundant_expert_num()
+        self.global_expert_num = num_experts + self.get_global_redundant_expert_num(
+        )
         self.expert_placement_map = self.generate_expert_placement_map()
 
     def _expert_file_to_tensor(self):
