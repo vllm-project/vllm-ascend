@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
 @dataclass
 class ReqMeta:
     # Request Id
@@ -32,7 +34,7 @@ class ReqMeta:
     token_ids: torch.Tensor
     # Slot mappings, should have the same length as token_ids
     slot_mapping: torch.Tensor
-    
+
     block_ids: torch.Tensor
 
     @staticmethod
@@ -47,12 +49,10 @@ class ReqMeta:
                 block_ids_tensor.reshape((num_blocks, 1)) * block_size
         slot_mapping = slot_mapping.flatten()[:valid_num_tokens]
 
-        return ReqMeta(
-            request_id=request_id,
-            token_ids=token_ids_tensor,
-            slot_mapping=slot_mapping,
-            block_ids=block_ids_tensor
-        )
+        return ReqMeta(request_id=request_id,
+                       token_ids=token_ids_tensor,
+                       slot_mapping=slot_mapping,
+                       block_ids=block_ids_tensor)
 
 
 @dataclass
@@ -87,7 +87,7 @@ class P2pHcclConnector(KVConnectorBase_V1):
             if role == KVConnectorRole.WORKER else 0
         self._local_rank = self.config.kv_rank + (get_world_group().local_rank \
             if role == KVConnectorRole.WORKER else 0)
-        
+
         self.p2p_hccl_engine = P2pHcclEngine(
             local_rank=self._local_rank,
             config=self.config,

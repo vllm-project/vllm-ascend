@@ -9,10 +9,10 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Optional
 
-import msgpack
+import msgpack  # type: ignore
 import torch
 import torch_npu
-import zmq
+import zmq  # type: ignore
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import \
     TensorMemoryPool  # noqa: E501

@@ -233,7 +233,8 @@ class HCCLLibrary:
             if m := re.search(r'CANN_VERSION_STR "([^"]+)"', content):
                 cann_version = m.group(1)
         except Exception as e:
-            logger.info("cannot find cann version file %s: %s", cann_version_file, e)
+            logger.info("cannot find cann version file %s: %s",
+                        cann_version_file, e)
 
         acl_so = ""
         try:
@@ -241,7 +242,7 @@ class HCCLLibrary:
                 acl_so = "libascendcl.so"
             else:
                 acl_so = "libgert.so"
-            aclLib = ctypes.CDLL(acl_so)                
+            aclLib = ctypes.CDLL(acl_so)
         except Exception as e:
             logger.error("Failed to load %s", acl_so)
             raise e
