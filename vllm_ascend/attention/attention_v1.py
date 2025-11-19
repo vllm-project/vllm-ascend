@@ -587,10 +587,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                              query: torch.Tensor,
                              key: torch.Tensor,
                              value: torch.Tensor,
+                             kv_cache: torch.Tensor,
                              attn_metadata: AscendMetadata,
                              output: torch.Tensor,
                              num_tokens=0):
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+        if self.pcp_size * self.dcp_size > 1:
+            intermediate_output = self._forward_pcp_dcp(
+                query, key, value, kv_cache, attn_metadata, output)
+            return intermediate_output, query.shape[0]
+        elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             block_size = 128
             block_table = None
             actual_seq_lengths_kv = attn_metadata.query_start_loc_list
@@ -1601,7 +1606,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query, attn_metadata, output)
         else:
             intermediate_output, num_tokens = self.full_graph_attention(
-                query, key, value, attn_metadata, output)
+                query, key, value, kv_cache, attn_metadata, output)
         output[:num_tokens] = intermediate_output[:num_tokens]
 
         return output
