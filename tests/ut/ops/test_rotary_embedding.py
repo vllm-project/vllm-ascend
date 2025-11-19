@@ -432,7 +432,7 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
     @patch('vllm.distributed.parallel_state._TP', MagicMock(world_size=1))
     def test_forward_oot_1d_positions(self, mock_cpu_arc, mock_npu_mrope):
         mock_cpu_arc.return_value = CpuArchEnum.ARM
-        
+
         mock_npu_mrope.return_value = (torch.zeros_like(self.query),
                                        torch.zeros_like(self.key))
 
