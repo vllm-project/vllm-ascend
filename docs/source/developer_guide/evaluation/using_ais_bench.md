@@ -274,7 +274,6 @@ Multi-modal benchmarks (text + images):
 ais_bench --models vllm_api_stream_chat --datasets textvqa_gen_base64 --summarizer default_perf --mode perf
 ```
 
-
 After execution, you can get the result from saved files, there is an example as follows:
 
 ```
@@ -294,7 +293,6 @@ After execution, you can get the result from saved files, there is an example as
         |-- cevaldataset_plot.html # Final performance results (in html format)
         `-- cevaldataset_rps_distribution_plot_with_actual_rps.html # Final performance results (in html format)
 ```
-
 
 ### 3. Troubleshooting
 
