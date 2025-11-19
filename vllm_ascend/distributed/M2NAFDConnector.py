@@ -11,20 +11,29 @@ import torch_npu
 import torch
 
 from torch.distributed.distributed_c10d import _get_default_group
-from vllm.distributed.parallel_state import init_afd_process_group, DefaultProcessGroupSwitcher
 import re
 
 import torch
 from torch.distributed.distributed_c10d import  _update_default_pg, _get_default_group
+from vllm.distributed.afd_transfer.afd_connector.metadata import M2NAFDConnectorMetadata
 
 from vllm.distributed.parallel_state import init_afd_process_group, init_model_parallel_group
-from vllm.distributed.afd_transfer.afd_connector.metadata import (
-    M2NAFDConnectorMetadata)
 
 from vllm.logger import init_logger
 from vllm.config import VllmConfig
 logger = init_logger(__name__)
 
+
+class DefaultProcessGroupSwitcher:
+    def __init__(self, default_group, new_default_group):
+        self.default_group = default_group
+        self.new_default_group = new_default_group
+
+    def __enter__(self):
+        _update_default_pg(self.new_default_group)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        _update_default_pg(self.default_group)
 
 # # TODO(yxj):move to ascend ,use kwargs 
 # @dataclass
