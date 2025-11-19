@@ -21,5 +21,6 @@ multi_node_kimi
 multi_node_qwen3vl
 multi_node_pd_disaggregation_llmdatadist
 multi_node_pd_disaggregation_mooncake
+pd_disaggregation_with_p2p_hccl_connector
 multi_node_ray
 :::

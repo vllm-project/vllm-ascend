@@ -113,14 +113,15 @@ class PyHcclCommunicator:
         # `torch.npu.device` is a context manager that changes the
         # current npu device to the specified one
         with torch.npu.device(device):
+            self.context = self.hccl.aclrtGetCurrentContext()
             self.comm: hcclComm_t = self.hccl.hcclCommInitRank(
                 self.world_size, self.unique_id, self.rank)
 
-            stream = current_stream()
+            self.stream = current_stream()
             # A small all_reduce for warmup.
             data = torch.zeros(1, device=device)
             self.all_reduce(data)
-            stream.synchronize()
+            self.stream.synchronize()
             del data
 
     def all_reduce(self,
@@ -163,3 +164,27 @@ class PyHcclCommunicator:
         self.hccl.hcclBroadcast(buffer, tensor.numel(),
                                 hcclDataTypeEnum.from_torch(tensor.dtype), src,
                                 self.comm, aclrtStream_t(stream.npu_stream))
+
+    def send(self, tensor: torch.Tensor, dst: int, stream=None):
+        if self.disabled:
+            return
+        assert tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {tensor.device}")
+        if stream is None:
+            stream = self.stream
+        self.hccl.hcclSend(buffer_type(tensor.data_ptr()), tensor.numel(),
+                           hcclDataTypeEnum.from_torch(tensor.dtype), dst,
+                           self.comm, aclrtStream_t(stream.npu_stream))
+
+    def recv(self, tensor: torch.Tensor, src: int, stream=None):
+        if self.disabled:
+            return
+        assert tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {tensor.device}")
+        if stream is None:
+            stream = self.stream
+        self.hccl.hcclRecv(buffer_type(tensor.data_ptr()), tensor.numel(),
+                           hcclDataTypeEnum.from_torch(tensor.dtype), src,
+                           self.comm, aclrtStream_t(stream.npu_stream))
