@@ -6,9 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_npu
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata,
-                                              MLAAttentionImpl)
+from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
@@ -42,10 +40,6 @@ class AscendSFATorchairBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_SFA_TORCHAIR"
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return AscendSFATorchairMetadata
 
     @staticmethod
     def get_builder_cls():
