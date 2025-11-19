@@ -3631,8 +3631,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
+                    assert raw_tensor.numel(
+                    ) % kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel(
                     ) // kv_cache_spec.page_size_bytes
+
+                    # `num_blocks` is the number of blocks the model runner can use.
+                    # `kv_cache_config.num_blocks` is the number of blocks that
+                    # KVCacheManager may allocate.
+                    # Since different GPUs may have different number of layers and
+                    # different memory capacities, `num_blocks` can be different on
+                    # different GPUs, and `kv_cache_config.num_blocks` is set to
+                    # the min of all `num_blocks`. Verify it here.
                     assert num_blocks >= kv_cache_config.num_blocks
 
                     state_tensors = []
