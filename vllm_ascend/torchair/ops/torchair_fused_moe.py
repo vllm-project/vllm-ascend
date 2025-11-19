@@ -861,8 +861,10 @@ class TorchairAscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         global_redundant_expert_num = get_ascend_config(
         ).init_redundancy_expert
         is_deepseek_v3_r1 = global_num_experts - global_redundant_expert_num == 256
-        # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-        if is_deepseek_v3_r1:
+        is_kimi = global_num_experts - global_redundant_expert_num == 384
+        # NOTE: now npu_moe_gating_top_k can support `group_count=256` pattern, and `group_count=384` pattern in cann8.3
+        if is_deepseek_v3_r1 or (is_kimi
+                                 and torch.version.cann.startswith("8.3")):
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
                 router_logits,
                 k=top_k,  # topk currently is 8
