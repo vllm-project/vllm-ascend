@@ -405,7 +405,8 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        if self.mrope_section != [16, 24, 24]:
+        from vllm.platforms import CpuArchEnum, Platform
+        if self.mrope_section != [16, 24, 24] or Platform.get_cpu_architecture() == CpuArchEnum.X86:
             return super().forward_oot(positions, query, key)
 
         import torch_npu
