@@ -392,10 +392,14 @@ def test_update_states_after_model_execute_noop_when_not_hybrid():
     assert runner.input_batch.num_accepted_tokens_cpu.tolist() == [0]
 
 
-@patch("vllm_ascend.worker.model_runner_v1.vllm_version_is",
-       return_value=False)
-def test_calc_spec_decode_metadata(mock_version_is):
-    """Validate shapes and values of SpecDecodeMetadata."""
+@pytest.mark.parametrize("is_v11", [False, True])
+@patch("vllm_ascend.worker.model_runner_v1.SpecDecodeMetadata")
+@patch("vllm_ascend.worker.model_runner_v1.vllm_version_is")
+def test_calc_spec_decode_metadata(mock_version_is, mock_spec_cls, is_v11):
+    """Validate arguments passed into SpecDecodeMetadata factory."""
+    mock_version_is.side_effect = lambda version: is_v11
+    mock_spec_cls.return_value = SimpleNamespace(marker="metadata")
+
     runner = object.__new__(NPUModelRunner)
     runner.device = torch.device("cpu")
     runner.input_ids = torch.arange(100, dtype=torch.int32)
@@ -409,17 +413,30 @@ def test_calc_spec_decode_metadata(mock_version_is):
     metadata = NPUModelRunner._calc_spec_decode_metadata(
         runner, num_draft_tokens, cu_num_scheduled_tokens, num_pcp_pads)
 
-    assert metadata.num_draft_tokens == [2, 1]
-    assert metadata.draft_token_ids.numel() == num_draft_tokens.sum()
-    assert metadata.cu_num_draft_tokens.tolist() == [2, 3]
-    assert metadata.cu_num_sampled_tokens.tolist() == [3, 5]
-    assert metadata.logits_indices.numel(
+    assert metadata.marker == "metadata"
+    kwargs = mock_spec_cls.call_args.kwargs
+    assert kwargs["num_draft_tokens"] == [2, 1]
+    assert kwargs["draft_token_ids"].numel() == num_draft_tokens.sum()
+    assert kwargs["cu_num_draft_tokens"].numel() == len(num_draft_tokens)
+    assert kwargs["bonus_logits_indices"].numel() == len(num_draft_tokens)
+    assert kwargs["logits_indices"].numel(
     ) == num_draft_tokens.sum() + len(num_draft_tokens)
+    if is_v11:
+        assert "cu_num_sampled_tokens" not in kwargs
+    else:
+        assert kwargs["cu_num_sampled_tokens"].numel() == len(num_draft_tokens)
 
 
+@pytest.mark.parametrize("is_v11, structured_ids", [(False, ["reqA"]),
+                                                    (True, {
+                                                        "reqA": 0
+                                                    })])
 @patch("vllm_ascend.worker.model_runner_v1.xgr")
-def test_apply_grammar_bitmask_reorders_bitmask(mock_xgr):
+@patch("vllm_ascend.worker.model_runner_v1.vllm_version_is")
+def test_apply_grammar_bitmask_reorders_bitmask(mock_version_is, mock_xgr,
+                                                is_v11, structured_ids):
     """Ensure bitmask is reordered based on request order before applying."""
+    mock_version_is.side_effect = lambda version: is_v11
     runner = object.__new__(NPUModelRunner)
     runner.device = torch.device("cpu")
     runner.input_batch = SimpleNamespace(req_id_to_index={
@@ -430,7 +447,7 @@ def test_apply_grammar_bitmask_reorders_bitmask(mock_xgr):
 
     scheduler_output = SimpleNamespace(
         grammar_bitmask=np.array([[1., 0.], [0., 1.]], dtype=np.float32),
-        structured_output_request_ids=["reqA"],
+        structured_output_request_ids=structured_ids,
         scheduled_spec_decode_tokens={"reqA": [123]},
     )
     logits = torch.zeros(2, 2)
