@@ -425,7 +425,7 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
         return vllm_config
 
     @patch('torch_npu.npu_mrope')
-    @patch('vllm.platforms.Platform.get_cpu_architecture')
+    @patch('vllm_ascend.platform.NPUPlatform.get_cpu_architecture')
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))
@@ -447,7 +447,7 @@ class TestAscendMRotaryEmbedding(unittest.TestCase):
         self.assertEqual(result_q.shape, self.query.shape)
 
     @patch('torch_npu.npu_mrope')
-    @patch('vllm.platforms.Platform.get_cpu_architecture')
+    @patch('vllm_ascend.platform.NPUPlatform.get_cpu_architecture')
     @patch('vllm.config.ModelConfig.__post_init__', MagicMock())
     @patch('vllm.config.VllmConfig.__post_init__', MagicMock())
     @patch('vllm.distributed.parallel_state._DP', MagicMock(world_size=1))

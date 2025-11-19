@@ -20,6 +20,7 @@ from typing import Optional, Tuple
 
 import torch
 import torch_npu
+from vllm.platforms import CpuArchEnum
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
@@ -405,10 +406,10 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
         query: torch.Tensor,
         key: torch.Tensor,
     ):
-        from vllm.platforms import CpuArchEnum, Platform
+        # TODO: This judgment will be removed once the mrope precision issue is fixed
         if self.mrope_section != [
                 16, 24, 24
-        ] or Platform.get_cpu_architecture() == CpuArchEnum.X86:
+        ] or NPUPlatform.get_cpu_architecture() == CpuArchEnum.X86:
             return super().forward_oot(positions, query, key)
 
         import torch_npu
