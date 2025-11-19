@@ -587,7 +587,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                              query: torch.Tensor,
                              key: torch.Tensor,
                              value: torch.Tensor,
-                             kv_cache: torch.Tensor,
+                             kv_cache: Tuple[torch.Tensor],
                              attn_metadata: AscendMetadata,
                              output: torch.Tensor,
                              num_tokens=0):
