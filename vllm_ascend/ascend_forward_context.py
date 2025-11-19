@@ -96,6 +96,7 @@ def set_ascend_forward_context(
         ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
 
+        # fused_moe_state is used in torchair, it will be deleted along with torchair
         is_deepseek_v3_r1 = hasattr(
             vllm_config.model_config.hf_config, 'n_routed_experts'
         ) and vllm_config.model_config.hf_config.n_routed_experts == 256
