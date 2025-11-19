@@ -290,6 +290,7 @@ def test_e2e_deepseekv2lite_with_torchair_v1scheduler():
                                            use_v1_schduler=True)
 
 
+# kv_cache enable e2e test
 def test_e2e_deepseekv2lite_with_nz():
     additional_config = {
         "torchair_graph_config": {
