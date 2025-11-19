@@ -247,6 +247,14 @@ packed_modules_model_mapping = {
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
     },
+    "bailing_moe": {
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+    },
 }
 
 
