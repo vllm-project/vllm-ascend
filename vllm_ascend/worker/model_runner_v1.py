@@ -274,9 +274,11 @@ class AsyncNPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Release the device tensor once the copy has completed
         del self._sampled_token_ids
 
-        valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
+        valid_sampled_token_ids: list[np.ndarray] = [
+            row for row in self._sampled_token_ids_cpu.numpy()
+        ]
         for i in self._invalid_req_indices:
-            valid_sampled_token_ids[i].clear()
+            valid_sampled_token_ids[i] = np.array([])
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
@@ -3106,10 +3108,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         extra_args = ({"kv_connector_output": kv_connector_output})
 
+        # TODO(leo-pony): remove translate operations.
+        valid_sampled_token_ids = torch.as_tensor(
+            valid_sampled_token_ids).cpu()
+        sampled_token_ids_torch: list[np.ndarray] = [
+            row for row in valid_sampled_token_ids.numpy()
+        ]
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
             req_id_to_index=req_id_to_index_output_copy,
-            sampled_token_ids=valid_sampled_token_ids,
+            sampled_token_ids=sampled_token_ids_torch,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
