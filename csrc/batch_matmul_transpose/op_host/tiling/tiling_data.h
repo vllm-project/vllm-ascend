@@ -33,7 +33,7 @@ struct MatMulInfo {
     bool transA{0};    // false: 0, true: 1
     bool transB{0};    // false: 0, true: 1
     bool biasFlag{0};  // false: 0, true: 1
-    bool isInt8{0};    // 是否是 int8融合
+    bool isInt8{0};    // false: 0, true: 1
     float inDtype{0};
     float outDtype{0};
     MatMul::QuantMode quantMode{MatMul::QuantMode::PER_CHANNEL_SYMM};
