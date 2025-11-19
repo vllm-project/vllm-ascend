@@ -1154,8 +1154,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # 2. A list or tuple (length: num_items) of tensors, each of shape
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
-            curr_group_outputs = self.model.get_multimodal_embeddings(
-                **mm_kwargs_group)
+            curr_group_outputs = self.model.embed_multimodal(**mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -1764,7 +1763,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 mm_embeds, is_mm_embed = self._gather_mm_embeddings(
                     scheduler_output)
 
-                inputs_embeds = self.model.get_input_embeddings(
+                inputs_embeds = self.model.embed_input_ids(
                     input_ids,
                     multimodal_embeddings=mm_embeds,
                     is_multimodal=is_mm_embed,
@@ -1794,7 +1793,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Some tokens ids may need to become embeds
             if token_ids_idx.numel() > 0:
                 token_ids = self.input_ids[token_ids_idx]
-                tokens_to_embeds = self.model.get_input_embeddings(
+                tokens_to_embeds = self.model.embed_input_ids(
                     input_ids=token_ids)
                 self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
 
