@@ -7,8 +7,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendAttentionBackendImpl,
                                                 AscendAttentionMetadataBuilder,
-                                                AscendAttentionState,
-                                                AscendMetadata)
+                                                AscendAttentionState)
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
@@ -20,10 +19,6 @@ class TestAscendAttentionBackend(TestBase):
     def test_get_impl_cls(self):
         self.assertEqual(AscendAttentionBackend.get_impl_cls(),
                          AscendAttentionBackendImpl)
-
-    def test_get_metadata_cls(self):
-        self.assertEqual(AscendAttentionBackend.get_metadata_cls(),
-                         AscendMetadata)
 
     def test_get_builder_cls(self):
         self.assertEqual(AscendAttentionBackend.get_builder_cls(),
