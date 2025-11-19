@@ -20,11 +20,11 @@ from typing import Optional, Tuple
 
 import torch
 import torch_npu
-from vllm.platforms import CpuArchEnum
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding,
     YaRNScalingRotaryEmbedding)
+from vllm.platforms import CpuArchEnum
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import enable_custom_op, is_310p
