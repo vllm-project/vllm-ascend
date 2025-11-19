@@ -407,7 +407,7 @@ class AscendMRotaryEmbedding(MRotaryEmbedding):
     ):
         from vllm.platforms import CpuArchEnum, Platform
         if self.mrope_section != [
-            16, 24, 24
+                16, 24, 24
         ] or Platform.get_cpu_architecture() == CpuArchEnum.X86:
             return super().forward_oot(positions, query, key)
 
