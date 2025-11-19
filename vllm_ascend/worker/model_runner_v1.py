@@ -2949,49 +2949,26 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     kv_cache_raw_tensors[layer_name] = tensor
                 continue
 
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name = kv_cache_tensor.shared_by[idx]
-                if "linear_attn" in layer_name:
-                    # for mamba linear attention
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        if ("attn" in layer_name_inner and "linear_attn" not in layer_name_inner) or \
-                            layer_name_inner in kv_cache_raw_tensors.keys():
-                            continue
-                        if self.vllm_config.kv_transfer_config is None:
-                            tensor = torch.zeros(kv_cache_tensor.size,
-                                                 dtype=torch.int8,
-                                                 device=self.device)
-                        else:
-                            cache_size_aligned = kv_cache_tensor.size + alignment
-                            tensor = torch.zeros(cache_size_aligned,
-                                                 dtype=torch.int8,
-                                                 device=self.device)
-                            tensor = self._align_memory(
-                                tensor, alignment)[:kv_cache_tensor.size]
-                        kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name:
-                    # for other attentions, e.g., self_attn, sliding window attn
-                    if self.vllm_config.kv_transfer_config is None:
-                        k_tensor = torch.zeros(kv_cache_tensor.size // 2,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        v_tensor = torch.zeros(kv_cache_tensor.size // 2,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                    else:
-                        cache_size = kv_cache_tensor.size // 2
-                        cache_size_aligned = kv_cache_tensor.size // 2 + alignment
-                        k_tensor = torch.zeros(cache_size_aligned,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        v_tensor = torch.zeros(cache_size_aligned,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        k_tensor = self._align_memory(k_tensor,
-                                                      alignment)[:cache_size]
-                        v_tensor = self._align_memory(v_tensor,
-                                                      alignment)[:cache_size]
-                    kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
+            # for other attentions, e.g., self_attn, sliding window attn
+            if self.vllm_config.kv_transfer_config is None:
+                k_tensor = torch.zeros(kv_cache_tensor.size // 2,
+                                       dtype=torch.int8,
+                                       device=self.device)
+                v_tensor = torch.zeros(kv_cache_tensor.size // 2,
+                                       dtype=torch.int8,
+                                       device=self.device)
+            else:
+                cache_size = kv_cache_tensor.size // 2
+                cache_size_aligned = kv_cache_tensor.size // 2 + alignment
+                k_tensor = torch.zeros(cache_size_aligned,
+                                       dtype=torch.int8,
+                                       device=self.device)
+                v_tensor = torch.zeros(cache_size_aligned,
+                                       dtype=torch.int8,
+                                       device=self.device)
+                k_tensor = self._align_memory(k_tensor, alignment)[:cache_size]
+                v_tensor = self._align_memory(v_tensor, alignment)[:cache_size]
+            kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
@@ -3079,6 +3056,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 elif isinstance(kv_cache_spec, MambaSpec):
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert raw_tensor is not None
+                    assert raw_tensor.numel(
+                    ) % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel(
+                    ) // kv_cache_spec.page_size_bytes
+
+                    # `num_blocks` is the number of blocks the model runner can use.
+                    # `kv_cache_config.num_blocks` is the number of blocks that
+                    # KVCacheManager may allocate.
+                    # Since different GPUs may have different number of layers and
+                    # different memory capacities, `num_blocks` can be different on
+                    # different GPUs, and `kv_cache_config.num_blocks` is set to
+                    # the min of all `num_blocks`. Verify it here.
+                    assert num_blocks >= kv_cache_config.num_blocks
+
                     state_tensors = []
                     target_idx = 0
                     start_idx = 0
