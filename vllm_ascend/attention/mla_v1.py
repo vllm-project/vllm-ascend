@@ -7,9 +7,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from torch import nn
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata,
-                                              MLAAttentionImpl)
+from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_dcp_group,
                               get_decode_context_model_parallel_rank,
@@ -68,10 +66,6 @@ class AscendMLABackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "ASCEND_MLA"
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return AscendMLAMetadata
 
     @staticmethod
     def get_builder_cls():
