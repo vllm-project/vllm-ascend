@@ -121,7 +121,7 @@ def test_models_distributed_Qwen3_NEXT_W8A8DYNAMIC_WITH_EP():
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8"),
+            snapshot_download("vllm-ascend/Qwen3-Next-80B-A3B-Instruct-W8A8-Pruning"),
             max_model_len=4096,
             tensor_parallel_size=2,
             gpu_memory_utilization=0.8,
