@@ -57,6 +57,7 @@ from vllm.model_executor.models.qwen3_next import (  # isort: skip
     Qwen3NextGatedDeltaNet, Qwen3NextModel, Qwen3NextSparseMoeBlock,
     fused_gdn_gating)
 
+from vllm_ascend.ops.fla import fused_sigmoid_gating_delta_rule_update
 
 class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
 
@@ -309,127 +310,128 @@ class CustomQwen3NextGatedDeltaNet(Qwen3NextGatedDeltaNet, MambaBase):
             mixed_qkv_spec)
         query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
             mixed_qkv_non_spec)
-
-        beta = b.sigmoid()
-        g = fused_gdn_gating(self.A_log, a, self.dt_bias)
-        g, beta = map(lambda x: rearrange(x, 'l d -> 1 l d'), (g, beta))
-
-        if spec_sequence_masks is not None:
-            if (attn_metadata.num_prefills == 0
-                    and attn_metadata.num_decodes == 0):
-                g_spec = g
-                beta_spec = beta
-                g_non_spec = None
-                beta_non_spec = None
-            else:
-                if vllm_version_is("0.11.0"):
-                    g_spec = g[:, spec_token_masks]
-                    beta_spec = beta[:, spec_token_masks]
-                    g_non_spec = g[:, ~spec_token_masks]
-                    beta_non_spec = beta[:, ~spec_token_masks]
-                else:
-                    g_spec = g.index_select(1, spec_token_indx)
-                    beta_spec = beta.index_select(1, spec_token_indx)
-                    g_non_spec = g.index_select(1, non_spec_token_indx)
-                    beta_non_spec = beta.index_select(1, non_spec_token_indx)
-        else:
-            g_spec = None
-            beta_spec = None
-            g_non_spec = g
-            beta_non_spec = beta
-
-        # 3. Recurrent attention
-        # 3.1: process the mutlti-query part
-        if spec_sequence_masks is not None:
-            core_attn_out_spec, last_recurrent_state = (
-                fused_recurrent_gated_delta_rule(
-                    q=query_spec,
-                    k=key_spec,
-                    v=value_spec,
-                    g=g_spec,
-                    beta=beta_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=spec_query_start_loc[:attn_metadata.
-                                                    num_spec_decodes + 1],
-                    ssm_state_indices=spec_state_indices_tensor,
-                    num_accepted_tokens=num_accepted_tokens,
-                    use_qk_l2norm_in_kernel=True,
-                ))
-        else:
-            core_attn_out_spec, last_recurrent_state = None, None
-
-        # 3.2: process the remaining part
-        if attn_metadata.num_prefills > 0:
-            initial_state = ssm_state[
-                non_spec_state_indices_tensor].contiguous()
-            initial_state[~has_initial_state, ...] = 0
-
-            batch_size = initial_state.shape[0]
-            core_attn_out = []
-            last_recurrent_state = []
-
-            for b_idx in range(batch_size):
-                start, end = non_spec_query_start_loc[
-                    b_idx], non_spec_query_start_loc[b_idx + 1]
-                cur_q = query_non_spec[:, start:end, ...]
-                cur_k = key_non_spec[:, start:end, ...]
-                cur_v = value_non_spec[:, start:end, ...]
-                cur_g = g_non_spec[:, start:end, ...]
-                cur_b = beta_non_spec[:, start:end, ...]
-                cur_state = initial_state[b_idx].unsqueeze(0)
-
-                (
-                    cur_core_attn_out_non_spec,
-                    cur_last_recurrent_state,
-                ) = chunk_gated_delta_rule(
-                    query=cur_q,
-                    key=cur_k,
-                    value=cur_v,
-                    g=cur_g,
-                    beta=cur_b,
-                    initial_state=cur_state,
-                    output_final_state=True,
-                    use_qk_l2norm_in_kernel=True,
+        
+        if attn_metadata.num_decodes > 0:
+            core_attn_out_non_spec = fused_sigmoid_gating_delta_rule_update(
+                A_log=self.A_log.contiguous(),
+                dt_bias=self.dt_bias.contiguous(),
+                q=query_non_spec.contiguous(),
+                k=key_non_spec.contiguous(),
+                v=value_non_spec.contiguous(),
+                a=a.contiguous(),
+                b=b.contiguous(),
+                initial_state_source=ssm_state,
+                initial_state_indices=non_spec_state_indices_tensor,
+                cu_seqlens=non_spec_query_start_loc,
+                use_qk_l2norm_in_kernel=True,
+                softplus_beta=1.0,
+                softplus_threshold=20.0,
                 )
-
-                core_attn_out.append(cur_core_attn_out_non_spec)
-                last_recurrent_state.append(cur_last_recurrent_state)
-
-            tar_dtype = core_attn_out[0].dtype
-            tar_device = core_attn_out[0].device
-            tar_shape = list(core_attn_out[0].shape)
-            tar_shape[1] = non_spec_query_start_loc[-1]
-            core_attn_out_non_spec = torch.empty(tar_shape,
-                                                 dtype=tar_dtype,
-                                                 device=tar_device)
-            for b_idx in range(batch_size):
-                cur_core_attn_out = core_attn_out[b_idx]
-                start, end = non_spec_query_start_loc[
-                    b_idx], non_spec_query_start_loc[b_idx + 1]
-                core_attn_out_non_spec[:, start:end, ...] = cur_core_attn_out
-            last_recurrent_state = torch.cat(last_recurrent_state, dim=0)
-
-            # Init cache
-            ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                ssm_state.dtype)
-        elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, last_recurrent_state = (
-                fused_recurrent_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[:attn_metadata.
-                                                        num_decodes + 1],
-                    ssm_state_indices=non_spec_state_indices_tensor,
-                    use_qk_l2norm_in_kernel=True,
-                ))
         else:
-            core_attn_out_non_spec, last_recurrent_state = None, None
+            beta = b.sigmoid()
+            g = fused_gdn_gating(self.A_log, a, self.dt_bias)
+            g, beta = map(lambda x: rearrange(x, 'l d -> 1 l d'), (g, beta))
+
+            if spec_sequence_masks is not None:
+                if (attn_metadata.num_prefills == 0
+                        and attn_metadata.num_decodes == 0):
+                    g_spec = g
+                    beta_spec = beta
+                    g_non_spec = None
+                    beta_non_spec = None
+                else:
+                    if vllm_version_is("0.11.0"):
+                        g_spec = g[:, spec_token_masks]
+                        beta_spec = beta[:, spec_token_masks]
+                        g_non_spec = g[:, ~spec_token_masks]
+                        beta_non_spec = beta[:, ~spec_token_masks]
+                    else:
+                        g_spec = g.index_select(1, spec_token_indx)
+                        beta_spec = beta.index_select(1, spec_token_indx)
+                        g_non_spec = g.index_select(1, non_spec_token_indx)
+                        beta_non_spec = beta.index_select(1, non_spec_token_indx)
+            else:
+                g_spec = None
+                beta_spec = None
+                g_non_spec = g
+                beta_non_spec = beta
+
+            # 3. Recurrent attention
+            # 3.1: process the mutlti-query part
+            if spec_sequence_masks is not None:
+                core_attn_out_spec, last_recurrent_state = (
+                    fused_recurrent_gated_delta_rule(
+                        q=query_spec,
+                        k=key_spec,
+                        v=value_spec,
+                        g=g_spec,
+                        beta=beta_spec,
+                        initial_state=ssm_state,
+                        inplace_final_state=True,
+                        cu_seqlens=spec_query_start_loc[:attn_metadata.
+                                                        num_spec_decodes + 1],
+                        ssm_state_indices=spec_state_indices_tensor,
+                        num_accepted_tokens=num_accepted_tokens,
+                        use_qk_l2norm_in_kernel=True,
+                    ))
+            else:
+                core_attn_out_spec, last_recurrent_state = None, None
+
+            # 3.2: process the remaining part
+            if attn_metadata.num_prefills > 0:
+                initial_state = ssm_state[
+                    non_spec_state_indices_tensor].contiguous()
+                initial_state[~has_initial_state, ...] = 0
+
+                batch_size = initial_state.shape[0]
+                core_attn_out = []
+                last_recurrent_state = []
+
+                for b_idx in range(batch_size):
+                    start, end = non_spec_query_start_loc[
+                        b_idx], non_spec_query_start_loc[b_idx + 1]
+                    cur_q = query_non_spec[:, start:end, ...]
+                    cur_k = key_non_spec[:, start:end, ...]
+                    cur_v = value_non_spec[:, start:end, ...]
+                    cur_g = g_non_spec[:, start:end, ...]
+                    cur_b = beta_non_spec[:, start:end, ...]
+                    cur_state = initial_state[b_idx].unsqueeze(0)
+
+                    (
+                        cur_core_attn_out_non_spec,
+                        cur_last_recurrent_state,
+                    ) = chunk_gated_delta_rule(
+                        query=cur_q,
+                        key=cur_k,
+                        value=cur_v,
+                        g=cur_g,
+                        beta=cur_b,
+                        initial_state=cur_state,
+                        output_final_state=True,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+
+                    core_attn_out.append(cur_core_attn_out_non_spec)
+                    last_recurrent_state.append(cur_last_recurrent_state)
+
+                tar_dtype = core_attn_out[0].dtype
+                tar_device = core_attn_out[0].device
+                tar_shape = list(core_attn_out[0].shape)
+                tar_shape[1] = non_spec_query_start_loc[-1]
+                core_attn_out_non_spec = torch.empty(tar_shape,
+                                                    dtype=tar_dtype,
+                                                    device=tar_device)
+                for b_idx in range(batch_size):
+                    cur_core_attn_out = core_attn_out[b_idx]
+                    start, end = non_spec_query_start_loc[
+                        b_idx], non_spec_query_start_loc[b_idx + 1]
+                    core_attn_out_non_spec[:, start:end, ...] = cur_core_attn_out
+                last_recurrent_state = torch.cat(last_recurrent_state, dim=0)
+                # Init cache
+                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
+                    ssm_state.dtype)
+            else:
+                core_attn_out_non_spec, last_recurrent_state = None, None
 
         # Merge core attention output
         if (spec_sequence_masks is not None
