@@ -21,7 +21,6 @@ It is recommended to download the model weight to the shared directory of multip
 You can use our official docker image to run `Qwen3-Embedding` series models.
 - Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
-
 if you don't want to use the docker image as above, you can also build all from source:
 - Install `vllm-ascend` from source, refer to [installation](../installation.md).
 
