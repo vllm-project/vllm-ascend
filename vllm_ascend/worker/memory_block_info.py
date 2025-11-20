@@ -1,4 +1,5 @@
-from common import UCEType
+from vllm_ascend.worker.common import UCEType
+from typing import Tuple,List
 class MemoryBlockInfo:
     def __init__(self,model):
         self.model = model

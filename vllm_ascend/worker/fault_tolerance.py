@@ -6,7 +6,7 @@ import torch.distributed as dist
 from vllm.config import VllmConfig
 from datetime import timedelta
 from typing import Callable,List
-from memory_block_info import MemoryBlockInfo
+from vllm_ascend.worker.memory_block_info import MemoryBlockInfo
 from vllm.logger import logger
 from vllm_ascend.worker.common import FaultAction
 from vllm_ascend.worker.recovery_chain import UCEHandler, RecoveryHandler, ForceStopHandler, NetworkHandler
@@ -77,11 +77,11 @@ class FaultTolerance:
                         fault_queue=self.fault_queue
                     )
                     ft_action = self._handle_exception(recovery_context)
-                    if torch.equal(ft_action,FaultAction.RECOMPUTE.value):
+                    if torch.equal(ft_action,FaultAction.RECOMPUTE):
                         continue
-                    elif torch.equal(ft_action,FaultAction.RAISE_EXCEPTION.value):
+                    elif torch.equal(ft_action,FaultAction.RAISE_EXCEPTION):
                         raise e
-                    elif torch.equal(ft_action,FaultAction.RETURN.value):
+                    elif torch.equal(ft_action,FaultAction.RETURN):
                         return None
                     else:
                         raise e
