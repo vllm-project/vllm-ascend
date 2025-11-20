@@ -55,6 +55,8 @@ PADDING_SLOT_ID = -1
 _MTP_MODELS = {
     "DeepseekV3ForCausalLM":
     ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
+    "DeepseekV32ForCausalLM":
+    ("vllm.model_executor.models.deepseek_mtp", "DeepSeekMTP"),
     "Qwen3NextForCausalLM":
     ("vllm_ascend.models.qwen3_next_mtp", "CustomQwen3NextMTP")
 }
