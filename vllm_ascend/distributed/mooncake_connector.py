@@ -1282,7 +1282,7 @@ class MooncakeConnectorWorker:
                 if len(local_block_ids_list[pcp_dcp_rank]) + len(
                         remote_block_ids_list[pcp_dcp_rank]) == 0:
                     continue
-                for i in range(self.num_need_pulls):
+                for i in range(self.tp_num_need_pulls):
                     assert self.kv_recv_thread is not None
                     self.kv_recv_thread.add_request(
                         request_id=req_id,
@@ -1293,7 +1293,7 @@ class MooncakeConnectorWorker:
                         remote_handshake_port=remote_handshake_port_list[
                             pcp_dcp_rank][i],
                         offset=i,
-                        num_need_pulls=self.num_need_pulls)
+                        num_need_pulls=self.tp_num_need_pulls)
         else:   #TODO: support prefill context parallel and pipeline parallel open at the same time
             choosen_rank_list = self._get_remote_tp_rank(req_id)
             remote_handshake_port_list = [
