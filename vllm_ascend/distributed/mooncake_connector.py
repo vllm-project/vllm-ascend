@@ -40,6 +40,7 @@ from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.mooncake.transfer_engine import get_global_te
 from vllm_ascend.distributed.utils import get_transfer_timeout_value
 from vllm_ascend.utils import prefill_context_parallel_enable, vllm_version_is
+from typing import List
 
 # isort: off
 if prefill_context_parallel_enable():
@@ -1330,7 +1331,7 @@ class MooncakeConnectorWorker:
                 map(lambda x: [x],
                     range(self._prefill_tp_size * self._prefill_pp_size)))
             return result
-
+        sampled_nums: List[List[int]] = []
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
         sampled_nums = []
