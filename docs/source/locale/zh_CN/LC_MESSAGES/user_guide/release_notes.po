@@ -2928,4 +2928,3 @@ msgstr ""
 "的日志，实际应该为 `# NPU blocks:`。这实际上不会影响任何功能和性能，你可以忽略它。该问题已在这个 "
 "[PR](https://github.com/vllm-project/vllm/pull/13378) 中修复，并将在 v0.7.3 "
 "版本中包含。"
-

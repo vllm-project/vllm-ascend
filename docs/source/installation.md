@@ -78,18 +78,18 @@ source vllm-ascend-env/bin/activate
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC1/Ascend-cann-toolkit_8.2.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_8.2.RC1_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_8.2.RC1_linux-"$(uname -i)".run --full
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC2/Ascend-cann-toolkit_8.2.RC2_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.2.RC2_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.2.RC2_linux-"$(uname -i)".run --full
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC1/Ascend-cann-kernels-910b_8.2.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-kernels-910b_8.2.RC1_linux-"$(uname -i)".run
-./Ascend-cann-kernels-910b_8.2.RC1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC2/Ascend-cann-kernels-910b_8.2.RC2_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-kernels-910b_8.2.RC2_linux-"$(uname -i)".run
+./Ascend-cann-kernels-910b_8.2.RC2_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC1/Ascend-cann-nnal_8.2.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_8.2.RC1_linux-"$(uname -i)".run
-./Ascend-cann-nnal_8.2.RC1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC2/Ascend-cann-nnal_8.2.RC2_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.2.RC2_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.2.RC2_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
