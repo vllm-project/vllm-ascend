@@ -211,5 +211,3 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         output = attn.forward(positions, hidden_states)
 
         self.assertEqual(output.shape, (3, self.hidden_size))
-        self.assertTrue(
-            torch.allclose(output, output.view(-1, self.hidden_size)))
