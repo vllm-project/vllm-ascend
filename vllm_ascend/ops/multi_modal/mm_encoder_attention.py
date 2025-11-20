@@ -69,124 +69,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         q, k, v = (x.view(*new_shape) for x in (q, k, v))
         return q, k, v
 
-    def pad_qkv_bias(self, bias):
-        first_half = bias.reshape(
-            -1, 3, self.origin_hidden_size_per_attention_head
-        )[:, :, :self.half_origin_hidden_size_per_attention_head]
-        second_half = bias.reshape(
-            -1, 3, self.origin_hidden_size_per_attention_head
-        )[:, :, self.half_origin_hidden_size_per_attention_head:]
-        first_half_padded = F.pad(
-            first_half, (0, self.half_pad_hidden_size_per_attention_head))
-        second_half_padded = F.pad(
-            second_half, (0, self.half_pad_hidden_size_per_attention_head))
-        bias_padded = torch.cat([first_half_padded, second_half_padded], dim=2)
-        bias_final = bias_padded.reshape(-1)
-        return bias_final
-
-    def pad_qkv_weight(self, data):
-        qkv_weight_first_half = data.reshape(
-            -1, 3, self.origin_hidden_size_per_attention_head, self.hidden_size
-        )[:, :, :self.half_origin_hidden_size_per_attention_head, :]
-        qkv_weight_second_half = data.reshape(
-            -1, 3, self.origin_hidden_size_per_attention_head, self.hidden_size
-        )[:, :, self.half_origin_hidden_size_per_attention_head:, :]
-
-        qkv_weight_first_half_padded = F.pad(
-            qkv_weight_first_half,
-            (0, 0, 0, self.half_pad_hidden_size_per_attention_head))
-        qkv_weight_second_half_padded = F.pad(
-            qkv_weight_second_half,
-            (0, 0, 0, self.half_pad_hidden_size_per_attention_head))
-        qkv_weight_padded = torch.cat(
-            [qkv_weight_first_half_padded, qkv_weight_second_half_padded],
-            dim=2)
-        qkv_weight_final = qkv_weight_padded.reshape(-1, self.hidden_size)
-
-        if is_enable_nz():
-            qkv_weight_final_copy = torch.empty_like(qkv_weight_final).copy_(
-                qkv_weight_final)
-            qkv_weight_final_copy = torch_npu.npu_format_cast(
-                qkv_weight_final_copy, ACL_FORMAT_FRACTAL_ND)
-            return qkv_weight_final_copy
-
-        return qkv_weight_final
-
-    def pad_proj_weight(self, data):
-        out_weight = F.pad(
-            data.reshape(self.hidden_size, -1,
-                         self.half_origin_hidden_size_per_attention_head),
-            (0, self.half_pad_hidden_size_per_attention_head, 0, 0)).reshape(
-                self.hidden_size, -1)
-
-        if is_enable_nz():
-            out_weight_copy = torch.empty_like(out_weight).copy_(out_weight)
-            out_weight_copy = torch_npu.npu_format_cast(
-                out_weight_copy, ACL_FORMAT_FRACTAL_ND)
-            return out_weight_copy
-
-        return out_weight
-
-    def pad_qkv_weight_scale_offset(self, data):
-        reshaped_data = data.reshape(
-            -1, 3, self.origin_hidden_size_per_attention_head, 1)
-        data1 = reshaped_data[:, :, :self.
-                              half_origin_hidden_size_per_attention_head, :]
-        data2 = reshaped_data[:, :, self.
-                              half_origin_hidden_size_per_attention_head:, :]
-        data1_paded = F.pad(
-            data1, (0, 0, 0, self.half_pad_hidden_size_per_attention_head, 0,
-                    0, 0, 0))
-        data2_paded = F.pad(
-            data2, (0, 0, 0, self.half_pad_hidden_size_per_attention_head, 0,
-                    0, 0, 0))
-        res = torch.cat([data1_paded, data2_paded], dim=2)
-        res = res.reshape(-1, 1)
-        return res
-
-    def pad_qkv_deq_scale_quant_bias(self, data):
-        reshaped_data = data.reshape(
-            -1, 3, self.origin_hidden_size_per_attention_head)
-        data1 = reshaped_data[:, :, :self.
-                              half_origin_hidden_size_per_attention_head]
-        data2 = reshaped_data[:, :,
-                              self.half_origin_hidden_size_per_attention_head:]
-
-        data1_paded = F.pad(
-            data1, (0, self.half_pad_hidden_size_per_attention_head))
-        data2_paded = F.pad(
-            data2, (0, self.half_pad_hidden_size_per_attention_head))
-
-        res = torch.cat([data1_paded, data2_paded], dim=2)
-        res = res.reshape(-1)
-        return res
-
-    def pad_cos_sin(self, cos: torch.Tensor, sin: torch.Tensor):
-        # cos/sin: [seqlen, rotary_dim / 2] ?
-        if self.enable_pad:
-            cos = F.pad(
-                cos, (0, self.half_pad_hidden_size_per_attention_head))
-            sin = F.pad(
-                sin, (0, self.half_pad_hidden_size_per_attention_head))
-        
-        if not self.interleaved:
-            cos_new = torch.cat((cos, cos), dim=-1)
-            sin_new = torch.cat((sin, sin), dim=-1)
-        else:
-            cos_new = rearrange(torch.stack((cos, cos), dim=-1),
-                                "... d two -> ...(d two)",
-                                two=2)
-            sin_new = rearrange(torch.stack((sin, sin), dim=-1),
-                                "... d two -> ...(d two)",
-                                two=2)
-        cos_new = cos_new.reshape(1, -1, 1,
-                                  self.hidden_size_per_attention_head)
-        sin_new = sin_new.reshape(1, -1, 1,
-                                  self.hidden_size_per_attention_head)
-        return cos_new, sin_new
-        
-        return cos, sin
-
     def forward(
         self,
         x: torch.Tensor,
@@ -194,16 +76,6 @@ class AscendMMEncoderAttention(MMEncoderAttention):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        # Padding weight
-        if self.enable_pad and not self.finish_pad:
-            self.qkv.weight.data = self.pad_qkv_weight(self.qkv.weight.data)
-            self.qkv.bias.data = self.pad_qkv_bias(self.qkv.bias.data)
-            self.proj.weight.data = self.pad_proj_weight(self.proj.weight.data)
-            # TODO(shen-shanshan): optimize this to avoid redundant computation.
-            cos, sin = self.pad_cos_sin(cos, sin)
-            # TODO(shen-shanshan): add padding for quantization.
-            self.finish_pad = True
-
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
 
@@ -221,6 +93,14 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             for x in (q, k, v)
         ]
 
+        # TODO(shen-shanshan): use context manager.
+        if self.enable_pad:
+            origin_shape = q.shape[-1]
+            pad_len = MAX_PAD_SIZE - origin_shape
+            q = F.pad(q, (0, pad_len), mode="constant", value=0)
+            k = F.pad(k, (0, pad_len), mode="constant", value=0)
+            v = F.pad(v, (0, pad_len), mode="constant", value=0)
+
         context_layer = torch.empty_like(q)
 
         # operator requires pta version >= 2.5.1
@@ -233,6 +113,10 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             num_heads=self.num_attention_heads_per_partition,
             num_kv_heads=self.num_attention_heads_per_partition,
             out=context_layer)
+
+        # TODO(shen-shanshan): use context manager.
+        if self.enable_pad:
+            context_layer = context_layer[..., :origin_shape]
 
         context_layer = rearrange(context_layer,
                                   "(b s) h d -> s b (h d)",

@@ -169,12 +169,6 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-                if ("attn.qkv.weight_scale" in name
-                      or "attn.qkv.weight_offset" in name) and self.enable_pad:
-                    param.data = self.pad_qkv_weight_scale_offset(param.data)
-                elif ("attn.qkv.deq_scale" in name
-                      or "attn.qkv.quant_bias" in name) and self.enable_pad:
-                    param.data = self.pad_qkv_deq_scale_quant_bias(param.data)
             loaded_params.add(name)
         return loaded_params
 
