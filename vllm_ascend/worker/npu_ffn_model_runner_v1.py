@@ -83,6 +83,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 self.model_config.hf_config.text_config.num_hidden_layers)
         else:
             self.num_layers = self.model_config.hf_config.num_hidden_layers
+        self.dummy_run_call_cnt = 0
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -120,7 +121,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 m2n_afdconnector_data.expert_token_nums_type = 0
                 m2n_afdconnector_data.aiv_num = 48
                 m2n_afdconnector_data.batch_size = self.max_num_tokens * m2n_afdconnector_data.k * 2
-                
+                # [64,2048]
                 hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
                 print(f'recv_attn_output success ,layer id is {current_layer_idx}')
                 m2n_afdconnector_data.handle = handle
@@ -134,20 +135,24 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 hidden_states, dynamic_scales, expandIdx, expertTokenNums, epRecvCounts, simulateExpertIds, simulateExpertScales, attenBatchSize = output1[0:8]
                 group_list = expertTokenNums.to(torch.int64)
                 topk_weights = simulateExpertScales
-            else:
+            elif self.connector_name == "p2pconnector":
                 hidden_states,router_logits,topk_weights, topk_ids, row_idx, afdConnectorMetadata = self.connector.recv_attn_output()
                 print(f'recv_attn_output success ,layer id is {current_layer_idx}')
-            logger.info("*"*50)
-            logger.info(f"layer {current_layer_idx} moe recv hidden states type:{type(hidden_states)}, shape:{hidden_states.shape}")
-            num_tokens = hidden_states.shape[0]
 
+                
             # Try to use ACL graph if available
             # TODO(yxj):move layer
+            # 先做成通信不如图的版本
+            max_num_tokens = self.max_num_tokens * 8 *2 # 64
+            self.cudagraph_batch_sizes.append(max_num_tokens)
+            num_tokens = hidden_states.shape[0]
             acl_graph_info = self._find_cuda_graph(current_layer_idx,
                                                     num_tokens)
-            # print(f'acl_graph_info is {acl_graph_info}')
-            # print(f'current_layer_idx is {current_layer_idx},num_tokens is {num_tokens}')
-            print(f'self._forword_cnt is {self._forword_cnt},num_tokens is {num_tokens}')
+
+            
+            print(f'acl_graph_info is {acl_graph_info}')
+            print(f'current_layer_idx is {current_layer_idx},num_tokens is {max_num_tokens}')
+            print(f'self._forword_cnt is {self._forword_cnt},num_tokens is {max_num_tokens}')
            
             if acl_graph_info is not None:
                 # Use captured ACL graph for computation
@@ -161,6 +166,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                         model_instance=self.model):
                     if self.connector_name == "m2nconnector":
                         # 未combine hidden
+                        # TODO(yxj)：图模式
                         rank_ffn_output = self._execute_with_acl_graph(
                             acl_graph_info = acl_graph_info,
                             hidden_states=hidden_states,
@@ -195,16 +201,16 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                     moe_comm_type = ffn_need_forward_data.moe_comm_type
                     num_input_tokens = ffn_need_forward_data.num_input_tokens
                     total_num_scheduled_tokens = ffn_need_forward_data.total_num_scheduled_tokens
-                
+                # test
                 with set_ascend_forward_context(
                         attn_metadata=None,
                         vllm_config=self.vllm_config,
-                        num_tokens=num_input_tokens,
-                        with_prefill=with_prefill,
+                        # num_tokens=num_input_tokens,
+                        # with_prefill=with_prefill,
                         reserved_mc2_mask=self.reserved_mc2_mask,
-                        moe_comm_type=moe_comm_type,
+                        # moe_comm_type=moe_comm_type,
                         prefetch_stream=self.prefetch_stream,
-                        num_actual_tokens=total_num_scheduled_tokens,
+                        # num_actual_tokens=total_num_scheduled_tokens,
                         model_instance=self.model):
                     if self.connector_name == "m2nconnector":
                         # 未combine hidden
@@ -506,11 +512,15 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 else:
                     self._capture_graph_for_layer_and_size(
                         layer_idx, num_tokens,aclgraph_runtime_mode)
+        print(f'self.dummy_run_call_cnt is {self.dummy_run_call_cnt}')
+        self.dummy_run_call_cnt += 1
+        
         
                        
     def _capture_graph_for_layer_and_size(self, layer_idx: int,
                                           num_tokens: int,
-                                          aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,):
+                                          aclgraph_runtime_mode: Optional[CUDAGraphMode] = None,
+                                          **kargs):
         """Capture ACL graph for specific layer and number of tokens."""
         # Create dummy hidden states
         dummy_hidden_states = torch.randn(
@@ -544,7 +554,7 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                 m2n_afdconnector_data.k = 8
                 m2n_afdconnector_data.expert_token_nums_type = 0
                 m2n_afdconnector_data.aiv_num = 48
-                m2n_afdconnector_data.batch_size = num_tokens * m2n_afdconnector_data.k * 2
+                m2n_afdconnector_data.batch_size = self.max_num_tokens * m2n_afdconnector_data.k * 2 # self.max_num_tokens*topk*die_nums
                 
                 hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
                 # print(f'recv_attn_output success ,layer id is {current_layer_idx}')
@@ -571,24 +581,24 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
         aclgraph = torch.npu.NPUGraph()
 
         # Start graph capture
+        # recv_attn_output
+        if self.connector_name == "m2nconnector":
+            # TODO metadata
+            m2n_afdconnector_data = M2NAFDConnectorMetadata()
+            m2n_afdconnector_data.quant_mode = 0
+            m2n_afdconnector_data.expand_x_type = torch.bfloat16
+            m2n_afdconnector_data.moe_expert_num = 64
+            m2n_afdconnector_data.h = 2048
+            m2n_afdconnector_data.k = 8
+            m2n_afdconnector_data.expert_token_nums_type = 0
+            m2n_afdconnector_data.aiv_num = 48
+            m2n_afdconnector_data.batch_size = self.max_num_tokens * m2n_afdconnector_data.k * 2
+            
+            hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
+            # print(f'recv_attn_output success ,layer id is {current_layer_idx}')
+            m2n_afdconnector_data.handle = handle
+            m2n_afdconnector_data.topk_weights = topk_weights
         with torch.npu.graph(aclgraph, pool=self.graph_pool):
-            # recv_attn_output
-            if self.connector_name == "m2nconnector":
-                # TODO metadata
-                m2n_afdconnector_data = M2NAFDConnectorMetadata()
-                m2n_afdconnector_data.quant_mode = 0
-                m2n_afdconnector_data.expand_x_type = torch.bfloat16
-                m2n_afdconnector_data.moe_expert_num = 64
-                m2n_afdconnector_data.h = 2048
-                m2n_afdconnector_data.k = 8
-                m2n_afdconnector_data.expert_token_nums_type = 0
-                m2n_afdconnector_data.aiv_num = 48
-                m2n_afdconnector_data.batch_size = num_tokens * m2n_afdconnector_data.k * 2
-                
-                hidden_states, dynamic_scales, group_list, handle, topk_weights,afdConnectorMetadata = self.connector.recv_attn_output(m2n_afdconnector_data)
-                # print(f'recv_attn_output success ,layer id is {current_layer_idx}')
-                m2n_afdconnector_data.handle = handle
-                m2n_afdconnector_data.topk_weights = topk_weights
             # compute_ffn_output
             output = self._run_ffn_computation(hidden_states = hidden_states,
                                                layer_idx=layer_idx,
@@ -597,19 +607,20 @@ class NPUFFNModelRunner(NPUModelRunner,GPUFFNModelRunner):
                                                 dynamic_scales=dynamic_scales,
                                                 topk_weights=topk_weights
                                                )
-            # send_ffn_output
-            if self.connector_name == "camconnector":
-                pass
-            elif self.connector_name == "m2nconnector":
-                self.connector.send_ffn_output(output, m2n_afdconnector_data)
-            else :
-                self.connector.send_ffn_output(output, afdConnectorMetadata)
+        # send_ffn_output 暂时不入图
+        if self.connector_name == "camconnector":
+            pass
+        elif self.connector_name == "m2nconnector":
+            self.connector.send_ffn_output(output, m2n_afdconnector_data)
+        else :
+            self.connector.send_ffn_output(output, afdConnectorMetadata)
         print(f'dummy_hidden_states shape is {dummy_hidden_states.shape}')
         print(f'output shape is {output.shape}')
         # Store the captured graph with layer and token count as key
-        self._acl_graphs[(layer_idx, num_tokens)] = {
+        # dummy_hidden_states ->[4,2048];output ->[4,2048];
+        self._acl_graphs[(layer_idx, output.shape[0])] = {
             'graph': aclgraph,
-            'input_hidden_states': dummy_hidden_states,
+            'input_hidden_states': output,
             'output': output
         }
         print(f'self._acl_graphs is {self._acl_graphs}')

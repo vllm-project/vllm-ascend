@@ -530,6 +530,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                      dtype=torch.int64)
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs,
                                                   dtype=torch.int32)
+        self.attn_dummy_run_call_cnt = 0
 
     def _make_buffer(self,
                      *size: Union[int, torch.SymInt],
@@ -2609,6 +2610,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if not self.in_profile_run and self.dynamic_eplb:
                 self.eplb_updator.take_update_info_from_eplb_process()
                 self.eplb_updator.forward_end()
+            print(f'self.attn_dummy_run_call_cnt is {self.attn_dummy_run_call_cnt}')
+            self.attn_dummy_run_call_cnt += 1
             return hidden_states
 
     @contextmanager

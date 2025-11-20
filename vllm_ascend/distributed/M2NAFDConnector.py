@@ -125,6 +125,7 @@ class M2NAFDConnector(AFDConnectorBase):
                          topk_ids:torch.Tensor, 
                          metadata: AFDConnectorMetadata) -> Any:
         # TODO():move to support aclgraph
+        # torch.npu.synchronize()
         if not self.use_aclgraph:
             dst = (self.process_group.rank_in_group + 1) % self.process_group.world_size
             print(f'send_attn_output dst is {dst}')
@@ -203,7 +204,7 @@ class M2NAFDConnector(AFDConnectorBase):
     
     # ATTN发给MOE(MOE接收)
     def recv_attn_output(self, metadata: M2NAFDConnectorMetadata) -> Any: 
-        
+        # torch.npu.synchronize()
         afdConnectorMetadata = None
         if not self.use_aclgraph:
             print(f'before recv_attn_output metadata is {metadata}') 
