@@ -36,12 +36,9 @@ class AscendConfig:
         additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
-        self.torchair_graph_config = TorchairGraphConfig(torchair_graph_config)
-
-        ascend_compilation_config = additional_config.get(
-            "ascend_compilation_config", {})
-        self.ascend_compilation_config = AscendCompilationConfig(
-            **ascend_compilation_config)
+        
+        self.torchair_graph_config = TorchairGraphConfig(
+            torchair_graph_config, vllm_config, additional_config)
 
         ascend_scheduler_config = additional_config.get(
             "ascend_scheduler_config", {})
@@ -140,6 +137,11 @@ class AscendConfig:
             if self.pd_tp_ratio == 0:
                 raise AssertionError(
                     "Only support P node tp size lagger then D node tp size")
+        self.SLO_limits_for_dynamic_batch = additional_config.get(
+            "SLO_limits_for_dynamic_batch", -1)
+        from vllm_ascend.utils import \
+            get_flashcomm2_oproj_tp_size_and_validate_config
+        self.flashcomm2_oproj_tensor_parallel_size = get_flashcomm2_oproj_tp_size_and_validate_config(self, vllm_config)
 
 
 class AscendCompilationConfig:
