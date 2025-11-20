@@ -63,3 +63,23 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
   "max_tokens": 4096
 }'
 ```
+
+## Accuracy Evaluation
+
+Here are two accuracy evaluation methods.
+
+### Using AISBench
+
+1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
+
+2. After execution, you can get the result, here is the result of `Qwen3-Coder-30B-A3B-Instruct` in `vllm-ascend:0.11.0rc0` for reference only.
+
+| dataset | version | metric | mode | vllm-api-general-chat |
+|----- | ----- | ----- | ----- | -----|
+| openai_humaneval | f4a973 | humaneval_pass@1 | gen | 94.51 |
+
+## Performance
+
+### Using AISBench
+
+Refer to [Using AISBench for performance evaluation](../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for details.
