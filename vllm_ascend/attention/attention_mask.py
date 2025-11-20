@@ -15,9 +15,7 @@
 import torch
 
 
-def _generate_attn_mask(max_seq_len, dtype, is_causal):
-    if not is_causal:
-        return torch.zeros(size=(max_seq_len, max_seq_len)).to(dtype)
+def _generate_attn_mask(max_seq_len, dtype):
     # Construct lower triangle matrix.
     mask_flag = torch.ones((max_seq_len, max_seq_len),
                            dtype=torch.bool).tril_()

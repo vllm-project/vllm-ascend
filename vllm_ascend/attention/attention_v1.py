@@ -221,6 +221,9 @@ class AscendMetadata:
     # dcp
     decode_meta: Optional[AscendMetadataForDecode] = None
 
+    # Used to guide the attention computation for pooling models.
+    is_causal_pooling: Optional[bool] = None
+
 
 class AscendAttentionMetadataBuilder:
     # Does this backend/builder support ACL Graphs for attention (default: no).
@@ -336,7 +339,8 @@ class AscendAttentionMetadataBuilder:
             attn_mask=attn_mask,
             attn_state=attn_state,
             num_prefills=num_prefills,
-            num_decodes=num_decodes)
+            num_decodes=num_decodes,
+            is_causal_pooling=is_causal_pooling)
         return attn_metadata
 
     def build_for_graph_capture(
@@ -597,6 +601,33 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 out=output)
         return output
 
+    def _forward_pooling(self, query: torch.Tensor, key: torch.Tensor,
+                         value: torch.Tensor, attn_metadata: AscendMetadata,
+                         _: torch.Tensor) -> torch.Tensor:
+        assert attn_metadata is not None
+        assert attn_metadata.is_causal_pooling is not None
+        if attn_metadata.is_causal_pooling:
+            return torch_npu.npu_fusion_attention(
+                query=query,
+                key=key,
+                value=value,
+                head_num=self.num_heads,
+                atten_mask=attn_metadata.attn_mask,
+                input_layout="TND",
+                actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+                scale=self.scale,
+                sparse_mode=3)[0]
+        else:
+            return torch_npu.npu_fusion_attention(
+                query=query,
+                key=key,
+                value=value,
+                head_num=self.num_heads,
+                input_layout="TND",
+                actual_seq_qlen=attn_metadata.actual_seq_lengths_q,
+                actual_seq_kvlen=attn_metadata.actual_seq_lengths_q,
+                scale=self.scale)[0]
     def _forward_encode(
         self,
         query: torch.Tensor,
