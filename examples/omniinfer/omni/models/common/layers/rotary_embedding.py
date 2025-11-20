@@ -229,7 +229,7 @@ class RotaryEmbeddingTorchNpu(torch.nn.Module):
             cos = cos.view(num_batch, tokens_per_batch, cos.shape[1], self.head_size)
             sin = sin.view(num_batch, tokens_per_batch, sin.shape[1], self.head_size)
 
-        # npu_apply_rotary_pos_emb replace npu_rotary_mul, npu_rotary_mul will not support muti batch size
+        # npu_apply_rotary_pos_emb replace npu_rotary_mul, npu_rotary_mul will not support multi batch size
         q_embed, k_embed = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin)
 
         # Flatten results
@@ -714,4 +714,3 @@ def get_rope(
                                              is_neox_style)
     _ROPE_DICT[key] = rotary_emb
     return rotary_emb
-

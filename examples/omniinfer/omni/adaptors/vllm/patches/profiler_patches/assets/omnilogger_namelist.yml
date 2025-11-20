@@ -96,7 +96,7 @@ targets:
               if os.getenv('ROLE') == "prefill":
                   safe_print(trace_output_directory, f"<<<Action: success add to seq groups; Timestamp:{time.time()}; RequestID:{item.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
               else:
-                  safe_print(trace_output_directory, f"<<<Action: Start append running sequece for decode; Timestamp:{time.time()}; RequestID:{item.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
+                  safe_print(trace_output_directory, f"<<<Action: Start append running sequence for decode; Timestamp:{time.time()}; RequestID:{item.request_id}; Role:{os.getenv('ROLE')}_{ip_str}")
               super().append(item)
       self.running = CustomList(self.running)
       for request in self.waiting: 

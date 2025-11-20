@@ -106,9 +106,9 @@ class DeepSeekV3ToolParser(ToolParser):
                                                     tool_calls=[],
                                                     content=model_output)
 
-    def combine_char(self, matchs):
+    def combine_char(self, matches):
         delta_text = ""
-        for match in matchs:
+        for match in matches:
             delta_text += match[1]
         
         return delta_text

@@ -34,7 +34,7 @@ class ClusterStatus:
     def add_state_action(self, state, action):
         """
         add state update action which will be executed asynchronously peroiodically (e.g. every 5 seconds)?
-        poentially update the current state in multiple queues
+        potentially update the current state in multiple queues
         """
         # add state update action to a queue
         self.state_actions_queue.append((state, action))

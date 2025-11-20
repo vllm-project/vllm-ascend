@@ -486,7 +486,7 @@ static void ngx_http_gen_decode_request_body(ngx_http_request_t *r, ngx_http_pre
     ngx_http_prefill_loc_conf_t  *plcf;
     plcf = ngx_http_get_module_loc_conf(r, ngx_http_prefill_module);
     switch (plcf->stream_ops) {
-        case NGX_PREFILL_STREAM_ADD: // enforce stream_options to turn on no matter stream is true or flase
+        case NGX_PREFILL_STREAM_ADD: // enforce stream_options to turn on no matter stream is true or false
             need_add_stream_option = 1;
             break;
         case NGX_PREFILL_STREAM_SET_OPT: //enforce stream_options to turn on only when stream is true

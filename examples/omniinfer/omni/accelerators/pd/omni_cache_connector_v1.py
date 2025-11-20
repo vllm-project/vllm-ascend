@@ -659,7 +659,7 @@ class DecodeConnectorWorker:
                     logger.info(f" ***** Request {req_id} has 0 local blocks, skip load kv.")
                     continue
                 # remote_block_ids in P is less than local_block_ids[0] in D,
-                # leaded by lookahead num, which is used by eagle and multi step
+                # led by lookahead num, which is used by eagle and multi step
                 elif len(meta.remote_block_ids[0]) < len(meta.local_block_ids[0]):
                     meta.local_block_ids[0] = meta.local_block_ids[0][:len(meta.remote_block_ids[0])]
                     logger.debug("look ahead token num is greater than 0")
@@ -732,7 +732,7 @@ class DecodeConnectorWorker:
                 ]
                 s.send_multipart(frames)
 
-            # receove and verfy the request_id
+            # receove and verify the request_id
             for inst, s in enumerate(tmp_sockets):
                 self._recv_agent_reply(
                     s, inst,

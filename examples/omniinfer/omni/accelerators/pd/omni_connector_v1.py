@@ -486,7 +486,7 @@ class DecodeConnectorScheduler:
         metadata = DatadistConnectorMetadata()
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             if req.kv_transfer_params is None:
-                logger.warning(f"For reuqest {req_id}: kv_transfer_params now is None")
+                logger.warning(f"For request {req_id}: kv_transfer_params now is None")
             else:
                 metadata.add_new_req(
                     request_id=req_id,
@@ -731,7 +731,7 @@ class DecodeConnectorWorker:
             # and we can directly use the local_block_ids and remote_block_ids
             if isinstance(meta.local_block_ids[0], int):
                 # local_block_ids (kv blocks in D) is more than remote_block_ids (kv blocks in P)
-                # leaded by lookahead num, which is used by eagle and multi step
+                # led by lookahead num, which is used by eagle and multi step
                 if len(meta.remote_block_ids) < len(meta.local_block_ids):
                     meta.local_block_ids = meta.local_block_ids[:len(meta.remote_block_ids)]
                     logger.debug("look ahead token num is greater than 0")
@@ -758,7 +758,7 @@ class DecodeConnectorWorker:
                     logger.info(f" ***** Request {req_id} has 0 local blocks, skip load kv.")
                     continue
                 # remote_block_ids in P is less than local_block_ids[0] in D, 
-                # leaded by lookahead num, which is used by eagle and multi step
+                # led by lookahead num, which is used by eagle and multi step
                 elif len(meta.remote_block_ids[0]) < len(meta.local_block_ids[0]):
                     meta.local_block_ids[0] = meta.local_block_ids[0][:len(meta.remote_block_ids[0])]
                     logger.debug("look ahead token num is greater than 0")

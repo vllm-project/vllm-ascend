@@ -37,7 +37,7 @@ Thank you for your contribution to Omni Infer! Before submitting the pull reques
 
 ### CLA Signing
 
-The commnunity will provide a CLA bot for you to sign either ICLA or CCLA. Please ensure you have signed the CLA before submitting a pull request.
+The community will provide a CLA bot for you to sign either ICLA or CCLA. Please ensure you have signed the CLA before submitting a pull request.
 
 ### PR Title and Classification
 

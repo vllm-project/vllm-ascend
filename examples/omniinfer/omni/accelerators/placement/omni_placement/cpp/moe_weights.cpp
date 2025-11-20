@@ -204,7 +204,7 @@ void MoEWeights::init_weights(
 
     num_layers_ = npu_weights_.size();
     size_t expert_size =
-        npu_weights_[0][0].get_total_size(); // FIXEME: 每个专家的大小均一致
+        npu_weights_[0][0].get_total_size(); // FIXME: 每个专家的大小均一致
     if (expert_size == 0) {
         throw std::runtime_error("Invalid size: size cannot be 0");
     }

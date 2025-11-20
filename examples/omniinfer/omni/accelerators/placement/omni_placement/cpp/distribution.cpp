@@ -90,7 +90,7 @@ bool Distribution::isCompletedQueueFull() {
 
 void *Distribution::get_recv_buff_address() {
     if (recv_buff_ == nullptr) {
-        std::cout << "[DynamicEplb-Error], Pls initilization recv_buff_ by "
+        std::cout << "[DynamicEplb-Error], Pls initialization recv_buff_ by "
                      "allocate_recv_buffs"
                   << std::endl;
         exit(0);

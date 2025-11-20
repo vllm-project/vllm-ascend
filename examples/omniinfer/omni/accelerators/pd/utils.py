@@ -45,7 +45,7 @@ def get_p_start_rank(p_tp_size, p_dp_size, d_tp_size, d_dp_size, d_node_num, cur
     p_replica_groups = p_tp_size // kv_group_size
     total_kv_groups = p_dp_size * p_replica_groups
     
-    # Calculate connection step size (ensure KV group are evenly distrubuted)
+    # Calculate connection step size (ensure KV group are evenly distributed)
     link_group_step = max(1, math.ceil(total_kv_groups / total_dp_groups))
     kv_group_index = (global_dp_group * link_group_step) % total_kv_groups
     

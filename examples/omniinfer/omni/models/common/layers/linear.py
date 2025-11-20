@@ -961,7 +961,7 @@ class FlashCommLinearBase(torch.nn.Module):
 """
 Similar to vllm's original RowParallelLinear except for:
 1. layerwise TP configurations. call get_tensor_model_parallel_world_size/rank.
-2. flexible communication applied to x or y during forward (controled by parameters of forward function).
+2. flexible communication applied to x or y during forward (controlled by parameters of forward function).
 """
 class RowParallelFlashCommLinear(FlashCommLinearBase):
     def __init__(self,

@@ -136,7 +136,7 @@ static inline void omni_register_worker(omni_global_state_t *gs, ngx_shmtx_t *g_
     assert(!"No space left for new worker");
 }
 
-// The first work is the master and will do the global schduling
+// The first work is the master and will do the global scheduling
 static inline int omni_is_master_worker(omni_global_state_t *gs)
 {
     return gs->workers[0] == ngx_pid;
