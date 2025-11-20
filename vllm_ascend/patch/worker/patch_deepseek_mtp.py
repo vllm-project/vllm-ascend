@@ -10,6 +10,12 @@ from vllm.model_executor.models.deepseek_mtp import \
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2DecoderLayer
 from vllm.model_executor.models.utils import maybe_prefix
 
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.11.0"):
+    from vllm.compilation.decorators import support_torch_compile
+    from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
+
 
 class SharedHead(nn.Module):
 
@@ -51,4 +57,38 @@ def predictor_init(self, vllm_config: VllmConfig, prefix: str) -> None:
                                             topk_indices_buffer)
 
 
+def predictor_forward(
+    self,
+    input_ids: torch.Tensor,
+    positions: torch.Tensor,
+    previous_hidden_states: torch.Tensor,
+    inputs_embeds: torch.Tensor | None = None,
+    spec_step_index: int = 0,
+) -> torch.Tensor:
+    assert inputs_embeds is not None
+    # masking inputs at position 0, as not needed by MTP
+    inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
+    inputs_embeds = self.enorm(inputs_embeds)
+    previous_hidden_states = self.hnorm(previous_hidden_states)
+
+    hidden_states = self.eh_proj(
+        torch.cat([inputs_embeds, previous_hidden_states], dim=-1))
+
+    hidden_states, residual = self.mtp_block(positions=positions,
+                                             hidden_states=hidden_states,
+                                             residual=None)
+    hidden_states = residual + hidden_states
+    return hidden_states
+
+
+# Patch this only for aclgraph support, as this is not support in vLLM 0.11.0
+@support_torch_compile
+class AscendDeepSeekMTP(DeepSeekMTP):
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+
 DeepSeekMultiTokenPredictorLayer.__init__ = predictor_init
+if vllm_version_is("0.11.0"):
+    DeepSeekMultiTokenPredictorLayer.forward = predictor_forward
