@@ -20,7 +20,7 @@ Refer to [feature guide](../user_guide/feature_guide/index.md) to get the featur
 
 ### Model Weight
 
-- `Qwen3-VL-8B-Instruct`: require 1 Atlas 800 A3 (64G × 16) nodes or 1 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
+- `Qwen3-VL-8B-Instruct`:  [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
 
 ### Installation
 
