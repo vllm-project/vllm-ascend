@@ -18,7 +18,6 @@
 from typing import Optional, Union
 
 import torch
-
 from vllm.model_executor.models.roberta import (
     RobertaEmbedding, RobertaForSequenceClassification,
     replace_roberta_positions)
