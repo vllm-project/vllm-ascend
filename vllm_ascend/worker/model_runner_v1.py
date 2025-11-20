@@ -58,7 +58,7 @@ from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.model_loader import get_model, get_model_loader
+from vllm.model_executor.model_loader import get_model
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.model_executor.models.interfaces import (SupportsMultiModal,
