@@ -8,8 +8,8 @@ from pytest_mock import MockerFixture
 from tests.ut.base import PytestBase
 from vllm_ascend.models.qwen2_5_vl import (
     AscendQwen2_5_VisionAttention, AscendQwen2_5_VisionBlock,
-    AscendQwen2_5_VisionPatchEmbed, AscendQwen2_5_VisionRotaryEmbedding,
-    AscendQwen2_5_VisionTransformer, AscendQwen2_5_VLForConditionalGeneration)
+    AscendQwen2_5_VisionRotaryEmbedding, AscendQwen2_5_VisionTransformer,
+    AscendQwen2_5_VLForConditionalGeneration)
 
 
 class TestAscendQwen2_5_VisionAttention(PytestBase):
@@ -213,15 +213,6 @@ class TestAscendQwen2_5_VisionBlock(PytestBase):
         }
 
         assert torch.all(x * 3 == output)
-
-
-class TestAscendQwen2_5_VisionPatchEmbed(PytestBase):
-
-    def test_forward(self):
-        patch_embed = AscendQwen2_5_VisionPatchEmbed()
-
-        ret = patch_embed(torch.rand((120, 1176)))
-        assert ret.shape == (120, 1152)
 
 
 class TestAscendQwen2_5_VisionRotaryEmbedding(PytestBase):
