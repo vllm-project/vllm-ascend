@@ -48,8 +48,7 @@ class TestExpertLoadBalancer(TestBase):
         with open(json_file, 'r') as f:
             self.expert_map: MockData = json.load(f)
 
-        self.expert_load_balancer = ExpertLoadBalancer(json_file,
-                                                       global_expert_num=8)
+        self.expert_load_balancer = ExpertLoadBalancer(json_file, 8)
 
     def test_init(self):
 
