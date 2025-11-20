@@ -25,14 +25,11 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.utils import logger
-from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
-                                             get_tp_group,
-                                             get_pp_group,
-                                             get_tensor_model_parallel_rank,
-                                             get_tensor_model_parallel_world_size,
-                                             get_decode_context_model_parallel_rank,
-                                             get_decode_context_model_parallel_world_size)
+from vllm.distributed.parallel_state import (
+    get_decode_context_model_parallel_rank,
+    get_decode_context_model_parallel_world_size, get_pp_group,
+    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
+    get_tp_group)
 from vllm.distributed.utils import get_pp_indices
 from vllm.utils import get_ip, logger, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -203,7 +200,11 @@ class KVCacheSendingThread(threading.Thread):
         # NOTE(rob): we need each rank to have a unique port. This hack to keeps
         # us moving. We will switch when moving to etcd or where we have a
         # single ZMQ socket in the scheduler.
+<<<<<<< HEAD
         device_index = self.pp_rank + self.tp_size + self.tp_rank + self.pcp_rank * self.prefill_tp_size
+=======
+        device_index = self.pp_rank * self.tp_size + self.pcp_rank * self.decode_tp_size + self.tp_rank
+>>>>>>> 7bde789 (format code)
         handshake_port = self.side_channel_port + device_index
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
         logger.info("Starting listening on path: %s", path)
@@ -784,9 +785,8 @@ class MooncakeConnectorScheduler:
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port +
             vllm_config.parallel_config.data_parallel_rank *
-            vllm_config.parallel_config.tensor_parallel_size * 
-            vllm_config.parallel_config.pipeline_parallel_size *
-            self.pcp_size)
+            vllm_config.parallel_config.tensor_parallel_size *
+            vllm_config.parallel_config.pipeline_parallel_size * self.pcp_size)
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
@@ -960,10 +960,10 @@ class MooncakeConnectorWorker:
         self.side_channel_port = (
             vllm_config.kv_transfer_config.kv_port +
             vllm_config.parallel_config.data_parallel_rank *
-            vllm_config.parallel_config.tensor_parallel_size * 
-            vllm_config.parallel_config.pipeline_parallel_size *
-            self.pcp_size)
-        device_index = (self.pp_rank + self.pcp_rank) * self.tp_size + self.tp_rank
+            vllm_config.parallel_config.tensor_parallel_size *
+            vllm_config.parallel_config.pipeline_parallel_size * self.pcp_size)
+        device_index = (self.pp_rank +
+                        self.pcp_rank) * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
 
@@ -973,8 +973,10 @@ class MooncakeConnectorWorker:
         device_ids_str = envs_ascend.PHYSICAL_DEVICES
         if device_ids_str is None:
             device_ids = list(
-                range(self.dp_rank * self.tp_size * self.pcp_size * self.pp_size,
-                      (self.dp_rank + 1) * self.tp_size * self.pcp_size * self.pp_size))
+                range(
+                    self.dp_rank * self.tp_size * self.pcp_size * self.pp_size,
+                    (self.dp_rank + 1) * self.tp_size * self.pcp_size *
+                    self.pp_size))
         else:
             device_ids = list(map(int, device_ids_str.split(',')))
             start_index = self.dp_rank * self.tp_size * self.pcp_size * self.pp_size
@@ -986,11 +988,12 @@ class MooncakeConnectorWorker:
                     f"Expected at least {end_index} devices, but found {len(device_ids)} "
                     "in PHYSICAL_DEVICES.")
             device_ids = device_ids[start_index:end_index]
-        device_index = (self.pp_rank+self.pcp_rank) * self.tp_size + self.tp_rank
+        device_index = (self.pp_rank +
+                        self.pcp_rank) * self.tp_size + self.tp_rank
         assert len(
-            device_ids
-        ) > (self.pp_rank+self.pcp_rank) * self.tp_size + self.tp_rank  # type: ignore
-        assert len(device_ids) > self.tp_rank*self.pp_rank  # type: ignore
+            device_ids) > (self.pp_rank + self.pcp_rank
+                           ) * self.tp_size + self.tp_rank  # type: ignore
+        assert len(device_ids) > self.tp_rank * self.pp_rank  # type: ignore
         self.device_id = device_ids[device_index]  # type: ignore
 
         if vllm_config.kv_transfer_config.get_from_extra_config(
