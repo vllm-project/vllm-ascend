@@ -72,7 +72,8 @@ def set_ascend_forward_context(
         batch_descriptor: Optional[BatchDescriptor] = None,
         prefetch_stream: torch.npu.Stream = None,
         model_instance: torch.nn.Module = None,
-        weight_prefetch_method: Optional[WeightPrefetchMethod] = None):
+        weight_prefetch_method: Optional[WeightPrefetchMethod] = None,
+        is_mtp_model=False):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
@@ -158,6 +159,7 @@ def set_ascend_forward_context(
         forward_context.prefetch_mlp_enabled = prefetch_mlp_enabled
         forward_context.model_instance = model_instance
         forward_context.weight_prefetch_method = weight_prefetch_method
+        forward_context.is_mtp_model = is_mtp_model
 
         # TODO(rjg-lyh): The current implementation is somewhat brute force and not elegant.
         # It will be improved later by implementing operator fusion through the FX graph.
