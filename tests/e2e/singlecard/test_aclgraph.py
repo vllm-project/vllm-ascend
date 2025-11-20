@@ -25,10 +25,10 @@ import random
 import string
 
 import pytest
+from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
-from vllm import SamplingParams
 
 MODELS = [
     "Qwen/Qwen3-0.6B",
