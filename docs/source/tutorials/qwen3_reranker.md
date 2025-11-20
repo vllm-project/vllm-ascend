@@ -35,7 +35,7 @@ Set up environment variables in container:
 export VLLM_USE_MODELSCOPE=True
 
 # Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 ```
 
 ### Online Inference
