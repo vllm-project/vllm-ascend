@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod, VocabParallelEmbedding)
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -110,6 +111,14 @@ class AscendQuantConfig(QuantizationConfig):
         if model_type in packed_modules_model_mapping:
             self.packed_modules_mapping = packed_modules_model_mapping[
                 model_type]
+        if model_type == "qwen3_vl_moe":
+            hf_to_vllm_mapper = WeightsMapper(
+                orig_to_new_prefix={
+                    "visual.": "model.visual.",
+                    "language_model.lm_head.": "lm_head.",
+                    "language_model.model.": "model.language_model.",
+                })
+            prefix = hf_to_vllm_mapper._map_name(prefix)
         from vllm.attention.layer import Attention
         if prefix.startswith("language_model"):
             prefix = prefix.split('.', 1)[-1]
@@ -241,6 +250,19 @@ packed_modules_model_mapping = {
             "gate_proj",
             "up_proj",
         ],
+    },
+    "qwen3_vl_moe": {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
     "glm4_moe": {
         "qkv_proj": [
