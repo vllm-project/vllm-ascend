@@ -273,7 +273,7 @@ class AscendFusedMoE(FusedMoE):
         if self.dynamic_eplb:
             self.moe_load = torch.zeros(local_num_experts,
                                         dtype=torch.int64).npu()
-            
+
         eplb_enable = self.dynamic_eplb or (self.expert_map_path is not None)
         if eplb_enable and (not isinstance(self.quant_method,
                                            AscendW8A8DynamicFusedMoEMethod)):
