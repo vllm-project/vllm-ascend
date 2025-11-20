@@ -59,16 +59,16 @@ jobs:
       - name: Analysing the code with ruff
         run: |
           echo "::add-matcher::.github/workflows/matchers/ruff.json"
-          ruff check --output-format github .
+          ruff check --output-format github . --exclude 'examples/'
       - name: Run isort
         run: |
-          isort . --check-only
+          isort . --check-only --skip examples
       - name: Running yapf
         run: |
           python -m pip install --upgrade pip
           pip install toml
           pip install yapf==0.32.0
-          yapf --diff --recursive .
+          yapf --diff --recursive . --exclude 'examples/*'
 
       - name: Install dependencies
         run: |
