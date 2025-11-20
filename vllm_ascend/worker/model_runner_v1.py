@@ -369,16 +369,12 @@ class NPUModelRunner(LoRAModelRunnerMixin, ECConnectorModelRunnerMixin):
                                              self.block_size,
                                              use_mla=self.model_config.use_mla,
                                              use_sparse=self.use_sparse)
-        pooler_config = self.model_config.pooler_config
-        is_causal = self.model_config.runner_type == "generate" or (
-            pooler_config is not None
-            and pooler_config.pooling_type.lower() == "last")
         if self.pcp_size > 1:
             self.attn_mask_builder = None
         else:
             self.attn_mask_builder = AttentionMaskBuilder(
                 self.scheduler_config.max_num_batched_tokens, self.dtype,
-                self.device, is_causal)
+                self.device)
 
         self._set_up_drafter()
 

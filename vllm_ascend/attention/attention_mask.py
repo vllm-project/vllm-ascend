@@ -15,9 +15,7 @@
 import torch
 
 
-def _generate_attn_mask(max_seq_len, dtype, is_causal):
-    if not is_causal:
-        return torch.zeros(size=(max_seq_len, max_seq_len)).to(dtype)
+def _generate_attn_mask(max_seq_len, dtype):
     # Construct lower triangle matrix.
     mask_flag = torch.ones((max_seq_len, max_seq_len),
                            dtype=torch.bool).tril_()
@@ -33,18 +31,14 @@ def _generate_attn_mask(max_seq_len, dtype, is_causal):
 
 class AttentionMaskBuilder:
 
-    def __init__(
-        self,
-        max_seq_len: int,
-        dtype: torch.dtype,
-        device: torch.device = None,
-        is_causal: bool = True,
-    ):
+    def __init__(self,
+                 max_seq_len: int,
+                 dtype: torch.dtype,
+                 device: torch.device = None):
         # NOTE: The device argument specifies the target NPU
         # to be used for the newly added FIA operator.
         # Only pass this parameter when using the new FIA operator.
-        self.is_causal = is_causal
-        attn_mask = _generate_attn_mask(max_seq_len, dtype, self.is_causal)
+        attn_mask = _generate_attn_mask(max_seq_len, dtype)
 
         self._seq_len_cached = attn_mask.shape[0]
         self.attn_mask_cache = attn_mask
@@ -85,7 +79,6 @@ class AttentionMaskBuilder:
     def _update_attn_cache(self, seqlen: int, dtype: torch.dtype):
         if seqlen > self._seq_len_cached:
             self._seq_len_cached = seqlen
-            self.attn_mask_cache = _generate_attn_mask(seqlen, dtype,
-                                                       self.is_causal)
+            self.attn_mask_cache = _generate_attn_mask(seqlen, dtype)
         if self.attn_mask_cache.dtype != dtype:
             self.attn_mask_cache = self.attn_mask_cache.to(dtype)
