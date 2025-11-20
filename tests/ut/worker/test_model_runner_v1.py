@@ -155,7 +155,3 @@ def test_update_config(model_runner):
     # Raise error on non-existing config
     with pytest.raises(AssertionError):
         model_runner.update_config({"do_not_exist_config": "dummy"})
-
-def test_reload_weights_before_load_model(model_runner):
-    with pytest.raises(AssertionError):
-        model_runner.reload_weights()

@@ -4603,10 +4603,3 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             config = getattr(self, config_name)
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
-
-    def reload_weights(self) -> None:
-        assert getattr(self, "model", None) is not None, \
-            "Cannot reload weights before model is loaded."
-        model_loader = get_model_loader(self.load_config)
-        logger.info("Reloading weights inplace...")
-        model_loader.load_weights(self.model, model_config=self.model_config)
