@@ -207,7 +207,7 @@ class AscendFusedMoE(FusedMoE):
             vllm_config = get_current_vllm_config()
             self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
                 dtype=vllm_config.model_config.dtype)
-            
+
         # init moe.
         if vllm_version_is("0.11.0"):
             self.local_num_experts, self.expert_map = determine_expert_map(
