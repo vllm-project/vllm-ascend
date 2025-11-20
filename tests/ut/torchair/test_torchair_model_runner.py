@@ -142,6 +142,9 @@ class TestNPUTorchairModelRunner(PytestBase):
             "vllm_ascend.torchair.utils.torchair_quant_method_register")
         mocker.patch("vllm_ascend.envs.VLLM_ASCEND_TRACE_RECOMPILES",
                      return_value=False)
+        mock_attn_builder = Mock()
+        mock_attn_backend = Mock()
+        mock_attn_backend.get_builder_cls.return_value = lambda *args, **kwargs: mock_attn_builder
 
         # 设置类属性（如果需要）
         NPUTorchairModelRunner.decode_token_per_req = 1
