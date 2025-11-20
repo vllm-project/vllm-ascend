@@ -35,7 +35,6 @@ from vllm_ascend.utils import (ASCEND_QUANTIZATION_METHOD, enable_sp, is_310p,
                                update_aclgraph_sizes,
                                update_cudagraph_capture_sizes,
                                update_default_aclgraph_sizes, vllm_version_is)
-from vllm_ascend.compilation.compiler_interface import AscendAdaptor
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -64,6 +63,15 @@ class NPUPlatform(Platform):
     @property
     def pass_key(self) -> str:
         return "graph_fusion_manager"
+    
+    @classmethod
+    def get_pass_manager_cls(cls) -> str:
+        return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
+    
+    @classmethod
+    def get_compile_backend(self) -> str:
+        from vllm_ascend.compilation.compiler_interface import AscendAdaptor
+        return AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
 
     @classmethod
     def pre_register_and_update(cls,
@@ -243,7 +251,6 @@ class NPUPlatform(Platform):
                     "vllm.mla_forward"
                 ])
                 update_aclgraph_sizes(vllm_config)
-                compilation_config.oot_compiler = AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
             elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
                 compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
                 logger.info(
@@ -282,7 +289,6 @@ class NPUPlatform(Platform):
                 compilation_config.use_inductor = False
                 compilation_config.splitting_ops.extend(["vllm::mla_forward"])
                 update_aclgraph_sizes(vllm_config)
-                compilation_config.oot_compiler = AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
             elif compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY or\
                 compilation_config.cudagraph_mode == CUDAGraphMode.FULL:
                 logger.info(
