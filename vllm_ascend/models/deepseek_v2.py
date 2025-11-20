@@ -447,6 +447,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             "enable_afd", False)
         
         afd_config = vllm_config.afd_config
+        self.afd_config = afd_config
         if afd_config:
             self.role = afd_config.afd_role
             self.connector_name = afd_config.afd_connector

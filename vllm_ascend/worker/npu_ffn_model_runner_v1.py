@@ -22,7 +22,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner,graph_capture
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm.distributed.afd_transfer.afd_connector.metadata import (
-    AFDConnectorMetadata,FFNNeedForwardData,M2NAFDConnectorMetadata)
+    AFDConnectorMetadata, FFNNeedForwardData, M2NAFDConnectorMetadata)
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config)

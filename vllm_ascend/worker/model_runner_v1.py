@@ -1996,9 +1996,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         aclgraph_runtime_mode, batch_descriptor = \
         self.aclgraph_dispatcher.dispatch(batch_descriptor)
         
-        if afd_metadata == None:
+        if afd_metadata == None and self.afd_config is not None:
             afd_metadata = AFDMetadata(
-                0,0,0,self.afd_connector,0
+                [0],[0],0,self.afd_connector,[0]
             )
 
         
