@@ -16,7 +16,6 @@
 #
 
 import torch
-
 from vllm.model_executor.models.bert import (BertEmbedding,
                                              BertForSequenceClassification,
                                              BertForTokenClassification)
