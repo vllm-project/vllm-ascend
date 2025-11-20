@@ -377,16 +377,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                              self.block_size,
                                              use_mla=self.model_config.use_mla,
                                              use_sparse=self.use_sparse)
-        pooler_config = self.model_config.pooler_config
-        is_causal = self.model_config.runner_type == "generate" or (
-            pooler_config is not None
-            and pooler_config.pooling_type.lower() == "last")
         if self.pcp_size > 1:
             self.attn_mask_builder = None
         else:
             self.attn_mask_builder = AttentionMaskBuilder(
                 self.scheduler_config.max_num_batched_tokens, self.dtype,
-                self.device, is_causal)
+                self.device)
 
         self._set_up_drafter()
 
@@ -1021,8 +1017,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # dcp situation.
         if self.dcp_size > 1:
             return self.attn_mask_builder.get_splitfuse_attn_mask()
+        # Pooling situation.
+        if self.model_config.runner_type == "pooling":
+            return self.attn_mask_builder.get_attn_mask(
+                2048, self.dtype, self.device)
         # Chunk Prefill situation.
-        if attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
+        elif attn_state == AscendAttentionState.ChunkedPrefill and not self.vllm_config.model_config.use_mla and not self.use_sparse:
             return self.attn_mask_builder.get_splitfuse_attn_mask()
 
         # Prefill without cache situation.
@@ -2089,14 +2089,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _build_attn_state(self, num_reqs, num_scheduled_tokens,
                           num_valid_tokens):
         ascend_config = get_ascend_config()
-        if self.model_config.runner_type == "pooling":
-            if isinstance(
-                    self.kv_cache_config.kv_cache_groups[0].kv_cache_spec,
-                    EncoderOnlyAttentionSpec):
-                attn_state = AscendAttentionState.PrefillNoCache
-            else:
-                attn_state = AscendAttentionState.PrefillCacheHit
-        elif np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
+        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
