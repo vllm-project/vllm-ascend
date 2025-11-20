@@ -1,0 +1,91 @@
+test_name: "test Qwen3-235B-A22B-W8A8 disaggregated_prefill"
+model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
+num_nodes: 2
+npu_per_node: 16
+env_common:
+  VLLM_USE_MODELSCOPE: true
+  OMP_PROC_BIND: false
+  OMP_NUM_THREADS: 100
+  HCCL_BUFFSIZE: 1024
+  SERVER_PORT: 8080
+  DYNAMIC_EPLB: true
+disaggregated_prefill:
+  enabled: true
+  prefiller_host_index: [0]
+  decoder_host_index: [1]
+
+deployment:
+  -
+    server_cmd: >
+        vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --data-parallel-size 2
+        --data-parallel-size-local 2
+        --tensor-parallel-size 8
+        --seed 1024
+        --enable-expert-parallel
+        --max-num-seqs 16
+        --max-model-len 8192
+        --max-num-batched-tokens 8192
+        --quantization ascend
+        --trust-remote-code
+        --no-enable-prefix-caching
+        --gpu-memory-utilization 0.9
+        --kv-transfer-config
+        '{"kv_connector": "MooncakeConnector",
+        "kv_role": "kv_producer",
+        "kv_port": "30000",
+        "engine_id": "0",
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  }
+            }
+        }'
+        --additional-config
+        '{"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+
+  -
+    server_cmd: >
+        vllm serve "vllm-ascend/Qwen3-235B-A22B-W8A8"
+        --host 0.0.0.0
+        --port $SERVER_PORT
+        --data-parallel-size 2
+        --data-parallel-size-local 2
+        --tensor-parallel-size 8
+        --seed 1024
+        --quantization ascend
+        --max-num-seqs 16
+        --max-model-len 8192
+        --max-num-batched-tokens 8192
+        --enable-expert-parallel
+        --trust-remote-code
+        --no-enable-prefix-caching
+        --gpu-memory-utilization 0.9
+        --kv-transfer-config
+        '{"kv_connector": "MooncakeConnector",
+        "kv_role": "kv_consumer",
+        "kv_port": "30200",
+        "engine_id": "1",
+        "kv_connector_module_path": "vllm_ascend.distributed.mooncake_connector",
+        "kv_connector_extra_config": {
+                  "prefill": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  },
+                  "decode": {
+                          "dp_size": 2,
+                          "tp_size": 8
+                  }
+            }
+        }'
+        --additional-config
+        '{"dynamic_eplb":true,"num_iterations_eplb_update":2048,"num_wait_worker_iterations":200}'
+benchmarks:

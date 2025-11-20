@@ -165,11 +165,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON":
     lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", '0'))),
-    # Timeout (in seconds) for delayed KVCache block release. In the prefill
-    # node, if a request is marked for delayed KV block release and the blocks
-    # are not freed within this timeout, they will be forcibly released.
-    "VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT":
-    lambda: int(os.getenv("VLLM_ASCEND_KVCACHE_DELAY_FREE_TIMEOUT", 250)),
     "VLLM_ASCEND_ENABLE_MLAPO":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLAPO", '0'))),
     # Whether to enable transpose weight and cast format to FRACTAL_NZ.
@@ -177,7 +172,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_ASCEND_ENABLE_NZ", 1)),
     # Decide whether we should enable CP parallelism.
     "VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", '0')))
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CONTEXT_PARALLEL", '0'))),
+    # Whether to anbale dynamic EPLB
+    "DYNAMIC_EPLB":
+    lambda: os.getenv("DYNAMIC_EPLB", "false").lower(),
 }
 
 # end-env-vars-definition

@@ -56,10 +56,6 @@ class AscendAttentionTorchairBackend(AscendAttentionBackend):
         return AscendAttentionTorchairBackendImpl
 
     @staticmethod
-    def get_metadata_cls() -> Type["AscendTorchairMetadata"]:
-        return AscendTorchairMetadata
-
-    @staticmethod
     def get_builder_cls() -> type["AscendAttentionTorchairMetadataBuilder"]:
         return AscendAttentionTorchairMetadataBuilder
 
