@@ -28,3 +28,6 @@ numba
 #--pre
 #--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 torch-npu==2.7.1
+
+# Install triton-ascend
+triton-ascend==3.2.0rc4
