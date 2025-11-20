@@ -1,7 +1,7 @@
 import json
 import os.path
+import torch
 
-import yaml
 from abc import ABC, abstractmethod
 from typing import List,Tuple,Dict,Any
 from common import FaultStatus,UCEType
@@ -51,11 +51,11 @@ class RecoveryHandler(ABC):
         pass
 
     @abstractmethod
-    def recover(self, ctx:RecoveryContext) -> RecoveryStatus:
+    def recover(self, ctx:RecoveryContext) -> torch.Tensor:
         """Specific recovery function"""
         pass
 
-    def handle(self, ctx:RecoveryContext) -> RecoveryStatus:
+    def handle(self, ctx:RecoveryContext) -> torch.Tensor:
         """ Entry point for RecoveryHandler """
         if self.can_handle(ctx):
             return self.recover(ctx)
@@ -113,11 +113,11 @@ class UCEHandler(RecoveryHandler):
         recovery_statuses = []
         #2.根据类型执行恢复策略
         for uce_type,layer_names in uce_result:
-            if uce_type == UCEType.KVCACHE_UCE:
+            if uce_type == UCEType.KVCACHE_UCE.name:
                 recovery_statuses.append(self._recover_kv_cache_uce(ctx,layer_names))
-            elif uce_type == UCEType.WEIGHTS_UCE:
+            elif uce_type == UCEType.WEIGHTS_UCE.name:
                 recovery_statuses.append(self._recover_weight_uce(ctx,layer_names))
-            elif uce_type == UCEType.ACTIVATION_UCE:
+            elif uce_type == UCEType.ACTIVATION_UCE.name:
                 recovery_statuses.append(self._recover_activation_uce(ctx))
             else:
                 logger.error(f"UCEHandler: Unknown UCE type: {uce_type}")
@@ -126,7 +126,7 @@ class UCEHandler(RecoveryHandler):
             return RecoveryStatus.FAILED_ABORT
         return RecoveryStatus.SUCCESS_RECOMPUTE
 
-    def classify_uce_type(self,ctx:RecoveryContext) -> List[Tuple[str,List[str]]]:
+    def classify_uce_type(self,ctx:RecoveryContext) -> List[Tuple[UCEType,List[str]]]:
         #1.获取出现uce的地址信息
         try:
             memory_block_info = ctx.memory_block_info
