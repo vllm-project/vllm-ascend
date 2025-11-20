@@ -14,13 +14,13 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig, VllmConfig)
+from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.utils import AscendSocVersion
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm.platforms import current_platform
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig, VllmConfig, set_current_vllm_config)
 
 DEVICE = current_platform.device_type
 BLOCK_SIZE = 16
@@ -155,3 +155,7 @@ def test_update_config(model_runner):
     # Raise error on non-existing config
     with pytest.raises(AssertionError):
         model_runner.update_config({"do_not_exist_config": "dummy"})
+
+def test_reload_weights_before_load_model(model_runner):
+    with pytest.raises(AssertionError):
+        model_runner.reload_weights()
