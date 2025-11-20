@@ -103,7 +103,7 @@ class TestNPUTorchairModelRunner(PytestBase):
         vllm_config.scheduler_config = scheduler_config
 
         vllm_config.load_config = MagicMock()
-        
+
         vllm_config.kv_transfer_config = None
 
         mocker.patch(
@@ -124,7 +124,6 @@ class TestNPUTorchairModelRunner(PytestBase):
         mocker.patch(
             "vllm_ascend.torchair.torchair_model_runner._may_pad_kv_consumer_num_seq"
         )
-
 
         device = torch.device("npu:0")
         ascend_config = MagicMock()
