@@ -3,40 +3,32 @@
 ## Introduction
 The Qwen3 Reranker model series is the latest proprietary model of the Qwen family, specifically designed for text embedding and ranking tasks. Building upon the dense foundational models of the Qwen3 series, it provides a comprehensive range of text embeddings and reranking models in various sizes (0.6B, 4B, and 8B). This guide describes how to run the model with vLLM Ascend. Note that only 0.9.2rc1 and higher versions of vLLM Ascend support the model.
 
+## Supported Features
+
+Refer to [supported features](../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
+## Environment Preparation
+
+### Model Weight
+
+- `Qwen3-Reranker-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-8B)
+- `Qwen3-Reranker-4B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-4B)
+- `Qwen3-Reranker-0.6B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-Reranker-0.6B)
+
+It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
+
+### Installation
+You can use our official docker image to run `Qwen3-Embedding` series models.
+- Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
+
+
+if you don't want to use the docker image as above, you can also build all from source:
+- Install `vllm-ascend` from source, refer to [installation](../installation.md).
+
 ## Deployment
-*only support single npu*
+*only support single node single npu deployment*
 
 Using the Qwen3-Reranker-8B model as an example, first run the docker container with the following command:
-
-```bash
-# Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
---name vllm-ascend \
---shm-size=1g \
---device /dev/davinci0 \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--p 8000:8000 \
--it $IMAGE bash
-```
-
-Set up environment variables in container:
-
-```bash
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-
-# Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-```
 
 ### Online Inference
 
@@ -51,7 +43,7 @@ Once your server is started, you can send request with follow examples.
 ```python
 import requests
 
-url = "http://127.0.0.1:8000/v1/rerank"
+url = "http://<ip>:<port>/v1/rerank"
 MODEL_NAME = "Qwen/Qwen3-Reranker-8B"
 
 # Please use the query_template and document_template to format the query and
@@ -169,3 +161,7 @@ If you run this script successfully, you will see a list of scores printed to th
 ```bash
 [0.9943699240684509, 6.876250040477316e-07]
 ```
+## Accuracy Evaluation
+will be provided later...
+## Performance
+will be provided later...
