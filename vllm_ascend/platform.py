@@ -70,6 +70,15 @@ class NPUPlatform(Platform):
     @property
     def pass_key(self) -> str:
         return "graph_fusion_manager"
+    
+    @classmethod
+    def get_pass_manager_cls(cls) -> str:
+        return "vllm_ascend.compilation.graph_fusion_pass_manager.GraphFusionPassManager"
+    
+    @classmethod
+    def get_compile_backend(self) -> str:
+        from vllm_ascend.compilation.compiler_interface import AscendAdaptor
+        return AscendAdaptor.__module__ + "." + AscendAdaptor.__name__
 
     @classmethod
     def pre_register_and_update(cls,

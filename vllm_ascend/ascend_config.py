@@ -39,6 +39,11 @@ class AscendConfig:
         
         self.torchair_graph_config = TorchairGraphConfig(
             torchair_graph_config, vllm_config, additional_config)
+        
+        ascend_compilation_config = additional_config.get(
+            "ascend_compilation_config", {})
+        self.ascend_compilation_config = AscendCompilationConfig(
+            **ascend_compilation_config)
 
         ascend_scheduler_config = additional_config.get(
             "ascend_scheduler_config", {})
