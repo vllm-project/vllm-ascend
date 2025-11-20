@@ -54,10 +54,11 @@ class TestNPUTorchairWorker(TestBase):
         mock_platform.mem_get_info.return_value = (1000, 2000)
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
-            worker = NPUWorker
+            worker = NPUWorker()
             worker.local_rank = 1
             worker.model_config = MagicMock()
             worker.model_config.seed = 42
+            worker.vllm_config = MagicMock()
 
             result = worker._init_device()
 
@@ -85,10 +86,11 @@ class TestNPUTorchairWorker(TestBase):
 
         with patch.object(NPUTorchairWorker, "__init__",
                           lambda x, **kwargs: None):
-            worker = NPUTorchairWorker
+            worker = NPUTorchairWorker()
             worker.local_rank = 1
             worker.model_config = MagicMock()
             worker.model_config.seed = 42
+            worker.vllm_config = MagicMock()
 
             result = worker._init_device()
 
