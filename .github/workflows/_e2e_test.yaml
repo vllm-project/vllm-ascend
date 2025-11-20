@@ -182,6 +182,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         if: ${{ inputs.type == 'full' }}
         run: |
+          pytest -sv tests/e2e/multicard/test_aclgraph_capture_replay.py
           pytest -sv tests/e2e/multicard/test_torchair_graph_mode.py
           pytest -sv tests/e2e/multicard/test_full_graph_mode.py
           pytest -sv tests/e2e/multicard/test_data_parallel.py
