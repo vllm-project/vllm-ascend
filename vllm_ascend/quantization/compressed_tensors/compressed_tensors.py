@@ -16,11 +16,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
 
+from vllm_ascend.quantization.quant_config import (AscendLinearMethod,
+                                                   AscendQuantConfig)
+from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
-
-from .schemes.compressed_tensors_w8a8 import CompressedTensorsW8A8
-from .schemes.compressed_tensors_w8a8_dynamic import \
-    CompressedTensorsW8A8Dynamic
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -137,6 +137,7 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         prefix: str,
     ) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
+            layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
 
@@ -144,7 +145,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
             quant_method: LinearMethodBase = UnquantizedLinearMethod()
             if quant_scheme is not None:
                 layer.scheme = quant_scheme
-                quant_method = AscendCompressedTensorsLinearMethod(self)
+                ascend_quant_config = AscendQuantConfig(
+                                        self.quant_description)
+                quant_method = AscendLinearMethod(ascend_quant_config,
+                                                  prefix, None, layer)
             return quant_method
         return None
 
@@ -206,10 +210,10 @@ class AscendCompressedTensorsConfig(QuantizationConfig):
         act_quant_format = is_activation_quantization_format(self.quant_format)
         if act_quant_format and input_quant is not None:
             if self._is_static_tensor_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8()
+                return AscendW8A8LinearMethod()
 
             if self._is_dynamic_token_w8a8(weight_quant, input_quant):
-                return CompressedTensorsW8A8Dynamic()
+                return AscendW8A8DynamicLinearMethod()
 
         raise NotImplementedError(
             "No compressed-tensors compatible scheme was found.")
