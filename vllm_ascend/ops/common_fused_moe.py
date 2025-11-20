@@ -42,6 +42,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, enable_sp, is_310p,
                                is_enable_nz, npu_stream_switch,
                                shared_expert_dp_enabled,
                                shared_experts_compute_stream)
+from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -246,6 +247,10 @@ class AscendFusedMoE(FusedMoE):
         if self.dynamic_eplb:
             self.moe_load = torch.zeros(local_num_experts,
                                         dtype=torch.int64).npu()
+            
+        eplb_enable = self.dynamic_eplb or (self.expert_map_path is not None)
+        if eplb_enable and (not isinstance(self.quant_method, AscendW8A8DynamicFusedMoEMethod)):
+            raise ValueError("Eplb supports only w8a8_dynamic quantization.")
 
         self.moe_config.num_experts = self.global_num_experts
         self.moe_config.num_local_experts = self.local_num_experts
