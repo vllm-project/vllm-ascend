@@ -10,7 +10,7 @@ import vllm.envs as envs
 import zmq
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.utils import logger
-from vllm.v1.kv_cache_interface import (AttentionSpec, MLAAttentionSpec)
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 
 from vllm_ascend.distributed.cpu_offload_manager.cpu_kv_cache_manager import \
     CPUKVCacheManager

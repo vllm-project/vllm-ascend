@@ -15,15 +15,13 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.utils import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheSpec,
-                                        MLAAttentionSpec, MambaSpec)
+                                        MambaSpec, MLAAttentionSpec)
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.cpu_offload_manager.metadata import (
     MetadataServer, MetadataServerProc, MLAConfig)
 from vllm_ascend.utils import vllm_version_is
@@ -31,11 +29,11 @@ from vllm_ascend.utils import vllm_version_is
 if vllm_version_is("0.11.0"):
     from vllm.attention.layer import Attention
     from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+
     from vllm_ascend.models.layers.mla import AscendMultiHeadLatentAttention
 else:
     from vllm.attention.layer import MLAAttention
     from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -455,12 +453,12 @@ def get_kv_cache_spec_v0110(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
     block_size = vllm_config.cache_config.block_size
     use_mla = vllm_config.model_config.use_mla
-    use_sparse = hasattr(vllm_config.model_config.hf_config,
-                                  "index_topk")
+    use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
     if vllm_config.cache_config.cache_dtype == "auto":
         kv_cache_dtype = vllm_config.model_config.dtype
     else:
-        kv_cache_dtype= STR_DTYPE_TO_TORCH_DTYPE[vllm_config.cache_config.cache_dtype]
+        kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+            vllm_config.cache_config.cache_dtype]
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
     for layer_name, attn_module in attn_layers.items():
@@ -487,7 +485,7 @@ def get_kv_cache_spec_v0110(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     head_size=attn_module.head_size,
                     dtype=kv_cache_dtype)
         elif attn_module.attn_type in (AttentionType.ENCODER,
-                                        AttentionType.ENCODER_ONLY):
+                                       AttentionType.ENCODER_ONLY):
             # encoder-only attention does not need KV cache.
             continue
         elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
@@ -508,8 +506,7 @@ def get_kv_cache_spec_v0110(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 "Prefix caching is not supported for Mamba yet.")
         max_model_len = vllm_config.model_config.max_model_len
 
-        page_size_padded = (
-            vllm_config.cache_config.mamba_page_size_padded)
+        page_size_padded = (vllm_config.cache_config.mamba_page_size_padded)
 
         # Set block_size to max_model_len, so that mamba model will always
         # have only one block in the KV cache.
@@ -527,6 +524,7 @@ def get_kv_cache_spec_v0110(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
     return kv_cache_spec
 
+
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """
     Generates the KVCacheSpec by parsing the kv cache format from each
@@ -540,15 +538,14 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
     block_size = vllm_config.cache_config.block_size
     use_mla = vllm_config.model_config.use_mla
-    use_sparse = hasattr(vllm_config.model_config.hf_config,
-                         "index_topk")
+    use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
     if vllm_config.cache_config.cache_dtype == "auto":
         kv_cache_dtype = vllm_config.model_config.dtype
     else:
-        kv_cache_dtype= STR_DTYPE_TO_TORCH_DTYPE[vllm_config.cache_config.cache_dtype]
+        kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+            vllm_config.cache_config.cache_dtype]
     kv_cache_spec: dict[str, KVCacheSpec] = {}
-    attn_layers = get_layers_from_vllm_config(vllm_config,
-                                                AttentionLayerBase)
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     for layer_name, attn_module in attn_layers.items():
         if isinstance(attn_module, Attention):
             # TODO: Support other attention modules, e.g., cross-attention
@@ -561,7 +558,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                     head_size=attn_module.head_size,
                     dtype=kv_cache_dtype)
             elif attn_module.attn_type in (AttentionType.ENCODER,
-                                            AttentionType.ENCODER_ONLY):
+                                           AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.
                 continue
             elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
@@ -599,8 +596,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 "Prefix caching is not supported for Mamba yet.")
         max_model_len = vllm_config.model_config.max_model_len
 
-        page_size_padded = (
-            vllm_config.cache_config.mamba_page_size_padded)
+        page_size_padded = (vllm_config.cache_config.mamba_page_size_padded)
 
         # Set block_size to max_model_len, so that mamba model will always
         # have only one block in the KV cache.
