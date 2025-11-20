@@ -21,7 +21,9 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor, ForwardContext
 
 from tests.ut.base import TestBase
-from vllm_ascend.compilation.acl_graph import ACLGraphEntry, ACLGraphWrapper
+from vllm_ascend.compilation.acl_graph import (
+    ACLGraphEntry, ACLGraphWrapper, get_mtp_graph_params, set_mtp_graph_params,
+    update_mtp_graph_params_workspaces)
 
 
 class TestACLGraphEntry(TestBase):
@@ -718,3 +720,24 @@ class TestACLGraphWrapper(TestBase):
 
         unwrapped = wrapper.unwrap()
         self.assertEqual(unwrapped, self.mock_runnable)
+
+
+class TestMTPGraphParams(TestBase):
+
+    def test_set_mtp_graph_params(self):
+        with patch('vllm_ascend.compilation.acl_graph._mtp_graph_params',
+                   new=None):
+            set_mtp_graph_params([4])
+            from vllm_ascend.compilation.acl_graph import _mtp_graph_params
+            self.assertIsNotNone(_mtp_graph_params)
+
+    @patch('vllm_ascend.compilation.acl_graph._mtp_graph_params')
+    def test_update_mtp_graph_params_workspaces(self, mtp_graph_params_mock):
+        mtp_graph_params_mock.workspaces = {4: 5}
+        update_mtp_graph_params_workspaces(4, 6)
+        self.assertEqual(mtp_graph_params_mock.workspaces[4], 6)
+
+    @patch('vllm_ascend.compilation.acl_graph._mtp_graph_params')
+    def test_get_mtp_graph_params(self, mtp_graph_params_mock):
+        graph_params = get_mtp_graph_params()
+        self.assertIs(mtp_graph_params_mock, graph_params)
