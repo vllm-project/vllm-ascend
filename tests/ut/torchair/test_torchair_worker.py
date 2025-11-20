@@ -1,5 +1,3 @@
-import os
-import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -69,24 +67,24 @@ class TestNPUTorchairWorker(TestBase):
 
             mock_platform.empty_cache.assert_called_once()
             mock_platform.seed_everything.assert_called_once_with(42)
-            mock_platform.mem_get_info.assert_called_once(
-            )
-            mock_init_dist_env.assert_called_once(
-            )
+            mock_platform.mem_get_info.assert_called_once()
+            mock_init_dist_env.assert_called_once()
 
             self.assertEqual(str(result), "npu:1")
             self.assertEqual(worker.init_npu_memory, 1000)
-    
+
     @patch(
         "vllm_ascend.worker.worker_v1.NPUWorker._init_worker_distributed_environment"
     )
     @patch("vllm_ascend.worker.worker_v1.NPUPlatform")
-    def test_init_device_torchair_worker(self, mock_platform, mock_init_dist_env):
+    def test_init_device_torchair_worker(self, mock_platform,
+                                         mock_init_dist_env):
         from vllm_ascend.torchair.torchair_worker import NPUTorchairWorker
 
         mock_platform.mem_get_info.return_value = (1000, 2000)
 
-        with patch.object(NPUTorchairWorker, "__init__", lambda x, **kwargs: None):
+        with patch.object(NPUTorchairWorker, "__init__",
+                          lambda x, **kwargs: None):
             worker = NPUTorchairWorker
             worker.local_rank = 1
             worker.model_config = MagicMock()
@@ -100,13 +98,8 @@ class TestNPUTorchairWorker(TestBase):
 
             mock_platform.empty_cache.assert_called_once()
             mock_platform.seed_everything.assert_called_once_with(42)
-            mock_platform.mem_get_info.assert_called_once(
-            )
-            mock_init_dist_env.assert_called_once(
-            )
+            mock_platform.mem_get_info.assert_called_once()
+            mock_init_dist_env.assert_called_once()
 
             self.assertEqual(str(result), "npu:1")
             self.assertEqual(worker.init_npu_memory, 1000)
-
-
-
