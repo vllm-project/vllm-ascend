@@ -149,9 +149,10 @@ def model_runner():
     return NPUModelRunner(vllm_config, DEVICE)
 
 def test_update_config(model_runner):
-    # Simple update
+    """
+    Tests test_update_config simple update model_runner's load_config, and raise error on non-existing config
+    """
     model_runner.update_config({"load_config": {"load_format": "dummy"}})
     assert model_runner.load_config.load_format == "dummy"
-    # Raise error on non-existing config
     with pytest.raises(AssertionError):
         model_runner.update_config({"do_not_exist_config": "dummy"})
