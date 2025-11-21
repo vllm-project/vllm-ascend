@@ -28,7 +28,7 @@ on:
     # Allow manual triggering of the workflow
 
   pull_request:
-    types: [ labeled ]
+    types: [labeled, synchronize]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
