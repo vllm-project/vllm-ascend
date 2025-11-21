@@ -385,7 +385,7 @@ class MooncakeEngine:
             )
 
     def get_save_tp_ranks_new(self, token_id) -> List[int]:
-        block_num = token_id.item() // 128
+        block_num = token_id.item() // self.block_size
         if block_num >= self.tp_size:
             return list(range(self.tp_size))
         else:
