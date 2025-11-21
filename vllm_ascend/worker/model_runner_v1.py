@@ -2973,7 +2973,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return self.model.compute_logits(hidden_states[dummy_indices])
 
             def dummy_drafter_compute_logits(hidden_states):
-                if not need_dummy_logits:
+                if not need_dummy_logits or self.drafter is None:
                     return
                 if hasattr(self.drafter, "model") and hasattr(
                         self.drafter.model, "compute_logits"):
