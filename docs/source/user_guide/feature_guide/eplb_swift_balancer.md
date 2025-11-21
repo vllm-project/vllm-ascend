@@ -12,6 +12,13 @@ Expert balancing for MoE models in LLM serving is essential for optimal performa
 - Adaptive Scaling: Automatically adjusts to workload fluctuations while maintaining stable performance.
 - Fault Tolerance: Redundant expert placement ensures system resilience during hardware failures.
 
+## Support Scenarios
+
+### Models:
+DeepseekV3/V3.1/R1、Qwen3-MOE
+### MOE QuantType:
+W8A8-dynamic
+
 ## How to Use EPLB
 
 ### Dynamic EPLB
