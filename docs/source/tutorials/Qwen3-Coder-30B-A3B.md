@@ -66,8 +66,6 @@ curl http://localhost:8000/v1/chat/completions -H "Content-Type: application/jso
 
 ## Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
-
 ### Using AISBench
 
 1. Refer to [Using AISBench](../developer_guide/evaluation/using_ais_bench.md) for details.
