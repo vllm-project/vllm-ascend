@@ -69,8 +69,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LazyLoader, cdiv, get_dtype_size,
-                        is_pin_memory_available)
+                        LazyLoader, cdiv, is_pin_memory_available)
 from vllm.utils.jsontree import json_map_leaves
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
@@ -2930,50 +2929,46 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # llmdatadist need the addr of cache tensor be aligned with 2M
         alignment = 2 * 1024 * 1024
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            # TODO: REFACTOR ME to sharing hybrid cache
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name = kv_cache_tensor.shared_by[idx]
-                if "linear_attn" in layer_name:
-                    # for mamba linear attention
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        if ("attn" in layer_name_inner and "linear_attn" not in layer_name_inner) or \
-                            layer_name_inner in kv_cache_raw_tensors.keys():
-                            continue
-                        if self.vllm_config.kv_transfer_config is None:
-                            tensor = torch.zeros(kv_cache_tensor.size,
-                                                 dtype=torch.int8,
-                                                 device=self.device)
-                        else:
-                            cache_size_aligned = kv_cache_tensor.size + alignment
-                            tensor = torch.zeros(cache_size_aligned,
-                                                 dtype=torch.int8,
-                                                 device=self.device)
-                            tensor = self._align_memory(
-                                tensor, alignment)[:kv_cache_tensor.size]
-                        kv_cache_raw_tensors[layer_name_inner] = tensor
-                elif "attn" in layer_name:
-                    # for other attentions, e.g., self_attn, sliding window attn
-                    if self.vllm_config.kv_transfer_config is None:
-                        k_tensor = torch.zeros(kv_cache_tensor.size // 2,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        v_tensor = torch.zeros(kv_cache_tensor.size // 2,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                    else:
-                        cache_size = kv_cache_tensor.size // 2
-                        cache_size_aligned = kv_cache_tensor.size // 2 + alignment
-                        k_tensor = torch.zeros(cache_size_aligned,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        v_tensor = torch.zeros(cache_size_aligned,
-                                               dtype=torch.int8,
-                                               device=self.device)
-                        k_tensor = self._align_memory(k_tensor,
-                                                      alignment)[:cache_size]
-                        v_tensor = self._align_memory(v_tensor,
-                                                      alignment)[:cache_size]
-                    kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
+            if self.use_hybrid_blocks:
+                # NOTE: when sharing kvcache between linear_attn and self_attn,
+                # we should use an unified buffer of kv, which requires more
+                # address align operations in connector in pd Disaggregation scenario.
+                # The sizes of k cache and conv cache (v cache and ssm cache)
+                # could not be aligned, thus we should use an unified buffer of kv
+                # for sharing cache tensor in hybrid attention scenario
+                # |------ k cache ------|------ v cache ------|
+                # | conv cache |----- ssm cache ------|- pad -|
+                kv_cache_size = kv_cache_tensor.size if self.vllm_config.kv_transfer_config is None else kv_cache_tensor.size + alignment
+                tensor = torch.zeros(kv_cache_size,
+                                     dtype=torch.int8,
+                                     device=self.device)
+                if self.vllm_config.kv_transfer_config is not None:
+                    tensor = self._align_memory(
+                        tensor, alignment)[:kv_cache_tensor.size]
+                for layer_name in kv_cache_tensor.shared_by:
+                    kv_cache_raw_tensors[layer_name] = tensor
+                continue
+
+            # for other attentions, e.g., self_attn, sliding window attn
+            if self.vllm_config.kv_transfer_config is None:
+                k_tensor = torch.zeros(kv_cache_tensor.size // 2,
+                                       dtype=torch.int8,
+                                       device=self.device)
+                v_tensor = torch.zeros(kv_cache_tensor.size // 2,
+                                       dtype=torch.int8,
+                                       device=self.device)
+            else:
+                cache_size = kv_cache_tensor.size // 2
+                cache_size_aligned = kv_cache_tensor.size // 2 + alignment
+                k_tensor = torch.zeros(cache_size_aligned,
+                                       dtype=torch.int8,
+                                       device=self.device)
+                v_tensor = torch.zeros(cache_size_aligned,
+                                       dtype=torch.int8,
+                                       device=self.device)
+                k_tensor = self._align_memory(k_tensor, alignment)[:cache_size]
+                v_tensor = self._align_memory(v_tensor, alignment)[:cache_size]
+            kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
@@ -2995,14 +2990,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
-                    raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
-                        layer_name]
-                    assert raw_k_tensor is not None
-                    assert raw_v_tensor is not None
-                    assert (raw_k_tensor.numel() + raw_v_tensor.numel()
-                            ) % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = (raw_k_tensor.numel() + raw_v_tensor.numel()
-                                  ) // kv_cache_spec.page_size_bytes
+                    if self.use_hybrid_blocks:
+                        raw_kv_tensor = kv_cache_raw_tensors[layer_name]
+                        assert raw_kv_tensor is not None
+                        sum_page_size_bytes = raw_kv_tensor.numel()
+                    else:
+                        raw_k_tensor, raw_v_tensor = kv_cache_raw_tensors[  # type: ignore
+                            layer_name]
+                        assert raw_k_tensor is not None
+                        assert raw_v_tensor is not None
+                        sum_page_size_bytes = raw_k_tensor.numel(
+                        ) + raw_v_tensor.numel()
+                    assert sum_page_size_bytes % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = sum_page_size_bytes // kv_cache_spec.page_size_bytes
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
@@ -3034,6 +3034,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
+
+                    # NOTE: In hybrid attention model, we use an unified kv cache tensor
+                    if self.use_hybrid_blocks:
+                        k_cache = raw_kv_tensor[:int(sum_page_size_bytes //
+                                                     2)].view(dtype).view(
+                                                         kv_cache_shape[1:])
+                        k_cache = self._convert_torch_format(k_cache)
+                        v_cache = raw_kv_tensor[int(sum_page_size_bytes //
+                                                    2):].view(dtype).view(
+                                                        kv_cache_shape[1:])
+                        v_cache = self._convert_torch_format(v_cache)
+                        kv_caches[layer_name] = (k_cache, v_cache)
+                        continue
+
                     k_cache = raw_k_tensor.view(dtype).view(kv_cache_shape[1:])
                     k_cache = self._convert_torch_format(k_cache)
                     v_cache = raw_v_tensor.view(dtype).view(kv_cache_shape[1:])
@@ -3057,24 +3071,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     assert num_blocks >= kv_cache_config.num_blocks
 
                     state_tensors = []
-                    storage_offset_bytes = 0
-                    for (shape, dtype) in zip(kv_cache_spec.shapes,
-                                              kv_cache_spec.dtypes):
-                        dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size)
+                    target_idx = 0
+                    start_idx = 0
+                    for shape, dtype in zip(kv_cache_spec.shapes,
+                                            kv_cache_spec.dtypes):
+                        # normally, there is conv state and ssm state in this loop. And there is only
+                        # a conv state in some special models.
                         target_shape = (num_blocks, *shape)
-                        stride = torch.empty(target_shape).stride()
-                        target_stride = (num_element_per_page, *stride[1:])
-                        assert storage_offset_bytes % dtype_size == 0
-                        tensor = torch.as_strided(
-                            raw_tensor.view(dtype),
-                            size=target_shape,
-                            stride=target_stride,
-                            storage_offset=storage_offset_bytes // dtype_size,
-                        )
+
+                        target_idx += torch.prod(
+                            torch.tensor(target_shape)).item()
+                        tensor = raw_tensor.view(
+                            dtype)[start_idx:target_idx].view(target_shape)
+                        start_idx = target_idx
                         state_tensors.append(tensor)
-                        storage_offset_bytes += stride[0] * dtype_size
                     kv_caches[layer_name] = state_tensors
                 else:
                     raise ValueError("Unknown KV cache spec type.")
@@ -3386,7 +3396,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         for attn_group in self._attn_group_iterator():
             builder = attn_group.get_metadata_builder()
-            if builder.aclgraph_support.value < min_ag_support.value:
+            graph_support = None
+            if hasattr(builder, 'aclgraph_support'):
+                graph_support = builder.aclgraph_support.value
+            else:
+                graph_support = builder.cudagraph_support.value
+            if graph_support < min_ag_support.value:
                 min_ag_support = builder.aclgraph_support
                 min_ag_builder_name = builder.__class__.__name__
 
