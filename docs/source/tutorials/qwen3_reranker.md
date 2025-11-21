@@ -18,7 +18,7 @@ Refer to [supported features](../user_guide/support_matrix/supported_models.md) 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ### Installation
-You can use our official docker image to run `Qwen3-Embedding` series models.
+You can use our official docker image to run `Qwen3-Reranker` series models.
 - Start the docker image on your node, refer to [using docker](../installation.md#set-up-using-docker).
 
 if you don't want to use the docker image as above, you can also build all from source:
@@ -162,5 +162,6 @@ If you run this script successfully, you will see a list of scores printed to th
 ```
 ## Accuracy Evaluation
 will be provided later...
+
 ## Performance
 will be provided later...
