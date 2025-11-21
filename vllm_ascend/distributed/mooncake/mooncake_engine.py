@@ -94,7 +94,7 @@ class MooncakeEngine:
                                                    self.local_save_rank,
                                                    self.save_nums)
 
-        self.m_store = Mooncakestore(parallel_config)
+        self.m_store = Mooncakestore(vllm_config)
 
         self.kv_send_thread: Optional[KVTransferThread] = None
         self.kv_recv_thread: Optional[KVTransferThread] = None
