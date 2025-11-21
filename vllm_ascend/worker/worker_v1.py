@@ -214,6 +214,14 @@ class NPUWorker(WorkerBase):
         device = torch.device(f"npu:{self.local_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
+
+        visible_device_count = (torch.npu.device_count()
+                                if torch.npu.is_available() else 0)
+        assert self.parallel_config.local_world_size <= visible_device_count, (
+            f"local_world_size ({self.parallel_config.local_world_size}) must be "
+            f"less than or equal to the number of visible devices "
+            f"({visible_device_count}).")
+
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
