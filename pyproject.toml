@@ -25,6 +25,9 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools_scm]
+# no extra settings needed, presence enables setuptools-scm
+
 [tool.pymarkdown]
 plugins.md004.style = "sublist" # ul-style
 plugins.md007.indent = 4 # ul-indent
