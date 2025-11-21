@@ -257,7 +257,7 @@ class AscendFusedMoE(FusedMoE):
                                         dtype=torch.int64).npu()
 
         eplb_enable = self.dynamic_eplb or (self.expert_map_path is not None)
-        if eplb_enable and (not isinstance(self.quant_method,
+        if eplb_enable and (not isinstance(self.quant_method.quant_method,
                                            AscendW8A8DynamicFusedMoEMethod)):
             raise ValueError("Eplb supports only w8a8_dynamic quantization.")
 
