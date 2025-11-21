@@ -75,7 +75,6 @@ class MooncakeEngine:
             self.use_mla,
         )
 
-        self.use_mla = vllm_config.model_config.is_deepseek_mla
         if not self.no_redundancy:
             self.save_nums = self.tp_size
             self.local_save_rank = self.tp_rank
