@@ -47,6 +47,8 @@ class MooncakeEngine:
             "load_async", False)
         self.register_buffer = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
             "register_buffer", False)
+        self.no_redundancy = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+            "no_redundancy", False)
         self.block_size = vllm_config.cache_config.block_size
         self.current_layer = 0
         # self.use_mla = first_kv_cache_tuple[0].size(
@@ -73,7 +75,25 @@ class MooncakeEngine:
             self.use_mla,
         )
 
-        self.token_database = ChunkedTokenDatabase(self.metadata)
+        self.use_mla = vllm_config.model_config.is_deepseek_mla
+        if not self.no_redundancy:
+            self.save_nums = self.tp_size
+            self.local_save_rank = self.tp_rank
+        elif self.use_mla:
+            self.save_nums = 1
+            self.local_save_rank = 1
+        else:
+            self.num_key_value_heads = vllm_config.model_config.hf_config.num_key_value_heads
+            if self.num_key_value_heads <= self.tp_size:
+                self.save_nums = self.num_key_value_heads
+            else:
+                self.save_nums = self.tp_size
+            self.local_save_rank = self.tp_rank // (self.tp_size //
+                                                    self.save_nums)
+
+        self.token_database = ChunkedTokenDatabase(self.metadata,
+                                                   self.local_save_rank,
+                                                   self.save_nums)
 
         self.m_store = Mooncakestore(parallel_config)
 
@@ -341,6 +361,12 @@ class MooncakeEngine:
             store_mask = torch.ones_like(token_ids, dtype=torch.bool)
             store_mask[:skip_leading_tokens] = False
 
+            if self.kv_role == "kv_producer" and self.tp_rank not in self.get_save_tp_ranks_new(
+                    sum(store_mask)):
+                self.kv_send_thread.set_finished_request(  # type: ignore[union-attr]
+                    req_id)
+                continue
+
             logger.info(
                 "Storing KV cache for %d out of %d tokens "
                 "(skip_leading_tokens=%d) for request %s",
@@ -357,6 +383,13 @@ class MooncakeEngine:
                 store_mask,
                 request.is_last_chunk,
             )
+
+    def get_save_tp_ranks_new(self, token_id) -> List[int]:
+        block_num = token_id.item() // 128
+        if block_num >= self.tp_size:
+            return list(range(self.tp_size))
+        else:
+            return list(range(block_num))
 
     def retrieve_layer(
         self,
