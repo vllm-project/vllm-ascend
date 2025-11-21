@@ -69,6 +69,25 @@ envs = load_module_from_path("envs",
                              os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
 
 
+def gen_build_info():
+    soc_version = envs.SOC_VERSION
+    if not soc_version:
+        raise ValueError(
+            "SOC version is not set. Please set SOC_VERSION environment variable."
+        )
+    if "310" in soc_version and not envs.COMPILE_CUSTOM_KERNELS:
+        raise ValueError(
+            "SOC version 310 only supports custom kernels. Please set COMPILE_CUSTOM_KERNELS=1 to enable custom kernels."
+        )
+
+    package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
+    with open(package_dir, "w+") as f:
+        f.write('# Auto-generated file\n')
+        f.write(f"__soc_version__ = '{soc_version}'\n")
+        f.write(f"__sleep_mode_enabled__ = {envs.COMPILE_CUSTOM_KERNELS}\n")
+    logging.info(f"Generated _build_info.py with SOC version: {soc_version}")
+
+
 class CMakeExtension(Extension):
 
     def __init__(self,
@@ -79,27 +98,17 @@ class CMakeExtension(Extension):
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
 
+class custom_develop(develop):
+
+    def run(self):
+        gen_build_info()
+        super().run()
+
+
 class custom_build_info(build_py):
 
     def run(self):
-        soc_version = envs.SOC_VERSION
-        if not soc_version:
-            raise ValueError(
-                "SOC version is not set. Please set SOC_VERSION environment variable."
-            )
-        if "310" in soc_version and not envs.COMPILE_CUSTOM_KERNELS:
-            raise ValueError(
-                "SOC version 310 only supports custom kernels. Please set COMPILE_CUSTOM_KERNELS=1 to enable custom kernels."
-            )
-
-        package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
-        with open(package_dir, "w+") as f:
-            f.write('# Auto-generated file\n')
-            f.write(f"__soc_version__ = '{soc_version}'\n")
-            f.write(
-                f"__sleep_mode_enabled__ = {envs.COMPILE_CUSTOM_KERNELS}\n")
-        logging.info(
-            f"Generated _build_info.py with SOC version: {soc_version}")
+        gen_build_info()
         super().run()
 
 
@@ -352,6 +361,7 @@ def get_requirements() -> List[str]:
 
 
 cmdclass = {
+    "develop": custom_develop,
     "build_py": custom_build_info,
     "build_ext": cmake_build_ext,
     "install": custom_install
