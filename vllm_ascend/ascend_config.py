@@ -137,12 +137,6 @@ class AscendConfig:
         from vllm_ascend.utils import get_flashcomm2_config_and_validate
         self.flashcomm2_oproj_tensor_parallel_size, self.flashcomm2_oproj_shared = get_flashcomm2_config_and_validate(
             self, vllm_config)
-        if self.flashcomm2_oproj_shared:
-            if self.flashcomm2_oproj_tensor_parallel_size == 0:
-                raise AssertionError(
-                    "flashcomm2_oproj_shared must be enabled with flashcomm2_oproj_tensor_parallel_size > 0"
-                )
-            logger.info("Enable Flashcomm2 with flashcomm2_oproj_shared")
 
 
 class TorchairGraphConfig:
