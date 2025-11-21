@@ -57,9 +57,9 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _IS_MOE_MODEL = None
+_IS_VL_MODEL = None
 _ENABLE_SP = None
 _HAS_LAYER_IDX = None
-_ENABLE_NZ = None
 _SUBSCRIBED_COMPUTE_STREAMS = set()
 _GRAPH_PRINT_STREAM = None
 _GRAPH_PRINT_STREAM_LOCK = Lock()
@@ -129,14 +129,8 @@ def is_310p():
     return _IS_310P
 
 
-def is_enable_nz(vllm_config: Optional[VllmConfig] = None) -> bool:
-    global _ENABLE_NZ
-    if _ENABLE_NZ is None:
-        if not vllm_config:
-            raise ValueError(
-                "vllm_config must be provided when _ENABLE_NZ is None")
-        _ENABLE_NZ = envs_ascend.VLLM_ASCEND_ENABLE_NZ and vllm_config.model_config.hf_config.model_type != "qwen3_next"
-    return _ENABLE_NZ
+def is_enable_nz():
+    return envs_ascend.VLLM_ASCEND_ENABLE_NZ
 
 
 def sleep_mode_enabled():
@@ -834,6 +828,15 @@ def _is_contain_expert(config: Any):
             if _is_contain_expert(v):
                 return True
     return False
+
+
+def is_vl_model(vllm_config: VllmConfig):
+    """Checks if the model is a VL model by config"""
+    global _IS_VL_MODEL
+    if _IS_VL_MODEL is None:
+        model_configs = vllm_config.model_config.hf_config.to_dict()
+        _IS_VL_MODEL = "VL" in model_configs["architectures"][0]
+    return _IS_VL_MODEL
 
 
 def weak_ref_tensor(tensor: Any) -> Any:
