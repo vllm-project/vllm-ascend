@@ -19,6 +19,7 @@ _LMTP: Optional[GroupCoordinator] = None
 _P_TP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_OTP: Optional[GroupCoordinator] = None
 _FLASHCOMM2_ODP: Optional[GroupCoordinator] = None
+_FC3_QUANT_X: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
@@ -57,6 +58,11 @@ def get_p_tp_group() -> GroupCoordinator:
     assert _P_TP is not None, (
         "distributed prefill tensor parallel group is not initialized")
     return _P_TP
+
+
+def get_fc3_quant_x_group() -> GroupCoordinator:
+    assert _FC3_QUANT_X is not None, ("fc3 quant x group is not initialized")
+    return _FC3_QUANT_X
 
 
 def model_parallel_initialized():
@@ -178,6 +184,14 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                           get_world_group().local_rank,
                                           backend,
                                           group_name="lmheadtp")
+    if get_ascend_config().multistream_overlap_gate:
+        global _FC3_QUANT_X
+        group_ranks = all_ranks.unbind(0)
+        group_ranks = [x.tolist() for x in group_ranks]
+        _FC3_QUANT_X = init_model_parallel_group(group_ranks,
+                                                 get_world_group().local_rank,
+                                                 backend,
+                                                 group_name="fc3_quant_x")
 
     # TODO: Extract and unify the logic across different communication group.
     if flashcomm2_enable():
@@ -269,3 +283,8 @@ def destroy_ascend_model_parallel():
     ).flashcomm2_oproj_tensor_parallel_size != 1:
         _FLASHCOMM2_ODP.destroy()
         _FLASHCOMM2_ODP = None
+
+    global _FC3_QUANT_X
+    if _FC3_QUANT_X:
+        _FC3_QUANT_X.destroy()
+    _FC3_QUANT_X = None
